@@ -1,0 +1,13 @@
+# 构建产物
+/robot
+/dist/
+
+# 本地配置（含密钥环境变量名）
+config.yaml
+
+# 语音模型（体积大，不入库）
+/models/
+
+# IDE
+.idea/
+.vscode/
