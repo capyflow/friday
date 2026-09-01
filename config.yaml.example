@@ -1,0 +1,33 @@
+# 复制为 config.yaml 并修改
+provider:
+  name: openai                 # 固定 openai（vortexagent OpenAI 兼容层）
+  baseURL: https://api.deepseek.com/v1   # DeepSeek/通义/智谱等兼容地址
+  model: deepseek-chat
+  apiKeyEnv: DEEPSEEK_API_KEY  # 从该环境变量读密钥（export DEEPSEEK_API_KEY=sk-...）
+  temperature: 0.7
+  maxTokens: 1024
+
+audio:
+  inputDevice: ""              # 麦克风设备，留空自动选择
+  outputDevice: ""             # 喇叭设备，留空自动选择
+  sampleRate: 16000
+  channels: 1
+
+asr:
+  engine: none                 # none=文本模式(开发)；sherpa-onnx=本地离线识别
+  modelDir: models/asr         # sherpa-onnx 识别模型目录
+
+wake:
+  engine: none                 # none=不用唤醒词；sherpa-onnx=启用唤醒词
+  modelDir: models/wake        # 唤醒词 KWS 模型目录
+  keywords: ["小助手"]
+
+tts:
+  engine: none                 # none=文字模式(开发)；sherpa-onnx=本地语音合成
+  modelDir: models/tts         # TTS 模型目录
+  voice: ""                    # 说话人，留空用模型默认
+
+display:
+  driver: console              # console=终端显示(开发)；后续可换 oled/st7789
+
+# systemPrompt: ""            # 可选，覆盖默认系统提示词
