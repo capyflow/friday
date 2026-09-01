@@ -8,4 +8,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require github.com/lib/pq v1.12.3 // indirect
+require (
+	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631 // indirect
+	github.com/k2-fsa/sherpa-onnx-go v1.13.7 // indirect
+	github.com/lib/pq v1.12.3 // indirect
+)

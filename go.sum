@@ -1,5 +1,9 @@
 github.com/capyflow/vortexagent v0.0.0-20260901113238-6d3d0387f749 h1:S56b2+w2X5V2CSMZx0VPEFUnEWAnQGxObeIQ2aEno30=
 github.com/capyflow/vortexagent v0.0.0-20260901113238-6d3d0387f749/go.mod h1:3NGimeVGvN/Nzqn3hds3chPTuOWL8AGM2n9ZYD4aFi0=
+github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631 h1:8TBHztmhDfAAg34yddptshinXBtDQwgKGlMfdtSFETw=
+github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631/go.mod h1:esZFQEUwqC+l76f2R8bIWSwXMaPbp79PppwZ1eJhFco=
+github.com/k2-fsa/sherpa-onnx-go v1.13.7 h1:QG5bjU5LQEz2nNDT9Rt0V1k3Pvr22OdQCVByChT/aPM=
+github.com/k2-fsa/sherpa-onnx-go v1.13.7/go.mod h1:JC2kmiNHLMvY7zEbAVXduAymntUTi4QQLkmjnuYlDxo=
 github.com/lib/pq v1.12.3 h1:tTWxr2YLKwIvK90ZXEw8GP7UFHtcbTtty8zsI+YjrfQ=
 github.com/lib/pq v1.12.3/go.mod h1:/p+8NSbOcwzAEI7wiMXFlgydTwcgTr3OSKMsD2BitpA=
 github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
