@@ -21,15 +21,15 @@ func ParseHumanDuration(s string) (time.Duration, error) {
 	s = stripSpace(s)
 	repl := map[string]string{
 		"天":       "d",
-		"days":     "d",
-		"小时":     "h",
-		"hours":    "h",
+		"days":    "d",
+		"小时":      "h",
+		"hours":   "h",
 		"时":       "h",
-		"分钟":     "m",
-		"minutes":  "m",
+		"分钟":      "m",
+		"minutes": "m",
 		"分":       "m",
-		"秒钟":     "s",
-		"seconds":  "s",
+		"秒钟":      "s",
+		"seconds": "s",
 		"秒":       "s",
 	}
 	for _, k := range unitKeys(repl) {

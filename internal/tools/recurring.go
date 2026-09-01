@@ -54,8 +54,10 @@ type ListRecurringTool struct {
 	Engine *reminder.Engine
 }
 
-func (t *ListRecurringTool) Name() string        { return "list_recurring" }
-func (t *ListRecurringTool) Description() string { return "列出当前所有循环任务及其 ID 和触发计划。" }
+func (t *ListRecurringTool) Name() string { return "list_recurring" }
+func (t *ListRecurringTool) Description() string {
+	return "列出当前所有循环任务及其 ID 和触发计划。"
+}
 func (t *ListRecurringTool) Schema() map[string]any {
 	return map[string]any{"type": "object"}
 }

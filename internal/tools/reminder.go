@@ -70,8 +70,10 @@ type ListRemindersTool struct {
 	Engine *reminder.Engine
 }
 
-func (t *ListRemindersTool) Name() string        { return "list_reminders" }
-func (t *ListRemindersTool) Description() string { return "列出当前所有已安排的定时提醒及其 ID 和触发时间。" }
+func (t *ListRemindersTool) Name() string { return "list_reminders" }
+func (t *ListRemindersTool) Description() string {
+	return "列出当前所有已安排的定时提醒及其 ID 和触发时间。"
+}
 func (t *ListRemindersTool) Schema() map[string]any {
 	return map[string]any{"type": "object"}
 }
