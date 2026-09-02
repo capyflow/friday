@@ -18,7 +18,8 @@ var (
 	portaudioInitErr error
 )
 
-func ensurePortaudio() error {
+// EnsurePortaudio 确保 PortAudio 全局初始化恰好一次（供本包与其他包共用）。
+func EnsurePortaudio() error {
 	portaudioOnce.Do(func() {
 		portaudioInitErr = portaudio.Initialize()
 	})
@@ -29,7 +30,7 @@ func ensurePortaudio() error {
 
 // findInputDevice 按名称子串查找麦克风设备；name 为空时返回默认设备。
 func findInputDevice(name string) (*portaudio.DeviceInfo, error) {
-	if err := ensurePortaudio(); err != nil {
+	if err := EnsurePortaudio(); err != nil {
 		return nil, fmt.Errorf("初始化 PortAudio 失败: %w", err)
 	}
 	if name == "" {
@@ -54,7 +55,7 @@ func findInputDevice(name string) (*portaudio.DeviceInfo, error) {
 
 // findOutputDevice 按名称子串查找播放设备；name 为空时返回默认设备。
 func findOutputDevice(name string) (*portaudio.DeviceInfo, error) {
-	if err := ensurePortaudio(); err != nil {
+	if err := EnsurePortaudio(); err != nil {
 		return nil, fmt.Errorf("初始化 PortAudio 失败: %w", err)
 	}
 	if name == "" {

@@ -9,6 +9,8 @@ import (
 
 	"github.com/gordonklaus/portaudio"
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+
+	"github.com/capyflow/friday/internal/audio"
 )
 
 // SherpaDetector 通过 sherpa-onnx KeywordSpotter 实现唤醒词检测。
@@ -124,7 +126,7 @@ func (d *SherpaDetector) Close() error {
 
 // findWakeDevice 按名称子串查找唤醒词检测用的输入设备。
 func findWakeDevice(name string) (*portaudio.DeviceInfo, error) {
-	if err := ensurePortaudio(); err != nil {
+	if err := audio.EnsurePortaudio(); err != nil {
 		return nil, err
 	}
 	if name == "" {
