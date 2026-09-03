@@ -2,7 +2,8 @@
 provider:
   name: openai                 # 固定 openai（vortexagent OpenAI 兼容层）
   baseURL: https://api.deepseek.com/v1   # DeepSeek/通义/智谱等兼容地址
-  model: deepseek-chat
+  # baseURL: https://api.stepfun.com/step_plan/v1   # 阶跃星辰 StepFun 示例
+  model: deepseek-chat         # StepFun 填 step-3.7-flash 等
   apiKeyEnv: DEEPSEEK_API_KEY  # 从该环境变量读密钥（export DEEPSEEK_API_KEY=sk-...）
   temperature: 0.7
   maxTokens: 1024
@@ -26,6 +27,13 @@ tts:
   engine: none                 # none=文字模式(开发)；sherpa-onnx=本地语音合成
   modelDir: models/tts         # TTS 模型目录
   voice: ""                    # 说话人，留空用模型默认
+
+vad:
+  modelPath: models/vad/silero_vad.onnx   # 语音断句模型（scripts/download-models.sh 下载）
+  threshold: 0.5               # 语音概率阈值，越大越不敏感
+  minSilence: 0.6              # 静音多久判定说完（秒）
+  minSpeech: 0.25              # 最短语音时长（秒）
+  # modelPath 留空或文件缺失时，录音退回固定时长（asr 收不到断句信号）
 
 display:
   driver: console              # console=终端显示(开发)；后续可换 oled/st7789

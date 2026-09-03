@@ -11,6 +11,7 @@ MODELS_DIR="${1:-$PROJECT_ROOT/models}"
 ASR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-2023-09-14.tar.bz2"
 KWS_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
 TTS_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-vits-zh-ll.tar.bz2"
+VAD_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 
 ASR_DIR="sherpa-onnx-paraformer-zh-2023-09-14"
 KWS_DIR="sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
@@ -49,23 +50,36 @@ download_and_extract() {
     log "$label 模型就绪: $MODELS_DIR/$target/$expected_dir"
 }
 
+download_vad() {
+    local target="$MODELS_DIR/vad/silero_vad.onnx"
+    if [ -f "$target" ]; then
+        log "VAD 模型已存在，跳过: $target"
+        return 0
+    fi
+    log "下载 VAD 模型（silero，录音断句用）..."
+    mkdir -p "$MODELS_DIR/vad"
+    curl -fSL -o "$target" "$VAD_URL"
+    log "VAD 模型就绪: $target"
+}
+
 create_keywords_file() {
     local kws_model_dir="$MODELS_DIR/wake/$KWS_DIR"
     local kw_file="$kws_model_dir/keywords.txt"
+    # 格式: 声母 + 带调韵母（合成一个 token），如 小 = "x iǎo"
+    local kw_line="x iǎo zh ù sh ǒu @小助手"
 
-    if [ -f "$kw_file" ]; then
-        log "keywords.txt 已存在，跳过"
+    if [ -f "$kw_file" ] && grep -q "@小助手" "$kw_file"; then
+        log "keywords.txt 已包含唤醒词 小助手，跳过"
         return 0
     fi
 
-    log "创建默认唤醒词文件: $kw_file"
-    cat > "$kw_file" <<'EOF'
-# 格式: 拼音标注 @中文词
-# 每行一个唤醒词，拼音之间用空格分隔
-# 参考: https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html
-x i ǎo zhù sh ǒu @小助手
-EOF
-    log "默认唤醒词: 小助手（如需自定义，编辑 $kw_file）"
+    if [ ! -f "$kw_file" ]; then
+        log "创建默认唤醒词文件: $kw_file"
+        printf '# 格式: 声母 带调韵母 @中文词（每行一个唤醒词）\n# 参考: https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html\n' > "$kw_file"
+    fi
+    # 模型包自带的演示唤醒词保留，追加我们的默认词
+    echo "$kw_line" >> "$kw_file"
+    log "已追加默认唤醒词: 小助手（如需自定义，编辑 $kw_file）"
 }
 
 main() {
@@ -85,6 +99,10 @@ main() {
     download_and_extract "$TTS_URL" "$TTS_DIR" "tts" "TTS"
 
     echo ""
+    log "=== 下载 VAD 模型（录音断句）==="
+    download_vad
+
+    echo ""
     log "=== 创建唤醒词配置 ==="
     create_keywords_file
 
@@ -95,6 +113,7 @@ main() {
     log "  models/asr/$ASR_DIR/    — ASR 识别模型"
     log "  models/wake/$KWS_DIR/   — KWS 唤醒词模型"
     log "  models/tts/$TTS_DIR/    — TTS 合成模型"
+    log "  models/vad/silero_vad.onnx — VAD 断句模型"
     log ""
     log "请确保 config.yaml 中的路径指向这些目录。"
 }

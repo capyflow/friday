@@ -30,7 +30,7 @@ sudo yum install -y portaudio-devel
 ## 模型下载
 
 ```bash
-# 一键下载全部中文模型（ASR + KWS + TTS，约 370MB）
+# 一键下载全部中文模型（ASR + KWS + TTS + VAD，约 371MB）
 ./scripts/download-models.sh
 
 # 指定下载目录
@@ -56,8 +56,9 @@ models/
     ├── model.onnx
     ├── tokens.txt
     ├── lexicon.txt
-    ├── espeak-ng-data/
-    └── *.fst
+    ├── dict/                              — jieba 分词词典（文本前端）
+    └── *.fst                              — 数字/日期/电话等规则
+vad/silero_vad.onnx                         — 录音断句（说完自动停止录音）
 ```
 
 ## 配置
@@ -84,6 +85,12 @@ tts:
   engine: sherpa-onnx
   modelDir: models/tts/sherpa-onnx-vits-zh-ll
   voice: ""
+
+vad:
+  modelPath: models/vad/silero_vad.onnx   # 说完自动断句；缺失则固定时长录音
+  threshold: 0.5
+  minSilence: 0.6              # 静音多久判定说完（秒）
+  minSpeech: 0.25
 ```
 
 ### 自定义唤醒词
@@ -139,7 +146,8 @@ go build -tags sherpa ./...  # 需要 portaudio + sherpa-onnx
 - 确认模型目录存在且包含所需文件
 - ASR 需要: `model.int8.onnx` + `tokens.txt`
 - KWS 需要: `encoder-*.onnx` + `decoder-*.onnx` + `joiner-*.onnx` + `tokens.txt`
-- TTS 需要: `model.onnx` + `tokens.txt` + `lexicon.txt` + `espeak-ng-data/`
+- TTS 需要: `model.onnx` + `tokens.txt` + `lexicon.txt` + `dict/`（jieba 词典）；
+  多语种 espeak 前端模型则为 `espeak-ng-data/`（代码按目录自动适配）
 
 ### CGO 编译错误
 
