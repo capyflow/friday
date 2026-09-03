@@ -10,6 +10,7 @@ import (
 	"github.com/capyflow/friday/internal/asr"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/tts"
+	"github.com/capyflow/friday/internal/vad"
 	"github.com/capyflow/friday/internal/wake"
 )
 
@@ -18,6 +19,8 @@ type Loop struct {
 	Wake     wake.Detector
 	Recorder audio.Recorder
 	ASR      asr.Recognizer
+	// VAD 非 nil 时说完自动断句；nil 时录满 MaxRecord。
+	VAD *vad.Detector
 	// MaxRecord 单次录音时长上限。
 	MaxRecord time.Duration
 }
@@ -29,7 +32,7 @@ func (l *Loop) Run(ctx context.Context, handle func(ctx context.Context, text st
 		if err := l.Wake.Wait(ctx); err != nil {
 			return err
 		}
-		samples, err := l.Recorder.Record(ctx, l.MaxRecord)
+		samples, err := l.record(ctx)
 		if err != nil {
 			return err
 		}
@@ -44,6 +47,16 @@ func (l *Loop) Run(ctx context.Context, handle func(ctx context.Context, text st
 			return err
 		}
 	}
+}
+
+// record 录一句指令：有 VAD 时说完自动断句，否则录满 MaxRecord。
+func (l *Loop) record(ctx context.Context) ([]int16, error) {
+	var onChunk func(chunk []int16) bool
+	if l.VAD != nil {
+		l.VAD.Reset() // 清理上一句可能残留的进行中状态
+		onChunk = l.VAD.EndOfSpeech
+	}
+	return l.Recorder.Record(ctx, l.MaxRecord, onChunk)
 }
 
 // SpeakerAdapter 把 Synthesizer + Player 组装成 output.Speaker。

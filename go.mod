@@ -11,6 +11,8 @@ require (
 )
 
 require (
+	github.com/k2-fsa/sherpa-onnx-go-linux v1.13.7 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.13.7 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-windows v1.13.7 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 )

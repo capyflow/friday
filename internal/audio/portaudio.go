@@ -18,7 +18,8 @@ var (
 	portaudioInitErr error
 )
 
-// EnsurePortaudio 确保 PortAudio 全局初始化恰好一次（供本包与其他包共用）。
+// EnsurePortaudio 确保 portaudio.Initialize/Terminate 全程恰好调用一次，
+// 供语音链路各包（audio/wake）共用。
 func EnsurePortaudio() error {
 	portaudioOnce.Do(func() {
 		portaudioInitErr = portaudio.Initialize()
@@ -91,8 +92,10 @@ func NewPortaudioRecorder(deviceName string) *PortaudioRecorder {
 	return &PortaudioRecorder{deviceName: deviceName}
 }
 
-// Record 录制 duration 时长的音频，返回 16kHz 单声道 int16 PCM。
-func (r *PortaudioRecorder) Record(ctx context.Context, duration time.Duration) ([]int16, error) {
+// Record 录制音频，返回 16kHz 单声道 int16 PCM。
+// duration 为时长上限；onChunk 非 nil 时每读到一块数据即回调，
+// 返回 true 则提前结束（VAD 断句）。
+func (r *PortaudioRecorder) Record(ctx context.Context, duration time.Duration, onChunk func(chunk []int16) bool) ([]int16, error) {
 	device, err := findInputDevice(r.deviceName)
 	if err != nil {
 		return nil, err
@@ -147,6 +150,9 @@ func (r *PortaudioRecorder) Record(ctx context.Context, duration time.Duration) 
 			n = remaining
 		}
 		samples = append(samples, buf[:n]...)
+		if onChunk != nil && onChunk(buf[:n]) {
+			break // VAD 判定说完，提前结束
+		}
 	}
 
 	if err := stream.Stop(); err != nil {

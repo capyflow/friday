@@ -8,6 +8,7 @@ import (
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/tts"
+	"github.com/capyflow/friday/internal/vad"
 	"github.com/capyflow/friday/internal/wake"
 )
 
@@ -18,6 +19,10 @@ type Components struct {
 	Player   audio.Player
 	ASR      asr.Recognizer
 	TTS      tts.Synthesizer
+	// Keywords 是实际生效的唤醒词（来自模型目录 keywords.txt，可能与配置不同）。
+	Keywords []string
+	// VAD 为 nil 时录音退回固定 MaxRecord 时长，否则说完自动断句。
+	VAD *vad.Detector
 }
 
 // NewComponents 依据配置构建语音组件。
@@ -35,6 +40,7 @@ func VoiceLoop(c *Components, maxRecord time.Duration) *Loop {
 		Wake:      c.Wake,
 		Recorder:  c.Recorder,
 		ASR:       c.ASR,
+		VAD:       c.VAD,
 		MaxRecord: maxRecord,
 	}
 }

@@ -9,8 +9,9 @@ import (
 
 // Recorder 从麦克风采集 PCM 音频。
 type Recorder interface {
-	// Record 录制 duration 时长的音频，返回 16kHz 单声道 int16 PCM。
-	Record(ctx context.Context, duration time.Duration) ([]int16, error)
+	// Record 录音，最长 duration；每读到一块数据调用一次 onChunk（可为 nil），
+	// onChunk 返回 true 时提前结束（如 VAD 判定说完）。返回全部已录样本。
+	Record(ctx context.Context, duration time.Duration, onChunk func(chunk []int16) bool) ([]int16, error)
 	Close() error
 }
 

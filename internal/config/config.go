@@ -16,6 +16,7 @@ type Config struct {
 	ASR          ASRConfig      `yaml:"asr"`
 	Wake         WakeConfig     `yaml:"wake"`
 	TTS          TTSConfig      `yaml:"tts"`
+	VAD          VADConfig      `yaml:"vad"`
 	Display      DisplayConfig  `yaml:"display"`
 	SystemPrompt string         `yaml:"systemPrompt"`
 }
@@ -72,6 +73,18 @@ type TTSConfig struct {
 	Voice string `yaml:"voice"`
 }
 
+// VADConfig 描述录音断句（silero VAD）：说完自动停止录音，替代固定时长等待。
+type VADConfig struct {
+	// ModelPath silero_vad.onnx 路径；为空或文件不存在时回退为固定时长录音。
+	ModelPath string `yaml:"modelPath"`
+	// Threshold 语音概率阈值（0~1，越大越不敏感，默认 0.5）。
+	Threshold float32 `yaml:"threshold"`
+	// MinSilence 静音持续多少秒判定"说完"（默认 0.6）。
+	MinSilence float32 `yaml:"minSilence"`
+	// MinSpeech 语音持续多少秒才算"说过话"（默认 0.25，滤除短噪声）。
+	MinSpeech float32 `yaml:"minSpeech"`
+}
+
 // DisplayConfig 描述屏幕。
 type DisplayConfig struct {
 	// Driver: "console"(开发) 或后续 "oled"/"st7789" 等。
@@ -125,6 +138,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.TTS.Engine == "" {
 		c.TTS.Engine = "none"
+	}
+	if c.VAD.Threshold == 0 {
+		c.VAD.Threshold = 0.5
+	}
+	if c.VAD.MinSilence == 0 {
+		c.VAD.MinSilence = 0.6
+	}
+	if c.VAD.MinSpeech == 0 {
+		c.VAD.MinSpeech = 0.25
 	}
 	if c.Display.Driver == "" {
 		c.Display.Driver = "console"

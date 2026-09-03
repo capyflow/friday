@@ -123,9 +123,14 @@ func main() {
 	}
 
 	if vc != nil {
-		fmt.Println("🎤 语音模式已启用：说出唤醒词开始对话（" + strings.Join(cfg.Wake.Keywords, "/") + "）")
+		kw := vc.Keywords
+		if len(kw) == 0 {
+			kw = cfg.Wake.Keywords
+		}
+		fmt.Println("🎤 语音模式已启用：说出唤醒词开始对话（" + strings.Join(kw, "/") + "）")
 		loop := voice.VoiceLoop(vc, 8*time.Second)
 		if err := loop.Run(ctx, func(c context.Context, text string) error {
+			log.Printf("[语音] 识别到: %s", text)
 			handle(c, text)
 			return nil
 		}); err != nil && ctx.Err() == nil {
