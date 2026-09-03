@@ -5,6 +5,7 @@ package tts
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -17,14 +18,26 @@ type SherpaSynthesizer struct {
 }
 
 // NewSherpaSynthesizer 创建离线语音合成器。
-// modelDir 包含 TTS 模型文件（VITS 的 model.onnx/tokens.txt/lexicon.txt 等）。
+// modelDir 包含 TTS 模型文件。中文 VITS 模型有两种文本前端布局，按目录自动适配：
+//   - dict/（jieba 词典，如 vits-zh-ll）→ 设为 DictDir
+//   - espeak-ng-data/（如 vits-zh-aishell3 等多语种模型）→ 设为 DataDir
+//
 // voice 为说话人 ID 字符串（留空或非法时使用默认说话人 0）。
 func NewSherpaSynthesizer(modelDir, voice string) (*SherpaSynthesizer, error) {
 	config := sherpa.OfflineTtsConfig{}
 	config.Model.Vits.Model = modelDir + "/model.onnx"
 	config.Model.Vits.Tokens = modelDir + "/tokens.txt"
-	config.Model.Vits.Lexicon = modelDir + "/lexicon.txt"
-	config.Model.Vits.DataDir = modelDir + "/espeak-ng-data"
+	if fileExists(modelDir + "/lexicon.txt") {
+		config.Model.Vits.Lexicon = modelDir + "/lexicon.txt"
+	}
+	switch {
+	case dirExists(modelDir + "/dict"):
+		config.Model.Vits.DictDir = modelDir + "/dict"
+	case dirExists(modelDir + "/espeak-ng-data"):
+		config.Model.Vits.DataDir = modelDir + "/espeak-ng-data"
+	default:
+		return nil, fmt.Errorf("TTS 模型目录 %q 缺少文本前端（dict/ 或 espeak-ng-data/），请确认模型完整", modelDir)
+	}
 	config.Model.Vits.NoiseScale = 0.667
 	config.Model.Vits.NoiseScaleW = 0.8
 	config.Model.Vits.LengthScale = 1.0
@@ -52,6 +65,18 @@ func parseVoiceID(voice string) int {
 		return 0
 	}
 	return id
+}
+
+// fileExists 报告 path 是否存在且为普通文件。
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// dirExists 报告 path 是否存在且为目录。
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Synthesize 将文字合成为 int16 PCM 音频，返回采样率。
