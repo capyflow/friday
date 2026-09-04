@@ -2,18 +2,30 @@
 set -euo pipefail
 
 # 下载 Friday 机器人语音模型（sherpa-onnx 中文 ASR / KWS / TTS）
-# 用法: scripts/download-models.sh [目标目录]
+# 用法: scripts/download-models.sh [--small-asr] [目标目录]
+#   --small-asr  ASR 换用小模型（int8 约 82MB，默认全量版约 230MB），适合 1GB 内存开发板
 # 默认下载到项目根目录下的 models/ 子目录。
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MODELS_DIR="${1:-$PROJECT_ROOT/models}"
+
+SMALL_ASR=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --small-asr) SMALL_ASR=1 ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+MODELS_DIR="${POSITIONAL[0]:-$PROJECT_ROOT/models}"
 
 ASR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-2023-09-14.tar.bz2"
+ASR_SMALL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2"
 KWS_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
 TTS_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-vits-zh-ll.tar.bz2"
 VAD_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 
 ASR_DIR="sherpa-onnx-paraformer-zh-2023-09-14"
+ASR_SMALL_DIR="sherpa-onnx-paraformer-zh-small-2024-03-09"
 KWS_DIR="sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
 TTS_DIR="sherpa-onnx-vits-zh-ll"
 
@@ -87,8 +99,15 @@ main() {
     mkdir -p "$MODELS_DIR"
 
     echo ""
-    log "=== 下载 ASR 模型（Paraformer 中文离线识别）==="
-    download_and_extract "$ASR_URL" "$ASR_DIR" "asr" "ASR"
+    if [ "$SMALL_ASR" -eq 1 ]; then
+        log "=== 下载 ASR 模型（Paraformer 中文小模型，低内存设备）==="
+        download_and_extract "$ASR_SMALL_URL" "$ASR_SMALL_DIR" "asr" "ASR"
+        ASR_CHOSEN_DIR="$ASR_SMALL_DIR"
+    else
+        log "=== 下载 ASR 模型（Paraformer 中文离线识别）==="
+        download_and_extract "$ASR_URL" "$ASR_DIR" "asr" "ASR"
+        ASR_CHOSEN_DIR="$ASR_DIR"
+    fi
 
     echo ""
     log "=== 下载 KWS 模型（Zipformer 中文唤醒词检测）==="
@@ -110,12 +129,15 @@ main() {
     log "全部模型下载完成！"
     log ""
     log "模型目录结构:"
-    log "  models/asr/$ASR_DIR/    — ASR 识别模型"
+    log "  models/asr/$ASR_CHOSEN_DIR/    — ASR 识别模型"
     log "  models/wake/$KWS_DIR/   — KWS 唤醒词模型"
     log "  models/tts/$TTS_DIR/    — TTS 合成模型"
     log "  models/vad/silero_vad.onnx — VAD 断句模型"
     log ""
-    log "请确保 config.yaml 中的路径指向这些目录。"
+    log "请确保 config.yaml 中的路径指向这些目录"
+    if [ "$SMALL_ASR" -eq 1 ]; then
+        log "（--small-asr 模式下 asr.modelDir 应为 models/asr/$ASR_CHOSEN_DIR）"
+    fi
 }
 
 main "$@"

@@ -33,8 +33,13 @@ sudo yum install -y portaudio-devel
 # 一键下载全部中文模型（ASR + KWS + TTS + VAD，约 371MB）
 ./scripts/download-models.sh
 
+# 1GB 内存开发板（香橙派 Zero 3 / Radxa Zero 3W 等）建议 ASR 换小模型：
+# Paraformer zh-small（int8 约 82MB，精度略降），下载后 config.yaml 的
+# asr.modelDir 改为 models/asr/sherpa-onnx-paraformer-zh-small-2024-03-09
+./scripts/download-models.sh --small-asr
+
 # 指定下载目录
-./scripts/download-models.sh /opt/friday-models
+./scripts/download-models.sh --small-asr /opt/friday-models
 ```
 
 下载后目录结构：
@@ -42,6 +47,8 @@ sudo yum install -y portaudio-devel
 ```
 models/
 ├── asr/sherpa-onnx-paraformer-zh-2023-09-14/    — Paraformer 离线中文识别
+│   │                                              （--small-asr 时为
+│   │                                               sherpa-onnx-paraformer-zh-small-2024-03-09）
 │   ├── model.int8.onnx
 │   ├── tokens.txt
 │   └── ...

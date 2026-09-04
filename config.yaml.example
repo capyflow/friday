@@ -16,7 +16,10 @@ audio:
 
 asr:
   engine: none                 # none=文本模式(开发)；sherpa-onnx=本地离线识别
-  modelDir: models/asr         # sherpa-onnx 识别模型目录
+  modelDir: models/asr         # sherpa-onnx 识别模型目录。全量 Paraformer 约 230MB；
+                               # 1GB 内存开发板建议 scripts/download-models.sh --small-asr 下载
+                               # 小模型（约 82MB），此目录改为
+                               # models/asr/sherpa-onnx-paraformer-zh-small-2024-03-09
 
 wake:
   engine: none                 # none=不用唤醒词；sherpa-onnx=启用唤醒词
