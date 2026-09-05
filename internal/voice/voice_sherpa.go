@@ -68,7 +68,7 @@ func newComponentsImpl(cfg *config.Config) (*Components, error) {
 
 	var synthesizer tts.Synthesizer
 	if cfg.TTS.Engine == "sherpa-onnx" {
-		s, err := tts.NewSherpaSynthesizer(cfg.TTS.ModelDir, cfg.TTS.Voice)
+		s, err := tts.NewSherpaSynthesizer(cfg.TTS.ModelDir, cfg.TTS.Voice, cfg.TTS.Speed)
 		if err != nil {
 			return nil, fmt.Errorf("初始化语音合成器: %w", err)
 		}

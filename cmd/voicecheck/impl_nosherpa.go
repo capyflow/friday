@@ -13,4 +13,8 @@ func runDevices() error { return errNeedSherpa }
 
 func runRec([]string) error { return errNeedSherpa }
 
+func runPlay([]string) error { return errNeedSherpa }
+
+func runKWS([]string) error { return errNeedSherpa }
+
 var errNeedSherpa = fmt.Errorf("voicecheck 需要 sherpa-onnx 支持：go run -tags sherpa ./cmd/voicecheck ...（依赖安装见 README-voice.md）")

@@ -40,6 +40,9 @@ sudo yum install -y portaudio-devel
 
 # 指定下载目录
 ./scripts/download-models.sh --small-asr /opt/friday-models
+
+# 换更好的 TTS（matcha：发音更清晰、合成更快；模型+vocoder 约 125MB）
+./scripts/download-models.sh --matcha-tts
 ```
 
 下载后目录结构：
@@ -59,8 +62,10 @@ models/
 │   ├── tokens.txt
 │   ├── keywords.txt                       — 自定义唤醒词（拼音注音格式）
 │   └── test_wavs/
-└── tts/sherpa-onnx-vits-zh-ll/            — VITS 中文语音合成（5 说话人）
-    ├── model.onnx
+└── tts/matcha-icefall-zh-baker/           — Matcha 中文合成（--matcha-tts 下载，含 vocos vocoder）
+    │                                        代码按目录布局自动识别 Matcha/VITS 与文本前端
+    ├── model-steps-3.onnx
+    ├── vocos-22khz-univ.onnx
     ├── tokens.txt
     ├── lexicon.txt
     ├── dict/                              — jieba 分词词典（文本前端）
@@ -90,8 +95,9 @@ wake:
 
 tts:
   engine: sherpa-onnx
-  modelDir: models/tts/sherpa-onnx-vits-zh-ll
-  voice: ""
+  modelDir: models/tts/matcha-icefall-zh-baker   # 默认 matcha；换回 VITS 改为 models/tts/sherpa-onnx-vits-zh-ll
+  voice: ""                    # matcha 单说话人；VITS（zh-ll）有 0-4 五个可选
+  speed: 1.0                   # 语速倍率（越大越快；听不清可试 0.8）
 
 vad:
   modelPath: models/vad/silero_vad.onnx   # 说完自动断句；缺失则固定时长录音

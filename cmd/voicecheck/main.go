@@ -28,6 +28,10 @@ func main() {
 		err = runDevices()
 	case "rec":
 		err = runRec(os.Args[2:])
+	case "play":
+		err = runPlay(os.Args[2:])
+	case "kws":
+		err = runKWS(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -44,6 +48,8 @@ func usage() {
   voicecheck tts [-model <TTS模型目录>] [-voice <说话人ID>] -out <输出.wav> <文本>...
   voicecheck devices              # 列出 portaudio 设备与默认输入/输出
   voicecheck rec [-device <名称子串>] -out <输出.wav> -sec <秒数>   # 用与 robot 相同的路径录音自检
+  voicecheck play [-device <名称子串>] [-effect ding|dingdong|alert] [wav文件]  # 喇叭自检：播内置音效或 wav 文件
+  voicecheck kws [-model <KWS模型目录>] <wav文件>...  # 离线唤醒词检测：验证灵敏度与麦克风录音
 
 需要 -tags sherpa 编译：go run -tags sherpa ./cmd/voicecheck ...`)
 }

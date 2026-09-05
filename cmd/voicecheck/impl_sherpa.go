@@ -18,6 +18,7 @@ import (
 	"github.com/capyflow/friday/internal/asr"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/tts"
+	"github.com/capyflow/friday/internal/wake"
 )
 
 // runASR 逐个识别 wav 文件，打印识别文本与耗时。
@@ -56,18 +57,19 @@ func runASR(args []string) error {
 // runTTS 把文本合成为 wav 文件并打印响度统计，无喇叭也能确认产物有效。
 func runTTS(args []string) error {
 	fs := flag.NewFlagSet("tts", flag.ExitOnError)
-	model := fs.String("model", "models/tts/sherpa-onnx-vits-zh-ll", "TTS 模型目录")
+	model := fs.String("model", "models/tts/matcha-icefall-zh-baker", "TTS 模型目录")
 	voice := fs.String("voice", "", "说话人 ID，留空用默认")
+	speed := fs.Float64("speed", 1.0, "语速倍率（1.0 正常，越大越快）")
 	out := fs.String("out", "", "输出 wav 路径")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	text := strings.Join(fs.Args(), " ")
 	if text == "" || *out == "" {
-		return fmt.Errorf("用法: voicecheck tts [-model <目录>] [-voice <ID>] -out <输出.wav> <文本>...")
+		return fmt.Errorf("用法: voicecheck tts [-model <目录>] [-voice <ID>] [-speed <倍率>] -out <输出.wav> <文本>...")
 	}
 
-	synth, err := tts.NewSherpaSynthesizer(*model, *voice)
+	synth, err := tts.NewSherpaSynthesizer(*model, *voice, *speed)
 	if err != nil {
 		return err
 	}
@@ -166,64 +168,91 @@ func runRec(args []string) error {
 	return nil
 }
 
-// readWav 读取 16-bit PCM wav；立体声自动下混为单声道。
+// runKWS 对 wav 文件离线做唤醒词检测（与 robot 的 Wake.Wait 同一套 KWS 配置），
+// 用于验证模型、keywords.txt 与麦克风录音的灵敏度。
+func runKWS(args []string) error {
+	fs := flag.NewFlagSet("kws", flag.ExitOnError)
+	model := fs.String("model", "models/wake/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01", "KWS 模型目录")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("用法: voicecheck kws [-model <KWS模型目录>] <wav文件>...")
+	}
+
+	det, err := wake.NewSherpaDetector(*model, nil, "")
+	if err != nil {
+		return err
+	}
+	defer det.Close()
+
+	for _, path := range fs.Args() {
+		samples, rate, err := readWav(path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		start := time.Now()
+		hits := det.Detect(samples)
+		name := filepath.Base(path)
+		if len(hits) == 0 {
+			fmt.Printf("%s: 未命中唤醒词（%.1fs 音频，检测耗时 %.2fs）\n",
+				name, float64(len(samples))/float64(rate), time.Since(start).Seconds())
+		} else {
+			fmt.Printf("%s: 命中 %d 次 %v（%.1fs 音频，检测耗时 %.2fs）\n",
+				name, len(hits), hits, float64(len(samples))/float64(rate), time.Since(start).Seconds())
+		}
+	}
+	return nil
+}
+
+// runPlay 用与 robot 相同的 PortaudioPlayer 路径播放内置音效或 wav 文件，验证播放链路。
+func runPlay(args []string) error {
+	fs := flag.NewFlagSet("play", flag.ExitOnError)
+	device := fs.String("device", "", "输出设备名称子串，留空用默认")
+	effect := fs.String("effect", "", "内置音效名（ding/dingdong/alert），指定后忽略文件参数")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	player := audio.NewPortaudioPlayer(*device)
+	defer player.Close()
+
+	var samples []int16
+	rate := 0
+	label := ""
+	switch {
+	case *effect != "":
+		var err error
+		if samples, rate, err = audio.Effect(*effect); err != nil {
+			return err
+		}
+		label = "音效 " + *effect
+	default:
+		if fs.NArg() == 0 {
+			return fmt.Errorf("用法: voicecheck play [-device <名称子串>] [-effect ding|dingdong|alert] [wav文件]")
+		}
+		var err error
+		if samples, rate, err = audio.DecodeWAV(fs.Arg(0)); err != nil {
+			return err
+		}
+		label = filepath.Base(fs.Arg(0))
+	}
+
+	start := time.Now()
+	if err := player.Play(context.Background(), samples, rate); err != nil {
+		return err
+	}
+	fmt.Printf("已播放 %s：%.1fs（%dHz），播放耗时 %.2fs\n",
+		label, float64(len(samples))/float64(rate), rate, time.Since(start).Seconds())
+	return nil
+}
+
+// readWav 读取 wav 供 ASR 使用：复用 audio.DecodeWAV 解析，
 // 采样率非 16kHz 时报错（paraformer 只接受 16k 输入），并提示 ffmpeg 转换命令。
 func readWav(path string) ([]int16, int, error) {
-	data, err := os.ReadFile(path)
+	samples, rate, err := audio.DecodeWAV(path)
 	if err != nil {
 		return nil, 0, err
-	}
-	if len(data) < 44 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
-		return nil, 0, fmt.Errorf("不是 RIFF/WAVE 文件")
-	}
-
-	var (
-		rate     int
-		channels int
-		raw      []byte
-	)
-	for pos := 12; pos+8 <= len(data); {
-		id := string(data[pos : pos+4])
-		size := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
-		if pos+8+size > len(data) {
-			size = len(data) - pos - 8
-		}
-		body := data[pos+8 : pos+8+size]
-		switch id {
-		case "fmt ":
-			if len(body) < 16 {
-				return nil, 0, fmt.Errorf("fmt 块过短")
-			}
-			format := binary.LittleEndian.Uint16(body[0:2])
-			channels = int(binary.LittleEndian.Uint16(body[2:4]))
-			rate = int(binary.LittleEndian.Uint32(body[4:8]))
-			bits := binary.LittleEndian.Uint16(body[14:16])
-			if format != 1 || bits != 16 {
-				return nil, 0, fmt.Errorf("仅支持 16-bit PCM，实际 format=%d bits=%d", format, bits)
-			}
-		case "data":
-			raw = body
-		}
-		pos += 8 + size
-		if size%2 == 1 {
-			pos++ // RIFF 块按 2 字节对齐
-		}
-	}
-	if raw == nil || rate == 0 {
-		return nil, 0, fmt.Errorf("缺少 fmt/data 块")
-	}
-
-	n := len(raw) / 2
-	samples := make([]int16, n)
-	for i := 0; i < n; i++ {
-		samples[i] = int16(binary.LittleEndian.Uint16(raw[i*2 : i*2+2]))
-	}
-	if channels == 2 {
-		mono := make([]int16, n/2)
-		for i := range mono {
-			mono[i] = int16((int32(samples[2*i]) + int32(samples[2*i+1])) / 2)
-		}
-		samples = mono
 	}
 	if rate != 16000 {
 		return nil, rate, fmt.Errorf("采样率 %dHz ≠ 16kHz（ffmpeg -i in -ar 16000 -ac 1 out.wav 转换后再试）", rate)

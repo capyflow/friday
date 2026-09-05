@@ -115,6 +115,35 @@ func (d *SherpaDetector) Wait(ctx context.Context) error {
 	}
 }
 
+// Detect 对一段离线 PCM（16kHz 单声道）做唤醒词检测，按顺序返回命中的唤醒词。
+// 与 Wait 走同一套 KWS 配置，用于不占麦克风的诊断与测试。
+func (d *SherpaDetector) Detect(samples []int16) []string {
+	kwsStream := sherpa.NewKeywordStream(d.spotter)
+	defer sherpa.DeleteOnlineStream(kwsStream)
+
+	var hits []string
+	const chunk = 1024
+	for off := 0; off < len(samples); off += chunk {
+		end := off + chunk
+		if end > len(samples) {
+			end = len(samples)
+		}
+		floats := make([]float32, end-off)
+		for i, s := range samples[off:end] {
+			floats[i] = float32(s) / 32768.0
+		}
+		kwsStream.AcceptWaveform(16000, floats)
+		for d.spotter.IsReady(kwsStream) {
+			d.spotter.Decode(kwsStream)
+			if result := d.spotter.GetResult(kwsStream); result.Keyword != "" {
+				hits = append(hits, result.Keyword)
+				d.spotter.Reset(kwsStream)
+			}
+		}
+	}
+	return hits
+}
+
 // Close 释放 KeywordSpotter 资源。
 func (d *SherpaDetector) Close() error {
 	if d.spotter != nil {

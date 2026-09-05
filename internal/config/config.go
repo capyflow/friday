@@ -71,6 +71,8 @@ type TTSConfig struct {
 	ModelDir string `yaml:"modelDir"`
 	// Voice 说话人/音色名（留空用模型默认）。
 	Voice string `yaml:"voice"`
+	// Speed 语速倍率（1.0 正常，越大越快；留空/0 视为 1.0）。
+	Speed float64 `yaml:"speed"`
 }
 
 // VADConfig 描述录音断句（silero VAD）：说完自动停止录音，替代固定时长等待。
