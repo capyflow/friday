@@ -11,6 +11,7 @@ import (
 	"github.com/capyflow/vortexagent/agent/sessionstore"
 	"github.com/capyflow/vortexagent/llm"
 
+	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/reminder"
@@ -72,8 +73,9 @@ func buildHooks() *vxagent.Hooks {
 }
 
 // RegisterTools 把机器人全部业务工具注册进 Registry。
-// engine 为提醒排程器；speaker/displayer 为输出实现（开发用 console，后续换 TTS/OLED）。
-func RegisterTools(r *vxagent.Registry, engine *reminder.Engine, speaker output.Speaker, displayer output.Displayer) error {
+// engine 为提醒排程器；speaker/displayer 为输出实现（开发用 console，后续换 TTS/OLED）；
+// player 为音频播放器（语音模式用 portaudio，文本模式用 console 兜底）。
+func RegisterTools(r *vxagent.Registry, engine *reminder.Engine, speaker output.Speaker, displayer output.Displayer, player audio.Player) error {
 	tools := []vxagent.Tool{
 		&tools_pkg.ScheduleReminderTool{Engine: engine},
 		&tools_pkg.ListRemindersTool{Engine: engine},
@@ -84,6 +86,8 @@ func RegisterTools(r *vxagent.Registry, engine *reminder.Engine, speaker output.
 		&tools_pkg.GetTimeTool{},
 		&tools_pkg.SpeakNowTool{Speaker: speaker},
 		&tools_pkg.DisplayNowTool{Displayer: displayer},
+		&tools_pkg.PlayAudioTool{Player: player},
+		&tools_pkg.PlayEffectTool{Player: player},
 	}
 	for _, t := range tools {
 		if err := r.Add(t); err != nil {
@@ -106,11 +110,13 @@ func systemPrompt(override string) string {
 3. 用户情绪低落时，先共情再给建议，不敷衍不说教。
 
 【任务执行】
-1. 用户要求"X 分钟后提醒我做 Y"：调用 schedule_reminder，相对时长填 in（如 10分钟/2小时/1天/90s），内容填 text；不要自己计算绝对时间。
-2. 用户要求每天/每周固定时间做事（如"每天早上8点提醒我喝水"）：调用 schedule_recurring，自然语言时间填 when（如"每天早上8点""每周一三五9:30"）。
-3. 查看/取消提醒或循环任务：调用 list_reminders / cancel_reminder / list_recurring / cancel_recurring（先列出拿 ID 再取消）。
-4. 用户要求立即播报/显示：调用 speak_now（语音）和 display_now（屏幕）。
-5. 查询当前时间调用 get_time。
+1. 用户要求"X 分钟后提醒我做 Y"：调用 schedule_reminder，相对时长填 in（如 10分钟/2小时/1天/90s），内容填 text。
+2. 用户要求在具体时刻提醒（如"4点11分提醒我""明天早上8点叫我起床"）：必须先调用 get_time 获取当前时间，然后调用 schedule_reminder 时必须用 when 填 RFC3339 绝对时间（含时区，如 2026-09-05T16:11:00+08:00），禁止用 in 表达具体时刻。
+3. 用户要求每天/每周固定时间做事（如"每天早上8点提醒我喝水"）：调用 schedule_recurring，自然语言时间填 when（如"每天早上8点""每周一三五9:30"）。
+4. 查看/取消提醒或循环任务：调用 list_reminders / cancel_reminder / list_recurring / cancel_recurring（先列出拿 ID 再取消）。
+5. 用户要求立即播报/显示：调用 speak_now（语音）和 display_now（屏幕）。
+6. 用户想听声音：播放本地 wav 文件调用 play_audio（path 填文件路径）；要提示音调用 play_effect（ding/dingdong/alert）。
+7. 查询当前时间调用 get_time。
 
 【注意】
 - 提醒到点后的播报由系统自动完成，你无需额外操作。

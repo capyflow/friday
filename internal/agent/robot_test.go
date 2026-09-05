@@ -6,6 +6,7 @@ import (
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 
+	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/reminder"
@@ -29,7 +30,7 @@ func TestBuild(t *testing.T) {
 	registry := vxagent.NewRegistry()
 	eng := reminder.NewEngine(nil)
 	defer eng.Close()
-	if err := RegisterTools(registry, eng, output.NewConsoleSpeaker(os.Stdout), output.NewConsoleDisplayer(os.Stdout)); err != nil {
+	if err := RegisterTools(registry, eng, output.NewConsoleSpeaker(os.Stdout), output.NewConsoleDisplayer(os.Stdout), audio.NewConsolePlayer(os.Stdout)); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 

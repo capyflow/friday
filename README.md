@@ -11,6 +11,7 @@
 - **定时提醒**：`10分钟后提示我该敷面膜了` → 到点自动播报 + 屏幕显示
 - **循环任务**：`每天早上8点提醒我喝水`、`每周一三五9点播报天气`（自然语言 → cron）
 - **立即播报/显示**：`speak_now` / `display_now` 工具
+- **声音播放**：`play_audio`（播放本地 16-bit PCM wav）`play_effect`（内置提示音 ding/dingdong/alert）工具
 - **语音交互**（可选）：唤醒词 → 录音 → 本地 ASR → 对话 → TTS 播报（sherpa-onnx，见 `README-voice.md`）
 - **可扩展工具**：`agent.Tool` 接口实现 4 个方法即可加能力（GPIO、传感器、媒体播放……）
 
@@ -28,6 +29,7 @@
 │  │   schedule_reminder / list_reminders / cancel_reminder
 │  │   schedule_recurring / list_recurring / cancel_recurring
 │  │   get_time / speak_now / display_now           │
+│  │   play_audio / play_effect                     │
 │  └─ Hooks：日志 / 工具调用审计                      │
 └────────────────────┬────────────────────────────┘
                      ▼

@@ -28,6 +28,7 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 
 	robotagent "github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/reminder"
@@ -54,6 +55,10 @@ func main() {
 	if speaker == nil {
 		speaker = output.NewConsoleSpeaker(os.Stdout)
 	}
+	player := audio.Player(audio.NewConsolePlayer(os.Stdout))
+	if vc != nil {
+		player = vc.Player
+	}
 
 	eng := reminder.NewEngine(func(r reminder.Reminder) {
 		log.Printf("[提醒] 到点：%s", r.Text)
@@ -67,7 +72,7 @@ func main() {
 	defer eng.Close()
 
 	registry := vxagent.NewRegistry()
-	if err := robotagent.RegisterTools(registry, eng, speaker, displayer); err != nil {
+	if err := robotagent.RegisterTools(registry, eng, speaker, displayer, player); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
 
@@ -119,6 +124,18 @@ func main() {
 		if streamed.Len() == 0 && answer != "" {
 			fmt.Println(answer)
 		}
+		// 语音模式下把最终回复播报出来（文本模式无 TTS，仅打印）。
+		if vc != nil {
+			spoken := answer
+			if spoken == "" {
+				spoken = streamed.String()
+			}
+			if s := stripMarkdown(spoken); strings.TrimSpace(s) != "" {
+				if err := speaker.Speak(ctx, s); err != nil {
+					log.Printf("语音播报失败: %v", err)
+				}
+			}
+		}
 		fmt.Println()
 	}
 
@@ -164,6 +181,11 @@ func buildVoice(cfg *config.Config) (output.Speaker, *voice.Components, error) {
 		return nil, nil, err
 	}
 	return &voice.SpeakerAdapter{Synth: vc.TTS, Player: vc.Player}, vc, nil
+}
+
+// stripMarkdown 去掉 LLM 回复中的 Markdown 符号，避免 TTS 把星号井号读出来。
+func stripMarkdown(s string) string {
+	return strings.NewReplacer("*", "", "#", "", "`", "", "_", "", "~", "", ">", "").Replace(s)
 }
 
 // printReminders 打印当前所有未触发提醒与循环任务。
