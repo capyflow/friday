@@ -5,6 +5,11 @@
 # 本地配置（含密钥环境变量名）
 config.yaml
 
+# 运行时持久化文件（任务/记忆/管理员账号）
+/tasks.json
+/memories.json
+/admin-account.json
+
 # 语音模型（体积大，不入库）
 /models/
 
