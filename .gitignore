@@ -19,3 +19,6 @@ config.yaml
 # 本地会话元数据
 /.codegraph
 /.omo/
+
+# 运行日志（allspark logx 自动创建）
+logs/
