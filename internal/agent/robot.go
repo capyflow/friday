@@ -1,5 +1,5 @@
 // Package agent 把 vortexagent 框架组装成机器人：创建 LLM Provider、注册工具、
-// 配置生命周期钩子（日志/拦截）、注入面向定时提醒场景的中文系统提示词。
+// 配置生命周期钩子（日志/拦截）、注入面向陪伴与定时任务场景的中文系统提示词。
 package agent
 
 import (
@@ -13,8 +13,9 @@ import (
 
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
-	"github.com/capyflow/friday/internal/reminder"
+	"github.com/capyflow/friday/internal/task"
 	tools_pkg "github.com/capyflow/friday/internal/tools"
 )
 
@@ -73,16 +74,17 @@ func buildHooks() *vxagent.Hooks {
 }
 
 // RegisterTools 把机器人全部业务工具注册进 Registry。
-// engine 为提醒排程器；speaker/displayer 为输出实现（开发用 console，后续换 TTS/OLED）；
-// player 为音频播放器（语音模式用 portaudio，文本模式用 console 兜底）。
-func RegisterTools(r *vxagent.Registry, engine *reminder.Engine, speaker output.Speaker, displayer output.Displayer, player audio.Player) error {
+// engine 为任务排程器（单次/多次/循环）；mem 为长期记忆仓库；speaker/displayer
+// 为输出实现（开发用 console，后续换 TTS/OLED）；player 为音频播放器
+// （语音模式用 portaudio，文本模式用 console 兜底）。
+func RegisterTools(r *vxagent.Registry, engine *task.Engine, mem *memory.Store, speaker output.Speaker, displayer output.Displayer, player audio.Player) error {
 	tools := []vxagent.Tool{
-		&tools_pkg.ScheduleReminderTool{Engine: engine},
-		&tools_pkg.ListRemindersTool{Engine: engine},
-		&tools_pkg.CancelReminderTool{Engine: engine},
-		&tools_pkg.ScheduleRecurringTool{Engine: engine},
-		&tools_pkg.ListRecurringTool{Engine: engine},
-		&tools_pkg.CancelRecurringTool{Engine: engine},
+		&tools_pkg.ScheduleTaskTool{Engine: engine},
+		&tools_pkg.ListTasksTool{Engine: engine},
+		&tools_pkg.CancelTaskTool{Engine: engine},
+		&tools_pkg.RememberTool{Memory: mem},
+		&tools_pkg.RecallTool{Memory: mem},
+		&tools_pkg.ForgetTool{Memory: mem},
 		&tools_pkg.GetTimeTool{},
 		&tools_pkg.SpeakNowTool{Speaker: speaker},
 		&tools_pkg.DisplayNowTool{Displayer: displayer},
@@ -110,16 +112,23 @@ func systemPrompt(override string) string {
 3. 用户情绪低落时，先共情再给建议，不敷衍不说教。
 
 【任务执行】
-1. 用户要求"X 分钟后提醒我做 Y"：调用 schedule_reminder，相对时长填 in（如 10分钟/2小时/1天/90s），内容填 text。
-2. 用户要求在具体时刻提醒（如"4点11分提醒我""明天早上8点叫我起床"）：必须先调用 get_time 获取当前时间，然后调用 schedule_reminder 时必须用 when 填 RFC3339 绝对时间（含时区，如 2026-09-05T16:11:00+08:00），禁止用 in 表达具体时刻。
-3. 用户要求每天/每周固定时间做事（如"每天早上8点提醒我喝水"）：调用 schedule_recurring，自然语言时间填 when（如"每天早上8点""每周一三五9:30"）。
-4. 查看/取消提醒或循环任务：调用 list_reminders / cancel_reminder / list_recurring / cancel_recurring（先列出拿 ID 再取消）。
-5. 用户要求立即播报/显示：调用 speak_now（语音）和 display_now（屏幕）。
-6. 用户想听声音：播放本地 wav 文件调用 play_audio（path 填文件路径）；要提示音调用 play_effect（ding/dingdong/alert）。
-7. 查询当前时间调用 get_time。
+1. 单次提醒（"10分钟后提醒我敷面膜"）：调用 schedule_task，in 填相对时长（如 10分钟/2小时/1天/90s），text 填内容。
+2. 具体时刻提醒（"4点11分提醒我""明天早上8点叫我起床"）：必须先调用 get_time 获取当前时间，然后调用 schedule_task 时必须用 when 填 RFC3339 绝对时间（含时区，如 2026-09-05T16:11:00+08:00），禁止用 in 表达具体时刻。
+3. 有限多次（"每10分钟提醒我一次，共3次"）：调用 schedule_task，in 填间隔（10分钟），times 填次数（3）。
+4. 无限循环（"每天早上8点提醒我喝水""每周一三五9点播报天气"）：调用 schedule_task，every 填自然语言（"每天早上8点""每周一三五9:30"）或 cron 表达式。
+5. 查看/取消任务：调用 list_tasks / cancel_task（先列出拿 ID 再取消，单次/多次/循环通用）。
+6. 用户要求立即播报/显示：调用 speak_now（语音）和 display_now（屏幕）。
+7. 用户想听声音：播放本地 wav 文件调用 play_audio（path 填文件路径）；要提示音调用 play_effect（ding/dingdong/alert）。
+8. 查询当前时间调用 get_time。
+
+【长期记忆】
+1. 用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、身体状况等），或明确说"记住…"：调用 remember，content 用一句话概括（如"用户对花粉过敏"）。
+2. 回答需要用户背景信息，或用户问"还记得吗""我是不是说过"：调用 recall，q 填关键词；留空返回最近的记忆。
+3. 用户要求忘记某事：先 recall 拿到记忆 ID，再调用 forget。
+4. 记忆要克制：只记对陪伴有用的事实，不要记录敏感隐私（密码、财务），也不要每次对话都记。
 
 【注意】
-- 提醒到点后的播报由系统自动完成，你无需额外操作。
+- 任务到点后的播报由系统自动完成，你无需额外操作。
 - 安排成功后用一句话简洁告知用户，并顺带一句关心。`
 }
 

@@ -1,4 +1,4 @@
-package reminder
+package task
 
 import (
 	"fmt"
@@ -8,11 +8,7 @@ import (
 )
 
 func newID() string {
-	return fmt.Sprintf("r%d", time.Now().UnixNano())
-}
-
-func sortByWhen(rs []Reminder) {
-	sort.Slice(rs, func(i, j int) bool { return rs[i].When.Before(rs[j].When) })
+	return fmt.Sprintf("t%d", time.Now().UnixNano())
 }
 
 // ParseHumanDuration 把用户输入的人类可读时长（"10分钟后"）解析为 time.Duration。
@@ -39,6 +35,34 @@ func ParseHumanDuration(s string) (time.Duration, error) {
 		return d, nil
 	}
 	return 0, fmt.Errorf("无法解析时长 %q", orig)
+}
+
+// FormatDuration 把时长格式化为人类可读中文（如"10分钟""1小时30分钟"），与
+// ParseHumanDuration 的输入习惯对应；亚秒级回退为 Go 默认格式。
+func FormatDuration(d time.Duration) string {
+	if d <= 0 {
+		return d.String()
+	}
+	var out string
+	if days := int(d / (24 * time.Hour)); days > 0 {
+		out += fmt.Sprintf("%d天", days)
+		d %= 24 * time.Hour
+	}
+	if h := int(d / time.Hour); h > 0 {
+		out += fmt.Sprintf("%d小时", h)
+		d %= time.Hour
+	}
+	if m := int(d / time.Minute); m > 0 {
+		out += fmt.Sprintf("%d分钟", m)
+		d %= time.Minute
+	}
+	if s := int(d / time.Second); s > 0 {
+		out += fmt.Sprintf("%d秒", s)
+	}
+	if out == "" {
+		out = d.String()
+	}
+	return out
 }
 
 // parseTokens 手工解析"数字+单位"序列（如 1d2h30m、10m、90s）。

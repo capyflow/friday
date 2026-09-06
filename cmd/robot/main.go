@@ -1,5 +1,5 @@
 // Command robot 是陪伴智能体机器人的入口：加载配置、组装 vortexagent Agent、
-// 启动提醒引擎（一次性 + 循环任务），以文本 REPL 或语音（sherpa-onnx，-tags sherpa）
+// 启动任务引擎（单次/多次/循环），以文本 REPL 或语音（sherpa-onnx，-tags sherpa）
 // 方式接收用户指令。
 //
 // 用法：
@@ -9,7 +9,7 @@
 //	go run ./cmd/robot                      # 文本模式（开发）
 //	go run -tags sherpa ./cmd/robot          # 语音模式（需安装 sherpa-onnx 与模型）
 //
-// 文本模式内置命令：/help /reminders /cancel <id> /self-test /quit
+// 文本模式内置命令：/help /tasks /cancel <id> /self-test /quit
 package main
 
 import (
@@ -28,10 +28,12 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 
 	robotagent "github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/admin"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
-	"github.com/capyflow/friday/internal/reminder"
+	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/voice"
 )
 
@@ -59,20 +61,42 @@ func main() {
 	if vc != nil {
 		player = vc.Player
 	}
+	voiceEnabled := vc != nil
+	keywords := cfg.Wake.Keywords
+	if voiceEnabled && len(vc.Keywords) > 0 {
+		keywords = vc.Keywords
+	}
 
-	eng := reminder.NewEngine(func(r reminder.Reminder) {
-		log.Printf("[提醒] 到点：%s", r.Text)
-		if err := speaker.Speak(ctx, r.Text); err != nil {
+	mem := memory.NewStore(cfg.Memory.File)
+	eng := task.NewEngineFile(func(t task.Task) {
+		log.Printf("[任务] 到点：%s", t.Text)
+		if err := speaker.Speak(ctx, t.Text); err != nil {
 			log.Printf("播报失败: %v", err)
 		}
-		if err := displayer.Display(ctx, r.Text); err != nil {
+		if err := displayer.Display(ctx, t.Text); err != nil {
 			log.Printf("显示失败: %v", err)
 		}
-	})
+	}, cfg.TaskFile)
 	defer eng.Close()
+	log.Printf("[任务] 持久化文件：%s（重启自动恢复）", cfg.TaskFile)
+
+	if cfg.Admin.IsEnabled() {
+		accounts := admin.NewAccountStore(cfg.Admin.AccountFile)
+		adminServer := admin.New(cfg.Admin.Port, accounts, eng, mem, admin.Info{
+			VoiceEnabled: voiceEnabled,
+			Keywords:     keywords,
+			Model:        cfg.Provider.Model,
+			BaseURL:      cfg.Provider.BaseURL,
+			TaskFile:     cfg.TaskFile,
+			MemoryFile:   cfg.Memory.File,
+		})
+		adminServer.Start(ctx)
+		log.Printf("[管理后台] http://0.0.0.0:%d（账号文件 %s，首次登录账号 admin/admin 需重新设置）",
+			cfg.Admin.Port, cfg.Admin.AccountFile)
+	}
 
 	registry := vxagent.NewRegistry()
-	if err := robotagent.RegisterTools(registry, eng, speaker, displayer, player); err != nil {
+	if err := robotagent.RegisterTools(registry, eng, mem, speaker, displayer, player); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
 
@@ -99,15 +123,15 @@ func main() {
 		case line == "/help":
 			printHelp()
 			return
-		case line == "/reminders":
-			printReminders(eng)
+		case line == "/tasks" || line == "/reminders":
+			printTasks(eng)
 			return
 		case strings.HasPrefix(line, "/cancel "):
 			id := strings.TrimSpace(strings.TrimPrefix(line, "/cancel "))
 			if eng.Cancel(id) {
-				fmt.Printf("已取消提醒 #%s\n", id)
+				fmt.Printf("已取消任务 #%s\n", id)
 			} else {
-				fmt.Printf("未找到提醒 #%s\n", id)
+				fmt.Printf("未找到任务 #%s\n", id)
 			}
 			return
 		case line == "/self-test":
@@ -158,15 +182,26 @@ func main() {
 
 	fmt.Println("🤖 小五已启动（文本模式，provider=" + cfg.Provider.Model + "）")
 	fmt.Println("输入指令，如：10分钟后提示我该敷面膜了。/help 查看命令。")
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return
+	// stdin 在独立 goroutine 中读取：主循环 select 监听 ctx，
+	// 保证 SIGTERM/Ctrl+C 时即使阻塞在等待输入也能立即退出（并触发 Close 快照）。
+	input := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			input <- scanner.Text()
 		}
-		handle(ctx, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("读取输入失败: %v", err)
+		close(input)
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case line, ok := <-input:
+			if !ok {
+				return
+			}
+			handle(ctx, line)
+		}
 	}
 }
 
@@ -188,43 +223,45 @@ func stripMarkdown(s string) string {
 	return strings.NewReplacer("*", "", "#", "", "`", "", "_", "", "~", "", ">", "").Replace(s)
 }
 
-// printReminders 打印当前所有未触发提醒与循环任务。
-func printReminders(eng *reminder.Engine) {
-	rs := eng.List()
-	if len(rs) == 0 {
-		fmt.Println("当前没有待触发的提醒。")
-	} else {
-		fmt.Println("待触发提醒：")
-		for _, r := range rs {
-			fmt.Printf("  #%-8s %s  %s\n", r.ID, r.When.Format("01-02 15:04:05"), r.Text)
-		}
+// printTasks 打印当前所有待触发任务（单次/多次/循环，按下次触发时间排序）。
+func printTasks(eng *task.Engine) {
+	tasks := eng.List()
+	if len(tasks) == 0 {
+		fmt.Println("当前没有待触发的任务。")
+		return
 	}
-	recs := eng.ListRecurring()
-	if len(recs) > 0 {
-		fmt.Println("循环任务：")
-		for _, r := range recs {
-			fmt.Printf("  #%-8s cron=%s  %s\n", r.ID, r.Cron, r.Text)
+	fmt.Println("待触发任务：")
+	for _, t := range tasks {
+		next := t.Next.Format("01-02 15:04:05")
+		switch t.Kind {
+		case task.KindOnce:
+			fmt.Printf("  #%-11s [单次] %s  %s\n", t.ID, next, t.Text)
+		case task.KindRepeat:
+			fmt.Printf("  #%-11s [多次] 每%s一次 剩%d/%d  下次 %s  %s\n",
+				t.ID, task.FormatDuration(t.Interval), t.Remaining, t.Times, next, t.Text)
+		case task.KindCron:
+			fmt.Printf("  #%-11s [循环] cron=%-12s 下次 %s  %s\n", t.ID, t.Cron, next, t.Text)
 		}
 	}
 }
 
-// runSelfTest 不依赖 LLM 演示"定时提醒 → 到点播报+显示"完整链路。
-func runSelfTest(eng *reminder.Engine) {
+// runSelfTest 不依赖 LLM 演示"定时任务 → 到点播报+显示"完整链路。
+func runSelfTest(eng *task.Engine) {
 	const delay = 5 * time.Second
-	fmt.Printf("自检：5 秒后触发提醒“该敷面膜了”……（观察 [TTS]/[屏幕] 输出）\n")
-	id, err := eng.Schedule("", time.Now().Add(delay), "该敷面膜了")
+	fmt.Printf("自检：5 秒后触发任务“该敷面膜了”……（观察 [TTS]/[屏幕] 输出）\n")
+	tsk, err := eng.Schedule(task.Task{Kind: task.KindOnce, When: time.Now().Add(delay), Text: "该敷面膜了"})
 	if err != nil {
 		log.Printf("自检失败: %v", err)
 		return
 	}
-	fmt.Printf("已注册提醒 #%s，%s 后触发。\n", id, delay)
+	fmt.Printf("已注册任务 #%s，%s 后触发。\n", tsk.ID, delay)
 }
 
 func printHelp() {
 	fmt.Println(`命令：
   <任意指令>      提问，如"10分钟后提示我该敷面膜了"
-  /reminders      查看待触发提醒与循环任务
-  /cancel <id>    取消提醒
-  /self-test      演示定时提醒链路（无需 LLM）
+  /tasks          查看待触发任务（单次/多次/循环）
+  /cancel <id>    取消任务
+  /self-test      演示定时任务链路（无需 LLM）
   /quit           退出`)
 }

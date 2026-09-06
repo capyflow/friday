@@ -8,8 +8,19 @@
 ## 功能
 
 - **陪伴对话**：自然聊天、情绪回应、主动关心（LLM 驱动，OpenAI 兼容：DeepSeek / 通义 / Qwen 等）
-- **定时提醒**：`10分钟后提示我该敷面膜了` → 到点自动播报 + 屏幕显示
-- **循环任务**：`每天早上8点提醒我喝水`、`每周一三五9点播报天气`（自然语言 → cron）
+- **定时任务**（统一模型，三类）：
+  - 单次：`10分钟后提示我该敷面膜了` → 到点自动播报 + 屏幕显示
+  - 多次：`每10分钟提醒我喝水，共3次` → 按间隔触发指定次数
+  - 循环：`每天早上8点提醒我喝水`、`每周一三五9点播报天气`（自然语言 → cron）
+- **任务管理**：`schedule_task` / `list_tasks` / `cancel_task` 工具，单次/多次/循环通用
+- **任务持久化**：任务落到本地 JSON（`taskFile`，默认 `tasks.json`），注册/取消/触发即原子写回，
+  重启自动恢复；停机期间过期的单次任务在启动时立即补触发一次
+- **长期记忆**：`remember` / `recall` / `forget` 工具让机器人记住用户偏好与习惯
+  （`memories.json` 落盘，重启不丢），对话中按需回忆
+- **管理后台**：基于 [vortexv3](https://github.com/capyflow/vortexv3)（Gin）的 Web 控制台
+  （默认 `http://<设备IP>:8080`），查看运行状态、管理任务与长期记忆。
+  账号密码登录：内置默认账号 `admin`/`admin`，**首次登录强制重新设置**用户名与密码，
+  之后一切登录均以该账号为准（bcrypt 哈希落盘，重启不变；删除账号文件即恢复默认）
 - **立即播报/显示**：`speak_now` / `display_now` 工具
 - **声音播放**：`play_audio`（播放本地 16-bit PCM wav）`play_effect`（内置提示音 ding/dingdong/alert）工具
 - **语音交互**（可选）：唤醒词 → 录音 → 本地 ASR → 对话 → TTS 播报（sherpa-onnx，见 `README-voice.md`）
@@ -22,22 +33,31 @@
 │ 输入：文本 REPL（开发） / 唤醒词+语音（-tags sherpa）│
 └────────────────────┬────────────────────────────┘
                      ▼
-┌─────────────────────────────────────────────────┐
-│  vortexagent Agent（内部/agent）                  │
+┌────────────────────┬────────────────────────────┐
+│  vortexagent Agent（内部/agent）                 │
 │  ├─ LLM Provider：OpenAI 兼容（DeepSeek/Qwen）     │
 │  ├─ 工具注册表（内部/tools）：                     │
-│  │   schedule_reminder / list_reminders / cancel_reminder
-│  │   schedule_recurring / list_recurring / cancel_recurring
+│  │   schedule_task / list_tasks / cancel_task    │
+│  │   （单次/多次/循环统一，自然语言 → 时间规则）      │
+│  │   remember / recall / forget（长期记忆）        │
 │  │   get_time / speak_now / display_now           │
 │  │   play_audio / play_effect                     │
 │  └─ Hooks：日志 / 工具调用审计                      │
 └────────────────────┬────────────────────────────┘
                      ▼
 ┌─────────────────────────────────────────────────┐
-│  排程引擎（内部/reminder）                         │
-│  ├─ 一次性提醒：time.Timer                        │
-│  └─ 循环任务：robfig/cron                         │
+│  任务引擎（内部/task）                              │
+│  ├─ 单次/多次：可重挂 time.Timer（无累积漂移）        │
+│  ├─ 循环：robfig/cron                             │
+│  ├─ 持久化：JSON 原子写回（taskFile），重启恢复       │
 │  到点 → Speaker（TTS/console）+ Displayer（屏幕）  │
+└─────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────┐
+│  管理后台（内部/admin，vortexv3/Gin）               │
+│  Dashboard 单页（go:embed）+ REST API              │
+│  /api/status /api/tasks /api/memories             │
+│  与机器人共用 tasks.json / memories.json            │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -61,13 +81,13 @@ go run ./cmd/robot
 ```
 🤖 小五已启动（文本模式，provider=deepseek-chat）
 > 10分钟后提示我该敷面膜了
-已设置提醒 #r1788264xxx：将于 20:12:30 触发。
-（10 分钟后）[提醒] 到点：该敷面膜了
+已安排单次任务 #t1788264xxx："该敷面膜了"，将于 20:12:30 触发。
+（10 分钟后）[任务] 到点：该敷面膜了
 [TTS] 该敷面膜了
 [屏幕] 该敷面膜了
 ```
 
-内置命令：`/help` `/reminders` `/cancel <id>` `/self-test`（无需 LLM 的自检演示）`/quit`
+内置命令：`/help` `/tasks` `/cancel <id>` `/self-test`（无需 LLM 的自检演示）`/quit`
 
 ## 测试
 
@@ -126,8 +146,10 @@ func (t *LedTool) Call(_ context.Context, args map[string]any) (string, error) {
 ```
 cmd/robot/           入口：文本/语音双模式、信号处理
 internal/agent/      vortexagent 组装：Provider、Hooks、系统提示词（陪伴人设）、工具注册
-internal/tools/      agent 工具：提醒/循环任务/时间/播报/显示 + 自然语言解析
-internal/reminder/   排程引擎：一次性（Timer）+ 循环（cron），带回调
+internal/tools/      agent 工具：任务（单次/多次/循环）/时间/播报/显示 + 自然语言时间解析
+internal/task/      统一任务引擎：单次/多次（可重挂 Timer）+ 循环（cron）+ JSON 落盘恢复
+internal/memory/    长期记忆仓库：JSON 落盘、关键词搜索
+internal/admin/     管理后台：vortexv3（Gin）REST API + 内嵌 Dashboard 单页
 internal/output/     Speaker/Displayer 抽象 + console 实现
 internal/audio/      录音/播放抽象（16kHz mono PCM 约定）
 internal/asr/        语音识别抽象

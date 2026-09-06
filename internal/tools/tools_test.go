@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/capyflow/friday/internal/reminder"
+	"github.com/capyflow/friday/internal/task"
 )
 
 // fakeSpeaker 用于测试 speak/display 工具。
@@ -18,12 +18,12 @@ func (f *fakeSpeaker) Speak(_ context.Context, text string) error {
 	return nil
 }
 
-// TestScheduleReminderCall 验证相对时长路径：in=50ms → 引擎注册一条提醒。
-func TestScheduleReminderCall(t *testing.T) {
-	eng := reminder.NewEngine(nil)
+// TestScheduleTaskOnce 验证相对时长路径：in → 单次任务。
+func TestScheduleTaskOnce(t *testing.T) {
+	eng := task.NewEngine(nil)
 	defer eng.Close()
 
-	tool := &ScheduleReminderTool{Engine: eng}
+	tool := &ScheduleTaskTool{Engine: eng}
 	res, err := tool.Call(context.Background(), map[string]any{
 		"text": "该敷面膜了",
 		"in":   "50ms",
@@ -35,49 +35,116 @@ func TestScheduleReminderCall(t *testing.T) {
 		t.Fatal("返回为空")
 	}
 	if eng.Len() != 1 {
-		t.Fatalf("应注册 1 条提醒，实际 %d", eng.Len())
+		t.Fatalf("应注册 1 条任务，实际 %d", eng.Len())
+	}
+	tsk := eng.List()[0]
+	if tsk.Kind != task.KindOnce {
+		t.Fatalf("应为 once，got %s", tsk.Kind)
 	}
 }
 
-// TestScheduleReminderCallInvalidIn 非法时长应报错且不注册。
-func TestScheduleReminderCallInvalidIn(t *testing.T) {
-	eng := reminder.NewEngine(nil)
+// TestScheduleTaskRepeat in + times → 多次任务。
+func TestScheduleTaskRepeat(t *testing.T) {
+	eng := task.NewEngine(nil)
 	defer eng.Close()
 
-	tool := &ScheduleReminderTool{Engine: eng}
+	tool := &ScheduleTaskTool{Engine: eng}
 	if _, err := tool.Call(context.Background(), map[string]any{
-		"text": "x",
-		"in":   "完全不是时长",
-	}); err == nil {
-		t.Fatal("非法时长应报错")
+		"text":  "提醒喝水",
+		"in":    "10分钟",
+		"times": float64(3),
+	}); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	tasks := eng.List()
+	if len(tasks) != 1 || tasks[0].Kind != task.KindRepeat || tasks[0].Times != 3 {
+		t.Fatalf("应注册一条 3 次的 repeat 任务，got %+v", tasks)
+	}
+	if tasks[0].Interval != 10*time.Minute {
+		t.Fatalf("间隔应为 10 分钟，got %v", tasks[0].Interval)
+	}
+}
+
+// TestScheduleTaskCron every → 循环任务。
+func TestScheduleTaskCron(t *testing.T) {
+	eng := task.NewEngine(nil)
+	defer eng.Close()
+
+	tool := &ScheduleTaskTool{Engine: eng}
+	res, err := tool.Call(context.Background(), map[string]any{
+		"text":  "提醒喝水",
+		"every": "每天早上8点",
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatal("返回为空")
+	}
+	tasks := eng.List()
+	if len(tasks) != 1 || tasks[0].Kind != task.KindCron || tasks[0].Cron != "0 8 * * *" {
+		t.Fatalf("应注册一条 cron=0 8 * * * 任务，got %+v", tasks)
+	}
+	if tasks[0].Next.IsZero() {
+		t.Fatal("循环任务应算出下次触发时间")
+	}
+}
+
+// TestScheduleTaskWhen 绝对时间路径：when → 单次任务。
+func TestScheduleTaskWhen(t *testing.T) {
+	eng := task.NewEngine(nil)
+	defer eng.Close()
+
+	tool := &ScheduleTaskTool{Engine: eng}
+	if _, err := tool.Call(context.Background(), map[string]any{
+		"text": "叫我起床",
+		"when": time.Now().Add(time.Hour).Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if eng.Len() != 1 {
+		t.Fatalf("应注册 1 条任务，实际 %d", eng.Len())
+	}
+}
+
+// TestScheduleTaskInvalid 各类非法参数应报错且不注册。
+func TestScheduleTaskInvalid(t *testing.T) {
+	eng := task.NewEngine(nil)
+	defer eng.Close()
+	tool := &ScheduleTaskTool{Engine: eng}
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"缺少 text", map[string]any{"in": "10分钟"}},
+		{"非法时长", map[string]any{"text": "x", "in": "完全不是时长"}},
+		{"缺少时间参数", map[string]any{"text": "x"}},
+		{"非法 RFC3339", map[string]any{"text": "x", "when": "明天早上8点"}},
+		{"times 缺少 in", map[string]any{"text": "x", "times": float64(3)}},
+		{"非法 every", map[string]any{"text": "x", "every": "每小时"}},
+	}
+	for _, c := range cases {
+		if _, err := tool.Call(context.Background(), c.args); err == nil {
+			t.Errorf("%s：应报错", c.name)
+		}
 	}
 	if eng.Len() != 0 {
-		t.Fatalf("不应注册提醒，实际 %d", eng.Len())
-	}
-}
-
-// TestScheduleReminderCallMissing 缺少 in/when 应报错。
-func TestScheduleReminderCallMissing(t *testing.T) {
-	eng := reminder.NewEngine(nil)
-	defer eng.Close()
-	tool := &ScheduleReminderTool{Engine: eng}
-	if _, err := tool.Call(context.Background(), map[string]any{"text": "x"}); err == nil {
-		t.Fatal("缺少 in/when 应报错")
+		t.Fatalf("非法参数不应注册任务，实际 %d", eng.Len())
 	}
 }
 
 // TestListAndCancel 验证列出与取消。
 func TestListAndCancel(t *testing.T) {
-	eng := reminder.NewEngine(nil)
+	eng := task.NewEngine(nil)
 	defer eng.Close()
 
-	sched := &ScheduleReminderTool{Engine: eng}
-	id, err := sched.Engine.Schedule("", time.Now().Add(time.Hour), "测试")
+	tsk, err := eng.Schedule(task.Task{When: time.Now().Add(time.Hour), Text: "测试"})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	list := &ListRemindersTool{Engine: eng}
+	list := &ListTasksTool{Engine: eng}
 	res, err := list.Call(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -86,13 +153,18 @@ func TestListAndCancel(t *testing.T) {
 		t.Fatalf("List 返回异常: %q", res)
 	}
 
-	cancel := &CancelReminderTool{Engine: eng}
-	out, err := cancel.Call(context.Background(), map[string]any{"id": id})
+	cancel := &CancelTaskTool{Engine: eng}
+	out, err := cancel.Call(context.Background(), map[string]any{"id": tsk.ID})
 	if err != nil || len(out) == 0 {
 		t.Fatalf("Cancel: %v %q", err, out)
 	}
 	if eng.Len() != 0 {
 		t.Fatalf("取消后应为 0，实际 %d", eng.Len())
+	}
+
+	missing, err := cancel.Call(context.Background(), map[string]any{"id": "nope"})
+	if err != nil || len(missing) == 0 {
+		t.Fatalf("取消不存在的任务应友好返回: %v %q", err, missing)
 	}
 }
 
@@ -170,32 +242,5 @@ func TestParseHumanCron(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%q = %q, want %q", c.in, got, c.want)
 		}
-	}
-}
-
-// TestScheduleRecurring 验证循环任务注册与列表。
-func TestScheduleRecurring(t *testing.T) {
-	eng := reminder.NewEngine(nil)
-	defer eng.Close()
-
-	tool := &ScheduleRecurringTool{Engine: eng}
-	res, err := tool.Call(context.Background(), map[string]any{
-		"text": "提醒喝水",
-		"when": "每天早上8点",
-	})
-	if err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if len(res) == 0 {
-		t.Fatal("返回为空")
-	}
-
-	list := &ListRecurringTool{Engine: eng}
-	out, err := list.Call(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(out) == 0 {
-		t.Fatal("List 返回为空")
 	}
 }

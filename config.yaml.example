@@ -42,3 +42,20 @@ display:
   driver: console              # console=终端显示(开发)；后续可换 oled/st7789
 
 # systemPrompt: ""            # 可选，覆盖默认系统提示词
+
+# 任务持久化文件：定时任务落到本地 JSON（增删/触发即写回），重启自动恢复；
+# 停机期间过期的单次任务会在启动时立即补触发一次。
+taskFile: tasks.json
+
+# 管理后台（vortexv3 HTTP 服务）：默认开启，浏览器打开 http://<设备IP>:8080
+# 可查看运行状态、管理任务与长期记忆。
+# 账号：内置默认账号 admin / admin，首次登录会强制重新设置用户名和密码，
+# 之后一切登录均以设置的账号为准（bcrypt 哈希落盘，重启不变）。
+admin:
+  enabled: true               # 写 false 关闭后台
+  port: 8080
+  accountFile: admin-account.json   # 管理员账号文件；删除该文件即恢复默认账号 admin/admin
+
+# 长期记忆：机器人记住的用户事实（偏好/习惯等），同样落盘重启不丢。
+memory:
+  file: memories.json
