@@ -22,6 +22,7 @@ type Detector struct {
 	vad     *sherpa.VoiceActivityDetector
 	pending []float32 // 不足一个 window 的残留样本
 	speech  bool      // 本句是否已出现过语音（防止一开口前的噪声/静音误断）
+	saw     bool      // 自上次 Reset 起是否出现过语音（跨整段 sticky，供"始终没开口"判定）
 }
 
 // New 创建检测器。modelPath 为 silero_vad.onnx；threshold 为语音概率阈值
@@ -56,6 +57,7 @@ func (d *Detector) EndOfSpeech(chunk []int16) bool {
 		d.pending = d.pending[windowSize:]
 		if d.vad.IsSpeech() {
 			d.speech = true
+			d.saw = true
 		}
 		if d.speech && !d.vad.IsEmpty() {
 			d.vad.Pop() // 消费完整语音段，为下一句复位
@@ -66,6 +68,9 @@ func (d *Detector) EndOfSpeech(chunk []int16) bool {
 	return false
 }
 
+// HasSpeech 报告自上次 Reset 起是否检测到过语音（sticky，跨已完成语音段不清零）。
+func (d *Detector) HasSpeech() bool { return d.saw }
+
 // Reset 丢弃进行中的状态（上一句被打断、未等到段尾时调用）。
 func (d *Detector) Reset() {
 	d.vad.Flush() // 强制把"进行中"的语音出段
@@ -73,6 +78,7 @@ func (d *Detector) Reset() {
 		d.vad.Pop()
 	}
 	d.speech = false
+	d.saw = false
 	d.pending = d.pending[:0]
 }
 

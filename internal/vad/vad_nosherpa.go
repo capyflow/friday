@@ -16,6 +16,9 @@ func New(string, float32, float32, float32) (*Detector, error) {
 
 func (*Detector) EndOfSpeech([]int16) bool { return false }
 
+// HasSpeech 占位实现：恒为 false（VAD 未启用，无语音检测能力）。
+func (*Detector) HasSpeech() bool { return false }
+
 func (*Detector) Reset() {}
 
 func (*Detector) Close() error { return nil }

@@ -5,7 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
+	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 	"github.com/capyflow/vortexagent/agent/sessionstore"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
@@ -49,35 +50,65 @@ func Build(cfg *config.Config, registry *vxagent.Registry, onDelta func(llm.Delt
 	return ag, nil
 }
 
-// buildHooks 配置生命周期钩子：记录 LLM 调用与工具调用，拦截失败。
+// buildHooks 配置生命周期钩子：按请求 ID 记录完整调用链——LLM 每轮调用（轮次/
+// token/耗时）、模型决定调用的工具、工具执行结果、最终回答与错误。
+// 请求 ID 从 ctx 读取（入口处由 logx.WithID 注入，见 logx 包）。
 func buildHooks() *vxagent.Hooks {
 	return &vxagent.Hooks{
-		OnLLMCall: func(_ context.Context, info vxagent.LLMCallInfo) {
-			log.Printf("[llm] round=%d model=%s tokens=%d+%d err=%v",
-				info.Round, info.Model, info.Usage.InputTokens, info.Usage.OutputTokens, info.Err)
+		OnLLMCall: func(ctx context.Context, info vxagent.LLMCallInfo) {
+			logx.Printf(ctx, "[llm] round=%d model=%s tokens=%d+%d 耗时=%s err=%v",
+				info.Round, info.Model, info.Usage.InputTokens, info.Usage.OutputTokens,
+				info.Duration, info.Err)
 		},
-		OnBeforeToolCall: func(_ context.Context, name string, args map[string]any) error {
-			log.Printf("[tool] -> %s %v", name, args)
+		OnMessage: func(ctx context.Context, msg llm.Message) {
+			// 工具调用轮次：记录模型决定调用哪些工具及参数；
+			// 纯文本的最终回答由 OnFinish 记录，这里不重复。
+			for _, tc := range msg.ToolCalls {
+				logx.Printf(ctx, "[llm] 请求工具: %s %v", tc.Name, tc.Arguments)
+			}
+			if len(msg.ToolCalls) > 0 {
+				if text := messageText(msg); strings.TrimSpace(text) != "" {
+					logx.Printf(ctx, "[llm] 附带文本: %s", logx.Truncate(text, 120))
+				}
+			}
+		},
+		OnBeforeToolCall: func(ctx context.Context, name string, args map[string]any) error {
+			logx.Printf(ctx, "[tool] -> %s %v", name, args)
 			return nil
 		},
-		OnAfterToolCall: func(_ context.Context, name string, _ map[string]any, result string, err error) {
+		OnAfterToolCall: func(ctx context.Context, name string, _ map[string]any, result string, err error) {
 			if err != nil {
-				log.Printf("[tool] <- %s 失败: %v", name, err)
+				logx.Printf(ctx, "[tool] <- %s 失败: %v", name, err)
 				return
 			}
-			log.Printf("[tool] <- %s: %s", name, truncate(result, 120))
+			logx.Printf(ctx, "[tool] <- %s: %s", name, logx.Truncate(result, 120))
 		},
-		OnError: func(_ context.Context, err error) {
-			log.Printf("[agent] 错误: %v", err)
+		OnFinish: func(ctx context.Context, answer string) {
+			logx.Printf(ctx, "[agent] 回答: %s", logx.Truncate(answer, 200))
+		},
+		OnError: func(ctx context.Context, err error) {
+			logx.Printf(ctx, "[agent] 错误: %v", err)
 		},
 	}
+}
+
+// messageText 拼接消息中的全部文本内容。
+func messageText(m llm.Message) string {
+	var b strings.Builder
+	for _, c := range m.Content {
+		if c.Type == llm.ContentText {
+			b.WriteString(c.Text)
+		}
+	}
+	return b.String()
 }
 
 // RegisterTools 把机器人全部业务工具注册进 Registry。
 // engine 为任务排程器（单次/多次/循环）；mem 为长期记忆仓库；speaker/displayer
 // 为输出实现（开发用 console，后续换 TTS/OLED）；player 为音频播放器
-// （语音模式用 portaudio，文本模式用 console 兜底）。
-func RegisterTools(r *vxagent.Registry, engine *task.Engine, mem *memory.Store, speaker output.Speaker, displayer output.Displayer, player audio.Player) error {
+// （语音模式用 portaudio，文本模式用 console 兜底）；
+// chatCtrl 承载 stop_listening 工具的结束信号（语音连续对话用，文本模式无人读取）。
+func RegisterTools(r *vxagent.Registry, engine *task.Engine, mem *memory.Store, speaker output.Speaker, displayer output.Displayer, player audio.Player, chatCtrl *tools_pkg.ChatController) error {
 	tools := []vxagent.Tool{
 		&tools_pkg.ScheduleTaskTool{Engine: engine},
 		&tools_pkg.ListTasksTool{Engine: engine},
@@ -90,6 +121,7 @@ func RegisterTools(r *vxagent.Registry, engine *task.Engine, mem *memory.Store, 
 		&tools_pkg.DisplayNowTool{Displayer: displayer},
 		&tools_pkg.PlayAudioTool{Player: player},
 		&tools_pkg.PlayEffectTool{Player: player},
+		&tools_pkg.StopChatTool{Ctrl: chatCtrl},
 	}
 	for _, t := range tools {
 		if err := r.Add(t); err != nil {
@@ -120,6 +152,7 @@ func systemPrompt(override string) string {
 6. 用户要求立即播报/显示：调用 speak_now（语音）和 display_now（屏幕）。
 7. 用户想听声音：播放本地 wav 文件调用 play_audio（path 填文件路径）；要提示音调用 play_effect（ding/dingdong/alert）。
 8. 查询当前时间调用 get_time。
+9. 连续对话：你回答后会继续听用户说下一句，用户无需重复唤醒词；当用户明确表示结束（如"不用了""别说了""就这样""再见"）时，调用 stop_listening 工具结束本轮对话，其他情况不要调用。
 
 【长期记忆】
 1. 用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、身体状况等），或明确说"记住…"：调用 remember，content 用一句话概括（如"用户对花粉过敏"）。
@@ -128,6 +161,7 @@ func systemPrompt(override string) string {
 4. 记忆要克制：只记对陪伴有用的事实，不要记录敏感隐私（密码、财务），也不要每次对话都记。
 
 【注意】
+- 语音交互为主：回复保持简短口语化，一般一两句话（50 字以内），方便语音播报，用户明确要求详细时再展开。
 - 任务到点后的播报由系统自动完成，你无需额外操作。
 - 安排成功后用一句话简洁告知用户，并顺带一句关心。`
 }
@@ -135,11 +169,4 @@ func systemPrompt(override string) string {
 // NewSession 创建一个新的对话会话。
 func NewSession() *sessionstore.Session {
 	return sessionstore.NewSession("robot")
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

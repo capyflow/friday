@@ -5,6 +5,7 @@ package asr
 import (
 	"context"
 	"fmt"
+	"log"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
@@ -17,6 +18,7 @@ type SherpaRecognizer struct {
 // NewSherpaRecognizer 创建离线语音识别器。
 // modelDir 包含 ASR 模型文件（paraformer/zipformer 的 encoder/decoder/tokens 等）。
 func NewSherpaRecognizer(modelDir string) (*SherpaRecognizer, error) {
+	log.Printf("[asr] 加载模型中: %s", modelDir)
 	config := sherpa.OfflineRecognizerConfig{}
 	config.FeatConfig.SampleRate = 16000
 	config.FeatConfig.FeatureDim = 80
@@ -33,6 +35,7 @@ func NewSherpaRecognizer(modelDir string) (*SherpaRecognizer, error) {
 	if recognizer == nil {
 		return nil, fmt.Errorf("创建 OfflineRecognizer 失败，请检查模型目录 %q", modelDir)
 	}
+	log.Printf("[asr] 模型加载完成")
 
 	return &SherpaRecognizer{recognizer: recognizer}, nil
 }

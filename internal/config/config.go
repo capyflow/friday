@@ -70,6 +70,10 @@ type AudioConfig struct {
 	OutputDevice string `yaml:"outputDevice"` // 留空自动选择
 	SampleRate   int    `yaml:"sampleRate"`   // 默认 16000
 	Channels     int    `yaml:"channels"`     // 默认 1
+	// SilenceRMS 静音门限：整段录音 RMS 低于该值视为没人说话，跳过 ASR
+	// （防止离线识别对环境噪声的幻觉）。0 视为默认 150；调小（如 1）关闭。
+	// 运行日志会打印实测 RMS，便于按麦克风灵敏度调整。
+	SilenceRMS float64 `yaml:"silenceRMS"`
 }
 
 // ASRConfig 描述语音识别。

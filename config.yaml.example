@@ -13,6 +13,7 @@ audio:
   outputDevice: ""             # 喇叭设备，留空自动选择
   sampleRate: 16000
   channels: 1
+  # silenceRMS: 150            # 静音门限：录音 RMS 低于此值视为没人说话（防 ASR 幻觉）；0 用内置默认 150
 
 asr:
   engine: none                 # none=文本模式(开发)；sherpa-onnx=本地离线识别

@@ -5,6 +5,7 @@ package tts
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,6 +34,7 @@ type SherpaSynthesizer struct {
 // voice 为说话人 ID 字符串（留空或非法时使用默认说话人 0）。
 // speed 为语速倍率（1.0 正常，越大越快；<=0 视为 1.0）。
 func NewSherpaSynthesizer(modelDir, voice string, speed float64) (*SherpaSynthesizer, error) {
+	log.Printf("[tts] 加载模型中: %s", modelDir)
 	config := sherpa.OfflineTtsConfig{}
 	config.RuleFsts = ruleFsts(modelDir)
 	config.Model.NumThreads = 2
@@ -89,6 +91,7 @@ func NewSherpaSynthesizer(modelDir, voice string, speed float64) (*SherpaSynthes
 	if tts == nil {
 		return nil, fmt.Errorf("创建 OfflineTts 失败，请检查模型目录 %q", modelDir)
 	}
+	log.Printf("[tts] 模型加载完成")
 
 	voiceID := parseVoiceID(voice)
 	if speed <= 0 {

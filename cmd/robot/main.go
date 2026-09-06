@@ -31,9 +31,11 @@ import (
 	"github.com/capyflow/friday/internal/admin"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/voice"
 )
 
@@ -69,12 +71,13 @@ func main() {
 
 	mem := memory.NewStore(cfg.Memory.File)
 	eng := task.NewEngineFile(func(t task.Task) {
-		log.Printf("[任务] 到点：%s", t.Text)
-		if err := speaker.Speak(ctx, t.Text); err != nil {
-			log.Printf("播报失败: %v", err)
+		// 每次任务触发视为独立请求：分配请求 ID，播报/显示日志串在同一条链路上。
+		rctx := logx.WithID(ctx, logx.NextID())
+		logx.Printf(rctx, "[任务] 到点：%s", t.Text)
+		if err := speaker.Speak(rctx, t.Text); err != nil {
+			logx.Printf(rctx, "播报失败: %v", err)
 		}
-		if err := displayer.Display(ctx, t.Text); err != nil {
-			log.Printf("显示失败: %v", err)
+		if err := displayer.Display(rctx, t.Text); err != nil {
 		}
 	}, cfg.TaskFile)
 	defer eng.Close()
@@ -95,8 +98,9 @@ func main() {
 			cfg.Admin.Port, cfg.Admin.AccountFile)
 	}
 
+	chatCtrl := &tools.ChatController{}
 	registry := vxagent.NewRegistry()
-	if err := robotagent.RegisterTools(registry, eng, mem, speaker, displayer, player); err != nil {
+	if err := robotagent.RegisterTools(registry, eng, mem, speaker, displayer, player, chatCtrl); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
 
@@ -110,11 +114,15 @@ func main() {
 	}
 
 	session := robotagent.NewSession()
-	handle := func(ctx context.Context, line string) {
+	// handle 处理一行用户输入：分配请求 ID（链路日志前缀），内置命令直接处理，
+	// 其余交给 agent；source 标注输入来源（语音/文本），TTS 播报日志继承同一 ID。
+	handle := func(ctx context.Context, source, line string) {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			return
 		}
+		ctx = logx.WithID(ctx, logx.NextID())
+		logx.Printf(ctx, "%s: %s", source, line)
 		switch {
 		case line == "/quit" || line == "/exit":
 			fmt.Println("再见 👋")
@@ -142,7 +150,10 @@ func main() {
 		streamed.Reset()
 		answer, err := ag.Ask(ctx, session, line)
 		if err != nil {
-			log.Printf("agent 出错: %v", err)
+			if ctx.Err() != nil {
+				return // 被 barge-in 打断或程序退出，由语音循环记日志
+			}
+			logx.Printf(ctx, "agent 出错: %v", err)
 			return
 		}
 		if streamed.Len() == 0 && answer != "" {
@@ -155,8 +166,8 @@ func main() {
 				spoken = streamed.String()
 			}
 			if s := stripMarkdown(spoken); strings.TrimSpace(s) != "" {
-				if err := speaker.Speak(ctx, s); err != nil {
-					log.Printf("语音播报失败: %v", err)
+				if err := speaker.Speak(ctx, s); err != nil && ctx.Err() == nil {
+					logx.Printf(ctx, "语音播报失败: %v", err)
 				}
 			}
 		}
@@ -169,10 +180,28 @@ func main() {
 			kw = cfg.Wake.Keywords
 		}
 		fmt.Println("🎤 语音模式已启用：说出唤醒词开始对话（" + strings.Join(kw, "/") + "）")
+		vadState := "未启用（固定时长录音）"
+		if vc.VAD != nil {
+			vadState = "已启用（说完自动断句）"
+		}
+		logx.Printf(ctx, "[语音] 组件就绪：唤醒词=%v，VAD=%s", kw, vadState)
 		loop := voice.VoiceLoop(vc, 8*time.Second)
+		loop.BargeIn = true // 回复期间可再次叫唤醒词打断
+		loop.SilenceRMS = cfg.Audio.SilenceRMS
+		// 连续对话退出信号：Taken 读即清除，结束后不影响下一次对话
+		loop.StopSignal = chatCtrl.Taken
+		loop.WakeChime = func(c context.Context) error {
+			samples, rate, err := audio.Effect("ding")
+			if err != nil {
+				return err
+			}
+			return vc.Player.Play(c, samples, rate)
+		}
+		loop.Misheard = func(c context.Context) error {
+			return speaker.Speak(c, "我没听清，再叫我一声")
+		}
 		if err := loop.Run(ctx, func(c context.Context, text string) error {
-			log.Printf("[语音] 识别到: %s", text)
-			handle(c, text)
+			handle(c, "[语音] 识别到", text)
 			return nil
 		}); err != nil && ctx.Err() == nil {
 			log.Fatalf("语音循环退出: %v", err)
@@ -200,7 +229,7 @@ func main() {
 			if !ok {
 				return
 			}
-			handle(ctx, line)
+			handle(ctx, "[文本] 输入", line)
 		}
 	}
 }

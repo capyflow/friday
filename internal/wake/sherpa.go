@@ -5,6 +5,7 @@ package wake
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gordonklaus/portaudio"
@@ -22,6 +23,7 @@ type SherpaDetector struct {
 // NewSherpaDetector 创建唤醒词检测器。
 // modelDir 包含 KWS 模型文件（encoder/decoder/joiner/tokens）与 keywords.txt（唤醒词列表）。
 func NewSherpaDetector(modelDir string, _ []string, deviceName string) (*SherpaDetector, error) {
+	log.Printf("[wake] 加载模型中: %s", modelDir)
 	config := sherpa.KeywordSpotterConfig{}
 	config.FeatConfig.SampleRate = 16000
 	config.FeatConfig.FeatureDim = 80
@@ -39,6 +41,7 @@ func NewSherpaDetector(modelDir string, _ []string, deviceName string) (*SherpaD
 	if spotter == nil {
 		return nil, fmt.Errorf("创建 KeywordSpotter 失败，请检查模型目录 %q 与 keywords.txt", modelDir)
 	}
+	log.Printf("[wake] 模型加载完成")
 
 	return &SherpaDetector{
 		spotter:    spotter,
