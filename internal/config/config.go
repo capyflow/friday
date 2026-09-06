@@ -18,7 +18,34 @@ type Config struct {
 	TTS          TTSConfig      `yaml:"tts"`
 	VAD          VADConfig      `yaml:"vad"`
 	Display      DisplayConfig  `yaml:"display"`
+	Admin        AdminConfig    `yaml:"admin"`
+	Memory       MemoryConfig   `yaml:"memory"`
 	SystemPrompt string         `yaml:"systemPrompt"`
+	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
+	TaskFile string `yaml:"taskFile"`
+}
+
+// AdminConfig 描述管理后台（vortexv3 HTTP 服务）。
+type AdminConfig struct {
+	// Enabled 默认开启；配置里写 enabled: false 显式关闭。
+	Enabled *bool `yaml:"enabled"`
+	// Port 监听端口（默认 8080）。
+	Port int `yaml:"port"`
+	// AccountFile 管理员账号文件（默认 admin-account.json）。
+	// 内置默认账号 admin/admin，首次登录强制重新设置用户名与密码；
+	// 账号以 bcrypt 哈希落盘，重启后以设置的账号为准。
+	AccountFile string `yaml:"accountFile"`
+}
+
+// IsEnabled 返回后台是否启用（未配置时默认开启）。
+func (a AdminConfig) IsEnabled() bool {
+	return a.Enabled == nil || *a.Enabled
+}
+
+// MemoryConfig 描述长期记忆。
+type MemoryConfig struct {
+	// File 记忆持久化 JSON 文件路径（默认 memories.json）。
+	File string `yaml:"file"`
 }
 
 // ProviderConfig 描述 LLM 供应商。
@@ -152,6 +179,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Display.Driver == "" {
 		c.Display.Driver = "console"
+	}
+	if c.TaskFile == "" {
+		c.TaskFile = "tasks.json"
+	}
+	if c.Admin.Port == 0 {
+		c.Admin.Port = 8080
+	}
+	if c.Admin.AccountFile == "" {
+		c.Admin.AccountFile = "admin-account.json"
+	}
+	if c.Memory.File == "" {
+		c.Memory.File = "memories.json"
 	}
 }
 

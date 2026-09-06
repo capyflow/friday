@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小五 · 管理后台</title>
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --ink: #1f2937; --muted: #6b7280;
+    --line: #e5e7eb; --brand: #2563eb; --brand-soft: #eff6ff;
+    --ok: #059669; --warn: #d97706; --danger: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { background: var(--card); border-bottom: 1px solid var(--line);
+           padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; flex: 1; }
+  header .who { color: var(--muted); font-size: 13px; }
+  main { max-width: 980px; margin: 20px auto; padding: 0 16px; display: grid; gap: 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  h2 .count { color: var(--muted); font-weight: normal; font-size: 12px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { background: var(--brand-soft); border-radius: 8px; padding: 10px 14px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 18px; font-weight: 600; margin-top: 2px; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: normal; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; border-radius: 4px; padding: 1px 7px; font-size: 12px; }
+  .once   { background: #ecfdf5; color: var(--ok); }
+  .repeat { background: #fffbeb; color: var(--warn); }
+  .cron   { background: var(--brand-soft); color: var(--brand); }
+  .src-user  { color: var(--muted); }
+  .src-agent { color: var(--brand); }
+  .src-admin { color: var(--ok); }
+  button { border: 1px solid var(--line); background: #fff; border-radius: 6px;
+           padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--ink); }
+  button:hover { border-color: var(--brand); color: var(--brand); }
+  button.danger:hover { border-color: var(--danger); color: var(--danger); }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  input, select { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+                  font-size: 13px; font-family: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--brand-soft); border-color: var(--brand); }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  form input { flex: 1; min-width: 120px; }
+  form input.w1 { flex: 2; }
+  .empty { color: var(--muted); text-align: center; padding: 18px 0; }
+  .msg { border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 13px; display: none; }
+  .msg.ok  { background: #ecfdf5; color: var(--ok); display: block; }
+  .msg.err { background: #fef2f2; color: var(--danger); display: block; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+
+  /* 登录 / 设置账号 */
+  #authView { position: fixed; inset: 0; background: var(--bg);
+              display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .auth-box { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+              padding: 28px 32px; width: 340px; box-shadow: 0 8px 30px rgba(0,0,0,.08); }
+  .auth-box h1 { font-size: 20px; margin: 0 0 4px; }
+  .auth-box h2 { margin: 10px 0 4px; }
+  .auth-box .hint { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .auth-box form { display: block; }
+  .auth-box input { width: 100%; margin-bottom: 10px; padding: 9px 10px; }
+  .auth-box button { width: 100%; padding: 9px; font-size: 14px; margin-top: 4px; }
+  .auth-box button.ghost { background: none; border: none; color: var(--muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<!-- 登录 / 首次设置账号 -->
+<div id="authView">
+  <div class="auth-box">
+    <h1>🤖 小五 · 管理后台</h1>
+    <form id="loginForm">
+      <h2>登录</h2>
+      <div class="hint">默认账号 admin / admin，首次登录需重新设置</div>
+      <input id="loginUser" placeholder="用户名" autocomplete="username" required>
+      <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button class="primary" type="submit">登 录</button>
+    </form>
+    <form id="setupForm" hidden>
+      <h2 id="setupTitle">设置管理员账号</h2>
+      <div class="hint">首次登录必须重新设置用户名和密码，之后将以该账号登录</div>
+      <input id="setupUser" placeholder="新用户名" autocomplete="username" required>
+      <input id="setupPass" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password" required>
+      <input id="setupPass2" type="password" placeholder="确认新密码" autocomplete="new-password" required>
+      <button class="primary" type="submit">保存并进入</button>
+      <button class="ghost" type="button" id="setupCancel" hidden>取消</button>
+    </form>
+    <div class="msg" id="authMsg"></div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<header id="appHeader" hidden>
+  <h1>🤖 小五 · 管理后台</h1>
+  <span class="sub" id="uptime">—</span>
+  <span class="who" id="who"></span>
+  <button id="btnAccount">修改账号</button>
+  <button id="btnLogout">退出</button>
+</header>
+<main id="appMain" hidden>
+  <section>
+    <h2>运行状态</h2>
+    <div class="cards" id="statusCards"></div>
+  </section>
+
+  <section>
+    <h2>任务 <span class="count" id="taskCount"></span></h2>
+    <div class="msg" id="taskMsg"></div>
+    <form id="taskForm">
+      <select id="tKind">
+        <option value="once">单次</option>
+        <option value="repeat">多次</option>
+        <option value="cron">循环</option>
+      </select>
+      <input class="w1" id="tText" placeholder="任务内容，如：该敷面膜了" required>
+      <input id="tArg" placeholder="10分钟后 / 2026-09-01T20:00:00+08:00" hidden>
+      <input id="tInterval" placeholder="间隔，如 10分钟" hidden>
+      <input id="tTimes" type="number" min="2" placeholder="次数" hidden style="max-width:90px">
+      <input id="tEvery" placeholder="每天早上8点 / 0 8 * * *" hidden>
+      <button class="primary" type="submit">添加任务</button>
+    </form>
+    <table>
+      <thead><tr><th>类型</th><th>内容</th><th>计划</th><th>下次触发</th><th></th></tr></thead>
+      <tbody id="taskRows"></tbody>
+    </table>
+    <div class="empty" id="taskEmpty" hidden>当前没有待触发的任务</div>
+  </section>
+
+  <section>
+    <h2>长期记忆 <span class="count" id="memCount"></span></h2>
+    <div class="msg" id="memMsg"></div>
+    <form id="memForm">
+      <input class="w1" id="mContent" placeholder="新增记忆，如：用户喜欢在晚饭后散步" required>
+      <button class="primary" type="submit">添加</button>
+      <input id="mQuery" placeholder="🔍 搜索记忆…">
+    </form>
+    <table>
+      <thead><tr><th>内容</th><th>来源</th><th>记录于</th><th></th></tr></thead>
+      <tbody id="memRows"></tbody>
+    </table>
+    <div class="empty" id="memEmpty" hidden>还没有任何记忆</div>
+  </section>
+</main>
+
+<script>
+/* ---------- 基础 ---------- */
+async function api(method, url, body) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await res.json();          // vortex 响应包络 {body, head, path}
+  if (res.status === 401) { showLogin(); throw new Error('未登录或会话已过期'); }
+  if (!res.ok) throw new Error((data.body && data.body.error) || ('HTTP ' + res.status));
+  return data.body;
+}
+function fmtTime(s) { return s ? s.replace('T', ' ').substring(5, 16) : '—'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+  el.textContent = text;
+  clearTimeout(el._t); el._t = setTimeout(() => { el.className = 'msg'; }, 4000);
+}
+const $ = id => document.getElementById(id);
+const kindName = { once: '单次', repeat: '多次', cron: '循环' };
+const srcName  = { user: '用户', agent: '主动', admin: '后台' };
+
+/* ---------- 登录 / 账号 ---------- */
+let setupForced = false;   // true=首次登录强制改号（不允许取消）
+
+function showLogin() {
+  $('authView').hidden = false;
+  $('appHeader').hidden = true; $('appMain').hidden = true;
+  $('loginForm').hidden = false; $('setupForm').hidden = true;
+  $('loginPass').value = '';
+}
+function showSetup(forced) {
+  setupForced = forced;
+  $('loginForm').hidden = true; $('setupForm').hidden = false;
+  $('setupTitle').textContent = forced ? '首次登录，请设置新的管理员账号' : '修改管理员账号';
+  $('setupCancel').hidden = forced;
+  $('setupUser').value = forced ? '' : currentUsername;
+  $('setupUser').focus();
+  $('setupPass').value = ''; $('setupPass2').value = '';
+}
+let currentUsername = '';
+function showApp(username) {
+  currentUsername = username;
+  $('who').textContent = '👤 ' + username;
+  $('authView').hidden = true;
+  $('appHeader').hidden = false; $('appMain').hidden = false;
+  loadStatus(); loadTasks(); loadMemories();
+}
+
+$('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/api/login', {
+      username: $('loginUser').value.trim(), password: $('loginPass').value,
+    });
+    if (r.mustChange) { showSetup(true); showMsg('authMsg', '首次登录：请设置新的用户名和密码', true); }
+    else showApp(r.username);
+  } catch (err) { showMsg('authMsg', err.message, false); }
+});
+
+$('setupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const u = $('setupUser').value.trim(), p = $('setupPass').value, p2 = $('setupPass2').value;
+  if (p !== p2) { showMsg('authMsg', '两次输入的密码不一致', false); return; }
+  try {
+    const r = await api('POST', '/api/account', { username: u, password: p });
+    showMsg('authMsg', '', true);
+    if (setupForced) showApp(r.username);
+    else { $('authView').hidden = true; showMsg('taskMsg', r.message, true); $('who').textContent = '👤 ' + r.username; }
+  } catch (err) { showMsg('authMsg', err.message, false); }
+});
+$('setupCancel').addEventListener('click', () => { $('authView').hidden = true; });
+
+$('btnAccount').addEventListener('click', () => showSetup(false));
+$('btnLogout').addEventListener('click', async () => {
+  try { await api('POST', '/api/logout', {}); } catch (e) {}
+  showLogin();
+});
+
+/* ---------- 状态 ---------- */
+async function loadStatus() {
+  try {
+    const st = await api('GET', '/api/status');
+    const up = st.uptimeSeconds;
+    const upStr = up >= 86400 ? Math.floor(up/86400)+'天'+Math.floor(up%86400/3600)+'小时'
+                : up >= 3600 ? Math.floor(up/3600)+'小时'+Math.floor(up%3600/60)+'分'
+                : Math.floor(up/60)+'分'+up%60+'秒';
+    document.getElementById('uptime').textContent = '已运行 ' + upStr;
+    const cards = [
+      ['LLM 模型', st.provider.model],
+      ['待触发任务', st.tasks.total],
+      ['长期记忆', st.memories],
+      ['语音模式', st.voice.enabled ? '开启（' + (st.voice.keywords||[]).join('/') + '）' : '文本模式'],
+      ['服务地址', location.host],
+    ];
+    document.getElementById('statusCards').innerHTML = cards.map(([k, v]) =>
+      '<div class="card"><div class="k">' + k + '</div><div class="v">' + esc(String(v)) + '</div></div>').join('');
+  } catch (e) { showMsg('taskMsg', '状态加载失败：' + e.message, false); }
+}
+
+/* ---------- 任务 ---------- */
+const kindArg = {
+  once:   [{ id: 'tArg', show: true, placeholder: '10分钟后 / 2026-09-01T20:00:00+08:00' }],
+  repeat: [{ id: 'tInterval', show: true, placeholder: '间隔，如 10分钟' },
+           { id: 'tTimes', show: true, placeholder: '次数' }],
+  cron:   [{ id: 'tEvery', show: true, placeholder: '每天早上8点 / 0 8 * * *' }],
+};
+document.getElementById('tKind').addEventListener('change', syncTaskForm);
+function syncTaskForm() {
+  const kind = document.getElementById('tKind').value;
+  for (const [k, defs] of Object.entries(kindArg)) {
+    for (const d of defs) {
+      const el = document.getElementById(d.id);
+      const on = k === kind && d.show;
+      el.hidden = !on;
+      if (d.placeholder) el.placeholder = d.placeholder;
+    }
+  }
+}
+
+document.getElementById('taskForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const kind = document.getElementById('tKind').value;
+  const body = { text: document.getElementById('tText').value.trim() };
+  if (kind === 'once') {
+    const v = document.getElementById('tArg').value.trim();
+    if (v.includes('T')) body.when = v; else body.in = v;
+  } else if (kind === 'repeat') {
+    body.in = document.getElementById('tInterval').value.trim();
+    body.times = Number(document.getElementById('tTimes').value);
+  } else {
+    body.every = document.getElementById('tEvery').value.trim();
+  }
+  try {
+    const r = await api('POST', '/api/tasks', body);
+    showMsg('taskMsg', r.message, true);
+    document.getElementById('taskForm').reset(); syncTaskForm();
+    loadTasks();
+  } catch (err) { showMsg('taskMsg', err.message, false); }
+});
+
+async function deleteTask(id) {
+  if (!confirm('确定取消任务 ' + id + '？')) return;
+  try { const r = await api('DELETE', '/api/tasks/' + id); showMsg('taskMsg', r.message, true); loadTasks(); }
+  catch (e) { showMsg('taskMsg', e.message, false); }
+}
+
+async function loadTasks() {
+  try {
+    const r = await api('GET', '/api/tasks');
+    const tasks = r.tasks || [];
+    document.getElementById('taskCount').textContent = tasks.length ? tasks.length + ' 条' : '';
+    document.getElementById('taskEmpty').hidden = tasks.length > 0;
+    document.getElementById('taskRows').innerHTML = tasks.map(t => {
+      let plan = '—';
+      if (t.kind === 'repeat') plan = '每 ' + esc(t.interval || '') + ' ×' + (t.remaining ?? '?') + '/' + (t.times ?? '?');
+      if (t.kind === 'cron') plan = 'cron: ' + esc(t.cron || '');
+      return '<tr>'
+        + '<td><span class="badge ' + t.kind + '">' + (kindName[t.kind] || t.kind) + '</span></td>'
+        + '<td>' + esc(t.text) + '</td>'
+        + '<td class="meta">' + plan + '</td>'
+        + '<td class="mono">' + fmtTime(t.next) + '</td>'
+        + '<td><button class="danger" onclick="deleteTask(\'' + t.id + '\')">取消</button></td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { showMsg('taskMsg', '任务加载失败：' + e.message, false); }
+}
+
+/* ---------- 长期记忆 ---------- */
+document.getElementById('memForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/memories', { content: document.getElementById('mContent').value.trim() });
+    showMsg('memMsg', '已添加记忆', true);
+    document.getElementById('mContent').value = '';
+    loadMemories();
+  } catch (err) { showMsg('memMsg', err.message, false); }
+});
+document.getElementById('mQuery').addEventListener('input', () => loadMemories());
+
+async function deleteMemory(id) {
+  if (!confirm('确定删除记忆 ' + id + '？')) return;
+  try { await api('DELETE', '/api/memories/' + id); showMsg('memMsg', '已删除', true); loadMemories(); }
+  catch (e) { showMsg('memMsg', e.message, false); }
+}
+
+async function loadMemories() {
+  try {
+    const q = document.getElementById('mQuery').value.trim();
+    const r = await api('GET', '/api/memories' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const mems = r.memories || [];
+    document.getElementById('memCount').textContent = mems.length ? mems.length + ' 条' : '';
+    document.getElementById('memEmpty').hidden = mems.length > 0;
+    document.getElementById('memRows').innerHTML = mems.map(m =>
+      '<tr>'
+      + '<td>' + esc(m.content) + '</td>'
+      + '<td><span class="src-' + esc(m.source || 'user') + '">' + (srcName[m.source] || m.source || '用户') + '</span></td>'
+      + '<td class="meta">' + fmtTime(m.createdAt) + '</td>'
+      + '<td><button class="danger" onclick="deleteMemory(\'' + m.id + '\')">删除</button></td>'
+      + '</tr>').join('');
+  } catch (e) { showMsg('memMsg', '记忆加载失败：' + e.message, false); }
+}
+
+/* ---------- 启动 ---------- */
+syncTaskForm();
+(async () => {
+  try {
+    const s = await api('GET', '/api/session');
+    if (s.authenticated) {
+      if (s.mustChange) showSetup(true); else showApp(s.username);
+    } else showLogin();
+  } catch (e) { showLogin(); }
+})();
+</script>
+</body>
+</html>
