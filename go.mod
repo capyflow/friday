@@ -7,6 +7,9 @@ require (
 	github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f
 	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	github.com/k2-fsa/sherpa-onnx-go v1.13.7
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
+	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/crypto v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -26,6 +29,7 @@ require (
 	github.com/go-playground/validator/v10 v10.28.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect

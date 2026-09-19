@@ -122,7 +122,9 @@ func (s *Store) Recent(n int) []Memory {
 }
 
 // Delete 按 ID 删除一条记忆，返回是否删除了。
+// ID 容忍 "#m..." 形式（recall 展示时带 # 前缀，模型会原样传回）。
 func (s *Store) Delete(id string) bool {
+	id = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), "#"))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, m := range s.memories {

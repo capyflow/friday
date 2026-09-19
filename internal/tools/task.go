@@ -26,18 +26,21 @@ func (t *ScheduleTaskTool) Description() string {
 	return "安排定时任务，三种类型三选一：" +
 		"1) 单次——用户说“10分钟后提醒我敷面膜”填 in；说“明天早上8点叫我起床”先 get_time 再填 when；" +
 		"2) 有限多次——用户说“每10分钟提醒我一次，共3次”填 in 加 times；" +
-		"3) 无限循环——用户说“每天早上8点提醒我喝水”“每周一三五9点播报天气”填 every。"
+		"3) 无限循环——用户说“每天早上8点提醒我喝水”“每周一三五9点播报天气”填 every。" +
+		"agent=true 时为智能任务：到点把 text 作为指令交给 agent 自主决策与行动" +
+		"（如“每天早上8点看看我的备忘录，把今天要做的事告诉我”），适合需要查询/判断/动手的任务。"
 }
 
 func (t *ScheduleTaskTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"text":  map[string]any{"type": "string", "description": "任务内容，如：该敷面膜了"},
+			"text":  map[string]any{"type": "string", "description": "任务内容或智能任务的指令，如：该敷面膜了"},
 			"in":    map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
 			"when":  map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
 			"every": map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
 			"times": map[string]any{"type": "integer", "description": "重复次数（≥2），必须配合 in 使用，如 in=10分钟 times=3：每10分钟一次共3次；缺省为单次"},
+			"agent": map[string]any{"type": "boolean", "description": "true=智能任务（agent 自主决策），text 为完整指令；默认 false（到点播报 text 原文）"},
 		},
 		"required": []string{"text"},
 	}
@@ -48,6 +51,10 @@ func (t *ScheduleTaskTool) Call(_ context.Context, args map[string]any) (string,
 	if text == "" {
 		return "", fmt.Errorf("缺少参数 text")
 	}
+	kind := task.Kind("") // 跟随各分支构造
+	if v, ok := args["agent"].(bool); ok && v {
+		kind = task.KindAgent
+	}
 
 	// 循环任务：every 优先。
 	if ev, _ := args["every"].(string); ev != "" {
@@ -55,12 +62,16 @@ func (t *ScheduleTaskTool) Call(_ context.Context, args map[string]any) (string,
 		if err != nil {
 			return "", err
 		}
-		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: task.KindCron, Cron: cronSpec})
+		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: orKind(kind, task.KindCron), Cron: cronSpec})
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("已安排循环任务 #%s：%q，cron=%s，下次触发 %s",
-			tsk.ID, text, cronSpec, tsk.Next.Format("2006-01-02 15:04:05")), nil
+		label := "循环任务"
+		if kind == task.KindAgent {
+			label = "智能任务"
+		}
+		return fmt.Sprintf("已安排%s #%s：%q，cron=%s，下次触发 %s",
+			label, tsk.ID, text, cronSpec, tsk.Next.Format("2006-01-02 15:04:05")), nil
 	}
 
 	var d time.Duration
@@ -87,14 +98,14 @@ func (t *ScheduleTaskTool) Call(_ context.Context, args map[string]any) (string,
 
 	switch {
 	case d > 0 && times >= 2:
-		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: task.KindRepeat, Interval: d, Times: times})
+		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: orKind(kind, task.KindRepeat), Interval: d, Times: times})
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("已安排多次任务 #%s：%q，每 %s 一次共 %d 次，首次 %s",
 			tsk.ID, text, task.FormatDuration(d), times, tsk.Next.Format("2006-01-02 15:04:05")), nil
 	case d > 0:
-		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: task.KindOnce, When: time.Now().Add(d)})
+		tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: orKind(kind, task.KindOnce), When: time.Now().Add(d)})
 		if err != nil {
 			return "", err
 		}
@@ -110,12 +121,20 @@ func (t *ScheduleTaskTool) Call(_ context.Context, args map[string]any) (string,
 	if err != nil {
 		return "", fmt.Errorf("无法解析时间 %q：%w", ws, err)
 	}
-	tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: task.KindOnce, When: tm})
+	tsk, err := t.Engine.Schedule(task.Task{Text: text, Kind: orKind(kind, task.KindOnce), When: tm})
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("已安排单次任务 #%s：%q，将于 %s 触发",
 		tsk.ID, text, tm.Format("2006-01-02 15:04:05")), nil
+}
+
+// orKind 返回智能任务类型（agent）或默认类型：agent 任务沿用各分支的时间语义。
+func orKind(kind, def task.Kind) task.Kind {
+	if kind != "" {
+		return kind
+	}
+	return def
 }
 
 // ListTasksTool 列出所有待触发任务（单次/多次/循环）。

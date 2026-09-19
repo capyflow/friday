@@ -1,28 +1,38 @@
 // Package config 负责加载机器人的 YAML 配置：LLM 供应商、语音链路（ASR/唤醒词/TTS）、
-// 显示输出等。核心 agent 只依赖 Provider 与 SystemPrompt 字段，其余为语音/显示层配置。
+// 显示输出等。核心 agent 只依赖 Provider 与 SystemPrompt 字段。
+// 语音链路代码已归档至 archive/voice-mode/（见其 README），但 ASR/Wake/TTS/VAD/Audio
+// 配置字段仍保留在此，避免恢复语音功能时改动配置结构。
 package config
 
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config 是机器人整体配置。
 type Config struct {
-	Provider     ProviderConfig `yaml:"provider"`
-	Audio        AudioConfig    `yaml:"audio"`
-	ASR          ASRConfig      `yaml:"asr"`
-	Wake         WakeConfig     `yaml:"wake"`
-	TTS          TTSConfig      `yaml:"tts"`
-	VAD          VADConfig      `yaml:"vad"`
-	Display      DisplayConfig  `yaml:"display"`
-	Admin        AdminConfig    `yaml:"admin"`
-	Memory       MemoryConfig   `yaml:"memory"`
-	SystemPrompt string         `yaml:"systemPrompt"`
+	Provider     ProviderConfig  `yaml:"provider"`
+	Audio        AudioConfig     `yaml:"audio"`
+	ASR          ASRConfig       `yaml:"asr"`
+	Wake         WakeConfig      `yaml:"wake"`
+	TTS          TTSConfig       `yaml:"tts"`
+	VAD          VADConfig       `yaml:"vad"`
+	Display      DisplayConfig   `yaml:"display"`
+	Chan         ChanConfig      `yaml:"chan"`
+	File         FileConfig      `yaml:"file"`
+	Admin        AdminConfig     `yaml:"admin"`
+	Memory       MemoryConfig    `yaml:"memory"`
+	Tools        ToolsConfig     `yaml:"tools"`
+	Heartbeat    HeartbeatConfig `yaml:"heartbeat"`
+	Mcp          McpConfig       `yaml:"mcp"`
+	SystemPrompt string          `yaml:"systemPrompt"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
+	// SessionFile 对话会话持久化 JSON 文件路径（默认 session.json，重启不失忆）。
+	SessionFile string `yaml:"sessionFile"`
 }
 
 // AdminConfig 描述管理后台（vortexv3 HTTP 服务）。
@@ -35,6 +45,39 @@ type AdminConfig struct {
 	// 内置默认账号 admin/admin，首次登录强制重新设置用户名与密码；
 	// 账号以 bcrypt 哈希落盘，重启后以设置的账号为准。
 	AccountFile string `yaml:"accountFile"`
+	// Username/Password 启动时预置的管理员账号（可选，两者须同时提供）。
+	// 提供后每次启动都会以它覆盖现有账号并取消"首次登录强制改密"；
+	// 环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD 优先于这两个字段。
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// 管理员凭据的环境变量名（优先于配置文件中的 username/password）。
+const (
+	AdminUsernameEnv = "FRIDAY_ADMIN_USERNAME"
+	AdminPasswordEnv = "FRIDAY_ADMIN_PASSWORD"
+)
+
+// ResolveAdminCredentials 解析启动预置的管理员凭据：环境变量优先，其次配置文件。
+// 两者都未提供返回空串（走默认 admin/admin + 首次改密流程）；
+// 只提供其一返回错误（防止误配一半导致账号处于意外状态）。
+func (c *Config) ResolveAdminCredentials() (username, password string, err error) {
+	username = strings.TrimSpace(os.Getenv(AdminUsernameEnv))
+	password = os.Getenv(AdminPasswordEnv)
+	if username == "" {
+		username = strings.TrimSpace(c.Admin.Username)
+	}
+	if password == "" {
+		password = c.Admin.Password
+	}
+	if username == "" && password == "" {
+		return "", "", nil
+	}
+	if username == "" || password == "" {
+		return "", "", fmt.Errorf("config: 管理员账号密码须同时提供（%s/%s 或 admin.username/admin.password，当前只配了一项）",
+			AdminUsernameEnv, AdminPasswordEnv)
+	}
+	return username, password, nil
 }
 
 // IsEnabled 返回后台是否启用（未配置时默认开启）。
@@ -42,10 +85,115 @@ func (a AdminConfig) IsEnabled() bool {
 	return a.Enabled == nil || *a.Enabled
 }
 
+// ChanConfig 描述外部消息通道（钉钉/飞书…），让助手住进用户的聊天软件。
+type ChanConfig struct {
+	Dingtalk DingtalkConfig `yaml:"dingtalk"`
+	Feishu   FeishuConfig   `yaml:"feishu"`
+}
+
+// DingtalkConfig 是钉钉 Stream 模式通道（WebSocket，免公网 IP）。
+type DingtalkConfig struct {
+	// Enabled 是否启用钉钉通道。
+	Enabled bool `yaml:"enabled"`
+	// ClientID 应用 AppKey（开发者后台创建应用后获取）。
+	ClientID string `yaml:"clientId"`
+	// ClientSecret 应用 AppSecret。
+	ClientSecret string `yaml:"clientSecret"`
+	// AllowUserIDs 发送者白名单（senderId）；为空表示允许所有用户（家用设备默认）。
+	AllowUserIDs []string `yaml:"allowUserIDs"`
+	// PushWebhook 可选：自定义机器人 webhook 地址（群机器人"Webhook 接入"），
+	// 用于心跳等主动消息推送；留空则钉钉侧不接收主动推送。
+	PushWebhook string `yaml:"pushWebhook"`
+}
+
+// FeishuConfig 是飞书长连接通道（larkws WebSocket，免公网 IP）。
+type FeishuConfig struct {
+	// Enabled 是否启用飞书通道。
+	Enabled bool `yaml:"enabled"`
+	// AppID 企业自建应用 App ID（飞书开放平台创建）。
+	AppID string `yaml:"appID"`
+	// AppSecret 企业自建应用 App Secret。
+	AppSecret string `yaml:"appSecret"`
+	// AllowOpenIDs 发送者白名单（open_id）；为空表示允许所有用户（家用设备默认）。
+	AllowOpenIDs []string `yaml:"allowOpenIDs"`
+	// PushChatIDs 可选：主动消息（心跳等）的投递目标 chat_id 列表
+	//（应用需已在对应群/单聊中且有发消息权限）。
+	PushChatIDs []string `yaml:"pushChatIDs"`
+}
+
+// FileConfig 描述文件工具（read_file/list_files）的访问边界。
+type FileConfig struct {
+	// AllowDirs 允许 agent 读取的目录白名单；相对路径基于服务运行目录解析。
+	// 为空时默认仅允许运行目录（"."）。
+	AllowDirs []string `yaml:"allowDirs"`
+}
+
 // MemoryConfig 描述长期记忆。
 type MemoryConfig struct {
 	// File 记忆持久化 JSON 文件路径（默认 memories.json）。
 	File string `yaml:"file"`
+}
+
+// ToolsConfig 描述执行类工具。
+type ToolsConfig struct {
+	Exec ExecConfig `yaml:"exec"`
+}
+
+// ExecConfig 描述 exec 工具的审批与安全边界。
+type ExecConfig struct {
+	// Mode 审批模式：auto（白名单内直接执行，其余拒绝）/ confirm（非白名单命令
+	// 进网页审批队列，批准后执行，超时自动拒绝）/ off（禁用 exec）。默认 confirm。
+	Mode string `yaml:"mode"`
+	// Allowlist 免审批命令白名单，如 ["uname -a", "ls", "date"]。
+	// 匹配规则：整条命令等于白名单项或以其为前缀（词边界），且不含 ; | & ` > < 等链式字符。
+	Allowlist []string `yaml:"allowlist"`
+	// Timeout 默认超时秒数（默认 30，上限 120；单次调用可用 timeout 参数覆盖，仍受上限约束）。
+	Timeout int `yaml:"timeout"`
+}
+
+// TimeoutSeconds 返回规范化后的默认超时秒数（默认 30，上限 120）。
+func (e ExecConfig) TimeoutSeconds() int {
+	if e.Timeout <= 0 {
+		return 30
+	}
+	if e.Timeout > 120 {
+		return 120
+	}
+	return e.Timeout
+}
+
+// HeartbeatConfig 描述心跳式主动任务：agent 定期醒来读检查清单，自主决策
+// 要不要做事/打扰用户（对标 OpenClaw HEARTBEAT.md）。
+type HeartbeatConfig struct {
+	// Enabled 是否启用心跳。
+	Enabled bool `yaml:"enabled"`
+	// Schedule 心跳触发时刻，标准 5 段 cron（分 时 日 月 周），如 "0 8 * * *"（每天 8 点）。
+	Schedule string `yaml:"schedule"`
+	// Interval 触发间隔时长（如 "30m"、"1h"）。与 Schedule 二选一，都填时 Schedule 优先。
+	Interval string `yaml:"interval"`
+	// QuietHours 静默时段 "HH:MM-HH:MM"（如 "23:00-07:00"，支持跨零点）：
+	// 心跳照常执行但只记轨迹不推送。留空关闭静默。
+	QuietHours string `yaml:"quietHours"`
+	// File 检查清单文件路径（默认工作目录 HEARTBEAT.md，可在管理后台编辑）。
+	File string `yaml:"file"`
+}
+
+// McpConfig 描述 MCP（Model Context Protocol）外部工具服务器。
+type McpConfig struct {
+	// Servers 声明的 MCP 服务器列表（stdio transport：本机子进程）。
+	Servers []McpServerConfig `yaml:"servers"`
+}
+
+// McpServerConfig 是一台 MCP 服务器的启动配置（视为可信配置，明文声明在 config.yaml）。
+type McpServerConfig struct {
+	// Name 服务器名（工具名前缀 mcp_<name>_，防冲突）。
+	Name string `yaml:"name"`
+	// Command 启动命令，如 npx / ./mcp-server。
+	Command string `yaml:"command"`
+	// Args 启动参数。
+	Args []string `yaml:"args"`
+	// Env 额外环境变量（在继承进程环境的基础上追加）。
+	Env map[string]string `yaml:"env"`
 }
 
 // ProviderConfig 描述 LLM 供应商。
@@ -141,6 +289,79 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// UpdateProvider 热更新 config.yaml 中的 provider.baseURL 与 provider.model：
+// 以 yaml.Node 方式编辑（保留注释与原有结构），临时文件 + rename 原子写回。
+func UpdateProvider(path, baseURL, model string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	prov := mappingValue(doc.Content[0], "provider")
+	if prov == nil {
+		return fmt.Errorf("配置文件中未找到 provider 段")
+	}
+	setMappingKey(prov, "baseURL", baseURL)
+	setMappingKey(prov, "model", model)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// mappingValue 在映射节点中按 key 取值节点。
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// setMappingKey 更新或新增映射中的字符串键。
+func setMappingKey(mapping *yaml.Node, key, val string) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			if len(mapping.Content[i+1].Content) == 0 { // 标量才直接改值
+				mapping.Content[i+1].Value = val
+				mapping.Content[i+1].Tag = "!!str"
+			}
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: "!!str"})
+}
+
+// marshalNode 以 2 空格缩进序列化。
+func marshalNode(doc *yaml.Node) ([]byte, error) {
+	var b strings.Builder
+	enc := yaml.NewEncoder(&b)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return nil, err
+	}
+	enc.Close()
+	return []byte(b.String()), nil
+}
+
 // ProviderAPIKey 从配置指定的环境变量读取 API 密钥。
 func (c *Config) ProviderAPIKey() string {
 	return os.Getenv(c.Provider.APIKeyEnv)
@@ -184,6 +405,9 @@ func (c *Config) applyDefaults() {
 	if c.Display.Driver == "" {
 		c.Display.Driver = "console"
 	}
+	if len(c.File.AllowDirs) == 0 {
+		c.File.AllowDirs = []string{"."}
+	}
 	if c.TaskFile == "" {
 		c.TaskFile = "tasks.json"
 	}
@@ -195,6 +419,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Memory.File == "" {
 		c.Memory.File = "memories.json"
+	}
+	if c.SessionFile == "" {
+		c.SessionFile = "session.json"
+	}
+	if c.Heartbeat.File == "" {
+		c.Heartbeat.File = "HEARTBEAT.md"
+	}
+	if c.Tools.Exec.Mode == "" {
+		c.Tools.Exec.Mode = "confirm"
 	}
 }
 

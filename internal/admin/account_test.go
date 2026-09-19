@@ -5,19 +5,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
-// TestDefaultAccountMustChange 文件不存在时初始化默认账号 admin/admin，且强制首次改号。
-func TestDefaultAccountMustChange(t *testing.T) {
+// TestDefaultAccount 文件不存在时初始化默认账号 admin/admin。
+func TestDefaultAccount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
 	s := NewAccountStore(path)
 
 	acc, ok := s.Login(DefaultUsername, DefaultPassword)
 	if !ok {
 		t.Fatal("默认账号 admin/admin 应可登录")
-	}
-	if !acc.MustChange {
-		t.Fatal("默认账号应标记 MustChange=true（首次登录强制改号）")
 	}
 	if acc.Username != DefaultUsername {
 		t.Fatalf("用户名应为 admin，got %q", acc.Username)
@@ -30,7 +29,7 @@ func TestDefaultAccountMustChange(t *testing.T) {
 	}
 }
 
-// TestUpdateAccount 重新设置账号后：默认账号失效、新账号生效、MustChange 清除、落盘。
+// TestUpdateAccount 预置账号（启动配置/环境变量）后：默认账号失效、新账号生效、落盘。
 func TestUpdateAccount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
 	s := NewAccountStore(path)
@@ -42,10 +41,10 @@ func TestUpdateAccount(t *testing.T) {
 		t.Fatal("改号后默认账号应失效")
 	}
 	acc, ok := s.Login("aaron", "secret123")
-	if !ok || acc.MustChange {
-		t.Fatalf("新账号应可登录且 MustChange=false，got %+v ok=%v", acc, ok)
+	if !ok {
+		t.Fatalf("新账号应可登录，got %+v ok=%v", acc, ok)
 	}
-	if cur := s.Current(); cur.Username != "aaron" || cur.MustChange {
+	if cur := s.Current(); cur.Username != "aaron" {
 		t.Fatalf("Current 不符，got %+v", cur)
 	}
 
@@ -57,12 +56,9 @@ func TestUpdateAccount(t *testing.T) {
 	if _, ok := s2.Login(DefaultUsername, DefaultPassword); ok {
 		t.Fatal("重启后默认账号不应复活")
 	}
-	if acc := s2.Current(); acc.MustChange {
-		t.Fatal("重启后不应再要求改号")
-	}
 }
 
-// TestUpdateValidation 改号的输入校验。
+// TestUpdateValidation 预置账号的输入校验。
 func TestUpdateValidation(t *testing.T) {
 	s := NewAccountStore("")
 
@@ -84,6 +80,23 @@ func TestUpdateValidation(t *testing.T) {
 	}
 }
 
+// TestLegacyAccountFileWithMustChange 旧格式账号文件（含 mustChange 字段）可正常加载。
+func TestLegacyAccountFileWithMustChange(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("oldpass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("生成哈希: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "admin-account.json")
+	legacy := `{"username":"legacy","passwordHash":"` + string(hash) + `","mustChange":false,"updatedAt":"2026-09-01T00:00:00+08:00"}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写文件: %v", err)
+	}
+	s := NewAccountStore(path)
+	if _, ok := s.Login("legacy", "oldpass"); !ok {
+		t.Fatal("旧格式账号文件应可正常加载并登录")
+	}
+}
+
 // TestCorruptAccountFile 账号文件损坏时回退默认账号（可重新进入系统）。
 func TestCorruptAccountFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
@@ -91,8 +104,7 @@ func TestCorruptAccountFile(t *testing.T) {
 		t.Fatalf("写文件: %v", err)
 	}
 	s := NewAccountStore(path)
-	acc, ok := s.Login(DefaultUsername, DefaultPassword)
-	if !ok || !acc.MustChange {
-		t.Fatalf("损坏时应回退默认账号 admin/admin，ok=%v acc=%+v", ok, acc)
+	if _, ok := s.Login(DefaultUsername, DefaultPassword); !ok {
+		t.Fatal("损坏时应回退默认账号 admin/admin")
 	}
 }

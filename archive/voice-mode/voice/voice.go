@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/capyflow/friday/internal/asr"
+	"github.com/capyflow/friday/archive/voice-mode/asr"
+	"github.com/capyflow/friday/archive/voice-mode/tts"
+	"github.com/capyflow/friday/archive/voice-mode/vad"
+	"github.com/capyflow/friday/archive/voice-mode/wake"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
-	"github.com/capyflow/friday/internal/tts"
-	"github.com/capyflow/friday/internal/vad"
-	"github.com/capyflow/friday/internal/wake"
 )
 
 // Components 是语音链路全部组件；NewComponents 按配置构建。

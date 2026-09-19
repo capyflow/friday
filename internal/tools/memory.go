@@ -17,14 +17,16 @@ func (t *RememberTool) Name() string { return "remember" }
 
 func (t *RememberTool) Description() string {
 	return "记住关于用户的重要信息（偏好、习惯、家人、纪念日、身体状况等）。用户说“记住我喜欢…”" +
-		"或分享了值得长期记住的事实时使用。content 用一句话概括，不要包含与内容无关的客套话。"
+		"或分享了值得长期记住的事实时使用。content 用一句话概括，不要包含与内容无关的客套话。" +
+		"当新内容修正了某条已有记忆（用户改变了偏好、之前记错了），传 replaceId=旧记忆ID 覆盖它，避免新旧矛盾并存。"
 }
 
 func (t *RememberTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"content": map[string]any{"type": "string", "description": "要记住的内容，一句话，如：用户喜欢在晚饭后散步"},
+			"content":   map[string]any{"type": "string", "description": "要记住的内容，一句话，如：用户喜欢在晚饭后散步"},
+			"replaceId": map[string]any{"type": "string", "description": "可选：被本条内容修正/替代的旧记忆 ID（来自 recall）"},
 		},
 		"required": []string{"content"},
 	}
@@ -35,11 +37,16 @@ func (t *RememberTool) Call(_ context.Context, args map[string]any) (string, err
 	if content == "" {
 		return "", fmt.Errorf("缺少参数 content")
 	}
+	replaceID, _ := args["replaceId"].(string)
 	m, err := t.Memory.Add(content, "user")
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已记住（#%s）：%s", m.ID, m.Content), nil
+	replaced := ""
+	if replaceID != "" && t.Memory.Delete(replaceID) {
+		replaced = fmt.Sprintf("（覆盖旧记忆 #%s）", replaceID)
+	}
+	return fmt.Sprintf("已记住%s（#%s）：%s", replaced, m.ID, m.Content), nil
 }
 
 // RecallTool 让 agent 回忆关于用户的长期记忆。

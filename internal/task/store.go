@@ -66,6 +66,9 @@ type storedTask struct {
 	Remaining int    `json:"remaining,omitempty"` // repeat：剩余次数
 	Cron      string `json:"cron,omitempty"`      // cron：表达式
 	CreatedAt string `json:"createdAt"`           // RFC3339
+	// agent 任务扩展字段。
+	Heartbeat bool   `json:"heartbeat,omitempty"`
+	Channel   string `json:"channel,omitempty"`
 }
 
 func newStoredTask(t Task) storedTask {
@@ -76,6 +79,8 @@ func newStoredTask(t Task) storedTask {
 		Times:     t.Times,
 		Remaining: t.Remaining,
 		Cron:      t.Cron,
+		Heartbeat: t.Heartbeat,
+		Channel:   t.Channel,
 	}
 	if !t.When.IsZero() {
 		st.When = t.When.Format(time.RFC3339Nano)
@@ -98,6 +103,8 @@ func (st storedTask) toTask() (Task, bool) {
 		Times:     st.Times,
 		Remaining: st.Remaining,
 		Cron:      st.Cron,
+		Heartbeat: st.Heartbeat,
+		Channel:   st.Channel,
 	}
 	var err error
 	if st.When != "" {
@@ -126,6 +133,11 @@ func (st storedTask) toTask() (Task, bool) {
 		}
 	case KindCron:
 		if t.Cron == "" {
+			return Task{}, false
+		}
+	case KindAgent:
+		// agent 任务须带定时字段（When/Interval/Cron 之一），具体校验交给 schedule()。
+		if t.When.IsZero() && t.Interval <= 0 && t.Cron == "" {
 			return Task{}, false
 		}
 	default:

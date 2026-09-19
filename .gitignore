@@ -22,3 +22,10 @@ config.yaml
 
 # 运行日志（allspark logx 自动创建）
 logs/
+# 用户上传的图片
+/uploads/
+
+# 会话持久化（多会话历史，运行时数据）
+/session.json
+# 用户本地备忘（agent 演示用，个人内容不入库）
+/notes.txt

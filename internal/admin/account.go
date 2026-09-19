@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// 默认管理员账号：admin/admin，首次登录强制修改（MustChange）。
+// 默认管理员账号：admin/admin（可通过启动配置或环境变量预置替换）。
 const (
 	DefaultUsername = "admin"
 	DefaultPassword = "admin"
@@ -22,10 +22,11 @@ const (
 )
 
 // Account 是管理员账号（密码只存 bcrypt 哈希）。
+// 账号来源：启动时由配置文件或环境变量预置（见 config.ResolveAdminCredentials），
+// 未预置时使用默认账号 admin/admin。旧账号文件中的 mustChange 字段加载时被忽略。
 type Account struct {
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"passwordHash"`
-	MustChange   bool      `json:"mustChange"` // true=首次登录（或尚未完成初始化），必须重新设置账号
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
@@ -36,7 +37,7 @@ type AccountStore struct {
 	acc  Account
 }
 
-// NewAccountStore 创建账号仓库；文件不存在时初始化默认账号 admin/admin（强制首次修改）。
+// NewAccountStore 创建账号仓库；文件不存在时初始化默认账号 admin/admin。
 func NewAccountStore(path string) *AccountStore {
 	s := &AccountStore{path: path}
 	if s.load() {
@@ -49,7 +50,6 @@ func NewAccountStore(path string) *AccountStore {
 	s.acc = Account{
 		Username:     DefaultUsername,
 		PasswordHash: string(hash),
-		MustChange:   true,
 		UpdatedAt:    time.Now(),
 	}
 	s.saveLocked()
@@ -93,7 +93,7 @@ func (s *AccountStore) saveLocked() {
 	}
 }
 
-// Login 校验用户名与密码；成功返回账号信息（含是否需要首次改号）。
+// Login 校验用户名与密码；成功返回账号信息（不含密码哈希）。
 func (s *AccountStore) Login(username, password string) (Account, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -103,10 +103,10 @@ func (s *AccountStore) Login(username, password string) (Account, bool) {
 	if bcrypt.CompareHashAndPassword([]byte(s.acc.PasswordHash), []byte(password)) != nil {
 		return Account{}, false
 	}
-	return Account{Username: s.acc.Username, MustChange: s.acc.MustChange}, true
+	return Account{Username: s.acc.Username}, true
 }
 
-// Update 重新设置账号（用户名 + 密码），清除首次修改标记。
+// Update 用给定的用户名与密码覆盖账号（启动预置凭据走此入口，见 main）。
 // 规则：用户名非空且 ≤32 字符；密码 ≥6 位。
 func (s *AccountStore) Update(username, password string) error {
 	username = strings.TrimSpace(username)
@@ -128,7 +128,6 @@ func (s *AccountStore) Update(username, password string) error {
 	s.acc = Account{
 		Username:     username,
 		PasswordHash: string(hash),
-		MustChange:   false,
 		UpdatedAt:    time.Now(),
 	}
 	s.saveLocked()
@@ -139,7 +138,7 @@ func (s *AccountStore) Update(username, password string) error {
 func (s *AccountStore) Current() Account {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Account{Username: s.acc.Username, MustChange: s.acc.MustChange}
+	return Account{Username: s.acc.Username}
 }
 
 // subtleMismatch 常量时间比较用户名，避免用户名枚举计时侧信道。

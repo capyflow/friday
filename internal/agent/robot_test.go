@@ -11,7 +11,6 @@ import (
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
-	"github.com/capyflow/friday/internal/tools"
 )
 
 // TestBuild verifies 用合法配置能成功组装 Agent（NewProvider 不联网，只校验配置）。
@@ -33,11 +32,19 @@ func TestBuild(t *testing.T) {
 	eng := task.NewEngine(nil)
 	defer eng.Close()
 	mem := memory.NewStore("")
-	if err := RegisterTools(registry, eng, mem, output.NewConsoleSpeaker(os.Stdout), output.NewConsoleDisplayer(os.Stdout), audio.NewConsolePlayer(os.Stdout), &tools.ChatController{}); err != nil {
+	err := RegisterTools(registry, Deps{
+		Engine:    eng,
+		Memory:    mem,
+		Speaker:   output.NewConsoleSpeaker(os.Stdout),
+		Displayer: output.NewConsoleDisplayer(os.Stdout),
+		Player:    audio.NewConsolePlayer(os.Stdout),
+		Config:    cfg,
+	})
+	if err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 
-	ag, err := Build(cfg, registry, nil)
+	ag, err := Build(cfg, registry, NewSessionPool(nil))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

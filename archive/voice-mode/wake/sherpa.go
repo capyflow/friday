@@ -11,7 +11,7 @@ import (
 	"github.com/gordonklaus/portaudio"
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"github.com/capyflow/friday/internal/audio"
+	"github.com/capyflow/friday/archive/voice-mode/audio"
 )
 
 // SherpaDetector 通过 sherpa-onnx KeywordSpotter 实现唤醒词检测。

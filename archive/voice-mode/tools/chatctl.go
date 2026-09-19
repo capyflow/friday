@@ -2,8 +2,15 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 )
+
+// marshalJSON 本包自带的序列化助手（归档副本，不再依赖 internal/tools）。
+func marshalJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
 
 // ChatController 承载"结束连续对话"信号：stop_listening 工具置位，
 // 语音循环每轮回答后取走（读即清除），不影响下一次对话。

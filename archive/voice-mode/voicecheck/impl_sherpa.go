@@ -15,10 +15,11 @@ import (
 
 	"github.com/gordonklaus/portaudio"
 
-	"github.com/capyflow/friday/internal/asr"
+	"github.com/capyflow/friday/archive/voice-mode/asr"
+	devaudio "github.com/capyflow/friday/archive/voice-mode/audio"
+	"github.com/capyflow/friday/archive/voice-mode/tts"
+	"github.com/capyflow/friday/archive/voice-mode/wake"
 	"github.com/capyflow/friday/internal/audio"
-	"github.com/capyflow/friday/internal/tts"
-	"github.com/capyflow/friday/internal/wake"
 )
 
 // runASR 逐个识别 wav 文件，打印识别文本与耗时。
@@ -110,7 +111,7 @@ func runTTS(args []string) error {
 
 // runDevices 列出 portaudio 枚举到的音频设备与默认输入/输出，排查设备选择问题。
 func runDevices() error {
-	if err := audio.EnsurePortaudio(); err != nil {
+	if err := devaudio.EnsurePortaudio(); err != nil {
 		return err
 	}
 	defIn, _ := portaudio.DefaultInputDevice()
@@ -142,7 +143,7 @@ func runRec(args []string) error {
 		return err
 	}
 
-	rec := audio.NewPortaudioRecorder(*device)
+	rec := devaudio.NewPortaudioRecorder(*device)
 	samples, err := rec.Record(context.Background(), time.Duration(*sec*float64(time.Second)), nil)
 	if err != nil && len(samples) == 0 {
 		return err
@@ -214,7 +215,7 @@ func runPlay(args []string) error {
 		return err
 	}
 
-	player := audio.NewPortaudioPlayer(*device)
+	player := devaudio.NewPortaudioPlayer(*device)
 	defer player.Close()
 
 	var samples []int16

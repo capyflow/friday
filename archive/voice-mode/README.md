@@ -1,3 +1,23 @@
+# [已归档] 语音模式（voice-mode）
+
+> **2026-09 起语音链路整体归档**，项目转向"网页聊天 + 终端 REPL"优先。
+> 本目录代码不再随主链路演进，仅作保留；默认构建不会编译其中带
+> `//go:build sherpa` 标签的文件，因此主项目构建无需任何 cgo 依赖。
+>
+> **目录内容**：`asr/`（语音识别）、`tts/`（语音合成）、`wake/`（唤醒词）、
+> `vad/`（断句）、`voice/`（交互主循环）、`audio/`（portaudio 录放）、
+> `voicecheck/`（链路诊断工具）、`tools/`（stop_listening 连续对话控制）、
+> `download-models.sh`（模型下载脚本）。
+>
+> **如何恢复**：`git mv archive/voice-mode/* 回原目录`（asr/tts/wake/vad/voice
+> 回 `internal/`，voicecheck 回 `cmd/`，portaudio.go 回 `internal/audio/`，
+> chatctl.go 回 `internal/tools/`），恢复 import 路径，并在 `cmd/robot/main.go`
+> 中参照归档前的装配代码接回语音循环（见 git 历史中本次归档之前的 main.go），
+> 以 `-tags sherpa` 编译即可。配置项（asr/wake/tts/vad/audio）仍保留在
+> `config.go` 与 `config.yaml.example` 中，未删除。
+
+---
+
 # Friday 语音模式安装指南
 
 语音模式基于 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（离线语音识别/合成）和

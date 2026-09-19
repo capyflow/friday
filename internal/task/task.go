@@ -27,10 +27,12 @@ const (
 	KindOnce   Kind = "once"   // 单次：到 When 触发一次
 	KindRepeat Kind = "repeat" // 有限多次：从首次触发起每 Interval 一次，共 Times 次
 	KindCron   Kind = "cron"   // 无限循环：按 Cron 表达式反复触发
+	KindAgent  Kind = "agent"  // 智能任务：到点把指令交给 agent 自主决策与行动
 )
 
 // Task 是一条待触发的任务，Kind 决定哪些字段生效：
-// once → When；repeat → Interval + Times；cron → Cron。
+// once → When；repeat → Interval + Times；cron → Cron；agent → 按
+// When/Interval/Cron 之一定时，到点执行 Prompt/Text 指令而非播报文案。
 type Task struct {
 	ID        string        `json:"id"`
 	Text      string        `json:"text"`
@@ -43,6 +45,10 @@ type Task struct {
 	CreatedAt time.Time     `json:"createdAt"`
 	// Next 是下次触发时刻，由引擎维护：Schedule 返回值中即可读，List 与回调中均已填充。
 	Next time.Time `json:"next,omitempty"`
+	// Heartbeat 标记该任务为心跳任务（到点把 HEARTBEAT.md 清单喂给 agent）。
+	Heartbeat bool `json:"heartbeat,omitempty"`
+	// Channel 可选推送通道名（agent 任务的输出投递过滤；空 = 全部可用通道）。
+	Channel string `json:"channel,omitempty"`
 }
 
 // Callback 在任务到点时被调用，fn 在独立 goroutine 中执行。
@@ -135,8 +141,9 @@ func (e *Engine) saveWith(snapshot func() []Task) {
 	}
 }
 
-// cronParser 仅接受标准 5 段 cron（分 时 日 月 周），保证解析与调度行为一致。
-var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+// cronParser 接受标准 5 段 cron（分 时 日 月 周）与描述符（@every 1h30m、@daily 等），
+// 描述符支撑心跳 interval 与相对周期循环，保证解析与调度行为一致。
+var cronParser = cron.NewParser(cron.Descriptor | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
 // ParseCron 校验 cron 表达式（标准 5 段：分 时 日 月 周）。
 func ParseCron(spec string) (string, error) {
@@ -171,7 +178,22 @@ func (e *Engine) schedule(t Task, restore bool) (Task, error) {
 	}
 
 	var sched cron.Schedule
-	switch t.Kind {
+	// agent 任务的定时方式由时间字段推断（once/repeat/cron 三种触发器共用），
+	// Kind 保持 agent，到点回调按 Kind 分流处理。
+	trigger := t.Kind
+	if t.Kind == KindAgent {
+		switch {
+		case !t.When.IsZero():
+			trigger = KindOnce
+		case t.Interval > 0:
+			trigger = KindRepeat
+		case t.Cron != "":
+			trigger = KindCron
+		default:
+			return Task{}, ErrNoWhen
+		}
+	}
+	switch trigger {
 	case KindOnce:
 		if t.When.IsZero() {
 			return Task{}, ErrNoWhen
@@ -209,7 +231,7 @@ func (e *Engine) schedule(t Task, restore bool) (Task, error) {
 		return Task{}, ErrDuplicateID
 	}
 	ent := &entry{task: t, sched: sched}
-	switch t.Kind {
+	switch trigger {
 	case KindOnce:
 		ent.task.Next = t.When
 		ent.timer = time.AfterFunc(t.When.Sub(e.now()), func() { e.fireOnce(t.ID) })

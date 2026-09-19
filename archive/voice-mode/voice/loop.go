@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capyflow/friday/internal/asr"
+	"github.com/capyflow/friday/archive/voice-mode/asr"
+	"github.com/capyflow/friday/archive/voice-mode/tts"
+	"github.com/capyflow/friday/archive/voice-mode/vad"
+	"github.com/capyflow/friday/archive/voice-mode/wake"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/logx"
-	"github.com/capyflow/friday/internal/tts"
-	"github.com/capyflow/friday/internal/vad"
-	"github.com/capyflow/friday/internal/wake"
 )
 
 // Loop 是语音交互主循环。

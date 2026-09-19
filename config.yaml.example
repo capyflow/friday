@@ -8,6 +8,8 @@ provider:
   temperature: 0.7
   maxTokens: 1024
 
+# —— 以下 audio/asr/wake/tts/vad 属于已归档的语音链路（archive/voice-mode/），
+#    字段仍保留以便恢复；文本/网页聊天模式下无需关心这些配置。——
 audio:
   inputDevice: ""              # 麦克风设备，留空自动选择
   outputDevice: ""             # 喇叭设备，留空自动选择
@@ -18,7 +20,7 @@ audio:
 asr:
   engine: none                 # none=文本模式(开发)；sherpa-onnx=本地离线识别
   modelDir: models/asr         # sherpa-onnx 识别模型目录。全量 Paraformer 约 230MB；
-                               # 1GB 内存开发板建议 scripts/download-models.sh --small-asr 下载
+                               # 1GB 内存开发板建议 archive/voice-mode/download-models.sh --small-asr 下载
                                # 小模型（约 82MB），此目录改为
                                # models/asr/sherpa-onnx-paraformer-zh-small-2024-03-09
 
@@ -33,7 +35,7 @@ tts:
   voice: ""                    # 说话人，留空用模型默认
 
 vad:
-  modelPath: models/vad/silero_vad.onnx   # 语音断句模型（scripts/download-models.sh 下载）
+  modelPath: models/vad/silero_vad.onnx   # 语音断句模型（archive/voice-mode/download-models.sh 下载）
   threshold: 0.5               # 语音概率阈值，越大越不敏感
   minSilence: 0.6              # 静音多久判定说完（秒）
   minSpeech: 0.25              # 最短语音时长（秒）
@@ -48,14 +50,94 @@ display:
 # 停机期间过期的单次任务会在启动时立即补触发一次。
 taskFile: tasks.json
 
-# 管理后台（vortexv3 HTTP 服务）：默认开启，浏览器打开 http://<设备IP>:8080
-# 可查看运行状态、管理任务与长期记忆。
-# 账号：内置默认账号 admin / admin，首次登录会强制重新设置用户名和密码，
-# 之后一切登录均以设置的账号为准（bcrypt 哈希落盘，重启不变）。
+# HTTP 服务（vortexv3）：默认开启，打开 http://<设备IP>:8080/ 登录后进入统一界面
+#（聊天 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
+# 账号默认 admin/admin（登录页仅登录，不提供改号），建议通过下面字段或环境变量预置。
 admin:
   enabled: true               # 写 false 关闭后台
   port: 8080
-  accountFile: admin-account.json   # 管理员账号文件；删除该文件即恢复默认账号 admin/admin
+  accountFile: admin-account.json   # 管理员账号文件（bcrypt 哈希落盘）；删除即恢复默认 admin/admin
+  # 启动预置账号（可选，须同时提供）：设置后每次启动以它覆盖账号文件里的账号。
+  # 环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD 优先于下面两个字段。
+  # username: aaron
+  # password: your-password-at-least-6-chars
+
+# 钉钉通道：让小五住进你的钉钉（Stream 模式，WebSocket 接入，无需公网 IP）。
+# 接入步骤：https://open-dev.dingtalk.com 创建企业内部应用 → 消息接收模式选"Stream 模式"
+# → 开通"企业内部机器人"能力 → 把 AppKey/AppSecret 填到下面 → 重启服务。
+# allowUserIDs 为发送者白名单（钉钉 senderId），留空 = 允许所有联系人（家用设备默认）。
+# pushWebhook 可选：自定义机器人 webhook（群机器人 Webhook 接入地址），
+# 用于心跳/智能任务输出主动推送；留空则钉钉侧不接收主动推送。
+# chan:
+#   dingtalk:
+#     enabled: true
+#     clientId: "dingxxxxxxxxxxxx"
+#     clientSecret: "xxxxxxxxxxxxxxxx"
+#     allowUserIDs: []
+#     pushWebhook: ""
+
+# 飞书通道：长连接接入（免公网 IP），能力与钉钉对齐。
+# 接入步骤：https://open.feishu.cn 创建企业自建应用 → 开启机器人能力
+# → 订阅 im.message.receive_v1 事件（选择长连接）→ 申请 im:message 读写权限
+# → 把 App ID/App Secret 填到下面 → 重启服务。
+# allowOpenIDs 为发送者白名单（open_id），留空 = 允许所有；
+# pushChatIDs 为心跳/智能任务主动推送的目标会话 chat_id 列表（机器人需已在会话内）。
+# chan:
+#   feishu:
+#     enabled: true
+#     appID: "cli_xxxxxxxx"
+#     appSecret: "xxxxxxxxxxxxxxxx"
+#     allowOpenIDs: []
+#     pushChatIDs: []
+
+# 会话持久化：对话历史按会话独立落盘（web/repl/ding-*/feishu-*/task），
+# 重启自动恢复，不失忆。清除上下文按会话粒度（管理后台"设置 → 会话管理"）。
+sessionFile: session.json
+
+# 执行类工具（write_file / edit_file / exec）的审批机制：
+# exec.mode 三选一：
+#   auto    —— 白名单内命令直接执行，白名单外拒绝
+#   confirm —— 白名单外命令进网页审批队列（管理后台弹卡片），批准后执行；
+#              5 分钟未处理自动拒绝；write_file/edit_file 同样需网页批准
+#   off     —— 禁用 exec（write_file/edit_file 不受影响）
+# allowlist 是免审批命令白名单（匹配命令前缀，且不允许 ; | & ` > < 等链式字符）；
+# rm -rf、mkfs、shutdown 等毁灭性命令有内置黑名单兜底，任何模式都拦截。
+# tools:
+#   exec:
+#     mode: confirm
+#     allowlist:
+#       - uname -a
+#       - uptime
+#       - vcgencmd measure_temp
+#     timeout: 30            # 默认超时秒数（上限 120）
+
+# 心跳式主动任务（对标 OpenClaw HEARTBEAT.md）：agent 定期醒来读清单自主巡检，
+# 输出首行 [推送]/[静默] 决定是否打扰用户；静默时段内只记轨迹不推送。
+# schedule（cron）与 interval（时长）二选一，都填时 schedule 优先。
+# heartbeat:
+#   enabled: false
+#   schedule: "0 8 * * *"    # 每天 8:00（标准 5 段 cron）
+#   interval: ""             # 如 "30m"（内部转为 @every 30m）
+#   quietHours: "23:00-07:00" # 静默时段（支持跨零点），留空关闭
+#   file: HEARTBEAT.md       # 清单文件（管理后台"设置"页可编辑）
+
+# MCP 服务器（Model Context Protocol）：stdio 子进程，随机器人拉起，
+# 其工具以 mcp_<名称>_<工具名> 前缀动态注册进 agent；进程崩溃自动重启。
+# 示例：接入官方 filesystem 服务器后，agent 可用 mcp_filesystem_read_file 等工具。
+# mcp:
+#   servers:
+#     - name: filesystem
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/shared"]
+#       env: {}
+
+# 文件工具（read_file / list_files / write_file / edit_file）的访问白名单：
+# agent 只能读写这些目录内的文件。相对路径基于服务运行目录。
+# 默认仅允许运行目录（"."）。
+# file:
+#   allowDirs:
+#     - .
+#     - /home/user/documents
 
 # 长期记忆：机器人记住的用户事实（偏好/习惯等），同样落盘重启不丢。
 memory:

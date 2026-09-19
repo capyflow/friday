@@ -8,12 +8,12 @@ import (
 	"os"
 	"slices"
 
-	"github.com/capyflow/friday/internal/asr"
-	"github.com/capyflow/friday/internal/audio"
+	"github.com/capyflow/friday/archive/voice-mode/asr"
+	"github.com/capyflow/friday/archive/voice-mode/audio"
+	"github.com/capyflow/friday/archive/voice-mode/tts"
+	"github.com/capyflow/friday/archive/voice-mode/vad"
+	"github.com/capyflow/friday/archive/voice-mode/wake"
 	"github.com/capyflow/friday/internal/config"
-	"github.com/capyflow/friday/internal/tts"
-	"github.com/capyflow/friday/internal/vad"
-	"github.com/capyflow/friday/internal/wake"
 )
 
 // newComponentsImpl 在 sherpa 编译标签启用时构建真实语音组件。
