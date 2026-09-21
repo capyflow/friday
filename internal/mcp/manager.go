@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,18 +35,31 @@ func sanitize(s string) string {
 	return b.String()
 }
 
-// ServerConfig 是一台 MCP 服务器的声明（来自 config mcp.servers[]）。
+// ServerConfig 是一台 MCP 服务器的声明（来自 config mcp.servers[]）：
+// Command 非空走 stdio（本机子进程）；URL 非空走 Streamable HTTP（远程服务器）。
+// 两者必须二选一。
 type ServerConfig struct {
 	Name    string            `yaml:"name"`
 	Command string            `yaml:"command"`
 	Args    []string          `yaml:"args"`
 	Env     map[string]string `yaml:"env"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers"`
+}
+
+// Conn 是一台 MCP 服务器连接的统一抽象（stdio 子进程或远程 HTTP）。
+type Conn interface {
+	Tools() []Tool
+	RefreshTools() error
+	CallTool(ctx context.Context, name string, args map[string]any) (string, error)
+	Close()
 }
 
 // Status 是一台服务器的连接状态（设置页展示）。
 type Status struct {
 	Name      string    `json:"name"`
-	Command   string    `json:"command"`
+	Command   string    `json:"command,omitempty"`
+	URL       string    `json:"url,omitempty"`
 	Running   bool      `json:"running"`
 	Tools     int       `json:"tools"`
 	Restarts  int       `json:"restarts"`
@@ -58,7 +72,7 @@ type Status struct {
 type Manager struct {
 	mu       sync.Mutex
 	cfgs     []ServerConfig
-	clients  map[string]*Client
+	clients  map[string]Conn
 	status   map[string]*Status
 	onChange func() // 工具清单可能变化后的重建回调（重建注册表与 Agent）
 	closed   bool
@@ -67,7 +81,7 @@ type Manager struct {
 // NewManager 创建管理器。onChange 在工具清单可能变化后被调用（可为 nil）。
 func NewManager(onChange func()) *Manager {
 	return &Manager{
-		clients:  make(map[string]*Client),
+		clients:  make(map[string]Conn),
 		status:   make(map[string]*Status),
 		onChange: onChange,
 	}
@@ -84,8 +98,9 @@ func (m *Manager) Apply(ctx context.Context, cfgs []ServerConfig) error {
 	}
 	desired := make(map[string]ServerConfig, len(cfgs))
 	for _, c := range cfgs {
-		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Command) == "" {
-			continue // 未声明完整的服务器跳过
+		if strings.TrimSpace(c.Name) == "" ||
+			(strings.TrimSpace(c.Command) == "" && strings.TrimSpace(c.URL) == "") {
+			continue // 未声明完整（缺名称，或命令与 URL 均空）的服务器跳过
 		}
 		desired[c.Name] = c
 	}
@@ -119,8 +134,10 @@ func (m *Manager) Apply(ctx context.Context, cfgs []ServerConfig) error {
 
 // sameServer 判断两份服务器定义是否等价（决定 Apply 时是否需要重启）。
 func (m *Manager) sameServer(a, b ServerConfig) bool {
-	return a.Command == b.Command && strings.Join(a.Args, "\x00") == strings.Join(b.Args, "\x00") &&
-		fmt.Sprint(a.Env) == fmt.Sprint(b.Env)
+	return a.Command == b.Command && a.URL == b.URL &&
+		strings.Join(a.Args, "\x00") == strings.Join(b.Args, "\x00") &&
+		fmt.Sprint(a.Env) == fmt.Sprint(b.Env) &&
+		fmt.Sprint(a.Headers) == fmt.Sprint(b.Headers)
 }
 
 // cfgByName 取当前配置中某服务器的定义。
@@ -136,25 +153,32 @@ func (m *Manager) cfgByName(name string) ServerConfig {
 // start 拉起一台服务器并完成握手；成功登记连接，失败把错误记入状态。
 func (m *Manager) start(ctx context.Context, cfg ServerConfig) error {
 	name := cfg.Name
-	cli, err := Start(name, cfg.Command, cfg.Args, cfg.Env, func() { m.handleExit(name) })
+	var conn Conn
+	var err error
+	if cfg.URL != "" {
+		conn, err = StartHTTP(name, cfg.URL, cfg.Headers)
+	} else {
+		conn, err = Start(name, cfg.Command, cfg.Args, cfg.Env, func() { m.handleExit(name) })
+	}
 	m.mu.Lock()
 	st, ok := m.status[name]
 	if !ok {
-		st = &Status{Name: name, Command: cfg.Command}
+		st = &Status{Name: name, Command: cfg.Command, URL: cfg.URL}
 		m.status[name] = st
 	}
 	st.Command = cfg.Command
+	st.URL = cfg.URL
 	if err != nil {
 		st.Running = false
 		st.LastError = err.Error()
 		m.mu.Unlock()
 		return err
 	}
-	m.clients[name] = cli
+	m.clients[name] = conn
 	st.Running = true
 	st.StartedAt = time.Now()
 	st.LastError = ""
-	st.Tools = len(cli.Tools())
+	st.Tools = len(conn.Tools())
 	m.mu.Unlock()
 	return nil
 }
@@ -216,12 +240,17 @@ func (m *Manager) handleExit(name string) {
 // RegisterTools 把所有在线服务器的工具注册进注册表（名字加 mcp_<server>_ 前缀）。
 func (m *Manager) RegisterTools(r *vxagent.Registry) error {
 	m.mu.Lock()
-	clients := make([]*Client, 0, len(m.clients))
-	for _, c := range m.clients {
-		clients = append(clients, c)
+	names := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	conns := make([]Conn, 0, len(names))
+	for _, name := range names {
+		conns = append(conns, m.clients[name])
 	}
 	m.mu.Unlock()
-	for _, cli := range clients {
+	for i, cli := range conns {
 		for _, t := range cli.Tools() {
 			schema := map[string]any{"type": "object"}
 			if len(t.Schema) > 0 {
@@ -229,7 +258,7 @@ func (m *Manager) RegisterTools(r *vxagent.Registry) error {
 			}
 			tool := &ServerTool{
 				Manager:   m,
-				Server:    cli.Name,
+				Server:    names[i],
 				Tool:      t,
 				SchemaMap: schema,
 			}
@@ -337,7 +366,7 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	clients := m.clients
-	m.clients = make(map[string]*Client)
+	m.clients = make(map[string]Conn)
 	m.mu.Unlock()
 	for _, c := range clients {
 		c.Close()

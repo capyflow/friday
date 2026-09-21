@@ -172,7 +172,10 @@ func main() {
 	if len(cfg.Mcp.Servers) > 0 {
 		servers := make([]mcp.ServerConfig, 0, len(cfg.Mcp.Servers))
 		for _, s := range cfg.Mcp.Servers {
-			servers = append(servers, mcp.ServerConfig{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
+			servers = append(servers, mcp.ServerConfig{
+				Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env,
+				URL: s.URL, Headers: s.Headers,
+			})
 		}
 		if err := mcpMgr.Apply(ctx, servers); err != nil {
 			log.Printf("[MCP] 部分服务器连接失败（不影响其余功能）: %v", err)

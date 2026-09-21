@@ -259,6 +259,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	if err != nil {
 		return "", err
 	}
+	return parseToolResult(res)
+}
+
+// parseToolResult 解析 tools/call 的 result：拼接文本型 content；
+// isError 时把内容转为错误。stdio 与 HTTP 两种连接共用。
+func parseToolResult(res json.RawMessage) (string, error) {
 	var out struct {
 		Content []struct {
 			Type string `json:"type"`

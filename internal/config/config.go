@@ -196,6 +196,10 @@ type McpServerConfig struct {
 	Args []string `yaml:"args" json:"args"`
 	// Env 额外环境变量（在继承进程环境的基础上追加）。
 	Env map[string]string `yaml:"env" json:"env"`
+	// URL 远程 MCP 服务器地址（Streamable HTTP），与 Command 二选一。
+	URL string `yaml:"url" json:"url"`
+	// Headers 远程请求头（鉴权等，如 Authorization: Bearer xxx）。
+	Headers map[string]string `yaml:"headers" json:"headers"`
 }
 
 // ProviderConfig 描述 LLM 供应商。
@@ -357,30 +361,51 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 				&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
 		}
 		strPair("name", s.Name)
-		strPair("command", s.Command)
-		if len(s.Args) > 0 {
-			argsSeq := &yaml.Node{Kind: yaml.SequenceNode}
-			for _, a := range s.Args {
-				argsSeq.Content = append(argsSeq.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: a, Tag: "!!str"})
+		if s.URL != "" {
+			// 远程服务器：写 url + headers。
+			strPair("url", s.URL)
+			if len(s.Headers) > 0 {
+				hdrMap := &yaml.Node{Kind: yaml.MappingNode}
+				keys := make([]string, 0, len(s.Headers))
+				for k := range s.Headers {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys) // 固定顺序，避免每次保存随机重排
+				for _, k := range keys {
+					hdrMap.Content = append(hdrMap.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+						&yaml.Node{Kind: yaml.ScalarNode, Value: s.Headers[k], Tag: "!!str"})
+				}
+				item.Content = append(item.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "headers"}, hdrMap)
 			}
-			item.Content = append(item.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "args"}, argsSeq)
-		}
-		if len(s.Env) > 0 {
-			envMap := &yaml.Node{Kind: yaml.MappingNode}
-			keys := make([]string, 0, len(s.Env))
-			for k := range s.Env {
-				keys = append(keys, k)
+		} else {
+			// 本地命令服务器：写 command + args + env。
+			strPair("command", s.Command)
+			if len(s.Args) > 0 {
+				argsSeq := &yaml.Node{Kind: yaml.SequenceNode}
+				for _, a := range s.Args {
+					argsSeq.Content = append(argsSeq.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: a, Tag: "!!str"})
+				}
+				item.Content = append(item.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "args"}, argsSeq)
 			}
-			sort.Strings(keys) // 固定顺序，避免每次保存时 env 行随机重排
-			for _, k := range keys {
-				envMap.Content = append(envMap.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: k},
-					&yaml.Node{Kind: yaml.ScalarNode, Value: s.Env[k], Tag: "!!str"})
+			if len(s.Env) > 0 {
+				envMap := &yaml.Node{Kind: yaml.MappingNode}
+				keys := make([]string, 0, len(s.Env))
+				for k := range s.Env {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys) // 固定顺序，避免每次保存时 env 行随机重排
+				for _, k := range keys {
+					envMap.Content = append(envMap.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+						&yaml.Node{Kind: yaml.ScalarNode, Value: s.Env[k], Tag: "!!str"})
+				}
+				item.Content = append(item.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "env"}, envMap)
 			}
-			item.Content = append(item.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "env"}, envMap)
 		}
 		seq.Content = append(seq.Content, item)
 	}

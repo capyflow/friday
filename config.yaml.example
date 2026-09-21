@@ -121,15 +121,19 @@ sessionFile: session.json
 #   quietHours: "23:00-07:00" # 静默时段（支持跨零点），留空关闭
 #   file: HEARTBEAT.md       # 清单文件（管理后台"设置"页可编辑）
 
-# MCP 服务器（Model Context Protocol）：stdio 子进程，随机器人拉起，
-# 其工具以 mcp_<名称>_<工具名> 前缀动态注册进 agent；进程崩溃自动重启。
-# 示例：接入官方 filesystem 服务器后，agent 可用 mcp_filesystem_read_file 等工具。
+# MCP 服务器（Model Context Protocol）：工具以 mcp_<名称>_<工具名> 前缀动态注册进
+# agent。两种接入方式二选一（管理后台"设置 → MCP 服务器"可在线配置，保存即热生效）：
+#   本地命令（stdio）：Friday 拉起本机子进程，崩溃自动重启；
+#   远程 URL（Streamable HTTP）：连接托管 MCP 服务，headers 可带鉴权。
 # mcp:
 #   servers:
-#     - name: filesystem
+#     - name: filesystem                      # 方式一：本地命令
 #       command: npx
 #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/shared"]
 #       env: {}
+#     - name: remote-tools                    # 方式二：远程 URL
+#       url: https://mcp.example.com/mcp
+#       headers: {"Authorization": "Bearer xxx"}
 
 # 文件工具（read_file / list_files / write_file / edit_file）的访问白名单：
 # agent 只能读写这些目录内的文件。相对路径基于服务运行目录。

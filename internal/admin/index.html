@@ -486,7 +486,7 @@
         <div class="panel">
           <h2 style="font-size:14px">MCP 服务器 <span class="count" id="mcpCount"></span></h2>
           <table>
-            <thead><tr><th>名称</th><th>命令</th><th>参数</th><th>环境变量</th><th>状态</th><th>操作</th></tr></thead>
+            <thead><tr><th>名称</th><th>方式</th><th>本地命令 / 远程地址</th><th>参数</th><th>环境变量 / 请求头</th><th>状态</th><th>操作</th></tr></thead>
             <tbody id="mcpRows"></tbody>
           </table>
           <div class="empty" id="mcpEmpty" hidden>未配置 MCP 服务器——点击"添加服务器"开始</div>
@@ -495,9 +495,9 @@
             <button class="btn primary" type="button" onclick="saveMCP()">保存并生效</button>
           </div>
           <div class="msg" id="mcpMsg"></div>
-          <div class="set-note">保存后立即热生效（新增自动拉起、移除自动停止、变更自动重启，无需重启服务），
-            并写回 config.yaml。参数按空格分隔；环境变量 KEY=VALUE 多对用逗号分隔。
-            进程崩溃后数秒内自动重启并恢复工具。</div>
+          <div class="set-note">两种接入方式二选一：<b>本地命令</b>（Friday 拉起本机子进程，崩溃自动重启）
+            或<b>远程 URL</b>（连接托管 MCP 服务，Streamable HTTP，可带鉴权请求头）。
+            保存后立即热生效并写回 config.yaml，无需重启服务。</div>
         </div>
         <div class="panel">
           <h2 style="font-size:14px">当前配置</h2>
@@ -701,40 +701,68 @@ function renderMcpRows(servers) {
   $('mcpEmpty').hidden = servers.length > 0;
   $('mcpRows').innerHTML = servers.map((x, i) => {
     const st = mcpStatusByName[x.name] || {};
+    const isHTTP = x.type ? x.type === 'http' : !!(x.url || '').trim();
     const envStr = Object.entries(x.env || {}).map(([k, v]) => k + '=' + v).join(', ');
+    const hdrStr = Object.entries(x.headers || {}).map(([k, v]) => k + ': ' + v).join(', ');
     const status = !x.name ? '—'
       : st.running ? '<span class="dot ok"></span>在线 · ' + (st.tools ?? 0) + ' 工具'
       : '<span class="dot bad"></span>离线' + (st.lastError ? '<div class="meta">' + esc(st.lastError) + '</div>' : '');
+    const target = isHTTP
+      ? '<input class="mcp-target" value="' + esc(x.url || '') + '" placeholder="远程地址，http(s)://…" style="width:100%; min-width:150px">'
+      : '<input class="mcp-target" value="' + esc(x.command || '') + '" placeholder="本地命令，如 npx / python3" style="width:100%; min-width:150px">';
+    const extra = isHTTP
+      ? '<input class="mcp-extra" value="' + esc(hdrStr) + '" placeholder="KEY: VALUE，逗号分隔（鉴权等）" style="width:150px">'
+      : '<input class="mcp-extra" value="' + esc(envStr) + '" placeholder="KEY=VALUE，逗号分隔" style="width:150px">';
+    const args = isHTTP
+      ? '<input value="" disabled placeholder="远程无需参数" style="width:100%; min-width:110px; opacity:.5">'
+      : '<input class="mcp-args" value="' + esc((x.args || []).join(' ')) + '" placeholder="空格分隔" style="width:100%; min-width:110px">';
     return '<tr>'
-      + '<td><input class="mcp-name" value="' + esc(x.name || '') + '" placeholder="名称" style="width:92px"></td>'
-      + '<td><input class="mcp-cmd" value="' + esc(x.command || '') + '" placeholder="命令，如 npx" style="width:120px"></td>'
-      + '<td><input class="mcp-args" value="' + esc((x.args || []).join(' ')) + '" placeholder="参数，空格分隔" style="width:100%; min-width:130px"></td>'
-      + '<td><input class="mcp-env" value="' + esc(envStr) + '" placeholder="KEY=VALUE，逗号分隔" style="width:150px"></td>'
+      + '<td><input class="mcp-name" value="' + esc(x.name || '') + '" placeholder="名称" style="width:88px"></td>'
+      + '<td><select class="mcp-type" data-i="' + i + '" onchange="switchMcpType(this)" style="border:1px solid rgba(148,163,184,.4); border-radius:8px; padding:4px 6px; background:transparent; color:inherit">'
+      + '<option value="stdio"' + (!isHTTP ? ' selected' : '') + '>本地命令</option>'
+      + '<option value="http"' + (isHTTP ? ' selected' : '') + '>远程 URL</option>'
+      + '</select></td>'
+      + '<td>' + target + '</td>'
+      + '<td>' + args + '</td>'
+      + '<td>' + extra + '</td>'
       + '<td style="font-size:12px; white-space:nowrap">' + status + '</td>'
       + '<td style="white-space:nowrap"><button class="btn" onclick="reconnectMCP(\'' + esc(x.name || '') + '\')">重连</button> '
       + '<button class="btn danger" onclick="removeMcpRow(' + i + ')">删除</button></td>'
       + '</tr>';
   }).join('');
 }
+function switchMcpType(sel) {
+  const i = +sel.dataset.i, rows = collectMcpRows();
+  if (rows[i]) { rows[i].type = sel.value; renderMcpRows(rows); }
+}
 function collectMcpRows() {
   const rows = [];
   $('mcpRows').querySelectorAll('tr').forEach(tr => {
     const val = cls => (tr.querySelector(cls) || {}).value || '';
-    const env = {};
-    val('.mcp-env').split(',').map(x => x.trim()).filter(Boolean).forEach(pair => {
-      const idx = pair.indexOf('=');
-      if (idx > 0) env[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
-    });
-    rows.push({
+    const row = {
+      type: (tr.querySelector('.mcp-type') || {}).value || 'stdio',
       name: val('.mcp-name').trim(),
-      command: val('.mcp-cmd').trim(),
-      args: val('.mcp-args').trim().split(/\s+/).filter(Boolean),
-      env,
-    });
+      command: '', args: [], env: {}, url: '', headers: {},
+    };
+    if (row.type === 'http') {
+      row.url = val('.mcp-target').trim();
+      val('.mcp-extra').split(',').map(x => x.trim()).filter(Boolean).forEach(pair => {
+        const idx = pair.indexOf(':');
+        if (idx > 0) row.headers[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+      });
+    } else {
+      row.command = val('.mcp-target').trim();
+      row.args = val('.mcp-args').trim().split(/\s+/).filter(Boolean);
+      val('.mcp-extra').split(',').map(x => x.trim()).filter(Boolean).forEach(pair => {
+        const idx = pair.indexOf('=');
+        if (idx > 0) row.env[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+      });
+    }
+    rows.push(row);
   });
   return rows;
 }
-function addMcpRow() { const rows = collectMcpRows(); rows.push({ name: '', command: '', args: [], env: {} }); renderMcpRows(rows); }
+function addMcpRow() { const rows = collectMcpRows(); rows.push({ type: 'stdio', name: '', command: '', args: [], env: {}, url: '', headers: {} }); renderMcpRows(rows); }
 function removeMcpRow(i) { const rows = collectMcpRows(); rows.splice(i, 1); renderMcpRows(rows); }
 async function saveMCP() {
   try {

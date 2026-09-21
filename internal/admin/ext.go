@@ -146,15 +146,24 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	// 校验：名称/命令必填，名称去重（工具前缀用，重名会冲突）。
+	// 校验：名称必填；command（本地 stdio）与 url（远程 HTTP）二选一；名称去重。
 	seen := map[string]bool{}
 	for i := range req.Servers {
 		sv := &req.Servers[i]
 		sv.Name = strings.TrimSpace(sv.Name)
 		sv.Command = strings.TrimSpace(sv.Command)
-		if sv.Name == "" || sv.Command == "" {
+		sv.URL = strings.TrimSpace(sv.URL)
+		if sv.Name == "" {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest,
-				map[string]string{"error": fmt.Sprintf("第 %d 个服务器缺少 name 或 command", i+1)})
+				map[string]string{"error": fmt.Sprintf("第 %d 个服务器缺少 name", i+1)})
+		}
+		if (sv.URL == "") == (sv.Command == "") {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": fmt.Sprintf("服务器 %s：command（本地命令）与 url（远程地址）必须二选一", sv.Name)})
+		}
+		if sv.URL != "" && !strings.HasPrefix(sv.URL, "http://") && !strings.HasPrefix(sv.URL, "https://") {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "服务器 " + sv.Name + " 的 url 须以 http:// 或 https:// 开头"})
 		}
 		key := mcp.ToolPrefix(sv.Name)
 		if seen[key] {
@@ -169,7 +178,10 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 	if s.mcp != nil {
 		live := make([]mcp.ServerConfig, 0, len(req.Servers))
 		for _, sv := range req.Servers {
-			live = append(live, mcp.ServerConfig{Name: sv.Name, Command: sv.Command, Args: sv.Args, Env: sv.Env})
+			live = append(live, mcp.ServerConfig{
+				Name: sv.Name, Command: sv.Command, Args: sv.Args, Env: sv.Env,
+				URL: sv.URL, Headers: sv.Headers,
+			})
 		}
 		applyErr = s.mcp.Apply(ctx.Context(), live)
 	}

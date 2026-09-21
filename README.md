@@ -186,7 +186,19 @@ mcp:
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/shared"]
 ```
 
-进程崩溃数秒内自动重启并恢复工具；管理后台"设置 → MCP 服务器"展示连接状态并支持手动重连。
+进程崩溃数秒内自动重启并恢复工具；管理后台"设置 → MCP 服务器"可**在线增删改配置**
+（保存即热生效并写回 config.yaml）、查看状态并手动重连。
+
+**两种接入方式**（二选一）：本地命令（stdio 子进程，如上）；远程 URL（Streamable HTTP，
+适合只有地址的托管服务）：
+
+```yaml
+mcp:
+  servers:
+    - name: remote-tools
+      url: https://mcp.example.com/mcp
+      headers: {"Authorization": "Bearer xxx"}   # 可选鉴权头
+```
 
 ## 测试
 

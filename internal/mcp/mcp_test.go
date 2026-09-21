@@ -188,12 +188,13 @@ func TestManagerLifecycle(t *testing.T) {
 
 	// 2) kill 进程 → 自动重启恢复。
 	mgr.mu.Lock()
-	cli := mgr.clients["helper"]
+	cliConn := mgr.clients["helper"]
 	mgr.mu.Unlock()
-	if cli == nil || cli.cmd.Process == nil {
-		t.Fatal("应存在运行中的客户端进程")
+	stdio, ok := cliConn.(*Client) // kill 测试只针对 stdio 连接
+	if !ok || stdio.cmd.Process == nil {
+		t.Fatal("应存在运行中的 stdio 客户端进程")
 	}
-	_ = cli.cmd.Process.Kill()
+	_ = stdio.cmd.Process.Kill()
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
