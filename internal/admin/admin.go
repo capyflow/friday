@@ -138,6 +138,7 @@ func (s *Server) Start(_ context.Context) {
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
 		root.AddRouter([]string{http.MethodGet}, "/api/sessions", s.wrap(s.handleListSessions))
+		root.AddRouter([]string{http.MethodGet}, "/api/chat/history", s.wrap(s.handleChatHistory))
 	}
 	if s.cfg != nil && s.regFn != nil && s.configPath != "" {
 		root.AddRouter([]string{http.MethodPost}, "/api/provider", s.wrap(s.handleUpdateProvider))

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/capyflow/vortexagent/agent/sessionstore"
+	"github.com/capyflow/vortexagent/llm"
 )
 
 // 会话 ID 前缀：池内会话 ID 固定为 prefix+key，保证 JSON 存储按 key 稳定落盘与恢复。
@@ -128,6 +129,26 @@ func (p *SessionPool) Save(ctx context.Context, s *sessionstore.Session) {
 // sessionKeyOf 从会话 ID 还原池内 key（ID 固定为 prefix+key）。
 func sessionKeyOf(s *sessionstore.Session) string {
 	return strings.TrimPrefix(s.ID, sessionIDPrefix)
+}
+
+// History 返回指定会话的消息列表（只读，不创建会话）：
+// 内存有则取内存版，否则从持久层加载；都没有返回 nil。
+// 供管理后台回显历史对话——打开页面不应产生 LLM 调用，
+// 也不应因为查询历史而把空会话写进池里。
+func (p *SessionPool) History(ctx context.Context, key string) []llm.Message {
+	key = CurrentKey(key)
+	p.mu.Lock()
+	s, ok := p.sess[key]
+	p.mu.Unlock()
+	if ok {
+		return s.Messages()
+	}
+	if p.store != nil {
+		if loaded, err := p.store.Load(ctx, sessionIDPrefix+key); err == nil && loaded != nil {
+			return loaded.Messages()
+		}
+	}
+	return nil
 }
 
 // Reset 清除指定会话：丢弃内存与持久层中的历史，下次对话从新会话开始。

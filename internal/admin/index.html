@@ -605,7 +605,7 @@ function showApp(username) {
   $('authView').hidden = true;
   $('app').hidden = false;
   showView('chat');
-  loadStatus(); loadTasks(); loadMemories(); loadChatSessions();
+  loadStatus(); loadTasks(); loadMemories(); loadChatSessions(); loadHistory();
   pollApprovals(); // 审批卡片轮询（confirm 模式下危险操作需在此批准）
 }
 
@@ -623,9 +623,22 @@ async function loadChatSessions() {
     '<option value="' + esc(k) + '"' + (k === cur ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
   sel.onchange = () => {
     localStorage.setItem('fridaySession', sel.value);
-    msgList.innerHTML = '<div class="chat-hint">已切换到会话 ' + esc(sel.value) +
-      '，历史各自独立。继续聊天即可 😊</div>';
+    loadHistory();
   };
+}
+/* 拉取当前会话的历史对话并回显（只读查询，不产生 LLM 调用） */
+async function loadHistory() {
+  const key = currentChatSession();
+  let messages = [];
+  try {
+    messages = (await api('GET', '/api/chat/history?session=' + encodeURIComponent(key))).messages || [];
+  } catch (e) { /* 拉取失败按空会话处理 */ }
+  msgList.innerHTML = '';
+  if (!messages.length) {
+    msgList.innerHTML = '<div class="chat-hint">你好呀，我是小五 😊 试试对我说"10分钟后提醒我喝水"或"每天早上8点叫我起床"</div>';
+    return;
+  }
+  for (const m of messages) bubble(m.role === 'user' ? 'user' : 'bot', m.text);
 }
 async function loadSessions() {
   try {

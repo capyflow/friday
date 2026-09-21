@@ -58,6 +58,38 @@ func TestSessionPoolKeyAndPersist(t *testing.T) {
 	}
 }
 
+// TestSessionPoolHistoryReadOnly 验证 History 只读回显：不创建会话、能从持久层恢复。
+func TestSessionPoolHistoryReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	store, err := sessionstore.NewJSON(filepath.Join(dir, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 写入一轮对话并落盘。
+	pool := NewSessionPool(store)
+	s := pool.Get(ctx, SessionWeb)
+	s.Add(llm.NewTextMessage(llm.RoleUser, "你好"))
+	s.Add(llm.NewTextMessage(llm.RoleAssistant, "你好呀"))
+	pool.Save(ctx, s)
+
+	// 全新池（模拟重启进程后打开页面）：History 应从持久层取到历史。
+	fresh := NewSessionPool(store)
+	msgs := fresh.History(ctx, SessionWeb)
+	if len(msgs) != 2 || messageTextOf(msgs[0]) != "你好" || messageTextOf(msgs[1]) != "你好呀" {
+		t.Fatalf("History 应恢复持久化历史: %+v", msgs)
+	}
+
+	// 只读：查询不存在的会话返回 nil，且不会把会话创建进池（List 为空）。
+	if got := fresh.History(ctx, "never-used"); got != nil {
+		t.Fatalf("不存在的会话应返回 nil: %+v", got)
+	}
+	if list := fresh.List(); len(list) != 0 {
+		t.Fatalf("History 不应创建会话，List 应为空: %+v", list)
+	}
+}
+
 // TestSessionPoolParallelKeys 验证不同会话并行对话互不阻塞、同一会话串行。
 func TestSessionPoolParallelKeys(t *testing.T) {
 	pool := NewSessionPool(nil)

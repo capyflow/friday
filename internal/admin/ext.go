@@ -7,10 +7,58 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/capyflow/vortexagent/llm"
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
 	"github.com/capyflow/friday/internal/mcp"
 )
+
+// chatHistoryMax 是历史回显的最大条数（老会话只展示最近一段，避免页面过长）。
+const chatHistoryMax = 100
+
+// handleChatHistory 返回指定会话（?session=key，缺省 web）的可见对话历史：
+// 仅 user/assistant 的文本消息（工具轮次跳过），供打开页面/切换会话时回显。
+// 只读查询——不触发 LLM 调用，也不创建空会话。
+func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"messages": []any{}})
+	}
+	key := strings.TrimSpace(ctx.GinContext().Query("session"))
+	msgs := s.chat.Brain().Pool().History(ctx.Context(), key)
+	type item struct {
+		Role string `json:"role"`
+		Text string `json:"text"`
+	}
+	out := make([]item, 0, len(msgs))
+	for _, m := range msgs {
+		role := string(m.Role)
+		if role != "user" && role != "assistant" {
+			continue // 工具结果/系统轮次不进对话流
+		}
+		var text string
+		for _, c := range m.Content {
+			switch c.Type {
+			case llm.ContentText:
+				text += c.Text
+			case llm.ContentImage:
+				text += "[图片]"
+			}
+		}
+		if strings.TrimSpace(text) == "" {
+			continue // 纯工具调用意图的 assistant 消息不展示
+		}
+		out = append(out, item{Role: role, Text: text})
+	}
+	if len(out) > chatHistoryMax {
+		out = out[len(out)-chatHistoryMax:]
+	}
+	if key == "" {
+		key = "web"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"session": key, "messages": out,
+	})
+}
 
 // handleListSessions 返回全部会话概要（key、消息数、最后活跃）。
 func (s *Server) handleListSessions(ctx *vhttp.Context) error {
