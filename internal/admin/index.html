@@ -486,12 +486,18 @@
         <div class="panel">
           <h2 style="font-size:14px">MCP 服务器 <span class="count" id="mcpCount"></span></h2>
           <table>
-            <thead><tr><th>名称</th><th>命令</th><th>状态</th><th>工具数</th><th>最后错误</th><th></th></tr></thead>
+            <thead><tr><th>名称</th><th>命令</th><th>参数</th><th>环境变量</th><th>状态</th><th>操作</th></tr></thead>
             <tbody id="mcpRows"></tbody>
           </table>
-          <div class="empty" id="mcpEmpty" hidden>未配置 MCP 服务器（config.yaml mcp.servers）</div>
-          <div class="set-note">MCP 服务器随机器人自动拉起，进程崩溃后数秒内自动重启并恢复工具；
-            修改 config.yaml mcp.servers 后重启服务生效。</div>
+          <div class="empty" id="mcpEmpty" hidden>未配置 MCP 服务器——点击"添加服务器"开始</div>
+          <div style="display:flex; gap:10px; margin-top:10px; align-items:center">
+            <button class="btn" type="button" onclick="addMcpRow()">＋ 添加服务器</button>
+            <button class="btn primary" type="button" onclick="saveMCP()">保存并生效</button>
+          </div>
+          <div class="msg" id="mcpMsg"></div>
+          <div class="set-note">保存后立即热生效（新增自动拉起、移除自动停止、变更自动重启，无需重启服务），
+            并写回 config.yaml。参数按空格分隔；环境变量 KEY=VALUE 多对用逗号分隔。
+            进程崩溃后数秒内自动重启并恢复工具。</div>
         </div>
         <div class="panel">
           <h2 style="font-size:14px">当前配置</h2>
@@ -677,24 +683,68 @@ $('btnHbSave').addEventListener('click', async () => {
   } catch (e) { showMsg('hbMsg', e.message, false); }
 });
 
-/* ---------- MCP 服务器状态 ---------- */
+/* ---------- MCP 服务器（在线配置 + 状态） ---------- */
+let mcpStatusByName = {};
 async function loadMCP() {
+  let servers = [];
+  try { servers = (await api('GET', '/api/mcp/config')).servers || []; }
+  catch (e) { toast('MCP 配置加载失败：' + e.message, true); }
+  mcpStatusByName = {};
   try {
-    const servers = (await api('GET', '/api/mcp')).servers || [];
-    $('mcpCount').textContent = servers.length ? servers.length + ' 台' : '';
-    $('mcpEmpty').hidden = servers.length > 0;
-    $('mcpRows').innerHTML = servers.map(x =>
-      '<tr>'
-      + '<td class="mono">' + esc(x.name) + '</td>'
-      + '<td class="mono meta">' + esc(x.command) + '</td>'
-      + '<td>' + (x.running ? '<span class="dot ok"></span>在线' : '<span class="dot bad"></span>离线') + '</td>'
-      + '<td>' + (x.tools ?? 0) + '</td>'
-      + '<td class="meta">' + esc(x.lastError || '—') + '</td>'
-      + '<td><button class="btn" onclick="reconnectMCP(\'' + esc(x.name) + '\')">重连</button></td>'
-      + '</tr>').join('');
-  } catch (e) { toast('MCP 状态加载失败：' + e.message, true); }
+    const st = (await api('GET', '/api/mcp')).servers || [];
+    mcpStatusByName = Object.fromEntries(st.map(x => [x.name, x]));
+  } catch (e) { /* 状态缺失按离线展示 */ }
+  renderMcpRows(servers);
+}
+function renderMcpRows(servers) {
+  $('mcpCount').textContent = servers.length ? servers.length + ' 台' : '';
+  $('mcpEmpty').hidden = servers.length > 0;
+  $('mcpRows').innerHTML = servers.map((x, i) => {
+    const st = mcpStatusByName[x.name] || {};
+    const envStr = Object.entries(x.env || {}).map(([k, v]) => k + '=' + v).join(', ');
+    const status = !x.name ? '—'
+      : st.running ? '<span class="dot ok"></span>在线 · ' + (st.tools ?? 0) + ' 工具'
+      : '<span class="dot bad"></span>离线' + (st.lastError ? '<div class="meta">' + esc(st.lastError) + '</div>' : '');
+    return '<tr>'
+      + '<td><input class="mcp-name" value="' + esc(x.name || '') + '" placeholder="名称" style="width:92px"></td>'
+      + '<td><input class="mcp-cmd" value="' + esc(x.command || '') + '" placeholder="命令，如 npx" style="width:120px"></td>'
+      + '<td><input class="mcp-args" value="' + esc((x.args || []).join(' ')) + '" placeholder="参数，空格分隔" style="width:100%; min-width:130px"></td>'
+      + '<td><input class="mcp-env" value="' + esc(envStr) + '" placeholder="KEY=VALUE，逗号分隔" style="width:150px"></td>'
+      + '<td style="font-size:12px; white-space:nowrap">' + status + '</td>'
+      + '<td style="white-space:nowrap"><button class="btn" onclick="reconnectMCP(\'' + esc(x.name || '') + '\')">重连</button> '
+      + '<button class="btn danger" onclick="removeMcpRow(' + i + ')">删除</button></td>'
+      + '</tr>';
+  }).join('');
+}
+function collectMcpRows() {
+  const rows = [];
+  $('mcpRows').querySelectorAll('tr').forEach(tr => {
+    const val = cls => (tr.querySelector(cls) || {}).value || '';
+    const env = {};
+    val('.mcp-env').split(',').map(x => x.trim()).filter(Boolean).forEach(pair => {
+      const idx = pair.indexOf('=');
+      if (idx > 0) env[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+    });
+    rows.push({
+      name: val('.mcp-name').trim(),
+      command: val('.mcp-cmd').trim(),
+      args: val('.mcp-args').trim().split(/\s+/).filter(Boolean),
+      env,
+    });
+  });
+  return rows;
+}
+function addMcpRow() { const rows = collectMcpRows(); rows.push({ name: '', command: '', args: [], env: {} }); renderMcpRows(rows); }
+function removeMcpRow(i) { const rows = collectMcpRows(); rows.splice(i, 1); renderMcpRows(rows); }
+async function saveMCP() {
+  try {
+    const r = await api('POST', '/api/mcp/config', { servers: collectMcpRows() });
+    showMsg('mcpMsg', r.message || '已保存', true);
+    loadMCP(); loadStatus();
+  } catch (e) { showMsg('mcpMsg', e.message, false); }
 }
 async function reconnectMCP(name) {
+  if (!name) return;
   try {
     await api('POST', '/api/mcp/' + encodeURIComponent(name) + '/reconnect', {});
     toast('已重连 ' + name);

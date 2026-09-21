@@ -153,6 +153,10 @@ func (s *Server) Start(_ context.Context) {
 	}
 	if s.mcp != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/mcp", s.wrap(s.handleMCPStatus))
+		if s.cfg != nil && s.configPath != "" {
+			root.AddRouter([]string{http.MethodGet}, "/api/mcp/config", s.wrap(s.handleMCPConfigGet))
+			root.AddRouter([]string{http.MethodPost}, "/api/mcp/config", s.wrap(s.handleMCPConfigSet))
+		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
 	}
 	// 旧页面地址兼容：统一回到首页外壳。

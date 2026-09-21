@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -181,19 +182,20 @@ type HeartbeatConfig struct {
 // McpConfig 描述 MCP（Model Context Protocol）外部工具服务器。
 type McpConfig struct {
 	// Servers 声明的 MCP 服务器列表（stdio transport：本机子进程）。
-	Servers []McpServerConfig `yaml:"servers"`
+	Servers []McpServerConfig `yaml:"servers" json:"servers"`
 }
 
-// McpServerConfig 是一台 MCP 服务器的启动配置（视为可信配置，明文声明在 config.yaml）。
+// McpServerConfig 是一台 MCP 服务器的启动配置（视为可信配置，明文声明在 config.yaml；
+// 管理后台在线编辑后经 UpdateMcpServers 写回）。
 type McpServerConfig struct {
 	// Name 服务器名（工具名前缀 mcp_<name>_，防冲突）。
-	Name string `yaml:"name"`
+	Name string `yaml:"name" json:"name"`
 	// Command 启动命令，如 npx / ./mcp-server。
-	Command string `yaml:"command"`
+	Command string `yaml:"command" json:"command"`
 	// Args 启动参数。
-	Args []string `yaml:"args"`
+	Args []string `yaml:"args" json:"args"`
 	// Env 额外环境变量（在继承进程环境的基础上追加）。
-	Env map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env" json:"env"`
 }
 
 // ProviderConfig 描述 LLM 供应商。
@@ -319,6 +321,92 @@ func UpdateProvider(path, baseURL, model string) error {
 		return fmt.Errorf("写入配置失败: %w", err)
 	}
 	return os.Rename(tmp, path)
+}
+
+// UpdateMcpServers 热更新 config.yaml 中的 mcp.servers 列表：以 yaml.Node 方式编辑
+// （保留文件其余部分的注释与结构；mcp 段不存在时追加），临时文件 + rename 原子写回。
+// servers 允许为空（写空列表，表示清空全部 MCP 服务器）。
+func UpdateMcpServers(path string, servers []McpServerConfig) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	mcpNode := mappingValue(root, "mcp")
+	if mcpNode == nil || mcpNode.Kind != yaml.MappingNode {
+		mcpNode = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "mcp"},
+			mcpNode)
+	}
+
+	// 构造 servers 序列（映射列表：name/command/args/env）。
+	seq := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, s := range servers {
+		item := &yaml.Node{Kind: yaml.MappingNode}
+		strPair := func(k, v string) {
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
+		}
+		strPair("name", s.Name)
+		strPair("command", s.Command)
+		if len(s.Args) > 0 {
+			argsSeq := &yaml.Node{Kind: yaml.SequenceNode}
+			for _, a := range s.Args {
+				argsSeq.Content = append(argsSeq.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: a, Tag: "!!str"})
+			}
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "args"}, argsSeq)
+		}
+		if len(s.Env) > 0 {
+			envMap := &yaml.Node{Kind: yaml.MappingNode}
+			keys := make([]string, 0, len(s.Env))
+			for k := range s.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys) // 固定顺序，避免每次保存时 env 行随机重排
+			for _, k := range keys {
+				envMap.Content = append(envMap.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+					&yaml.Node{Kind: yaml.ScalarNode, Value: s.Env[k], Tag: "!!str"})
+			}
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "env"}, envMap)
+		}
+		seq.Content = append(seq.Content, item)
+	}
+	setMappingNode(mcpNode, "servers", seq)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// setMappingNode 更新或新增映射中一个键的任意值节点（保留键节点上的注释）。
+func setMappingNode(mapping *yaml.Node, key string, val *yaml.Node) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = val
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key}, val)
 }
 
 // mappingValue 在映射节点中按 key 取值节点。

@@ -3,6 +3,7 @@
 package admin
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
+	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/mcp"
 )
 
@@ -118,6 +120,70 @@ func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	msg := "已拒绝"
 	if req.Approve {
 		msg = "已批准"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
+}
+
+// handleMCPConfigGet 返回当前 MCP 服务器配置（config.yaml mcp.servers）。
+func (s *Server) handleMCPConfigGet(ctx *vhttp.Context) error {
+	servers := []config.McpServerConfig{}
+	if s.cfg != nil {
+		servers = s.cfg.Mcp.Servers
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"servers": servers})
+}
+
+// handleMCPConfigSet 保存 MCP 服务器配置：校验后写回 config.yaml（保留注释），
+// 并经管理器热生效（新增的拉起、移除的停止、变更的重启，工具清单变化自动重建 Agent）。
+// 请求体 {"servers":[{"name":"x","command":"npx","args":["-y","pkg"],"env":{"K":"V"}}]}。
+func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
+	if s.cfg == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+	}
+	var req struct {
+		Servers []config.McpServerConfig `json:"servers"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	// 校验：名称/命令必填，名称去重（工具前缀用，重名会冲突）。
+	seen := map[string]bool{}
+	for i := range req.Servers {
+		sv := &req.Servers[i]
+		sv.Name = strings.TrimSpace(sv.Name)
+		sv.Command = strings.TrimSpace(sv.Command)
+		if sv.Name == "" || sv.Command == "" {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": fmt.Sprintf("第 %d 个服务器缺少 name 或 command", i+1)})
+		}
+		key := mcp.ToolPrefix(sv.Name)
+		if seen[key] {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "服务器名称重复：" + sv.Name})
+		}
+		seen[key] = true
+	}
+
+	// 热生效（先应用运行时，再落盘；落盘失败不影响已生效配置）。
+	var applyErr error
+	if s.mcp != nil {
+		live := make([]mcp.ServerConfig, 0, len(req.Servers))
+		for _, sv := range req.Servers {
+			live = append(live, mcp.ServerConfig{Name: sv.Name, Command: sv.Command, Args: sv.Args, Env: sv.Env})
+		}
+		applyErr = s.mcp.Apply(ctx.Context(), live)
+	}
+	s.cfg.Mcp.Servers = req.Servers
+	msg := "MCP 配置已保存并热生效（新增拉起 / 移除停止 / 变更重启）"
+	if s.mcp == nil {
+		msg = "MCP 配置已保存，重启服务后生效"
+	}
+	if applyErr != nil {
+		msg += "；部分服务器连接失败：" + applyErr.Error()
+	}
+	if err := config.UpdateMcpServers(s.configPath, req.Servers); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
+			"message": msg + "；但写回 config.yaml 失败：" + err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
 }

@@ -167,8 +167,9 @@ func main() {
 	regMu.Unlock()
 
 	// MCP 服务器：随 Friday 拉起，工具动态注册（前缀 mcp_<server>_），崩溃自动重启。
+	// 管理器始终创建（无配置时为空跑）：管理后台在线添加 MCP 服务器可即时生效。
+	mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
 	if len(cfg.Mcp.Servers) > 0 {
-		mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
 		servers := make([]mcp.ServerConfig, 0, len(cfg.Mcp.Servers))
 		for _, s := range cfg.Mcp.Servers {
 			servers = append(servers, mcp.ServerConfig{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
@@ -176,8 +177,8 @@ func main() {
 		if err := mcpMgr.Apply(ctx, servers); err != nil {
 			log.Printf("[MCP] 部分服务器连接失败（不影响其余功能）: %v", err)
 		}
-		defer mcpMgr.Close()
 	}
+	defer mcpMgr.Close()
 
 	// 智能任务运行器：到点把指令（心跳任务附 HEARTBEAT.md 清单）交给 agent 决策，
 	// 输出按 [推送]/[静默] 协议投递。
