@@ -175,7 +175,8 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 
 	rctx, cancel := context.WithCancel(logx.WithID(ctx.Context(), logx.NextID()))
 	defer cancel()
-	key := agent.CurrentKey(req.Session)
+	// 全局单对话：所有渠道共用同一个主会话，网页端不支持切换到其他会话。
+	key := agent.SessionWeb
 	rctx = agent.WithSessionKey(rctx, key)
 	logx.Printf(rctx, "[网页] 输入: %s（图片 %d 张，会话 %s）", req.Message, len(imgs), key)
 	trace.Begin(logx.IDFrom(rctx), "web", key, req.Message)

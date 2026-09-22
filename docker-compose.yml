@@ -1,0 +1,26 @@
+services:
+  friday:
+    build:
+      context: .
+      # capyflow/* 私有 Go 模块经 SSH 拉取（依赖 ~/.ssh 可访问 GitHub 的密钥）
+      ssh:
+        - default
+    image: friday:latest
+    container_name: friday
+    restart: unless-stopped
+    stdin_open: true # 诊断期：保留 stdin 供 docker attach 走 REPL 触发请求
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # 诊断期：访问宿主机记录代理
+    # admin.port（data/config.yaml）若修改，这里同步调整，并同步 ADMIN_PORT
+    ports:
+      - "8090:8090"
+    volumes:
+      # 全部可变数据（config.yaml/session/tasks/memories/uploads/HEARTBEAT.md）
+      - ./data:/data
+    environment:
+      - TZ=Asia/Shanghai
+      - ADMIN_PORT=8090
+    # API 密钥等敏感环境变量放 .env（STEP_API_KEY=sk-...），不入库
+    env_file:
+      - path: .env
+        required: false

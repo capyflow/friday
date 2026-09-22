@@ -8,6 +8,8 @@ github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1 h1:DQHByp3O5B
 github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1/go.mod h1:URuUAhBl/BDF7wk5BSSb1TstS34ShLBnjX2US8dvuE8=
 github.com/capyflow/vortexagent v0.0.0-20260901113238-6d3d0387f749 h1:S56b2+w2X5V2CSMZx0VPEFUnEWAnQGxObeIQ2aEno30=
 github.com/capyflow/vortexagent v0.0.0-20260901113238-6d3d0387f749/go.mod h1:3NGimeVGvN/Nzqn3hds3chPTuOWL8AGM2n9ZYD4aFi0=
+github.com/capyflow/vortexagent v0.0.0-20260921165655-296e502905d8 h1:yA9V1hmuaChsuKuid9IyxcMbMIe2IbSPdRFsUFAPZ+8=
+github.com/capyflow/vortexagent v0.0.0-20260921165655-296e502905d8/go.mod h1:3NGimeVGvN/Nzqn3hds3chPTuOWL8AGM2n9ZYD4aFi0=
 github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f h1:yknZW0mnAFK5ZvUhYi0Gr0yKAFUiP2HNDHd4sl+ZlAU=
 github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f/go.mod h1:I0O8EH6fA36lj2piN0ZLLeaIEB/HQ9uVbp9CE8W/SC0=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=

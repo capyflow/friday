@@ -140,9 +140,6 @@ func TestOnReceiveGroupMessage(t *testing.T) {
 		if inb.Channel != "feishu" {
 			t.Fatalf("channel 不符: %s", inb.Channel)
 		}
-		if inb.SessionKey() != "feishu-oc_chat1" {
-			t.Fatalf("会话 key 不符: %s", inb.SessionKey())
-		}
 	default:
 		t.Fatal("消息应入队")
 	}
@@ -201,7 +198,8 @@ func TestDispatchTraceSource(t *testing.T) {
 	traces := trace.List()
 	found := false
 	for _, tr := range traces {
-		if tr.Source == "feishu" && tr.Input == "你好" && tr.Session == "feishu-oc_t" {
+		// 全局单对话：轨迹统一挂在主会话（web）上，来源仍记 source=feishu。
+		if tr.Source == "feishu" && tr.Input == "你好" && tr.Session == "web" {
 			found = true
 		}
 	}

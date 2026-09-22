@@ -34,6 +34,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -166,6 +167,7 @@ func (s *Server) Start(_ context.Context) {
 	root.AddRouter([]string{http.MethodPost}, "/api/login", s.wrapPublic(s.handleLogin))
 	root.AddRouter([]string{http.MethodGet}, "/api/traces", s.wrap(s.handleListTraces))
 	root.AddRouter([]string{http.MethodGet}, "/api/traces/:id", s.wrap(s.handleGetTrace))
+	root.AddRouter([]string{http.MethodGet}, "/api/usage", s.wrap(s.handleUsage))
 	root.AddRouter([]string{http.MethodPost}, "/api/logout", s.wrap(s.handleLogout))
 	root.AddRouter([]string{http.MethodGet}, "/api/status", s.wrap(s.handleStatus))
 	root.AddRouter([]string{http.MethodGet}, "/api/tasks", s.wrap(s.handleListTasks))
@@ -302,7 +304,7 @@ func (s *Server) handleUpdateProvider(ctx *vhttp.Context) error {
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), req.BaseURL, req.Model); err != nil {
+	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.BaseURL, req.Model); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	s.info.Model, s.info.BaseURL = req.Model, req.BaseURL
@@ -323,9 +325,15 @@ func noCache(ctx *vhttp.Context) {
 	ctx.GinContext().Header("Cache-Control", "no-cache")
 }
 
-// handleListTraces 返回调用轨迹列表（摘要，不含逐条事件）。
+// handleListTraces 返回全局调用事件流（最新在前，默认最近 300 条事件）
+// 与全量统计。轨迹生命周期跟随对话历史：清除上下文时一并清除。
 func (s *Server) handleListTraces(ctx *vhttp.Context) error {
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"traces": trace.List()})
+	limit := 300
+	if n, err := strconv.Atoi(ctx.GinContext().Query("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	events, stats := trace.Events(limit)
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"events": events, "stats": stats})
 }
 
 // handleGetTrace 返回单次调用的完整轨迹（含逐条事件）。

@@ -17,6 +17,7 @@ import (
 	"github.com/capyflow/vortexagent/agent/sessionstore"
 	"github.com/capyflow/vortexagent/llm"
 
+	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
 )
 
@@ -189,7 +190,7 @@ func TestBrainPersistenceAcrossRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		pool := NewSessionPool(store)
-		ag, err := Build(cfg, vxagent.NewRegistry(), pool)
+		ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +260,7 @@ func TestBrainSessionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := NewSessionPool(store)
-	ag, err := Build(cfg, vxagent.NewRegistry(), pool)
+	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +307,7 @@ func TestBrainReset(t *testing.T) {
 	t.Setenv("TEST_BRAIN_KEY", "sk-test")
 
 	pool := NewSessionPool(nil)
-	ag, err := Build(cfg, vxagent.NewRegistry(), pool)
+	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

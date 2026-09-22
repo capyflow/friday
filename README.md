@@ -41,14 +41,15 @@
 - **文件能力**：`read_file` / `list_files` 工具（目录白名单内读文本文件、按行分段、PDF 按页抽取），
   聊天可发送图片（`/api/upload`，多模态消息，需模型支持视觉）
 - **执行类工具 + 审批**：`write_file`（自动备份 .bak）/ `edit_file`（old 唯一匹配防误改）/
-  `exec`（30s 超时上限 120s、输出截断 32KB）；
-  审批三模式（`tools.exec.mode`）：`auto`（白名单内直接执行）/ `confirm`（进网页审批队列，
-  管理后台弹卡片，5 分钟未处理自动拒绝）/ `off`（禁用 exec）；
-  `rm -rf`、`mkfs` 等毁灭性命令有内置黑名单兜底，任何模式都拦截
-- **多会话 + 持久化**：网页/终端/钉钉/飞书聊天/智能任务各自拥有独立会话
-  （`web` / `repl` / `ding-<chatID>` / `feishu-<chatID>` / `task`），不同会话并行对话互不阻塞，
-  同一会话串行保证上下文连续；历史落盘 `session.json`，重启不失忆；
-  管理后台可查看会话列表、按会话清除
+  `exec_command`（shell 执行，默认 30s 超时上限 10min、输出截断 100KB）；
+  经 vortexagent 全局权限层把关，审批三模式（`tools.exec.mode`）：`auto`（白名单内直接执行）/
+  `confirm`（进网页审批队列，管理后台弹卡片，5 分钟未处理自动拒绝，可"批准并记住"）/
+  `off`（不注册 exec_command）；
+  白名单按 shell 语义段级校验（复合命令每段都须命中）；`rm -rf`、`mkfs` 等毁灭性命令有
+  内置黑名单兜底（含藏在命令替换里的片段），任何模式都拦截
+- **全局单对话 + 持久化**：网页/终端/钉钉/飞书共享同一个小五（同一份对话上下文）——
+  网页说过的话在终端能接着聊；心跳/智能任务用独立会话，巡检内容不污染主对话；
+  历史落盘 `session.json`，重启不失忆；管理后台可查看会话、按会话清除
 - **消息通道**：钉钉 Stream 模式 + 飞书长连接（均 WebSocket 免公网 IP），单聊/群聊 @机器人、
   白名单、2000 字符安全分段、自动重连；心跳/智能任务输出可推送（钉钉自定义机器人 webhook /
   飞书 pushChatIDs）
@@ -66,8 +67,8 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │ 输入：网页聊天 / 终端 REPL / 钉钉 / 飞书 / 智能任务    │
-│   （共用 Brain：按会话 key 独立会话，同会话串行、      │
-│     跨会话并行；历史经 SessionPool 落盘重启恢复）      │
+│   （共用 Brain：全局单对话，各渠道同一份上下文；        │
+│     历史经 SessionPool 落盘重启恢复；心跳用独立会话）    │
 └────────────────────┬────────────────────────────┘
                      ▼
 ┌─────────────────────────────────────────────────┐
@@ -77,10 +78,12 @@
 │  │   schedule_task（单次/多次/循环/智能任务）        │
 │  │   remember / recall / forget（长期记忆）        │
 │  │   read_file / list_files / write_file / edit_file │
-│  │   exec（审批：auto/confirm/off + 黑名单兜底）     │
+│  │   exec_command（全局权限层：白名单/黑名单/审批）     │
 │  │   get_time / speak_now / display_now           │
 │  │   play_audio / play_effect                     │
 │  │   mcp_<server>_<tool>（MCP 动态注册，内部/mcp）   │
+│  ├─ Permissions：全局工具权限层（白名单/黑名单/审批模式，│
+│  │   未放行调用桥接审批队列，网页批准后执行）           │
 │  └─ Hooks：日志 / 工具调用审计（轨迹含会话归属）      │
 └────────────────────┬────────────────────────────┘
                      ▼
@@ -105,19 +108,36 @@
 └─────────────────────────────────────────────────┘
 ```
 
-## 快速开始
+## 快速开始（Docker 部署）
 
 ```bash
-# 1. 依赖
+# 1. 构建并启动（capyflow/* 为私有 Go 模块，构建需传 SSH 凭据）
+docker compose up -d --build
+
+# 2. 首次运行会自动生成 data/config.yaml 与 .env：
+#    - data/config.yaml：补全 provider 段（baseURL / model / apiKeyEnv）
+#    - .env：填入真实密钥（变量名与 apiKeyEnv 对应，如 STEP_API_KEY=sk-xxx）
+#    改完重启生效：docker compose restart
+```
+
+服务地址：`http://<主机IP>:8090`（管理后台 `/admin`；端口由 `data/config.yaml` 的
+`admin.port` 决定，compose 里 `ports`/`ADMIN_PORT` 同步调整）。日常运维：
+
+```bash
+docker compose logs -f        # 看日志
+docker compose restart        # 改配置后重启（会话/任务自动恢复）
+docker compose down           # 停止（数据都在 ./data，不丢）
+```
+
+## 本地开发（go run）
+
+不走 Docker 时：
+
+```bash
 go mod tidy
-
-# 2. 配置 LLM（DeepSeek 示例）
-export DEEPSEEK_API_KEY=sk-xxx
-cp config.yaml.example config.yaml
-# 编辑 config.yaml：确认 baseURL/model 与你的厂商一致
-
-# 3. 运行
-go run ./cmd/robot
+export STEP_API_KEY=sk-xxx                 # 密钥环境变量（名与 config.yaml apiKeyEnv 一致）
+cp config.yaml.example config.yaml         # 编辑确认 baseURL/model
+go run ./cmd/robot                         # 或 go build -o robot ./cmd/robot && ./robot
 ```
 
 启动后两种入口：
@@ -148,21 +168,30 @@ go run ./cmd/robot
   订阅 `im.message.receive_v1` 事件（长连接方式）→ 申请 `im:message` 读写权限 →
   填 `chan.feishu.appID/appSecret`
 
-每个入口拥有独立会话（`ding-<chatID>` / `feishu-<chatID>`），与网页/终端互不干扰；
+钉钉/飞书与网页/终端共享同一份对话上下文（全局单对话）；
 `allowUserIDs` / `allowOpenIDs` 白名单留空 = 允许所有联系人。
 
 ## 执行类工具与审批（安全边界）
 
-agent 能写文件、跑命令，危险操作受审批机制约束（`internal/approval`）：
+agent 能写文件、跑命令，危险操作经 vortexagent **全局权限层**把关
+（`tools.exec` 翻译成权限规则，见 `internal/agent/permission.go`），未放行的调用
+桥接到审批队列（`internal/approval`），在管理后台网页批准：
 
-| 模式 | exec | write_file / edit_file |
+| 模式 | exec_command | write_file / edit_file |
 |------|------|------------------------|
 | `auto` | 白名单内直接执行，白名单外拒绝 | 直接执行 |
-| `confirm`（默认） | 白名单内直接执行；白名单外进**网页审批队列**（管理后台右下角弹卡片，5 分钟未处理自动拒绝） | 需网页批准后执行 |
-| `off` | 禁用 | 不受影响 |
+| `confirm`（默认） | 白名单内直接执行；白名单外进**网页审批队列**（管理后台右下角弹卡片，5 分钟未处理自动拒绝，可"批准并记住"——相同调用本进程内免审批） | 需网页批准后执行 |
+| `off` | 不注册 exec_command | 不受影响 |
 
-审批与拦截全程留痕（调用轨迹可查）；黑名单命令（`rm -rf` / `mkfs` / `shutdown` 等）
-任何模式都强制拦截；白名单匹配拒绝 `; | & ` ` > <` 等链式字符，防拼接绕过。
+审批与拦截全程留痕（调用轨迹可查）；毁灭性命令黑名单（`rm -rf` / `mkfs` /
+`shutdown` 等）翻译成 deny 规则，任何模式（含用户批准）都强制拦截，且对整条命令
+做词边界扫描——藏在命令替换里的片段（如 `echo $(rm -rf /tmp/x)`）同样拦得住。
+白名单按 shell 语义段级校验：复合命令（`; && || |`）拆段后每一段都须命中白名单项。
+MCP 工具默认免审批，可用 `permissions.mcp: confirm` 收紧进审批，`permissions.allow`
+/ `deny` 可配置任意附加规则。
+
+> 注意：权限规则是字符串级过滤，防模型误用，不防蓄意构造的绕过（如 base64 解码
+> 后执行）；高危环境请配合操作系统级沙箱使用。
 
 ## 心跳巡检与智能任务
 
@@ -200,6 +229,33 @@ mcp:
       headers: {"Authorization": "Bearer xxx"}   # 可选鉴权头
 ```
 
+## Docker 部署
+
+部署编排见 [`docker-compose.yml`](docker-compose.yml)：多阶段构建（Go 1.25 编译 +
+alpine 运行时，最终镜像约 40MB）、`./data:/data` 数据卷、`restart: unless-stopped`、
+内置健康检查。`capyflow/*` 是私有 Go 模块，构建时 compose 已配置把 SSH 凭据传给
+BuildKit（依赖 `~/.ssh` 里能访问 GitHub 的密钥）。
+
+```bash
+docker compose up -d --build   # 构建并启动
+```
+
+目录约定（迁移自旧的宿主机直接运行方式，运行数据全部收口在 `./data`）：
+
+```
+data/
+  config.yaml          # 主配置（首次启动自动播种模板）
+  .env（仓库根）        # API 密钥等敏感环境变量，不入库（变量名对应 provider.apiKeyEnv）
+  session.json / tasks.json / memories.json / admin-account.json / uploads/ / HEARTBEAT.md
+```
+
+- 非 root 用户（UID 1000）运行；bind mount 场景 `./data` 属主保持 1000 即可
+- 管理员可用 `FRIDAY_ADMIN_USERNAME` / `FRIDAY_ADMIN_PASSWORD` 预置（.env 里配）
+- 时区默认 `Asia/Shanghai`（定时任务/心跳 cron 依赖），compose 里 `-e TZ` 覆盖
+- 改了 `data/config.yaml` 的 `admin.port` 需同步 compose 的 `ports` 与 `ADMIN_PORT`
+- 容器自带 busybox `sh`，`exec_command` 开箱可用；MCP 远程 URL 开箱即用，
+  本地 stdio 服务器需自行扩展镜像安装对应运行时（如 node）
+
 ## 测试
 
 ```bash
@@ -208,8 +264,9 @@ go test -race ./...   # 并发安全（会话池/审批队列/MCP 管理器）
 go vet ./...
 ```
 
-覆盖范围：会话池与 Brain 持久化（假 OpenAI 服务器全链路）、审批模式/超时/黑名单、
-exec/write_file/edit_file 工具（白名单、逃逸、备份、审批往返）、智能任务触发与输出协议、
+覆盖范围：会话池与 Brain 持久化（假 OpenAI 服务器全链路）、审批队列（批准/拒绝/
+超时/记住）、权限层规则翻译（白名单/黑名单/直通名单/审批桥接）、
+write_file/edit_file 工具（逃逸、备份、审批往返）、智能任务触发与输出协议、
 静默时段、飞书 adapter（@ 剥离/分段/白名单/轨迹）、MCP 客户端握手与生命周期
 （自动重启、配置增减）、任务引擎 agent 类持久化恢复。
 

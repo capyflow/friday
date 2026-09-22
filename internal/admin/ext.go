@@ -13,6 +13,8 @@ import (
 
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/mcp"
+	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/usage"
 )
 
 // chatHistoryMax 是历史回显的最大条数（老会话只展示最近一段，避免页面过长）。
@@ -85,7 +87,13 @@ func (s *Server) handleClearContext(ctx *vhttp.Context) error {
 		key = "web"
 	}
 	s.chat.ResetContext(key)
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "会话 " + key + " 上下文已清除"})
+	// 轨迹生命周期跟随对话历史：清上下文时该会话的调用轨迹一并清除。
+	removed := trace.ClearSession(key)
+	msg := "会话 " + key + " 上下文已清除"
+	if removed > 0 {
+		msg += fmt.Sprintf("（同步清除 %d 条调用轨迹）", removed)
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
 }
 
 // handleListApprovals 返回当前待审批操作与审批模式。
@@ -98,13 +106,16 @@ func (s *Server) handleListApprovals(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, out)
 }
 
-// handleDecideApproval 审批一条待处理操作：body {"approve": true|false}。
+// handleDecideApproval 审批一条待处理操作：body {"approve": true|false,
+// "remember": true|false}。remember=true 为"批准并记住"——本进程内相同工具
+// 与参数的后续调用免审批（权限层 Remember 语义），拒绝时忽略该字段。
 func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	if s.approver == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "审批机制未启用"})
 	}
 	var req struct {
-		Approve bool `json:"approve"`
+		Approve  bool `json:"approve"`
+		Remember bool `json:"remember"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
@@ -114,12 +125,15 @@ func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "非法的审批 ID"})
 	}
-	if !s.approver.Decide(id, req.Approve) {
+	if !s.approver.DecideWith(id, req.Approve, req.Remember) {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待审批操作（可能已超时或已处理）"})
 	}
 	msg := "已拒绝"
 	if req.Approve {
 		msg = "已批准"
+		if req.Remember {
+			msg += "并记住（相同调用本进程内免审批）"
+		}
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
 }
@@ -219,6 +233,15 @@ func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已重连 " + name})
+}
+
+// handleUsage 返回 token 用量账本：按天倒序明细 + 总量。
+func (s *Server) handleUsage(ctx *vhttp.Context) error {
+	days, total := usage.Summary()
+	if days == nil {
+		days = []usage.Day{}
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"days": days, "total": total})
 }
 
 // handleGetHeartbeat 读取心跳检查清单内容。

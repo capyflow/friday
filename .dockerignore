@@ -1,0 +1,25 @@
+# 构建上下文只保留源码与构建所需文件；本地运行数据/密钥一律不进镜像。
+.git
+.zcode
+.gitignore
+.dockerignore
+
+# 本地运行数据与密钥（挂在 /data 卷里，不烤进镜像）
+config.yaml
+session.json
+tasks.json
+memories.json
+admin-account.json
+HEARTBEAT.md
+uploads/
+logs/
+notes.txt
+
+# 本地产物与非构建必需目录
+robot
+design-system/
+docs/
+archive/
+
+# Docker 自身（entrypoint.sh 在 docker/ 下，必须保留在上下文中）
+Dockerfile

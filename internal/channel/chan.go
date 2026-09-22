@@ -19,17 +19,11 @@ import (
 // （如钉钉的 sessionWebhook），Sender 收到回答后据此回发。
 type Inbound struct {
 	Channel  string // 通道名：dingtalk / feishu / ...
-	ChatID   string // 会话标识（单聊/群聊 ID）
+	ChatID   string // 会话标识（单聊/群聊 ID，日志用）
 	UserID   string // 发送者 ID（白名单过滤的依据）
 	UserName string // 发送者昵称（日志用）
 	Text     string // 消息文本（已剥离 @ 前缀）
 	Reply    any    // 回复上下文
-}
-
-// SessionKey 返回该消息所属的会话 key（<通道名>-<chatID>）：
-// 每个通道聊天拥有独立会话，互不交叉。
-func (in Inbound) SessionKey() string {
-	return agent.CurrentKey(in.Channel + "-" + in.ChatID)
 }
 
 // Asker 是对话能力抽象：Brain 实现它，通道层不依赖具体实现。
@@ -43,8 +37,8 @@ type Sender func(ctx context.Context, in Inbound, replyText string) error
 // Dispatch 串行消费入站消息直到 ctx 取消：
 //   - 白名单 allowUserIDs 非空时，仅放行列表内的 UserID（其余静默忽略并记日志）；
 //   - 一次处理一条，处理期间新消息在缓冲队列排队（不并发、不交叉）；
-//   - 每条消息分配请求 ID 并留痕（source=通道名，session=<通道>-<chatID>），
-//     会话 key 挂入 ctx，Brain 据此路由到该通道自己的会话；
+//   - 每条消息分配请求 ID 并留痕（source=通道名），会话 key 统一为主会话——
+//     全局单对话：所有渠道与网页/终端共享同一个小五；
 //   - Ask 出错时向用户回一句兜底话术。
 func Dispatch(ctx context.Context, in <-chan Inbound, asker Asker, allowUserIDs []string, send Sender) {
 	allowed := make(map[string]bool, len(allowUserIDs))
@@ -69,10 +63,10 @@ func Dispatch(ctx context.Context, in <-chan Inbound, asker Asker, allowUserIDs 
 				continue
 			}
 			rctx := logx.WithID(ctx, logx.NextID())
-			rctx = agent.WithSessionKey(rctx, inb.SessionKey())
+			rctx = agent.WithSessionKey(rctx, agent.SessionWeb)
 			id := logx.IDFrom(rctx)
 			logx.Printf(rctx, "[通道:%s] %s(%s): %s", inb.Channel, inb.UserName, inb.UserID, inb.Text)
-			trace.Begin(id, inb.Channel, inb.SessionKey(), inb.Text)
+			trace.Begin(id, inb.Channel, agent.SessionWeb, inb.Text)
 			reply, err := asker.Ask(rctx, inb.Text, nil, nil)
 			if err != nil {
 				if rctx.Err() != nil {

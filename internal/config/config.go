@@ -15,21 +15,23 @@ import (
 
 // Config 是机器人整体配置。
 type Config struct {
-	Provider     ProviderConfig  `yaml:"provider"`
-	Audio        AudioConfig     `yaml:"audio"`
-	ASR          ASRConfig       `yaml:"asr"`
-	Wake         WakeConfig      `yaml:"wake"`
-	TTS          TTSConfig       `yaml:"tts"`
-	VAD          VADConfig       `yaml:"vad"`
-	Display      DisplayConfig   `yaml:"display"`
-	Chan         ChanConfig      `yaml:"chan"`
-	File         FileConfig      `yaml:"file"`
-	Admin        AdminConfig     `yaml:"admin"`
-	Memory       MemoryConfig    `yaml:"memory"`
-	Tools        ToolsConfig     `yaml:"tools"`
-	Heartbeat    HeartbeatConfig `yaml:"heartbeat"`
-	Mcp          McpConfig       `yaml:"mcp"`
-	SystemPrompt string          `yaml:"systemPrompt"`
+	Provider     ProviderConfig    `yaml:"provider"`
+	Audio        AudioConfig       `yaml:"audio"`
+	ASR          ASRConfig         `yaml:"asr"`
+	Wake         WakeConfig        `yaml:"wake"`
+	TTS          TTSConfig         `yaml:"tts"`
+	VAD          VADConfig         `yaml:"vad"`
+	Display      DisplayConfig     `yaml:"display"`
+	Chan         ChanConfig        `yaml:"chan"`
+	File         FileConfig        `yaml:"file"`
+	Admin        AdminConfig       `yaml:"admin"`
+	Memory       MemoryConfig      `yaml:"memory"`
+	Tools        ToolsConfig       `yaml:"tools"`
+	Permissions  PermissionsConfig `yaml:"permissions"`
+	Trace        TraceConfig       `yaml:"trace"`
+	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
+	Mcp          McpConfig         `yaml:"mcp"`
+	SystemPrompt string            `yaml:"systemPrompt"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
 	// SessionFile 对话会话持久化 JSON 文件路径（默认 session.json，重启不失忆）。
@@ -140,27 +142,48 @@ type ToolsConfig struct {
 	Exec ExecConfig `yaml:"exec"`
 }
 
-// ExecConfig 描述 exec 工具的审批与安全边界。
+// ExecConfig 描述 exec_command 工具的审批与安全边界。策略经
+// internal/agent/permission.go 翻译成 vortexagent 全局权限层规则生效。
 type ExecConfig struct {
-	// Mode 审批模式：auto（白名单内直接执行，其余拒绝）/ confirm（非白名单命令
-	// 进网页审批队列，批准后执行，超时自动拒绝）/ off（禁用 exec）。默认 confirm。
+	// Mode 审批模式：auto（白名单内直接执行，其余拒绝，映射权限层 whitelist）/
+	// confirm（白名单内直行，其余进网页审批队列，批准后执行，超时自动拒绝）/
+	// off（不注册 exec_command，整体禁用）。默认 confirm。
 	Mode string `yaml:"mode"`
 	// Allowlist 免审批命令白名单，如 ["uname -a", "ls", "date"]。
-	// 匹配规则：整条命令等于白名单项或以其为前缀（词边界），且不含 ; | & ` > < 等链式字符。
+	// 匹配规则：按 shell 命令语义做段级校验——复合命令（; && || | 及换行）拆段
+	// 后每一段都须命中白名单项（整条相等或词边界前缀），感知引号。
 	Allowlist []string `yaml:"allowlist"`
-	// Timeout 默认超时秒数（默认 30，上限 120；单次调用可用 timeout 参数覆盖，仍受上限约束）。
+	// Timeout 默认超时秒数（默认 30，上限 600；单次调用可用 timeout 参数覆盖，仍受上限约束）。
 	Timeout int `yaml:"timeout"`
 }
 
-// TimeoutSeconds 返回规范化后的默认超时秒数（默认 30，上限 120）。
+// TimeoutSeconds 返回规范化后的默认超时秒数（默认 30，上限 600）。
 func (e ExecConfig) TimeoutSeconds() int {
 	if e.Timeout <= 0 {
 		return 30
 	}
-	if e.Timeout > 120 {
-		return 120
+	if e.Timeout > 600 {
+		return 600
 	}
 	return e.Timeout
+}
+
+// PermissionsConfig 描述全局工具权限层（vortexagent PermissionChecker）的附加// 规则。基础策略由 tools.exec 派生（模式/白名单/毁灭性黑名单/安全工具直通），
+// 此处只做补充与例外，对所有工具（含 MCP）生效。
+type PermissionsConfig struct {
+	// MCP 控制 MCP 工具（mcp_<server>_<tool>）是否需要网页审批：
+	// allow（默认，免审批）| confirm（每次调用进审批队列）。
+	MCP string `yaml:"mcp"`
+	// Allow 附加全局放行规则："工具名" 或 "工具名:参数模式"（如 "mcp_muse_*"）。
+	Allow []string `yaml:"allow"`
+	// Deny 附加全局拒绝规则，任何模式（含用户批准）下命中即拒。
+	Deny []string `yaml:"deny"`
+}
+
+// TraceConfig 描述调用轨迹的持久化。
+type TraceConfig struct {
+	// File 轨迹落盘文件（默认 traces.json，重启自动恢复最近 200 次调用）。
+	File string `yaml:"file"`
 }
 
 // HeartbeatConfig 描述心跳式主动任务：agent 定期醒来读检查清单，自主决策
@@ -541,6 +564,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Tools.Exec.Mode == "" {
 		c.Tools.Exec.Mode = "confirm"
+	}
+	if c.Permissions.MCP == "" {
+		c.Permissions.MCP = "allow"
+	}
+	if c.Trace.File == "" {
+		c.Trace.File = "traces.json"
 	}
 }
 

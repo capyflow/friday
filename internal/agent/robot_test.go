@@ -6,6 +6,7 @@ import (
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 
+	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/memory"
@@ -44,7 +45,7 @@ func TestBuild(t *testing.T) {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 
-	ag, err := Build(cfg, registry, NewSessionPool(nil))
+	ag, err := Build(cfg, registry, NewSessionPool(nil), approval.New(string(approval.ModeConfirm), nil, 0))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

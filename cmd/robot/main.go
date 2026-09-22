@@ -1,9 +1,14 @@
 // Command robot 是陪伴智能体机器人的入口：加载配置、组装 vortexagent Agent、
 // 启动任务引擎（单次/多次/循环/智能任务），以文本 REPL、网页聊天、钉钉、飞书
-// 多种方式接收用户指令——各入口拥有独立会话（SessionPool，JSON 落盘重启不失忆），
-// 共用同一个对话大脑（Brain）。危险操作（exec/write/edit）经审批机制把关。
+// 多种方式接收用户指令——全局单对话（同一份上下文，SessionPool 落盘重启不失忆），
+// 共用同一个对话大脑（Brain）。工具调用经 vortexagent 全局权限层把关：
+// 白名单/毁灭性黑名单/审批模式由 config 翻译成规则，未放行的操作进管理后台审批。
 //
 // 用法：
+//
+//	docker compose up -d --build   # 部署（数据卷 ./data，密钥放 .env）
+//
+// 或本地开发：
 //
 //	export DEEPSEEK_API_KEY=sk-...
 //	cp config.yaml.example config.yaml && vim config.yaml
@@ -44,6 +49,7 @@ import (
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/usage"
 	"github.com/capyflow/friday/internal/web"
 )
 
@@ -62,11 +68,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 调用轨迹持久化：防抖落盘，重启后管理后台仍可查看历史调用。
+	trace.Init(cfg.Trace.File)
+	// token 用量账本：按天累计，落盘 token-usage.json，重启恢复。
+	usage.Init("token-usage.json")
+
 	displayer := output.NewConsoleDisplayer(os.Stdout)
 	speaker := output.NewConsoleSpeaker(os.Stdout)
 	player := audio.NewConsolePlayer(os.Stdout)
 
-	// 危险操作审批队列（exec/write_file/edit_file；confirm 模式进网页审批）。
+	// 危险操作审批队列：exec_command 经全局权限层（白名单/黑名单/模式）桥接到
+	// 此处审批；write_file/edit_file 在 confirm 模式直接入队。
 	approver := approval.New(cfg.Tools.Exec.Mode, cfg.Tools.Exec.Allowlist, 0)
 	log.Printf("[审批] exec 模式=%s，白名单 %d 条，超时 %s", approver.Mode(), len(cfg.Tools.Exec.Allowlist), approver.Timeout())
 
@@ -104,7 +116,7 @@ func main() {
 		log.Fatalf("加载会话文件失败: %v", err)
 	}
 	pool := robotagent.NewSessionPool(store)
-	log.Printf("[会话] 持久化文件：%s（多会话独立，重启自动恢复）", cfg.SessionFile)
+	log.Printf("[会话] 持久化文件：%s（全局单对话，重启自动恢复）", cfg.SessionFile)
 
 	// 工具注册表：MCP 配置变化时会整体重建（rebuild），regHolder 持有当前实例。
 	var (
@@ -140,7 +152,7 @@ func main() {
 				log.Printf("[重建] 注册 MCP 工具失败（%s）: %v", reason, err)
 			}
 		}
-		ag, err := robotagent.Build(cfg, reg, pool)
+		ag, err := robotagent.Build(cfg, reg, pool, approver)
 		if err != nil {
 			log.Printf("[重建] 构建 Agent 失败（%s）: %v", reason, err)
 			return
@@ -157,7 +169,7 @@ func main() {
 	if err := robotagent.RegisterTools(registry, deps); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
-	ag, err := robotagent.Build(cfg, registry, pool)
+	ag, err := robotagent.Build(cfg, registry, pool, approver)
 	if err != nil {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
@@ -267,7 +279,7 @@ func main() {
 		}
 	}
 
-	// handle 处理一行用户输入：分配请求 ID（链路日志前缀）与独立会话 repl，
+	// handle 处理一行用户输入：分配请求 ID（链路日志前缀）并挂主会话，
 	// 内置命令直接处理，其余经 Brain 交给 agent（流式增量打印到终端）。
 	handle := func(ctx context.Context, source, line string) {
 		line = strings.TrimSpace(line)
@@ -275,7 +287,7 @@ func main() {
 			return
 		}
 		ctx = logx.WithID(ctx, logx.NextID())
-		ctx = robotagent.WithSessionKey(ctx, robotagent.SessionRepl)
+		ctx = robotagent.WithSessionKey(ctx, robotagent.SessionWeb)
 		logx.Printf(ctx, "%s: %s", source, line)
 		switch {
 		case line == "/quit" || line == "/exit":
@@ -302,7 +314,7 @@ func main() {
 		}
 
 		var streamed strings.Builder
-		trace.Begin(logx.IDFrom(ctx), "repl", robotagent.SessionRepl, line)
+		trace.Begin(logx.IDFrom(ctx), "repl", robotagent.SessionWeb, line)
 		answer, err := brain.Ask(ctx, line, nil, func(d llm.Delta) {
 			fmt.Print(d.Text)
 			streamed.WriteString(d.Text)

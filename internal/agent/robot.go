@@ -20,12 +20,15 @@ import (
 	"github.com/capyflow/friday/internal/task"
 	tools_pkg "github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/usage"
 )
 
 // Build 创建并返回配置好的 Agent。pool 为会话池：轨迹钩子在每轮 LLM 调用时
 // 对"当前请求的会话"做输入快照，从而记录下发给模型的完整上下文。
+// approver 为审批队列：构建全局权限 Checker（规则翻译 + ApprovalUI 桥接），
+// nil 时按 off 语义兜底（exec_command 不注册、其余工具直通）。
 // 调用方在 Build 后经 Brain 初始化会话（池按 key 惰性创建）。
-func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool) (*vxagent.Agent, error) {
+func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, approver *approval.Queue) (*vxagent.Agent, error) {
 	apiKey := cfg.ProviderAPIKey()
 	if apiKey == "" {
 		return nil, fmt.Errorf("未找到 API 密钥（环境变量 %s）", cfg.Provider.APIKeyEnv)
@@ -42,6 +45,13 @@ func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool) (*
 	if err != nil {
 		return nil, fmt.Errorf("创建 LLM provider: %w", err)
 	}
+	if approver == nil {
+		approver = approval.New(string(approval.ModeOff), nil, 0)
+	}
+	perms, err := NewPermissionChecker(cfg, approver)
+	if err != nil {
+		return nil, fmt.Errorf("组装权限层: %w", err)
+	}
 
 	prompt := systemPrompt(cfg.SystemPrompt)
 	ag := vxagent.New(vxagent.Options{
@@ -49,6 +59,7 @@ func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool) (*
 		Registry:     registry,
 		SystemPrompt: prompt,
 		Hooks:        buildHooks(pool, prompt),
+		Permissions:  perms,
 	})
 	return ag, nil
 }
@@ -64,6 +75,7 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 			logx.Printf(ctx, "[llm] round=%d model=%s tokens=%d+%d 耗时=%s err=%v",
 				info.Round, info.Model, info.Usage.InputTokens, info.Usage.OutputTokens,
 				info.Duration, info.Err)
+			usage.Add(int64(info.Usage.InputTokens), int64(info.Usage.OutputTokens))
 			// 此刻会话内容 = 本轮发给模型的完整输入（助手消息在调用返回后才入会话）。
 			// 第 1 轮额外带上系统提示词，凑齐真实上下文全貌。
 			msgs := msgsToTrace(pool.Get(ctx, SessionKeyFrom(ctx)).Messages())
@@ -170,13 +182,14 @@ type Deps struct {
 	Displayer output.Displayer // 屏幕输出（开发用 console）
 	Player    audio.Player     // 音频播放器
 	Config    *config.Config   // 运行配置（文件白名单等）
-	Approver  *approval.Queue  // 危险操作审批队列（exec/write/edit 用，可为 nil）
+	Approver  *approval.Queue  // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
 }
 
 // RegisterTools 把机器人全部业务工具注册进 Registry。
 // speaker/displayer 为输出实现（开发用 console，后续换 TTS/OLED）；player 为
 // 音频播放器（接喇叭后用 portaudio，当前用 console 兜底）；approver 支撑
-// exec/write_file/edit_file 的审批机制（confirm 模式），nil 时危险操作按 auto 语义放行。
+// write_file/edit_file 的审批机制（confirm 模式）与 exec_command 的全局权限层
+// （见 permission.go），nil 时 exec 按 off 禁用、文件工具直行。
 func RegisterTools(r *vxagent.Registry, d Deps) error {
 	fileTools := tools_pkg.FileTools{AllowDirs: d.Config.File.AllowDirs}
 	var approver *approval.Queue
@@ -201,10 +214,16 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.ListFilesTool{FileTools: fileTools},
 		&tools_pkg.WriteFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.EditFileTool{FileTools: fileTools, Approver: approver},
-		&tools_pkg.ExecTool{Approver: approver, BaseTimeout: d.Config.Tools.Exec.TimeoutSeconds()},
 	}
 	for _, t := range tools {
 		if err := r.Add(t); err != nil {
+			return err
+		}
+	}
+	// exec_command（框架工具 + 默认超时包装）：off 模式不注册——模型不可见即整体禁用。
+	// 权限规则（白名单/毁灭性黑名单）由 Build 里的权限 Checker 承担，见 permission.go。
+	if d.Config.Tools.Exec.Mode != string(approval.ModeOff) {
+		if err := r.Add(NewExecCommandTool(d.Config.Tools.Exec.TimeoutSeconds())); err != nil {
 			return err
 		}
 	}
@@ -236,8 +255,8 @@ func systemPrompt(override string) string {
 
 【文件与命令】
 1. 读文件用 read_file（可分段续读），列目录用 list_files；写文件用 write_file（原文件自动备份为 .bak）；精确修改用 edit_file（old 必须唯一匹配，防止误改）。
-2. write_file/edit_file/exec 属于危险操作：confirm 审批模式下需用户在管理后台批准后才会执行，请把要做什么说清楚；收到"用户未批准"时不要反复重试同一操作。
-3. 执行 shell 命令用 exec（默认 30 秒超时）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。
+2. write_file/edit_file/exec_command 属于受控操作：confirm 审批模式下需用户在管理后台批准后才会执行，请把要做什么说清楚；收到"用户未批准"或"被权限系统拒绝"时不要反复重试同一操作。
+3. 执行 shell 命令用 exec_command（默认 30 秒超时，可通过 timeout 参数最长调到 10 分钟）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。
 
 【长期记忆】
 1. 用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、身体状况等），或明确说"记住…"：调用 remember，content 用一句话概括（如"用户对花粉过敏"）。

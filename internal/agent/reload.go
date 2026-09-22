@@ -6,15 +6,17 @@ import (
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 
+	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
 )
 
 // ReloadProvider 热更新 LLM 供应商配置（baseURL/model）：
-//  1. 构建新 Agent（复用工具注册表与会话池），构建失败则原配置不动；
+//  1. 构建新 Agent（复用工具注册表与会话池；approver 支撑权限层 Checker），
+//     构建失败则原配置不动；
 //  2. 原子替换 Brain 内的 Agent（等待所有会话进行中的请求完成后生效）；
 //  3. 把新配置写回 config.yaml（yaml.Node 编辑，保留注释），
 //     写回失败不影响已生效的运行时配置，返回提示性错误。
-func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, baseURL, model string) error {
+func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue, baseURL, model string) error {
 	baseURL = strings.TrimSpace(baseURL)
 	model = strings.TrimSpace(model)
 	if baseURL == "" || model == "" {
@@ -26,7 +28,7 @@ func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Reg
 
 	oldURL, oldModel := cfg.Provider.BaseURL, cfg.Provider.Model
 	cfg.Provider.BaseURL, cfg.Provider.Model = baseURL, model
-	newAg, err := Build(cfg, registry, brain.Pool())
+	newAg, err := Build(cfg, registry, brain.Pool(), approver)
 	if err != nil {
 		cfg.Provider.BaseURL, cfg.Provider.Model = oldURL, oldModel
 		return err

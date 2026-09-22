@@ -1,7 +1,8 @@
-// pool.go 实现多会话池（SessionPool）：按 key 持有各自独立的对话会话，
-// key 约定 web（网页）/ repl（终端）/ ding-<chatID> / feishu-<chatID>（各通道聊天）/ task（定时任务）。
-// 会话经 sessionstore.Store（JSON 文件）持久化，重启恢复；不同 key 的会话互不交叉，
-// 同一会话内的请求由 per-key 锁串行，不同会话可并行对话。
+// pool.go 实现会话池（SessionPool）：按 key 持有对话会话，经 sessionstore.Store
+// （JSON 文件）持久化，重启恢复；同一会话内的请求由 per-key 锁串行。
+// 全局单对话：网页/终端/钉钉/飞书等所有对话渠道统一使用 SessionWeb——
+// 同一个小五、同一份上下文，从任何渠道接着聊都记得；SessionTask 供心跳/
+// 智能任务独立使用，避免内部巡检内容污染主对话。渠道来源只在轨迹 source 区分。
 package agent
 
 import (
@@ -19,11 +20,11 @@ import (
 // 会话 ID 前缀：池内会话 ID 固定为 prefix+key，保证 JSON 存储按 key 稳定落盘与恢复。
 const sessionIDPrefix = "friday-"
 
-// 常用会话 key。通道会话为 <通道名>-<chatID>（如 ding-CIDxxx），由 Dispatch 统一拼装。
+// 常用会话 key。
 const (
-	SessionWeb  = "web"
-	SessionRepl = "repl"
-	SessionTask = "task"
+	SessionWeb  = "web" // 主会话：所有对话渠道共用
+	SessionRepl = "repl" // 已废弃：REPL 并入主会话，保留常量兼容旧数据读取
+	SessionTask = "task" // 心跳/智能任务专用（独立于主对话）
 )
 
 type sessionKey struct{}

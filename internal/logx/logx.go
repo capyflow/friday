@@ -1,20 +1,33 @@
 // Package logx 提供带请求 ID 的链路日志：一次用户输入或提醒触发分配一个请求 ID
-// 挂进 context，沿途各环节（LLM、工具、TTS 等）的日志自动带上 "[req-N] " 前缀，
+// 挂进 context，沿途各环节（LLM、工具、TTS 等）的日志自动带上 "[req-xxx-N] " 前缀，
 // 终端里按前缀过滤即可看到一次交互的完整调用链。
 package logx
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sync/atomic"
 )
 
-var seq atomic.Int64
+var (
+	seq  atomic.Int64
+	boot = randBoot()
+)
 
-// NextID 生成递增的请求 ID，形如 "req-1"。
+// randBoot 生成进程启动标识：请求 ID 带上它后跨进程重启也不会重复——
+// 轨迹按 ID 持久化，重启后 ID 撞车会把新请求的事件串档进旧记录。
+func randBoot() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// NextID 生成全局唯一的请求 ID，形如 "req-1a2b3c4d-1"。
 func NextID() string {
-	return fmt.Sprintf("req-%d", seq.Add(1))
+	return fmt.Sprintf("req-%s-%d", boot, seq.Add(1))
 }
 
 type idKey struct{}
