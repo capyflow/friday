@@ -1,5 +1,6 @@
-// Package config 负责加载机器人的 YAML 配置：LLM 供应商、语音链路（ASR/唤醒词/TTS）、
-// 显示输出等。核心 agent 只依赖 Provider 与 SystemPrompt 字段。
+// Package config 负责加载 Friday 的 YAML 配置：LLM 供应商、待办/天气/自定义指令
+// 等管家能力、消息通道与工具权限。硬件输出（扬声器/屏幕/音频播放）默认关闭
+// （hardware.enabled），Friday 当前是纯软件形态的私人管家服务。
 // 语音链路代码已归档至 archive/voice-mode/（见其 README），但 ASR/Wake/TTS/VAD/Audio
 // 配置字段仍保留在此，避免恢复语音功能时改动配置结构。
 package config
@@ -13,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 是机器人整体配置。
+// Config 是 Friday 整体配置。
 type Config struct {
 	Provider     ProviderConfig    `yaml:"provider"`
 	Audio        AudioConfig       `yaml:"audio"`
@@ -22,6 +23,9 @@ type Config struct {
 	TTS          TTSConfig         `yaml:"tts"`
 	VAD          VADConfig         `yaml:"vad"`
 	Display      DisplayConfig     `yaml:"display"`
+	Hardware     HardwareConfig    `yaml:"hardware"`
+	Weather      WeatherConfig     `yaml:"weather"`
+	Custom       CustomConfig      `yaml:"custom"`
 	Chan         ChanConfig        `yaml:"chan"`
 	File         FileConfig        `yaml:"file"`
 	Admin        AdminConfig       `yaml:"admin"`
@@ -31,11 +35,45 @@ type Config struct {
 	Trace        TraceConfig       `yaml:"trace"`
 	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
 	Mcp          McpConfig         `yaml:"mcp"`
+	Persona      PersonaConfig     `yaml:"persona"`
 	SystemPrompt string            `yaml:"systemPrompt"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
+	// TodoFile 待办清单持久化 JSON 文件路径（默认 todos.json，重启自动恢复）。
+	TodoFile string `yaml:"todoFile"`
 	// SessionFile 对话会话持久化 JSON 文件路径（默认 session.json，重启不失忆）。
 	SessionFile string `yaml:"sessionFile"`
+}
+
+// HardwareConfig 控制硬件输出能力。Friday 当前与硬件分离（纯软件形态）：
+// enabled=false（默认）时不注册 speak_now / display_now / play_audio / play_effect
+// 工具，提醒经钉钉/飞书等通道推送；将来接 TTS/OLED/喇叭只需打开开关并替换实现。
+type HardwareConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// WeatherConfig 描述天气查询能力（get_weather 工具，Open-Meteo 免密钥接口）。
+type WeatherConfig struct {
+	// DefaultCity 用户未指明城市时查询的默认城市（如 "上海"）。
+	// 留空时 agent 会先询问用户所在城市，并可用 remember 记住以便下次直接查。
+	DefaultCity string `yaml:"defaultCity"`
+}
+
+// CustomCommand 是一条自定义指令：聊天中输入 trigger（或"trigger 补充内容"）
+// 时自动展开为 prompt 交给 agent 执行，相当于用户自定义的快捷功能。
+type CustomCommand struct {
+	// Name 指令名（即聊天触发词），如 "早安简报"。
+	Name string `yaml:"name"`
+	// Description 用途说明（管理后台/文档展示用，不参与匹配）。
+	Description string `yaml:"description"`
+	// Prompt 展开后的完整提示词。
+	Prompt string `yaml:"prompt"`
+}
+
+// CustomConfig 是用户自定义指令集（config.yaml custom.commands，重启生效）。
+// 更灵活的自定义能力（接外部工具/服务）走 MCP 服务器（mcp.servers，可在线配置）。
+type CustomConfig struct {
+	Commands []CustomCommand `yaml:"commands"`
 }
 
 // AdminConfig 描述管理后台（vortexv3 HTTP 服务）。
@@ -102,7 +140,7 @@ type DingtalkConfig struct {
 	ClientID string `yaml:"clientId"`
 	// ClientSecret 应用 AppSecret。
 	ClientSecret string `yaml:"clientSecret"`
-	// AllowUserIDs 发送者白名单（senderId）；为空表示允许所有用户（家用设备默认）。
+	// AllowUserIDs 发送者白名单（senderId）；为空表示允许所有联系人。
 	AllowUserIDs []string `yaml:"allowUserIDs"`
 	// PushWebhook 可选：自定义机器人 webhook 地址（群机器人"Webhook 接入"），
 	// 用于心跳等主动消息推送；留空则钉钉侧不接收主动推送。
@@ -117,7 +155,7 @@ type FeishuConfig struct {
 	AppID string `yaml:"appID"`
 	// AppSecret 企业自建应用 App Secret。
 	AppSecret string `yaml:"appSecret"`
-	// AllowOpenIDs 发送者白名单（open_id）；为空表示允许所有用户（家用设备默认）。
+	// AllowOpenIDs 发送者白名单（open_id）；为空表示允许所有联系人。
 	AllowOpenIDs []string `yaml:"allowOpenIDs"`
 	// PushChatIDs 可选：主动消息（心跳等）的投递目标 chat_id 列表
 	//（应用需已在对应群/单聊中且有发消息权限）。
@@ -206,6 +244,27 @@ type HeartbeatConfig struct {
 type McpConfig struct {
 	// Servers 声明的 MCP 服务器列表（stdio transport：本机子进程）。
 	Servers []McpServerConfig `yaml:"servers" json:"servers"`
+}
+
+// Persona 是一套机器人人设：系统提示词中"性格与语气"段的可切换文案。
+type Persona struct {
+	// ID 人设唯一标识（内置：default/playful/rigorous/warm/concise；自定义另起名）。
+	ID string `yaml:"id" json:"id"`
+	// Name 显示名（管理后台下拉展示），如 "活泼调皮"。
+	Name string `yaml:"name" json:"name"`
+	// Tagline 一句话描述（管理后台展示用）。
+	Tagline string `yaml:"tagline" json:"tagline"`
+	// Prompt 人设正文（性格与语气描述，拼入系统提示词的人设段）。
+	Prompt string `yaml:"prompt" json:"prompt"`
+}
+
+// PersonaConfig 描述人设提示词配置：Active 指定当前生效的人设，
+// Presets 为用户自定义/覆盖预设（与内置预设同 ID 时覆盖内置文案）。
+type PersonaConfig struct {
+	// Active 当前生效的人设 ID（默认 default）。
+	Active string `yaml:"active" json:"active"`
+	// Presets 自定义或覆盖预设（管理后台在线编辑，写回 config.yaml）。
+	Presets []Persona `yaml:"presets" json:"presets"`
 }
 
 // McpServerConfig 是一台 MCP 服务器的启动配置（视为可信配置，明文声明在 config.yaml；
@@ -445,6 +504,58 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 	return os.Rename(tmp, path)
 }
 
+// UpdatePersona 热更新 config.yaml 中的 persona 配置（active + 自定义预设列表）：
+// 以 yaml.Node 方式编辑（保留文件其余部分的注释与结构；persona 段不存在时追加），
+// 临时文件 + rename 原子写回。presets 允许为空（写空列表，表示清空自定义覆盖）。
+func UpdatePersona(path, active string, presets []Persona) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	personaNode := mappingValue(root, "persona")
+	if personaNode == nil || personaNode.Kind != yaml.MappingNode {
+		personaNode = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "persona"},
+			personaNode)
+	}
+
+	setMappingKey(personaNode, "active", active)
+	seq := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, p := range presets {
+		item := &yaml.Node{Kind: yaml.MappingNode}
+		strPair := func(k, v string) {
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
+		}
+		strPair("id", p.ID)
+		strPair("name", p.Name)
+		strPair("tagline", p.Tagline)
+		strPair("prompt", p.Prompt)
+		seq.Content = append(seq.Content, item)
+	}
+	setMappingNode(personaNode, "presets", seq)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
 // setMappingNode 更新或新增映射中一个键的任意值节点（保留键节点上的注释）。
 func setMappingNode(mapping *yaml.Node, key string, val *yaml.Node) {
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
@@ -546,6 +657,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.TaskFile == "" {
 		c.TaskFile = "tasks.json"
+	}
+	if c.TodoFile == "" {
+		c.TodoFile = "todos.json"
 	}
 	if c.Admin.Port == 0 {
 		c.Admin.Port = 8080

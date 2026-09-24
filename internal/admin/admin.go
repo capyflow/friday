@@ -1,4 +1,4 @@
-// Package admin 提供机器人管理后台：基于 vortexv3（Gin）的 REST API 与
+// Package admin 提供Friday 管理后台：基于 vortexv3（Gin）的 REST API 与
 // 内嵌单页 Dashboard（go:embed，无外部静态文件依赖）。
 //
 // 鉴权：账号密码登录换取会话 Cookie（7 天有效）。
@@ -8,10 +8,12 @@
 //
 // 路由一览：
 //
-//	GET    /                  应用外壳（登录 + 聊天/运行状态/自动化/记忆/设置）
+//	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
 //	POST   /api/upload        图片上传（需登录，multipart 字段 file）
 //	POST   /api/provider      热更新 LLM baseURL/model（需登录，写回 config.yaml）
+//	GET    /api/persona       人设提示词配置（当前生效 ID + 全部预设，需登录）
+//	POST   /api/persona       切换人设/保存自定义人设（需登录，热生效并写回 config.yaml）
 //	POST   /api/context/clear 清除对话上下文（需登录）
 //	GET    /admin /traces     旧地址，重定向回 /
 //	GET    /api/traces        调用轨迹列表（鉴权）
@@ -19,10 +21,14 @@
 //	GET    /api/session       会话状态（公开）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
-//	GET    /api/status        运行状态（运行时长/模型/任务与记忆数量）
+//	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
 //	GET    /api/tasks         任务列表（含下次触发时间）
 //	POST   /api/tasks         手工建任务（参数同 schedule_task 工具：in/when/every/times）
 //	DELETE /api/tasks/:id     取消任务
+//	GET    /api/todos         待办清单（未完成在前）
+//	POST   /api/todos         新增待办
+//	POST   /api/todos/:id     完成/重开待办（{"done":true|false}，缺省 true）
+//	DELETE /api/todos/:id     删除待办
 //	GET    /api/memories?q=   长期记忆列表/搜索
 //	POST   /api/memories      新增记忆
 //	DELETE /api/memories/:id  删除记忆
@@ -49,6 +55,7 @@ import (
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/web"
@@ -62,11 +69,12 @@ const (
 	sessionTTL    = 7 * 24 * time.Hour
 )
 
-// Info 是由 main 注入的机器人静态运行信息（展示用）。
+// Info 是由 main 注入的管家静态运行信息（展示用）。
 type Info struct {
 	Model      string
 	BaseURL    string
 	TaskFile   string
+	TodoFile   string
 	MemoryFile string
 }
 
@@ -77,6 +85,7 @@ type Server struct {
 	sessMu        sync.Mutex
 	sessions      map[string]time.Time // 会话 token → 过期时刻（内存态，重启需重新登录）
 	engine        *task.Engine
+	todos         *todo.Store
 	memory        *memory.Store
 	schedule      *tools.ScheduleTaskTool  // 复用 LLM 工具的时间解析与建任务逻辑
 	chat          *web.Chat                // 网页聊天（可为 nil：不挂载聊天入口）
@@ -95,6 +104,7 @@ type Options struct {
 	Port          int
 	Accounts      *AccountStore
 	Engine        *task.Engine
+	Todos         *todo.Store
 	Memory        *memory.Store
 	Info          Info
 	Chat          *web.Chat
@@ -115,6 +125,7 @@ func New(o Options) *Server {
 		accounts:      o.Accounts,
 		sessions:      make(map[string]time.Time),
 		engine:        o.Engine,
+		todos:         o.Todos,
 		memory:        o.Memory,
 		schedule:      &tools.ScheduleTaskTool{Engine: o.Engine},
 		chat:          o.Chat,
@@ -143,6 +154,10 @@ func (s *Server) Start(_ context.Context) {
 	}
 	if s.cfg != nil && s.regFn != nil && s.configPath != "" {
 		root.AddRouter([]string{http.MethodPost}, "/api/provider", s.wrap(s.handleUpdateProvider))
+		if s.chat != nil {
+			root.AddRouter([]string{http.MethodGet}, "/api/persona", s.wrap(s.handleGetPersona))
+			root.AddRouter([]string{http.MethodPost}, "/api/persona", s.wrap(s.handleSetPersona))
+		}
 	}
 	if s.heartbeatFile != "" {
 		root.AddRouter([]string{http.MethodGet}, "/api/heartbeat", s.wrap(s.handleGetHeartbeat))
@@ -173,6 +188,10 @@ func (s *Server) Start(_ context.Context) {
 	root.AddRouter([]string{http.MethodGet}, "/api/tasks", s.wrap(s.handleListTasks))
 	root.AddRouter([]string{http.MethodPost}, "/api/tasks", s.wrap(s.handleCreateTask))
 	root.AddRouter([]string{http.MethodDelete}, "/api/tasks/:id", s.wrap(s.handleCancelTask))
+	root.AddRouter([]string{http.MethodGet}, "/api/todos", s.wrap(s.handleListTodos))
+	root.AddRouter([]string{http.MethodPost}, "/api/todos", s.wrap(s.handleAddTodo))
+	root.AddRouter([]string{http.MethodPost}, "/api/todos/:id", s.wrap(s.handleCompleteTodo))
+	root.AddRouter([]string{http.MethodDelete}, "/api/todos/:id", s.wrap(s.handleDeleteTodo))
 	root.AddRouter([]string{http.MethodGet}, "/api/memories", s.wrap(s.handleListMemories))
 	root.AddRouter([]string{http.MethodPost}, "/api/memories", s.wrap(s.handleAddMemory))
 	root.AddRouter([]string{http.MethodDelete}, "/api/memories/:id", s.wrap(s.handleDeleteMemory))
@@ -348,20 +367,25 @@ func (s *Server) handleGetTrace(ctx *vhttp.Context) error {
 
 // ---------- 业务接口 ----------
 
-// handleStatus 返回机器人运行状态。
+// handleStatus 返回管家运行状态。
 func (s *Server) handleStatus(ctx *vhttp.Context) error {
 	tasks := s.engine.List()
 	byKind := map[string]int{}
 	for _, t := range tasks {
 		byKind[string(t.Kind)]++
 	}
+	var pending int
+	if s.todos != nil {
+		pending = s.todos.CountPending()
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"startedAt":     s.startedAt.Format(time.RFC3339),
 		"uptimeSeconds": int(time.Since(s.startedAt).Seconds()),
 		"provider":      map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
 		"tasks":         map[string]any{"total": len(tasks), "byKind": byKind},
+		"todos":         map[string]any{"pending": pending},
 		"memories":      s.memory.Count(),
-		"files":         map[string]string{"tasks": s.info.TaskFile, "memories": s.info.MemoryFile},
+		"files":         map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryFile},
 	})
 }
 
@@ -427,4 +451,62 @@ func (s *Server) handleDeleteMemory(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到记忆 #" + id})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除记忆 #" + id})
+}
+
+// handleListTodos 待办清单（未完成在前）。
+func (s *Server) handleListTodos(ctx *vhttp.Context) error {
+	if s.todos == nil {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": []todo.Todo{}})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": s.todos.List()})
+}
+
+// handleAddTodo 新增一条待办。
+func (s *Server) handleAddTodo(ctx *vhttp.Context) error {
+	if s.todos == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+	}
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	td, err := s.todos.Add(req.Text)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todo": td})
+}
+
+// handleCompleteTodo 完成/重开一条待办（body {"done":false} 表示重开，缺省完成）。
+func (s *Server) handleCompleteTodo(ctx *vhttp.Context) error {
+	if s.todos == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+	}
+	done := true
+	var req struct {
+		Done *bool `json:"done"`
+	}
+	if err := ctx.UnmarshalBody(&req); err == nil && req.Done != nil {
+		done = *req.Done
+	}
+	id := ctx.GinContext().Param("id")
+	td, ok := s.todos.Complete(id, done)
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todo": td})
+}
+
+// handleDeleteTodo 删除一条待办。
+func (s *Server) handleDeleteTodo(ctx *vhttp.Context) error {
+	if s.todos == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+	}
+	id := ctx.GinContext().Param("id")
+	if !s.todos.Delete(id) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除待办 #" + id})
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
+	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/trace"
@@ -233,6 +234,73 @@ func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已重连 " + name})
+}
+
+// handleGetPersona 返回人设提示词配置：当前生效 ID + 全部可用预设
+// （内置在前、自定义在后；自定义覆盖内置时替换同 ID 文案并打标记）。
+// builtin=true 表示该 ID 有内置版本（覆盖后可"恢复内置"）；
+// custom=true 表示该条是自定义数据（删除不影响内置原文）。
+func (s *Server) handleGetPersona(ctx *vhttp.Context) error {
+	customByID := map[string]config.Persona{}
+	for _, p := range s.cfg.Persona.Presets {
+		customByID[p.ID] = p
+	}
+	builtinIDs := map[string]bool{}
+	for _, p := range agent.BuiltinPersonas() {
+		builtinIDs[p.ID] = true
+	}
+	type item struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Tagline string `json:"tagline"`
+		Prompt  string `json:"prompt"`
+		Builtin bool   `json:"builtin"`
+		Custom  bool   `json:"custom"`
+	}
+	out := make([]item, 0, len(builtinIDs)+len(customByID))
+	for _, p := range agent.BuiltinPersonas() {
+		if cp, ok := customByID[p.ID]; ok {
+			out = append(out, item{cp.ID, cp.Name, cp.Tagline, cp.Prompt, true, true})
+			continue
+		}
+		out = append(out, item{p.ID, p.Name, p.Tagline, p.Prompt, true, false})
+	}
+	for _, p := range s.cfg.Persona.Presets {
+		if builtinIDs[p.ID] {
+			continue // 覆盖内置的已在上面输出
+		}
+		out = append(out, item{p.ID, p.Name, p.Tagline, p.Prompt, false, true})
+	}
+	active := s.cfg.Persona.Active
+	if active == "" {
+		active = "default"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"active": active, "presets": out,
+	})
+}
+
+// handleSetPersona 切换人设/保存自定义人设（经 agent.ReloadPersona 热生效）：
+// body {"active": "playful", "presets": [...]}——presets 可省略（仅切换），
+// 提供则整体替换自定义预设（同 ID 覆盖内置文案，新 ID 即自定义人设）。
+func (s *Server) handleSetPersona(ctx *vhttp.Context) error {
+	var req struct {
+		Active  string           `json:"active"`
+		Presets []config.Persona `json:"presets"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "聊天服务未启用，人设无法热生效"})
+	}
+	if err := agent.ReloadPersona(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver,
+		req.Active, req.Presets); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
+		"message": "人设已切换并热生效（对话上下文保持连续），已写回 config.yaml",
+	})
 }
 
 // handleUsage 返回 token 用量账本：按天倒序明细 + 总量。

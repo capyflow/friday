@@ -8,8 +8,8 @@ provider:
   temperature: 0.7
   maxTokens: 1024
 
-# —— 以下 audio/asr/wake/tts/vad 属于已归档的语音链路（archive/voice-mode/），
-#    字段仍保留以便恢复；文本/网页聊天模式下无需关心这些配置。——
+# —— 以下 audio/asr/wake/tts/vad/display 属于硬件相关配置（语音链路已归档至
+#    archive/voice-mode/，字段保留以便恢复）；纯软件形态无需关心。——
 audio:
   inputDevice: ""              # 麦克风设备，留空自动选择
   outputDevice: ""             # 喇叭设备，留空自动选择
@@ -42,16 +42,62 @@ vad:
   # modelPath 留空或文件缺失时，录音退回固定时长（asr 收不到断句信号）
 
 display:
-  driver: console              # console=终端显示(开发)；后续可换 oled/st7789
+  driver: console              # console=终端显示；后续可接 oled/st7789 等硬件屏
 
-# systemPrompt: ""            # 可选，覆盖默认系统提示词
+# 硬件输出（扬声器/屏幕/音频播放）：Friday 当前与硬件分离（纯软件个人管家），默认关闭。
+# 关闭时不注册 speak_now / display_now / play_audio / play_effect 工具，
+# 任务到点的提醒经钉钉/飞书等通知渠道投递（见下方 chan 段的 pushWebhook/pushChatIDs）；
+# 打开即恢复本地播报/显示能力（当前为 console 实现，接 TTS/OLED/喇叭后替换实现）。
+hardware:
+  enabled: false
+
+# 天气查询（get_weather 工具，Open-Meteo 免密钥接口，支持全球城市）：
+# 用户没指明城市时用 defaultCity 查询；留空则 agent 会先询问用户所在城市，
+# 并可用长期记忆记住，之后无需再问。
+weather:
+  defaultCity: ""              # 如 "上海"
+
+# 用户自定义指令（聊天快捷功能）：聊天中输入 name（或"name 补充内容"）自动展开为
+# prompt 交给 agent，网页/终端/钉钉/飞书全入口生效，重启生效。
+# 更灵活的自定义能力（接外部工具/服务）走 MCP 服务器（见下，可在线配置热生效）。
+# custom:
+#   commands:
+#     - name: 早安简报
+#       description: 日期 + 天气 + 今日待办
+#       prompt: |
+#         请给我一份早安简报：先说今天的日期与星期，然后查默认城市的天气并提醒带伞与否，
+#         最后把待办清单里未完成的事项汇报一遍。
+#     - name: 晚安
+#       description: 收尾问候 + 明日提醒
+#       prompt: |
+#         说句晚安，并简要列出明天的定时任务和待办清单，让我安心休息。
+
+# 人设提示词：多套可切换的"性格与语气"（内置：default 贴心管家 / playful 活泼调皮 /
+# rigorous 严谨可靠 / warm 温柔陪伴 / concise 简洁高效）。人设只改变小五怎么说话，
+# 能力与工具规则不受影响，且所有人设都保留人文关怀底线。
+# 管理后台"设置 → 人设提示词"可在线切换/编辑/新增自定义人设，保存即热生效并写回此处。
+# persona:
+#   active: default            # 当前生效的人设 ID
+#   presets: []                # 自定义/覆盖预设（同 ID 覆盖内置文案，新 ID 即自定义人设）
+#     - id: grumpy
+#       name: 暴躁老哥
+#       tagline: 语气很冲但活儿漂亮
+#       prompt: |
+#         - 语气很冲，吐槽归吐槽，交代的事一件不落。
+#         - 关心人的方式是把事办妥，不煽情。
+
+# systemPrompt: ""            # 可选，覆盖默认系统提示词（优先级高于 persona）
 
 # 任务持久化文件：定时任务落到本地 JSON（增删/触发即写回），重启自动恢复；
 # 停机期间过期的单次任务会在启动时立即补触发一次。
 taskFile: tasks.json
 
-# HTTP 服务（vortexv3）：默认开启，打开 http://<设备IP>:8080/ 登录后进入统一界面
-#（聊天 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
+# 待办清单持久化：add_todo / list_todos 等工具与管理后台"待办"页共用，
+# 增删改即写回，重启不丢。
+todoFile: todos.json
+
+# HTTP 服务（vortexv3）：默认开启，打开 http://localhost:8080/ 登录后进入统一界面
+#（聊天 / 待办 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
 # 账号默认 admin/admin（登录页仅登录，不提供改号），建议通过下面字段或环境变量预置。
 admin:
   enabled: true               # 写 false 关闭后台
@@ -65,7 +111,7 @@ admin:
 # 钉钉通道：让小五住进你的钉钉（Stream 模式，WebSocket 接入，无需公网 IP）。
 # 接入步骤：https://open-dev.dingtalk.com 创建企业内部应用 → 消息接收模式选"Stream 模式"
 # → 开通"企业内部机器人"能力 → 把 AppKey/AppSecret 填到下面 → 重启服务。
-# allowUserIDs 为发送者白名单（钉钉 senderId），留空 = 允许所有联系人（家用设备默认）。
+# allowUserIDs 为发送者白名单（钉钉 senderId），留空 = 允许所有联系人。
 # pushWebhook 可选：自定义机器人 webhook（群机器人 Webhook 接入地址），
 # 用于心跳/智能任务输出主动推送；留空则钉钉侧不接收主动推送。
 # chan:

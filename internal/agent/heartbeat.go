@@ -28,7 +28,7 @@ type Notifier interface {
 	Notify(ctx context.Context, text string) error
 }
 
-// ConsoleNotifier 本地输出：播报 + 屏幕显示（开发环境 console，接硬件后为 TTS/OLED）。
+// ConsoleNotifier 本地输出：播报 + 屏幕显示（硬件输出开启时生效，当前为 console 实现）。
 type ConsoleNotifier struct {
 	Speaker   output.Speaker
 	Displayer output.Displayer
@@ -94,7 +94,7 @@ func (r *TaskRunner) Run(ctx context.Context, t task.Task) {
 // 心跳任务额外附上 HEARTBEAT.md 检查清单。
 func (r *TaskRunner) buildPrompt(t task.Task) string {
 	var b strings.Builder
-	b.WriteString("你是在家庭智能硬件上的助手小五，现在执行一条到点的定时智能任务，请自主决策并行动（可以像平时一样使用你的全部工具）。\n")
+	b.WriteString("你是用户的私人生活管家小五（Friday），现在执行一条到点的定时智能任务，请自主决策并行动（可以像平时一样使用你的全部工具）。\n")
 	b.WriteString(fmt.Sprintf("当前时间：%s\n", r.now().Format("2006-01-02 15:04:05 Monday")))
 	b.WriteString("任务指令：" + t.Text + "\n")
 	if t.Heartbeat {

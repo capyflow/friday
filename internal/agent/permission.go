@@ -34,6 +34,8 @@ const execToolName = vxexec.ToolName
 // 否则该工具的调用会落入 confirm 审批流程，网页会频繁弹审批卡片。
 var passThroughTools = []string{
 	"schedule_task", "list_tasks", "cancel_task",
+	"add_todo", "list_todos", "complete_todo", "delete_todo",
+	"get_weather",
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",
 	"read_file", "list_files", "write_file", "edit_file",

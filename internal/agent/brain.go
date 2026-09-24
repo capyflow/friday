@@ -14,6 +14,8 @@ import (
 	vxagent "github.com/capyflow/vortexagent/agent"
 	"github.com/capyflow/vortexagent/agent/sessionstore"
 	"github.com/capyflow/vortexagent/llm"
+
+	"github.com/capyflow/friday/internal/config"
 )
 
 // Brain 持有 Agent 与会话池，按会话 key 串行化提问。
@@ -23,6 +25,9 @@ type Brain struct {
 	rw    sync.RWMutex
 	agent *vxagent.Agent
 	pool  *SessionPool
+
+	customMu sync.RWMutex          // 保护 custom（自定义指令表，SetCustom 可运行期替换）
+	custom   []config.CustomCommand // 自定义指令：触发词 → 提示词展开
 }
 
 // NewBrain 创建对话大脑。pool 为会话池（含持久化存储），由调用方构建。
@@ -39,6 +44,9 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	keyMu := b.pool.Lock(key)
 	keyMu.Lock()
 	defer keyMu.Unlock()
+
+	// 自定义指令：命中触发词先展开为提示词（网页/终端/钉钉/飞书全入口生效）。
+	text = b.expandCustom(text)
 
 	b.rw.RLock()
 	ag := b.agent

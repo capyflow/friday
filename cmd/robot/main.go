@@ -1,4 +1,4 @@
-// Command robot 是陪伴智能体机器人的入口：加载配置、组装 vortexagent Agent、
+// Command robot 是 Friday 个人管家的入口：加载配置、组装 vortexagent Agent、
 // 启动任务引擎（单次/多次/循环/智能任务），以文本 REPL、网页聊天、钉钉、飞书
 // 多种方式接收用户指令——全局单对话（同一份上下文，SessionPool 落盘重启不失忆），
 // 共用同一个对话大脑（Brain）。工具调用经 vortexagent 全局权限层把关：
@@ -16,7 +16,7 @@
 //
 // 启动后：
 //   - 终端 REPL 直接输入对话，内置命令 /help /tasks /cancel <id> /self-test /quit
-//   - 网页聊天 http://<设备IP>:8080/chat（端口同管理后台）
+//   - 网页聊天 http://localhost:8080/（端口同管理后台）
 package main
 
 import (
@@ -48,6 +48,7 @@ import (
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/usage"
 	"github.com/capyflow/friday/internal/web"
@@ -73,9 +74,30 @@ func main() {
 	// token 用量账本：按天累计，落盘 token-usage.json，重启恢复。
 	usage.Init("token-usage.json")
 
-	displayer := output.NewConsoleDisplayer(os.Stdout)
-	speaker := output.NewConsoleSpeaker(os.Stdout)
-	player := audio.NewConsolePlayer(os.Stdout)
+	// 硬件输出（扬声器/屏幕/音频播放）：Friday 当前与硬件分离（纯软件管家），
+	// 默认关闭（config hardware.enabled）。关闭时 speak_now/display_now 等工具不注册，
+	// 任务到点的提醒经下方通知渠道（钉钉/飞书）投递；打开开关即恢复本地播报/显示。
+	var speaker output.Speaker
+	var displayer output.Displayer
+	var player audio.Player
+	if cfg.Hardware.Enabled {
+		speaker = output.NewConsoleSpeaker(os.Stdout)
+		displayer = output.NewConsoleDisplayer(os.Stdout)
+		player = audio.NewConsolePlayer(os.Stdout)
+		log.Printf("[硬件输出] 已开启（console 实现，接 TTS/OLED/喇叭后替换实现）")
+	} else {
+		log.Printf("[硬件输出] 已关闭（纯软件形态），提醒经通知渠道投递")
+	}
+
+	// 通知渠道：普通任务到点与智能任务 [推送] 的投递目标。
+	// console 负责本地可见（硬件输出关闭时自动降级为空实现）；钉钉/飞书按配置挂载。
+	notifiers := []robotagent.Notifier{&robotagent.ConsoleNotifier{Speaker: speaker, Displayer: displayer}}
+	if cfg.Chan.Dingtalk.PushWebhook != "" {
+		notifiers = append(notifiers, &dingtalk.WebhookNotifier{Webhook: cfg.Chan.Dingtalk.PushWebhook})
+	}
+	if cfg.Chan.Feishu.Enabled && cfg.Chan.Feishu.AppID != "" && len(cfg.Chan.Feishu.PushChatIDs) > 0 {
+		notifiers = append(notifiers, feishu.NewPushNotifier(cfg.Chan.Feishu.AppID, cfg.Chan.Feishu.AppSecret, cfg.Chan.Feishu.PushChatIDs))
+	}
 
 	// 危险操作审批队列：exec_command 经全局权限层（白名单/黑名单/模式）桥接到
 	// 此处审批；write_file/edit_file 在 confirm 模式直接入队。
@@ -85,7 +107,7 @@ func main() {
 	// 智能任务运行器在 Brain 就绪后赋值（引擎回调经闭包引用）。
 	var runner *robotagent.TaskRunner
 	eng := task.NewEngineFile(func(t task.Task) {
-		// 每次任务触发视为独立请求：分配请求 ID，播报/显示日志串在同一条链路上。
+		// 每次任务触发视为独立请求：分配请求 ID，投递日志串在同一条链路上。
 		rctx := logx.WithID(ctx, logx.NextID())
 		id := logx.IDFrom(rctx)
 		trace.Begin(id, "task", robotagent.SessionTask, t.Text)
@@ -98,17 +120,28 @@ func main() {
 			return
 		}
 		logx.Printf(rctx, "[任务] 到点：%s", t.Text)
-		if err := speaker.Speak(rctx, t.Text); err != nil {
-			logx.Printf(rctx, "播报失败: %v", err)
-			trace.Record(rctx, "error", "播报失败：%v", err)
+		delivered := 0
+		for _, n := range notifiers {
+			if err := n.Notify(rctx, t.Text); err != nil {
+				logx.Printf(rctx, "[任务] 投递到 %s 失败: %v", n.Name(), err)
+				trace.Record(rctx, "error", "投递到 %s 失败：%v", n.Name(), err)
+				continue
+			}
+			delivered++
 		}
-		if err := displayer.Display(rctx, t.Text); err != nil {
+		if delivered > 0 {
+			trace.Record(rctx, "task", "提醒已投递到 %d 个通知渠道", delivered)
+		} else {
+			trace.Record(rctx, "task", "无可用通知渠道（未开硬件输出且未配置钉钉/飞书推送），提醒仅记录日志")
 		}
-		trace.Record(rctx, "task", "已自动播报并显示提醒内容")
 		trace.End(id, "")
 	}, cfg.TaskFile)
 	defer eng.Close()
 	log.Printf("[任务] 持久化文件：%s（重启自动恢复）", cfg.TaskFile)
+
+	// 待办清单：JSON 落盘，重启不丢；agent 工具与管理后台"待办"页共用。
+	todos := todo.NewStore(cfg.TodoFile)
+	log.Printf("[待办] 持久化文件：%s", cfg.TodoFile)
 
 	// 会话持久化：JSON 落盘，重启不失忆；池按 key（web/repl/ding-*/feishu-*/task）隔离。
 	store, err := sessionstore.NewJSON(cfg.SessionFile)
@@ -131,6 +164,7 @@ func main() {
 	}
 	deps := robotagent.Deps{
 		Engine:    eng,
+		Todos:     todos,
 		Memory:    memory.NewStore(cfg.Memory.File),
 		Speaker:   speaker,
 		Displayer: displayer,
@@ -174,6 +208,10 @@ func main() {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
 	brain = robotagent.NewBrain(ag, pool)
+	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
+	if n := len(cfg.Custom.Commands); n > 0 {
+		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)
+	}
 	regMu.Lock()
 	currentReg = registry
 	regMu.Unlock()
@@ -196,14 +234,7 @@ func main() {
 	defer mcpMgr.Close()
 
 	// 智能任务运行器：到点把指令（心跳任务附 HEARTBEAT.md 清单）交给 agent 决策，
-	// 输出按 [推送]/[静默] 协议投递。
-	notifiers := []robotagent.Notifier{&robotagent.ConsoleNotifier{Speaker: speaker, Displayer: displayer}}
-	if cfg.Chan.Dingtalk.PushWebhook != "" {
-		notifiers = append(notifiers, &dingtalk.WebhookNotifier{Webhook: cfg.Chan.Dingtalk.PushWebhook})
-	}
-	if cfg.Chan.Feishu.Enabled && cfg.Chan.Feishu.AppID != "" && len(cfg.Chan.Feishu.PushChatIDs) > 0 {
-		notifiers = append(notifiers, feishu.NewPushNotifier(cfg.Chan.Feishu.AppID, cfg.Chan.Feishu.AppSecret, cfg.Chan.Feishu.PushChatIDs))
-	}
+	// 输出按 [推送]/[静默] 协议投递到上方通知渠道。
 	runner = &robotagent.TaskRunner{
 		Ask:           brain,
 		HeartbeatFile: cfg.Heartbeat.File,
@@ -259,8 +290,9 @@ func main() {
 			Port:          cfg.Admin.Port,
 			Accounts:      accounts,
 			Engine:        eng,
+			Todos:         todos,
 			Memory:        deps.Memory,
-			Info:          admin.Info{Model: cfg.Provider.Model, BaseURL: cfg.Provider.BaseURL, TaskFile: cfg.TaskFile, MemoryFile: cfg.Memory.File},
+			Info:          admin.Info{Model: cfg.Provider.Model, BaseURL: cfg.Provider.BaseURL, TaskFile: cfg.TaskFile, TodoFile: cfg.TodoFile, MemoryFile: cfg.Memory.File},
 			Chat:          chat,
 			Cfg:           cfg,
 			ConfigPath:    *cfgPath,
@@ -334,8 +366,8 @@ func main() {
 		fmt.Println()
 	}
 
-	fmt.Println("🤖 小五已启动（provider=" + cfg.Provider.Model + "）")
-	fmt.Println("输入指令，如：10分钟后提示我该敷面膜了。/help 查看命令。")
+	fmt.Println("🤖 小五（Friday 个人管家）已启动（provider=" + cfg.Provider.Model + "）")
+	fmt.Println("对我说\"10分钟后提醒我喝水\"\"记个待办：买牛奶\"\"上海天气\"，或 /help 查看命令。")
 	// stdin 在独立 goroutine 中读取：主循环 select 监听 ctx，
 	// 保证 SIGTERM/Ctrl+C 时即使阻塞在等待输入也能立即退出（并触发 Close 快照）。
 	input := make(chan string)
@@ -419,11 +451,11 @@ func printTasks(eng *task.Engine) {
 	}
 }
 
-// runSelfTest 不依赖 LLM 演示"定时任务 → 到点播报+显示"完整链路。
+// runSelfTest 不依赖 LLM 演示"定时任务 → 到点投递提醒"完整链路。
 func runSelfTest(eng *task.Engine) {
 	const delay = 5 * time.Second
-	fmt.Printf("自检：5 秒后触发任务“该敷面膜了”……（观察 [TTS]/[屏幕] 输出）\n")
-	tsk, err := eng.Schedule(task.Task{Kind: task.KindOnce, When: time.Now().Add(delay), Text: "该敷面膜了"})
+	fmt.Printf("自检：5 秒后触发任务\"该浇水了\"……（观察日志中的到点投递）\n")
+	tsk, err := eng.Schedule(task.Task{Kind: task.KindOnce, When: time.Now().Add(delay), Text: "该浇水了"})
 	if err != nil {
 		log.Printf("自检失败: %v", err)
 		return
@@ -433,7 +465,7 @@ func runSelfTest(eng *task.Engine) {
 
 func printHelp() {
 	fmt.Println(`命令：
-  <任意指令>      提问，如"10分钟后提示我该敷面膜了"
+  <任意指令>      提问或安排事项，如"10分钟后提醒我喝水""记个待办：买牛奶""上海天气"
   /tasks          查看待触发任务（单次/多次/循环/智能）
   /cancel <id>    取消任务
   /self-test      演示定时任务链路（无需 LLM）

@@ -1,4 +1,4 @@
-# friday（陪伴机器人"小五"）镜像：
+# friday（个人管家"小五"）镜像：
 #   构建：docker build -t friday .
 #   运行：docker run -d --name friday \
 #           -p 8080:8080 \

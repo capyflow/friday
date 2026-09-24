@@ -320,13 +320,14 @@
   <symbol id="i-reset" viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
   <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></symbol>
+  <symbol id="i-todo" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
 </svg>
 
 <!-- 登录视图 -->
 <div id="authView">
   <div class="auth-box">
     <h1>小五</h1>
-    <div class="sub">你的专属陪伴助手</div>
+    <div class="sub">你的私人生活管家</div>
     <form id="loginForm">
       <div class="field">
         <label class="sr-only" for="loginUser">用户名</label>
@@ -351,6 +352,7 @@
       <button class="nav-item" data-view="status"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-status"/></svg><span class="txt">运行状态</span></button>
       <button class="nav-item" data-view="trace"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-trace"/></svg><span class="txt">调用轨迹</span></button>
       <button class="nav-item" data-view="auto"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-auto"/></svg><span class="txt">自动化</span></button>
+      <button class="nav-item" data-view="todo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-todo"/></svg><span class="txt">待办</span></button>
       <button class="nav-item" data-view="mem"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-mem"/></svg><span class="txt">记忆</span></button>
       <button class="nav-item" data-view="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-settings"/></svg><span class="txt">设置</span></button>
     </nav>
@@ -378,7 +380,7 @@
       </div>
       <div id="chatScroller">
         <div id="msgList">
-          <div class="chat-hint">你好呀，我是小五 😊 试试对我说"10分钟后提醒我喝水"或"每天早上8点叫我起床"</div>
+          <div class="chat-hint">你好呀，我是小五 😊 试试对我说"10分钟后提醒我喝水"、"记个待办：买牛奶"或"上海天气怎么样"</div>
         </div>
       </div>
       <div id="chatFoot">
@@ -435,6 +437,25 @@
       </div>
     </section>
 
+    <!-- 待办 -->
+    <section class="view" id="view-todo" hidden>
+      <div class="view-inner">
+        <h2>待办 <span class="count" id="todoCount"></span></h2>
+        <div class="panel">
+          <div class="msg" id="todoMsg"></div>
+          <form id="todoForm">
+            <input class="w1" id="tdText" placeholder="新增待办，如：周三前交房租" required>
+            <button class="btn primary" type="submit">添加</button>
+          </form>
+          <table>
+            <thead><tr><th style="width:36px"></th><th>内容</th><th>记录于</th><th></th></tr></thead>
+            <tbody id="todoRows"></tbody>
+          </table>
+          <div class="empty" id="todoEmpty" hidden>待办清单是空的，对小五说"记个待办：买牛奶"，或直接在上方添加</div>
+        </div>
+      </div>
+    </section>
+
     <!-- 记忆 -->
     <section class="view" id="view-mem" hidden>
       <div class="view-inner">
@@ -469,6 +490,31 @@
           <div class="msg" id="provMsg"></div>
           <div class="set-note">保存后立即热生效（无需重启，对话上下文保持连续），并写回 config.yaml。
             API 密钥沿用启动时的环境变量（apiKeyEnv 不可在线修改）。</div>
+        </div>
+        <div class="panel">
+          <h2 style="font-size:14px">人设提示词</h2>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+            <select id="personaSelect"
+              style="padding:7px 10px; border:1px solid rgba(148,163,184,.4); border-radius:10px;
+                     background:transparent; color:inherit; font-size:13px"></select>
+            <span class="meta" id="personaTagline"></span>
+            <span class="meta" id="personaMark" hidden>已自定义</span>
+          </div>
+          <textarea id="personaPrompt" rows="6"
+            style="width:100%; font-family:inherit; font-size:13px; padding:10px; margin-top:10px;
+                   border:1px solid rgba(148,163,184,.4); border-radius:10px;
+                   background:transparent; color:inherit; box-sizing:border-box"
+            placeholder="人设正文：描述这个性格下小五怎么说话、怎么关心人"></textarea>
+          <div style="display:flex; gap:10px; margin-top:8px; align-items:center; flex-wrap:wrap">
+            <button id="btnPersonaApply" class="btn primary" type="button">应用并热生效</button>
+            <button id="btnPersonaAdd" class="btn" type="button">＋ 新增自定义</button>
+            <button id="btnPersonaRevert" class="btn" type="button" hidden>恢复内置</button>
+            <button id="btnPersonaDelete" class="btn danger" type="button" hidden>删除自定义</button>
+          </div>
+          <div class="msg" id="personaMsg"></div>
+          <div class="set-note">人设只改变小五的性格与语气，能力和工具规则不受影响；所有人设都保留
+            <b>人文关怀</b>底线（深夜关怀、天气添衣带伞、低落时的安慰）。应用后立即热生效（无需重启，
+            对话上下文保持连续）并写回 config.yaml。内置人设的提示词改动会保存为同名自定义覆盖，可一键恢复内置。</div>
         </div>
         <div class="panel">
           <h2 style="font-size:14px">会话管理</h2>
@@ -653,7 +699,7 @@ function showApp(username) {
   $('authView').hidden = true;
   $('app').hidden = false;
   showView('chat');
-  loadStatus(); loadTasks(); loadMemories(); loadChatSessions(); loadHistory();
+  loadStatus(); loadTasks(); loadTodos(); loadMemories(); loadChatSessions(); loadHistory();
   pollApprovals(); // 审批卡片轮询（confirm 模式下危险操作需在此批准）
 }
 
@@ -669,7 +715,7 @@ async function loadHistory() {
   } catch (e) { /* 拉取失败按空会话处理 */ }
   msgList.innerHTML = '';
   if (!messages.length) {
-    msgList.innerHTML = '<div class="chat-hint">你好呀，我是小五 😊 试试对我说"10分钟后提醒我喝水"或"每天早上8点叫我起床"</div>';
+    msgList.innerHTML = '<div class="chat-hint">你好呀，我是小五 😊 试试对我说"10分钟后提醒我喝水"、"记个待办：买牛奶"或"上海天气怎么样"</div>';
     return;
   }
   for (const m of messages) bubble(m.role === 'user' ? 'user' : 'bot', m.text);
@@ -709,6 +755,104 @@ $('btnHbSave').addEventListener('click', async () => {
     await api('POST', '/api/heartbeat', { content: $('hbContent').value });
     showMsg('hbMsg', '已保存，下轮心跳生效', true);
   } catch (e) { showMsg('hbMsg', e.message, false); }
+});
+
+/* ---------- 人设提示词（多套性格切换 + 自定义） ---------- */
+let personaPresets = [];
+let personaActive = '';
+async function loadPersona(selectId) {
+  try {
+    const r = await api('GET', '/api/persona');
+    personaPresets = r.presets || [];
+    personaActive = r.active || 'default';
+    renderPersonaSelect();
+    if (selectId && personaPresets.some(p => p.id === selectId)) {
+      $('personaSelect').value = selectId;
+    }
+    fillPersonaPrompt();
+    return true;
+  } catch (e) { showMsg('personaMsg', e.message, false); return false; }
+}
+function renderPersonaSelect() {
+  $('personaSelect').innerHTML = personaPresets.map(p =>
+    '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
+  $('personaSelect').value = personaPresets.some(p => p.id === personaActive)
+    ? personaActive : 'default';
+}
+function curPersona() {
+  return personaPresets.find(p => p.id === $('personaSelect').value) || null;
+}
+function fillPersonaPrompt() {
+  const p = curPersona();
+  $('personaTagline').textContent = p ? (p.tagline || '') : '';
+  $('personaPrompt').value = p ? (p.prompt || '') : '';
+  $('personaMark').hidden = !(p && p.custom);
+  $('btnPersonaRevert').hidden = !(p && p.builtin && p.custom); // 覆盖版才可恢复内置
+  $('btnPersonaDelete').hidden = !(p && !p.builtin);            // 纯自定义才可删除
+}
+$('personaSelect').addEventListener('change', fillPersonaPrompt);
+
+/* 收集当前全部自定义预设（发后端整体替换用） */
+function personaCustoms() {
+  return personaPresets.filter(x => x.custom)
+    .map(x => ({ id: x.id, name: x.name, tagline: x.tagline || '', prompt: x.prompt || '' }));
+}
+/* 应用：把下拉选中项设为生效人设；正文有改动时一并保存为该人设的自定义覆盖 */
+$('btnPersonaApply').addEventListener('click', async () => {
+  const p = curPersona();
+  if (!p) return;
+  const promptText = $('personaPrompt').value.trim();
+  if (!promptText) { showMsg('personaMsg', '提示词正文不能为空', false); return; }
+  const body = { active: p.id };
+  if (promptText !== (p.prompt || '').trim()) {
+    const customs = personaCustoms();
+    const hit = customs.find(x => x.id === p.id);
+    if (hit) hit.prompt = promptText;
+    else customs.push({ id: p.id, name: p.name, tagline: p.tagline || '', prompt: promptText });
+    body.presets = customs;
+  }
+  try {
+    const r = await api('POST', '/api/persona', body);
+    showMsg('personaMsg', r.message || '已应用', true);
+    await loadPersona(p.id);
+  } catch (e) { showMsg('personaMsg', e.message, false); }
+});
+/* 新增自定义人设：立即落一份空预设防丢失，填好正文后点"应用并热生效" */
+$('btnPersonaAdd').addEventListener('click', async () => {
+  const name = (window.prompt('给新自定义人设起个名字（如：毒舌损友）') || '').trim();
+  if (!name) return;
+  const customs = personaCustoms();
+  customs.push({ id: 'custom-' + Date.now(), name: name, tagline: '自定义人设', prompt: '' });
+  try {
+    await api('POST', '/api/persona', { active: personaActive, presets: customs });
+    showMsg('personaMsg', '已创建「' + esc(name) + '」，写好提示词后点"应用并热生效"', true);
+    await loadPersona(customs[customs.length - 1].id);
+  } catch (e) { showMsg('personaMsg', e.message, false); }
+});
+/* 恢复内置：丢弃对内置人设的自定义覆盖 */
+$('btnPersonaRevert').addEventListener('click', async () => {
+  const p = curPersona();
+  if (!p || !p.builtin || !p.custom) return;
+  if (!confirm('恢复「' + p.name + '」为内置提示词？当前自定义文案将被丢弃。')) return;
+  try {
+    const r = await api('POST', '/api/persona',
+      { active: personaActive, presets: personaCustoms().filter(x => x.id !== p.id) });
+    showMsg('personaMsg', r.message || '已恢复内置', true);
+    await loadPersona(p.id);
+  } catch (e) { showMsg('personaMsg', e.message, false); }
+});
+/* 删除纯自定义人设；删除的是当前生效人设时回退到默认 */
+$('btnPersonaDelete').addEventListener('click', async () => {
+  const p = curPersona();
+  if (!p || p.builtin) return;
+  if (!confirm('删除自定义人设「' + p.name + '」？')) return;
+  const next = personaActive === p.id ? 'default' : personaActive;
+  try {
+    const r = await api('POST', '/api/persona',
+      { active: next, presets: personaCustoms().filter(x => x.id !== p.id) });
+    showMsg('personaMsg', r.message || '已删除', true);
+    await loadPersona(next);
+  } catch (e) { showMsg('personaMsg', e.message, false); }
 });
 
 /* ---------- MCP 服务器（在线配置 + 状态） ---------- */
@@ -871,9 +1015,9 @@ $('btnLogout2').addEventListener('click', logout);
 
 /* ---------- 视图切换 ---------- */
 let currentView = 'chat';
-const viewLoaders = { status: loadStatus, auto: loadTasks, mem: loadMemories,
+const viewLoaders = { status: loadStatus, auto: loadTasks, todo: loadTodos, mem: loadMemories,
   trace: refreshTraceList,
-  settings: () => { fillSettings(); loadSessions(); loadHeartbeat(); loadMCP(); } };
+  settings: () => { fillSettings(); loadSessions(); loadHeartbeat(); loadMCP(); loadPersona(); } };
 function showView(name) {
   currentView = name;
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
@@ -897,6 +1041,7 @@ async function loadStatus() {
     const cards = [
       ['LLM 模型', st.provider.model],
       ['待触发任务', st.tasks.total],
+      ['待办未完成', st.todos ? st.todos.pending : 0],
       ['长期记忆', st.memories],
       ['已运行', upStr(st.uptimeSeconds)],
       ['服务地址', location.host],
@@ -946,6 +1091,7 @@ function fillSettings() {
     ['LLM 模型', st && st.provider.model],
     ['API 地址', st && st.provider.baseURL],
     ['任务文件', st && st.files.tasks],
+    ['待办文件', st && st.files.todos],
     ['记忆文件', st && st.files.memories],
     ['服务地址', location.host],
   ];
@@ -1023,6 +1169,41 @@ async function loadTasks() {
         + '</tr>';
     }).join('');
   } catch (e) { toast('任务加载失败：' + e.message, true); }
+}
+
+/* ---------- 待办 ---------- */
+$('todoForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/todos', { text: $('tdText').value.trim() });
+    $('tdText').value = '';
+    loadTodos(); loadStatus();
+  } catch (err) { showMsg('todoMsg', err.message, false); }
+});
+async function toggleTodo(id, done) {
+  try { await api('POST', '/api/todos/' + id, { done }); loadTodos(); loadStatus(); }
+  catch (e) { showMsg('todoMsg', e.message, false); }
+}
+async function deleteTodo(id) {
+  if (!confirm('确定删除待办 ' + id + '？')) return;
+  try { await api('DELETE', '/api/todos/' + id); toast('已删除'); loadTodos(); loadStatus(); }
+  catch (e) { showMsg('todoMsg', e.message, false); }
+}
+async function loadTodos() {
+  try {
+    const r = await api('GET', '/api/todos');
+    const todos = r.todos || [];
+    const pending = todos.filter(t => !t.done).length;
+    $('todoCount').textContent = todos.length ? pending + ' 项待完成 / 共 ' + todos.length + ' 条' : '';
+    $('todoEmpty').hidden = todos.length > 0;
+    $('todoRows').innerHTML = todos.map(t =>
+      '<tr>'
+      + '<td><input type="checkbox" ' + (t.done ? 'checked' : '') + ' onchange="toggleTodo(\'' + t.id + '\', this.checked)" aria-label="标记完成"></td>'
+      + '<td' + (t.done ? ' style="text-decoration:line-through; opacity:.55"' : '') + '>' + esc(t.text) + '</td>'
+      + '<td class="meta">' + fmtDT(t.createdAt) + '</td>'
+      + '<td><button class="btn danger" onclick="deleteTodo(\'' + t.id + '\')">删除</button></td>'
+      + '</tr>').join('');
+  } catch (e) { toast('待办加载失败：' + e.message, true); }
 }
 
 /* ---------- 记忆 ---------- */
