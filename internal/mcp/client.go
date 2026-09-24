@@ -38,6 +38,7 @@ type Client struct {
 	Name string
 
 	cmd    *exec.Cmd
+	cancel context.CancelFunc // 取消即终止子进程（Close 调用）
 	stdin  io.WriteCloser
 	stderr io.ReadCloser
 
@@ -65,14 +66,37 @@ func (e *rpcError) Error() string { return fmt.Sprintf("MCP 错误 %d: %s", e.Co
 
 // Start 启动 MCP 服务器子进程并完成握手（initialize + tools/list）。
 // stderr 并入进程自身 stderr 便于排查。
+//
+// 信任边界：command/args 来自 config.yaml 的 mcp.servers——管理员在管理后台
+// 显式声明的可信配置，等价于管理员亲手执行的启动命令；不经 shell、参数逐项
+// 传递，不接受对话或外部输入。这里仍先做显式校验（非空、无控制字符）并经
+// exec.LookPath 解析可执行文件，尽早给出明确错误；随后以 exec.CommandContext
+// 启动，子进程生命周期绑定到 Client 私有 context（Close 取消即终止）。
 func Start(name, command string, args []string, env map[string]string, onExit func()) (*Client, error) {
-	cmd := exec.Command(command, args...)
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil, fmt.Errorf("MCP 服务器 %q 未配置启动命令", name)
+	}
+	parts := append([]string{command}, args...)
+	for _, p := range parts {
+		if strings.ContainsAny(p, "\x00\r\n") {
+			return nil, fmt.Errorf("MCP 服务器 %q 的命令/参数包含非法控制字符", name)
+		}
+	}
+	bin, err := exec.LookPath(command)
+	if err != nil {
+		return nil, fmt.Errorf("MCP 服务器 %q 的启动命令不可用: %w", name, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, bin, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("创建 stdin 管道: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("创建 stdout 管道: %w", err)
 	}
 	cmd.Stderr = os.Stderr
@@ -83,12 +107,14 @@ func Start(name, command string, args []string, env map[string]string, onExit fu
 		}
 	}
 	if err := cmd.Start(); err != nil {
+		cancel()
 		return nil, fmt.Errorf("启动 MCP 服务器 %q: %w", command, err)
 	}
 
 	c := &Client{
 		Name:    name,
 		cmd:     cmd,
+		cancel:  cancel,
 		stdin:   stdin,
 		stderr:  nil,
 		pending: make(map[int64]chan rpcResp),
@@ -293,7 +319,8 @@ func parseToolResult(res json.RawMessage) (string, error) {
 	return b.String(), nil
 }
 
-// Close 关闭连接并终止子进程（幂等）。
+// Close 关闭连接并终止子进程（幂等）：取消生命周期 context 杀进程，
+// 显式 Kill 兜底，再关闭 stdin。
 func (c *Client) Close() {
 	c.mu.Lock()
 	if c.closed {
@@ -302,8 +329,9 @@ func (c *Client) Close() {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	_ = c.stdin.Close()
+	c.cancel()
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
 	}
+	_ = c.stdin.Close()
 }
