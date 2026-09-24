@@ -8,7 +8,7 @@ import (
 
 // fileStore 以 JSON 文件持久化任务快照。时间用 RFC3339（纳秒可选，整秒时输出
 // 保持整洁）、时长用 Go duration 字符串，便于人工查看与编辑；写回采用
-// "临时文件 + rename" 原子替换，掉电不会留下半个文件（目标环境是开发板）。
+// "临时文件 + rename" 原子替换，掉电不会留下半个文件，适合无人值守的家用服务器。
 type fileStore struct {
 	path string
 }
