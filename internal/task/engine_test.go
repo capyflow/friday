@@ -201,30 +201,39 @@ func TestCronRegistered(t *testing.T) {
 	}
 }
 
-// TestFireCronDispatch 手动触发 cron 分发路径：回调收到任务、条目常驻且 Next 推进。
+// TestFireCronDispatch 循环任务触发路径：回调收到任务、条目常驻且 Next 推进。
 func TestFireCronDispatch(t *testing.T) {
-	var got atomic.Value
-	done := make(chan struct{})
+	var mu sync.Mutex
+	fired := make([]Task, 0, 2)
 	eng := NewEngine(func(tk Task) {
-		got.Store(tk)
-		close(done)
+		mu.Lock()
+		fired = append(fired, tk)
+		mu.Unlock()
 	})
 	defer eng.Close()
 
-	tsk, err := eng.Schedule(Task{Kind: KindCron, Cron: "0 8 * * *", Text: "提醒喝水"})
+	tsk, err := eng.Schedule(Task{Kind: KindCron, Cron: "@every 150ms", Text: "提醒喝水"})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
 	}
-	eng.fireCron(tsk.ID)
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("cron 回调未触发")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(fired)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	fired := got.Load().(Task)
-	if fired.Kind != KindCron || fired.Text != "提醒喝水" || fired.When.IsZero() {
-		t.Fatalf("回调任务字段错误，got %+v", fired)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fired) < 2 {
+		t.Fatalf("循环任务应至少触发 2 次，实际 %d 次", len(fired))
+	}
+	first := fired[0]
+	if first.Kind != KindCron || first.Text != "提醒喝水" || first.When.IsZero() {
+		t.Fatalf("回调任务字段错误，got %+v", first)
 	}
 	listed := eng.List()
 	if len(listed) != 1 {
@@ -500,8 +509,9 @@ func TestPersistCorruptFile(t *testing.T) {
 	}
 }
 
-// TestPersistConcurrentSaves 并发落盘必须串行化：恢复/触发/取消可能同时写盘，
-// 未串行化时两个"写 tmp + rename"会互踩导致 rename 失败（回归测试）。
+// TestPersistConcurrentSaves 并发注册/取消下的落盘必须串行化：注册、取消与
+// 框架推进可能同时写盘，未串行化时两个"写 tmp + rename"会互踩导致 rename
+// 失败（回归测试）。
 func TestPersistConcurrentSaves(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.json")
 	eng := NewEngineFile(nil, path)
@@ -514,10 +524,16 @@ func TestPersistConcurrentSaves(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			eng.save()
-		}()
+			id := fmt.Sprintf("c%d", i)
+			if _, err := eng.Schedule(Task{ID: id, When: time.Now().Add(time.Hour), Text: "x"}); err != nil {
+				t.Errorf("Schedule %s: %v", id, err)
+			}
+			if i%2 == 0 {
+				eng.Cancel(id)
+			}
+		}(i)
 	}
 	wg.Wait()
 
@@ -531,5 +547,8 @@ func TestPersistConcurrentSaves(t *testing.T) {
 	var stored []storedTask
 	if err := json.Unmarshal(b, &stored); err != nil {
 		t.Fatalf("文件应为合法 JSON: %v (%s)", err, b)
+	}
+	if len(stored) != 25 {
+		t.Fatalf("取消一半后应剩 25 条，实际 %d (%s)", len(stored), b)
 	}
 }

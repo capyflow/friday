@@ -2,8 +2,13 @@ package task
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
+	"sync"
 	"time"
+
+	"github.com/capyflow/vortexagent/autonomous"
 )
 
 // fileStore 以 JSON 文件持久化任务快照。时间用 RFC3339（纳秒可选，整秒时输出
@@ -92,6 +97,92 @@ func newStoredTask(t Task) storedTask {
 		st.CreatedAt = t.CreatedAt.Format(time.RFC3339Nano)
 	}
 	return st
+}
+
+// ─── GoalStore 适配器 ───
+
+// goalStore 把 JSON 任务文件适配成框架的 autonomous.GoalStore：磁盘格式保持
+// []storedTask 不变（人工可读、旧文件直接可用），内存侧缓存 Goal 指针供框架
+// 调度器复用（LoadAll/Get 返回与调度器共享的指针，框架就地推进状态）。
+//
+// 落盘只保留"存活"目标（active/pending 且次数未耗尽）：终态与已触发完的
+// 单次/多次任务即时从文件消失，等价旧引擎"触发即移除"的落盘时序。
+// mu 同时承担旧引擎 saveMu 的职责：串行化"写 tmp + rename"，避免并发落盘互踩。
+type goalStore struct {
+	mu    sync.Mutex
+	file  *fileStore // nil 表示仅内存（不持久化）
+	goals map[string]*autonomous.Goal
+}
+
+func newGoalStore(file *fileStore) *goalStore {
+	return &goalStore{file: file, goals: make(map[string]*autonomous.Goal)}
+}
+
+// LoadAll 从文件恢复全部目标（框架启动时调用）：逐条经 buildGoal 重建，
+// 非法行记日志跳过，不阻塞启动。
+func (s *goalStore) LoadAll() ([]*autonomous.Goal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks := s.file.load()
+	goals := make([]*autonomous.Goal, 0, len(tasks))
+	for _, t := range tasks {
+		g, err := buildGoal(t)
+		if err != nil {
+			log.Printf("[task] 恢复任务 %s 失败: %v", t.ID, err)
+			continue
+		}
+		s.goals[g.ID] = g
+		goals = append(goals, g)
+	}
+	return goals, nil
+}
+
+// Save 框架每次状态推进后的落盘入口：存活目标更新缓存并写盘，非存活
+// （终态或次数耗尽）目标从缓存与文件中即时移除。
+func (s *goalStore) Save(g *autonomous.Goal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if liveGoal(g.Snapshot()) {
+		s.goals[g.ID] = g
+	} else {
+		delete(s.goals, g.ID)
+	}
+	s.persistLocked()
+	return nil
+}
+
+func (s *goalStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.goals, id)
+	s.persistLocked()
+	return nil
+}
+
+func (s *goalStore) Get(id string) (*autonomous.Goal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.goals[id]
+	if !ok {
+		return nil, fmt.Errorf("任务 %q 不存在", id)
+	}
+	return g, nil
+}
+
+// persistLocked 把当前存活目标整体快照原子写回文件。
+func (s *goalStore) persistLocked() {
+	if s.file == nil {
+		return
+	}
+	tasks := make([]Task, 0, len(s.goals))
+	for _, g := range s.goals {
+		if snap := g.Snapshot(); liveGoal(snap) {
+			tasks = append(tasks, taskView(snap))
+		}
+	}
+	if err := s.file.save(tasks); err != nil {
+		log.Printf("[task] 持久化失败: %v", err)
+	}
 }
 
 // toTask 校验并还原落盘条目；字段缺失或非法（如手工编辑出错）时返回 false 跳过。
