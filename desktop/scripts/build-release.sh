@@ -47,6 +47,10 @@ step "前置检查"
 command -v go >/dev/null || die "未安装 Go（https://go.dev/dl/）"
 command -v cargo >/dev/null || die "未安装 Rust（https://rustup.rs）"
 command -v npx >/dev/null || die "未安装 Node/npx（Tauri CLI 经 npx 运行）"
+# Windows 的 Python 官方安装包只提供 python.exe（python3 常是商店假别名），回退取 python。
+if command -v python3 >/dev/null; then PYTHON=python3
+elif command -v python >/dev/null; then PYTHON=python
+else die "未安装 Python3（生成占位图标用）"; fi
 TAURI_CLI=(npx -y @tauri-apps/cli@^2)
 echo "go $(go version | awk '{print $3}') / rust $(rustc --version | awk '{print $2}') / tauri-cli ${TAURI_CLI[*]}"
 
@@ -66,7 +70,7 @@ step "目标：$TRIPLE"
 # ---- 3. 图标（正式设计资源就位后可 --skip-icon）----
 if [ "$SKIP_ICON" = 0 ] && { [ "$FORCE_ICON" = 1 ] || [ ! -f "$TAURI_DIR/icons/icon.icns" ] || [ ! -f "$TAURI_DIR/icons/icon.ico" ]; }; then
   step "绘制图标底图（gen-icon.py，纯 stdlib）"
-  python3 "$SCRIPT_DIR/gen-icon.py" --out "$TAURI_DIR/icons"
+  "$PYTHON" "$SCRIPT_DIR/gen-icon.py" --out "$TAURI_DIR/icons"
   # icns/ico 容器必须用官方工具生成：手写结构 sips 能读但系统图标服务不认，
   # 表现为安装后的 app "没有图标"。
   step "生成规范图标全套（tauri icon）"
