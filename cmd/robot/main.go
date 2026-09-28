@@ -10,7 +10,7 @@
 //
 // 或本地开发：
 //
-//	export DEEPSEEK_API_KEY=sk-...
+//	export FRIDAY_API_KEY=sk-...            # 通用命名（兼容旧名 DEEPSEEK_API_KEY）
 //	cp config.yaml.example config.yaml && vim config.yaml
 //	go run ./cmd/robot
 //
@@ -64,6 +64,11 @@ func main() {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("配置加载失败: %v", err)
+	}
+
+	// 密钥未配置不阻断启动：网页/桌面端均可在「设置」页补配（写回 config.yaml）。
+	if cfg.ProviderAPIKey() == "" {
+		log.Printf("[配置] 未检测到 LLM API Key：对话功能暂不可用（不影响启动）。可在管理后台「设置」页填写，或设环境变量 FRIDAY_API_KEY（见 config.yaml provider.apiKeyEnv）")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

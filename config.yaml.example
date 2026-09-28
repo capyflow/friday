@@ -4,7 +4,11 @@ provider:
   baseURL: https://api.deepseek.com/v1   # DeepSeek/通义/智谱等兼容地址
   # baseURL: https://api.stepfun.com/step_plan/v1   # 阶跃星辰 StepFun 示例
   model: deepseek-chat         # StepFun 填 step-3.7-flash 等
-  apiKeyEnv: DEEPSEEK_API_KEY  # 从该环境变量读密钥（export DEEPSEEK_API_KEY=sk-...）
+  apiKeyEnv: FRIDAY_API_KEY    # 从该环境变量读密钥（通用命名，任意服务商可用；
+                               # 未设置时兼容回退旧名 DEEPSEEK_API_KEY）。
+                               # 也可以不配环境变量：打开软件在「设置」页直接填密钥
+                               # （写回下方 apiKey 字段），或在此直接粘贴明文。
+  # apiKey: ""                 # 直填密钥（优先于环境变量；数据目录用户私有）
   temperature: 0.7
   maxTokens: 1024
 

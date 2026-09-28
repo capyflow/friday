@@ -30,10 +30,9 @@ import (
 // nil 时按 off 语义兜底（exec_command 不注册、其余工具直通）。
 // 调用方在 Build 后经 Brain 初始化会话（池按 key 惰性创建）。
 func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, approver *approval.Queue) (*vxagent.Agent, error) {
+	// 密钥允许为空（未配置不影响启动，管理后台/待办/任务照常可用）：
+	// LLM 请求在配置密钥前会失败并提示去「设置」页配置。
 	apiKey := cfg.ProviderAPIKey()
-	if apiKey == "" {
-		return nil, fmt.Errorf("未找到 API 密钥（环境变量 %s）", cfg.Provider.APIKeyEnv)
-	}
 	temp := cfg.Provider.Temperature
 	provider, err := llm.NewProvider(llm.ProviderConfig{
 		Name:        "openai",

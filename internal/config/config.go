@@ -296,7 +296,12 @@ type ProviderConfig struct {
 	// Model 模型名，如 deepseek-chat。
 	Model string `yaml:"model"`
 	// APIKeyEnv 环境变量名，运行时从该变量读取 API 密钥（不落盘）。
+	// 通用命名（默认 FRIDAY_API_KEY），任意 OpenAI 兼容服务商通用；
+	// 未设置时兼容回退旧名 DEEPSEEK_API_KEY。
 	APIKeyEnv string `yaml:"apiKeyEnv"`
+	// APIKey 直接配置的 API 密钥（可选）：优先于环境变量；可经管理后台
+	// 「设置」页在线填写并写回 config.yaml（数据目录用户私有）。
+	APIKey string `yaml:"apiKey"`
 	// Temperature 采样温度（可选，默认 0.7）。
 	Temperature float64 `yaml:"temperature"`
 	// MaxTokens 单次输出最大 token（可选，默认 1024）。
@@ -380,9 +385,10 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// UpdateProvider 热更新 config.yaml 中的 provider.baseURL 与 provider.model：
-// 以 yaml.Node 方式编辑（保留注释与原有结构），临时文件 + rename 原子写回。
-func UpdateProvider(path, baseURL, model string) error {
+// UpdateProvider 热更新 config.yaml 中的 provider.baseURL / provider.model，
+// 以及 provider.apiKey（apiKey 为空串表示不动已有密钥）：以 yaml.Node 方式编辑
+// （保留注释与原有结构），临时文件 + rename 原子写回。
+func UpdateProvider(path, baseURL, model, apiKey string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取配置失败: %w", err)
@@ -400,6 +406,9 @@ func UpdateProvider(path, baseURL, model string) error {
 	}
 	setMappingKey(prov, "baseURL", baseURL)
 	setMappingKey(prov, "model", model)
+	if apiKey != "" {
+		setMappingKey(prov, "apiKey", apiKey)
+	}
 
 	out, err := marshalNode(&doc)
 	if err != nil {
@@ -612,15 +621,28 @@ func marshalNode(doc *yaml.Node) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// ProviderAPIKey 从配置指定的环境变量读取 API 密钥。
+// ProviderAPIKey 解析当前生效的 API 密钥：直填 apiKey 优先，其次 apiKeyEnv
+// 指定的环境变量，再回退通用名 FRIDAY_API_KEY 与旧名 DEEPSEEK_API_KEY（兼容）。
+// 全部为空表示未配置——允许启动，对话在配置密钥前不可用。
 func (c *Config) ProviderAPIKey() string {
-	return os.Getenv(c.Provider.APIKeyEnv)
+	if c.Provider.APIKey != "" {
+		return c.Provider.APIKey
+	}
+	for _, name := range []string{c.Provider.APIKeyEnv, "FRIDAY_API_KEY", "DEEPSEEK_API_KEY"} {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // applyDefaults 填充未配置字段的合理默认值。
 func (c *Config) applyDefaults() {
 	if c.Provider.Name == "" {
 		c.Provider.Name = "openai"
+	}
+	if c.Provider.APIKeyEnv == "" {
+		c.Provider.APIKeyEnv = "FRIDAY_API_KEY"
 	}
 	if c.Provider.Temperature == 0 {
 		c.Provider.Temperature = 0.7
@@ -670,11 +692,11 @@ func (c *Config) applyDefaults() {
 	if c.Admin.AccountFile == "" {
 		c.Admin.AccountFile = "admin-account.json"
 	}
-	if c.Memory.Dir == "" {
-		c.Memory.Dir = "memories"
-	}
 	if c.Memory.File == "" {
 		c.Memory.File = "memories.json"
+	}
+	if c.Memory.Dir == "" {
+		c.Memory.Dir = "memories"
 	}
 	if c.SessionFile == "" {
 		c.SessionFile = "session.json"
@@ -695,12 +717,8 @@ func (c *Config) applyDefaults() {
 
 // Validate 校验必填项。
 func (c *Config) Validate() error {
-	if c.Provider.APIKeyEnv == "" {
-		return fmt.Errorf("config: provider.apiKeyEnv 不能为空（指定存放 API 密钥的环境变量名）")
-	}
-	if os.Getenv(c.Provider.APIKeyEnv) == "" {
-		return fmt.Errorf("config: 环境变量 %s 未设置", c.Provider.APIKeyEnv)
-	}
+	// API 密钥不在此校验：未配置允许启动（对话前经设置页/环境变量补配），
+	// 运行时由 ProviderAPIKey() 解析，为空时 LLM 请求报错并给出指引。
 	if c.Provider.BaseURL == "" {
 		return fmt.Errorf("config: provider.baseURL 不能为空（如 https://api.deepseek.com/v1）")
 	}

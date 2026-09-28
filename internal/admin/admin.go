@@ -324,16 +324,21 @@ func (s *Server) handleUpdateProvider(ctx *vhttp.Context) error {
 	var req struct {
 		BaseURL string `json:"baseURL"`
 		Model   string `json:"model"`
+		APIKey  string `json:"apiKey"` // 可选：留空保持已有密钥不变
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.BaseURL, req.Model); err != nil {
+	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.BaseURL, req.Model, req.APIKey); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	s.info.Model, s.info.BaseURL = req.Model, req.BaseURL
+	msg := "模型配置已热生效，并已写回 config.yaml"
+	if req.APIKey != "" {
+		msg = "模型配置与 API 密钥已热生效，并已写回 config.yaml"
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"message":  "模型配置已热生效，并已写回 config.yaml",
+		"message":  msg,
 		"provider": map[string]string{"model": req.Model, "baseURL": req.BaseURL},
 	})
 }
@@ -384,13 +389,14 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 		pending = s.todos.CountPending()
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"startedAt":     s.startedAt.Format(time.RFC3339),
-		"uptimeSeconds": int(time.Since(s.startedAt).Seconds()),
-		"provider":      map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
-		"tasks":         map[string]any{"total": len(tasks), "byKind": byKind},
-		"todos":         map[string]any{"pending": pending},
-		"memories":      s.memory.Count(),
-		"files":         map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
+		"startedAt":       s.startedAt.Format(time.RFC3339),
+		"uptimeSeconds":   int(time.Since(s.startedAt).Seconds()),
+		"provider":        map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
+		"apiKeyConfigured": s.cfg != nil && s.cfg.ProviderAPIKey() != "",
+		"tasks":           map[string]any{"total": len(tasks), "byKind": byKind},
+		"todos":           map[string]any{"pending": pending},
+		"memories":        s.memory.Count(),
+		"files":           map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
 	})
 }
 
