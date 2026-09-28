@@ -8,35 +8,49 @@ import (
 	"github.com/capyflow/friday/internal/memory"
 )
 
-// TestRememberAndRecall 记住 → 回忆 的完整链路。
+// TestRememberAndRecall 保存 → 搜索 → 读整页 的完整链路。
 func TestRememberAndRecall(t *testing.T) {
-	mem := memory.NewStore("")
+	mem := memory.NewWikiStore("", "")
 	rt := &RememberTool{Memory: mem}
 	qt := &RecallTool{Memory: mem}
 
-	if _, err := rt.Call(context.Background(), map[string]any{"content": "用户喜欢在晚饭后散步"}); err != nil {
+	if _, err := rt.Call(context.Background(), map[string]any{
+		"title": "用户偏好", "body": "- 喜欢在晚饭后散步",
+	}); err != nil {
 		t.Fatalf("remember: %v", err)
 	}
-	if _, err := rt.Call(context.Background(), map[string]any{"content": "用户对花粉过敏"}); err != nil {
+	if _, err := rt.Call(context.Background(), map[string]any{
+		"title": "健康状况", "body": "- 对花粉过敏",
+	}); err != nil {
 		t.Fatalf("remember: %v", err)
 	}
 
-	// 关键词回忆。
+	// 关键词搜索：返回页面列表与片段。
 	res, err := qt.Call(context.Background(), map[string]any{"q": "花粉"})
 	if err != nil {
 		t.Fatalf("recall: %v", err)
 	}
-	if !strings.Contains(res, "花粉过敏") || !strings.Contains(res, "#m") {
-		t.Fatalf("recall 应命中过敏记忆并带 ID，got %q", res)
+	if !strings.Contains(res, "花粉过敏") || !strings.Contains(res, "#m") || !strings.Contains(res, "健康状况") {
+		t.Fatalf("recall 应命中页面并带 ID，got %q", res)
 	}
 
-	// 空关键词 → 最近记忆。
+	// 按 id 读整页正文。
+	id := mem.Pages()[0].ID
+	res, err = qt.Call(context.Background(), map[string]any{"id": id})
+	if err != nil {
+		t.Fatalf("recall(id): %v", err)
+	}
+	if !strings.Contains(res, "记忆页") || !strings.Contains(res, mem.Pages()[0].Title) {
+		t.Fatalf("recall(id) 应返回整页，got %q", res)
+	}
+
+	// 空参数 → 全部页面列表（仅标题，不含正文片段）。
 	res, err = qt.Call(context.Background(), map[string]any{})
 	if err != nil {
 		t.Fatalf("recall(空): %v", err)
 	}
-	if !strings.Contains(res, "散步") {
-		t.Fatalf("recall(空) 应返回最近记忆，got %q", res)
+	if !strings.Contains(res, "《用户偏好》") || !strings.Contains(res, "《健康状况》") {
+		t.Fatalf("recall(空) 应列出全部页面，got %q", res)
 	}
 
 	// 未命中。
@@ -44,21 +58,66 @@ func TestRememberAndRecall(t *testing.T) {
 	if !strings.Contains(res, "没有找到") {
 		t.Fatalf("未命中应友好提示，got %q", res)
 	}
+	// 不存在的 id。
+	res, _ = qt.Call(context.Background(), map[string]any{"id": "m404"})
+	if !strings.Contains(res, "未找到") {
+		t.Fatalf("读不存在的页面应友好提示，got %q", res)
+	}
 }
 
-// TestForget 忘记：先记再忘，ID 错误时友好提示。
+// TestRememberMergeFlow 整编链路：同标题更新 = 合并写入，不产生重复页面。
+func TestRememberMergeFlow(t *testing.T) {
+	mem := memory.NewWikiStore("", "")
+	rt := &RememberTool{Memory: mem}
+
+	if _, err := rt.Call(context.Background(), map[string]any{
+		"title": "用户偏好", "body": "喜欢散步",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	id := mem.Pages()[0].ID
+
+	// 同标题再记一条：应更新同一页（agent 负责把新旧内容合并进 body）。
+	out, err := rt.Call(context.Background(), map[string]any{
+		"title": "用户偏好", "body": "喜欢散步\n- 对花粉过敏",
+	})
+	if err != nil {
+		t.Fatalf("remember 更新: %v", err)
+	}
+	if !strings.Contains(out, "已更新") || strings.Contains(out, "已新建") {
+		t.Fatalf("同标题应提示更新，got %q", out)
+	}
+	if mem.Count() != 1 {
+		t.Fatalf("同标题保存不应新建页面，实际 %d 页", mem.Count())
+	}
+
+	// 传 id 更新并改标题。
+	out, err = rt.Call(context.Background(), map[string]any{
+		"id": id, "title": "偏好与习惯", "body": "新正文",
+	})
+	if err != nil || !strings.Contains(out, "已更新") {
+		t.Fatalf("按 id 更新应成功，got %q %v", out, err)
+	}
+	if p, _ := mem.Read(id); p.Title != "偏好与习惯" {
+		t.Fatalf("按 id 更新应改标题，got %+v", p)
+	}
+}
+
+// TestForget 删除页面：先记再忘，ID 错误时友好提示。
 func TestForget(t *testing.T) {
-	mem := memory.NewStore("")
+	mem := memory.NewWikiStore("", "")
 	rt := &RememberTool{Memory: mem}
 	ft := &ForgetTool{Memory: mem}
 
-	if _, err := rt.Call(context.Background(), map[string]any{"content": "用户怕打雷"}); err != nil {
+	if _, err := rt.Call(context.Background(), map[string]any{
+		"title": "恐惧", "body": "用户怕打雷",
+	}); err != nil {
 		t.Fatalf("remember: %v", err)
 	}
-	id := mem.List()[0].ID
+	id := mem.Pages()[0].ID
 
 	out, err := ft.Call(context.Background(), map[string]any{"id": id})
-	if err != nil || !strings.Contains(out, "已忘记") {
+	if err != nil || !strings.Contains(out, "已删除") {
 		t.Fatalf("forget 应成功，got %q %v", out, err)
 	}
 	out, err = ft.Call(context.Background(), map[string]any{"id": "m404"})
@@ -73,12 +132,18 @@ func TestForget(t *testing.T) {
 	}
 }
 
-// TestRememberEmpty 空内容应报错且不入库。
+// TestRememberEmpty 缺参数应报错且不入库。
 func TestRememberEmpty(t *testing.T) {
-	mem := memory.NewStore("")
+	mem := memory.NewWikiStore("", "")
 	rt := &RememberTool{Memory: mem}
-	if _, err := rt.Call(context.Background(), map[string]any{"content": "  "}); err == nil {
-		t.Fatal("空内容应报错")
+	if _, err := rt.Call(context.Background(), map[string]any{"title": "  ", "body": "正文"}); err == nil {
+		t.Fatal("空标题应报错")
+	}
+	if _, err := rt.Call(context.Background(), map[string]any{"title": "标题", "body": "  "}); err == nil {
+		t.Fatal("空正文应报错")
+	}
+	if _, err := rt.Call(context.Background(), map[string]any{"body": "只有正文"}); err == nil {
+		t.Fatal("缺少 title 应报错")
 	}
 	if mem.Count() != 0 {
 		t.Fatalf("不应入库，实际 %d", mem.Count())

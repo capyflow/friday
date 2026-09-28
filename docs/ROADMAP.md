@@ -23,7 +23,7 @@
 | 管理后台 | 登录、运行状态、任务/记忆管理、模型热更新（写回 config.yaml，注释保留） |
 | 调用轨迹 | 每轮 LLM 输入快照（完整上下文 JSON）+ 原始输出 + 工具调用/结果 + token 统计（IN/OUT 汇总） |
 | 任务引擎 | 单次 / 多次 / 循环（cron），JSON 落盘，重启恢复 |
-| 长期记忆 | JSON 仓库 + remember/recall/forget 工具 + 矛盾覆盖（replaceId） |
+| 长期记忆 | wiki 页面仓库（`memories/<id>.md`）+ remember/recall/forget 工具，agent 先查相关页再合并整编；管理后台 wiki 化浏览/编辑 |
 | 文件工具 | read_file / list_files（目录白名单、行分段、PDF 按页抽取） |
 | 图片 | 上传（浏览器端统一转 JPEG + 降采样）、多模态消息（依赖模型支持视觉） |
 | 模型 | OpenAI 兼容层，baseURL/model 热更新 |
@@ -53,7 +53,7 @@
 |---|------|---------|-----------|
 | 4 | 会话持久化 + 多会话 | 多会话并行、per-channel 路由、历史可回溯 | M4 |
 | 5 | MCP 集成 | Hermes 统一 MCP 命令中心（生态扩张核心） | M5 |
-| 6 | 记忆升级 | Hermes 可插拔记忆 provider；OpenClaw agent 自写记忆文件 | P2 池 |
+| 6 | 记忆升级 | Hermes 可插拔记忆 provider（wiki 页面 + agent 自维护整编已落地，余项：语义检索/自动去重） | P2 池 |
 | 7 | 技能/插件系统 | OpenClaw skills 目录 | P2 池 |
 | 8 | 群聊/多 bot 协作 | Hermes bot 社会、群聊 | P2 池 |
 

@@ -8,63 +8,132 @@ import (
 	"time"
 )
 
-func mustAdd(t *testing.T, s *Store, content, source string) Memory {
+func mustSave(t *testing.T, s *WikiStore, title, body, source string) Page {
 	t.Helper()
-	m, err := s.Add(content, source)
+	p, created, err := s.Save("", title, body, source)
 	if err != nil {
-		t.Fatalf("Add(%q): %v", content, err)
+		t.Fatalf("Save(%q): %v", title, err)
 	}
-	return m
+	if !created {
+		t.Fatalf("Save(%q) 应为新建", title)
+	}
+	if !strings.HasPrefix(p.ID, "m") {
+		t.Fatalf("ID 应以 m 开头，got %q", p.ID)
+	}
+	return p
 }
 
-// TestAddListSearchOrder 新增/列表/搜索，列表按创建时间倒序。
-func TestAddListSearchOrder(t *testing.T) {
-	s := NewStore("")
-	mustAdd(t, s, "用户喜欢散步", "user")
+// TestSaveReadSearch 新建/读取/搜索：标题与正文都参与匹配，命中带片段。
+func TestSaveReadSearch(t *testing.T) {
+	s := NewWikiStore("", "")
+	p1 := mustSave(t, s, "用户偏好", "- 喜欢在晚饭后散步\n- 对花粉过敏", "user")
 	time.Sleep(2 * time.Millisecond)
-	mustAdd(t, s, "用户对花粉过敏", "agent")
-	time.Sleep(2 * time.Millisecond)
-	mustAdd(t, s, "女儿叫小红", "user")
+	mustSave(t, s, "家庭与重要的人", "- 女儿叫小红", "agent")
 
-	all := s.List()
-	if len(all) != 3 || all[0].Content != "女儿叫小红" {
-		t.Fatalf("List 应按时间倒序，got %+v", all)
+	// 读取整页。
+	got, ok := s.Read(p1.ID)
+	if !ok || got.Title != "用户偏好" || !strings.Contains(got.Body, "花粉过敏") {
+		t.Fatalf("Read 结果不符，got %+v", got)
 	}
-	if all[0].ID == "" || all[0].ID[0] != 'm' {
-		t.Fatalf("ID 应以 m 开头，got %q", all[0].ID)
+	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatal("时间戳不应为零值")
 	}
 
-	got := s.Search("喜欢")
-	if len(got) != 1 || got[0].Content != "用户喜欢散步" {
-		t.Fatalf("Search 应命中 1 条，got %+v", got)
+	// 标题命中 / 正文命中（带片段）/ 未命中。
+	hits := s.Search("偏好")
+	if len(hits) != 1 || hits[0].ID != p1.ID {
+		t.Fatalf("标题搜索应命中 1 页，got %+v", hits)
 	}
-	if n := len(s.Search("不存在的关键词")); n != 0 {
-		t.Fatalf("无关关键词应命中 0 条，got %d", n)
+	if hits[0].Snippet != "" {
+		t.Fatalf("标题命中无需片段，got %q", hits[0].Snippet)
 	}
-	if n := s.Count(); n != 3 {
-		t.Fatalf("Count 应为 3，got %d", n)
+	hits = s.Search("花粉")
+	if len(hits) != 1 || !strings.Contains(hits[0].Snippet, "花粉过敏") {
+		t.Fatalf("正文搜索应命中并带片段，got %+v", hits)
+	}
+	if len(s.Search("不存在的关键词")) != 0 {
+		t.Fatal("无关关键词应命中 0 页")
+	}
+	if s.Count() != 2 {
+		t.Fatalf("Count 应为 2，got %d", s.Count())
+	}
+
+	// 列表按更新时间倒序。
+	all := s.Pages()
+	if len(all) != 2 || all[0].Title != "家庭与重要的人" {
+		t.Fatalf("Pages 应按更新时间倒序，got %+v", all)
 	}
 }
 
-// TestAddEmpty 空内容应报错。
-func TestAddEmpty(t *testing.T) {
-	s := NewStore("")
-	if _, err := s.Add("   ", "user"); err == nil {
-		t.Fatal("空内容应报错")
+// TestSaveUpsertByTitle 相同标题保存 = 更新该页；id 更新可改标题。
+func TestSaveUpsertByTitle(t *testing.T) {
+	s := NewWikiStore("", "")
+	p1 := mustSave(t, s, "用户偏好", "喜欢散步", "user")
+	time.Sleep(2 * time.Millisecond)
+
+	p2, created, err := s.Save("", "用户偏好", "喜欢散步\n- 对花粉过敏", "agent")
+	if err != nil || created {
+		t.Fatalf("同标题应更新而非新建，created=%v err=%v", created, err)
+	}
+	if p2.ID != p1.ID {
+		t.Fatalf("更新应保持同一页面，got %s want %s", p2.ID, p1.ID)
+	}
+	if s.Count() != 1 {
+		t.Fatalf("同标题保存后应仍为 1 页，got %d", s.Count())
+	}
+	got, _ := s.Read(p1.ID)
+	if got.Source != "agent" || !strings.Contains(got.Body, "花粉过敏") {
+		t.Fatalf("更新后内容不符，got %+v", got)
+	}
+	if !got.UpdatedAt.After(got.CreatedAt) {
+		t.Fatal("更新后 UpdatedAt 应晚于 CreatedAt")
+	}
+
+	// 按 id 更新并改标题。
+	if _, _, err := s.Save(p1.ID, "偏好与习惯", "新正文", "admin"); err != nil {
+		t.Fatalf("按 id 更新: %v", err)
+	}
+	got, _ = s.Read(p1.ID)
+	if got.Title != "偏好与习惯" || got.Body != "新正文" {
+		t.Fatalf("按 id 更新结果不符，got %+v", got)
+	}
+}
+
+// TestSaveValidation 空标题/正文、不存在的 id、非法 ID 都应报错。
+func TestSaveValidation(t *testing.T) {
+	s := NewWikiStore("", "")
+	if _, _, err := s.Save("", "  ", "正文", "user"); err == nil {
+		t.Fatal("空标题应报错")
+	}
+	if _, _, err := s.Save("", "标题", "   ", "user"); err == nil {
+		t.Fatal("空正文应报错")
+	}
+	if _, _, err := s.Save("m404", "标题", "正文", "user"); err == nil {
+		t.Fatal("更新不存在的 id 应报错")
+	}
+	if _, _, err := s.Save("../evil", "标题", "正文", "user"); err == nil {
+		t.Fatal("路径穿越 ID 应报错")
 	}
 	if s.Count() != 0 {
-		t.Fatalf("空内容不应入库，got %d", s.Count())
+		t.Fatalf("失败保存不应入库，实际 %d", s.Count())
+	}
+	// Delete/Read 对非法 ID 同样安全。
+	if s.Delete("../../etc/passwd") || s.Count() != 0 {
+		t.Fatal("非法 ID 删除应返回 false")
+	}
+	if _, ok := s.Read("../../etc/passwd"); ok {
+		t.Fatal("非法 ID 读取不应命中")
 	}
 }
 
-// TestDelete 删除一条记忆。
+// TestDelete 删除一页；# 前缀 ID 容忍（recall 展示带 #，模型会原样传回）。
 func TestDelete(t *testing.T) {
-	s := NewStore("")
-	m := mustAdd(t, s, "用户怕打雷", "user")
-	if !s.Delete(m.ID) {
-		t.Fatal("Delete 应返回 true")
+	s := NewWikiStore("", "")
+	p := mustSave(t, s, "怕打雷", "用户怕打雷", "user")
+	if !s.Delete("#" + p.ID) {
+		t.Fatal("Delete 应容忍 # 前缀")
 	}
-	if s.Delete(m.ID) {
+	if s.Delete(p.ID) {
 		t.Fatal("重复 Delete 应返回 false")
 	}
 	if s.Count() != 0 {
@@ -74,59 +143,101 @@ func TestDelete(t *testing.T) {
 
 // TestPersistRoundTrip 落盘 → 重启恢复；删除也同步落盘。
 func TestPersistRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memories.json")
-	s1 := NewStore(path)
-	m1 := mustAdd(t, s1, "用户喜欢番茄", "user")
-	m2 := mustAdd(t, s1, "每周三要开会", "agent")
-	if !s1.Delete(m2.ID) {
+	dir := filepath.Join(t.TempDir(), "memories")
+	s1 := NewWikiStore(dir, "")
+	p1 := mustSave(t, s1, "用户偏好", "- 喜欢番茄", "user")
+	p2 := mustSave(t, s1, "例行安排", "每周三要开会", "agent")
+	if !s1.Delete(p2.ID) {
 		t.Fatal("Delete 应返回 true")
 	}
 
-	s2 := NewStore(path)
-	all := s2.List()
+	s2 := NewWikiStore(dir, "")
+	all := s2.Pages()
 	if len(all) != 1 {
-		t.Fatalf("重启后应恢复 1 条，实际 %d", len(all))
+		t.Fatalf("重启后应恢复 1 页，实际 %d", len(all))
 	}
-	got := all[0]
-	if got.ID != m1.ID || got.Content != m1.Content || got.Source != m1.Source || !got.CreatedAt.Equal(m1.CreatedAt) {
-		t.Fatalf("恢复的记忆不符，got %+v want %+v", got, m1)
+	got, ok := s2.Read(p1.ID)
+	if !ok {
+		t.Fatal("重启后应能读回原页面")
+	}
+	if got.Title != p1.Title || got.Body != p1.Body || got.Source != p1.Source ||
+		!got.CreatedAt.Equal(p1.CreatedAt) || !got.UpdatedAt.Equal(p1.UpdatedAt) {
+		t.Fatalf("恢复的页面不符，got %+v want %+v", got, p1)
+	}
+	// 页面文件是可读的 markdown + frontmatter。
+	raw, err := os.ReadFile(filepath.Join(dir, p1.ID+".md"))
+	if err != nil {
+		t.Fatalf("读页面文件: %v", err)
+	}
+	for _, want := range []string{"---", "title: 用户偏好", "喜欢番茄"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("页面文件应包含 %q，got:\n%s", want, raw)
+		}
 	}
 }
 
-// TestCorruptFile 损坏文件应空启动不崩溃。
-func TestCorruptFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memories.json")
-	if err := os.WriteFile(path, []byte("{{{不是 JSON"), 0o644); err != nil {
+// TestCorruptPageFile 损坏页面应跳过不崩溃，后续写入正常。
+func TestCorruptPageFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mbroken.md"), []byte("不是 frontmatter"), 0o644); err != nil {
 		t.Fatalf("写文件: %v", err)
 	}
-	s := NewStore(path)
+	s := NewWikiStore(dir, "")
 	if s.Count() != 0 {
-		t.Fatalf("损坏文件应空启动，实际 %d 条", s.Count())
+		t.Fatalf("损坏页面应跳过，实际 %d 页", s.Count())
 	}
-	mustAdd(t, s, "恢复后可正常写入", "user")
-	if !strings.Contains(readFile(t, path), "恢复后可正常写入") {
-		t.Fatal("新增后文件应包含新记忆")
-	}
-}
-
-// TestRecent 最近 N 条。
-func TestRecent(t *testing.T) {
-	s := NewStore("")
-	for i := 0; i < 5; i++ {
-		mustAdd(t, s, "记忆"+string(rune('A'+i)), "user")
-		time.Sleep(time.Millisecond)
-	}
-	got := s.Recent(3)
-	if len(got) != 3 || got[0].Content != "记忆E" {
-		t.Fatalf("Recent 应返回最新 3 条，got %+v", got)
+	p := mustSave(t, s, "恢复后可正常写入", "正文", "user")
+	if _, ok := s.Read(p.ID); !ok {
+		t.Fatal("新增后应可读回")
 	}
 }
 
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("读文件: %v", err)
+// TestLegacyMigration 旧版扁平 memories.json 自动迁入《用户档案》页，且只迁一次。
+func TestLegacyMigration(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "memories")
+	legacy := filepath.Join(t.TempDir(), "memories.json")
+	content := `[
+		{"id":"m1","content":"用户喜欢散步","source":"user","createdAt":"2026-09-01T10:00:00+08:00"},
+		{"id":"m2","content":"用户对花粉过敏","source":"agent","createdAt":"2026-09-02T10:00:00+08:00"}
+	]`
+	if err := os.WriteFile(legacy, []byte(content), 0o644); err != nil {
+		t.Fatalf("写旧文件: %v", err)
 	}
-	return string(b)
+
+	s := NewWikiStore(dir, legacy)
+	all := s.Pages()
+	if len(all) != 1 || all[0].Title != "用户档案" {
+		t.Fatalf("应迁移出一页《用户档案》，got %+v", all)
+	}
+	if all[0].Source != "migrate" {
+		t.Fatalf("迁移页来源应为 migrate，got %q", all[0].Source)
+	}
+	got, _ := s.Read(all[0].ID)
+	if !strings.Contains(got.Body, "用户喜欢散步") || !strings.Contains(got.Body, "用户对花粉过敏") {
+		t.Fatalf("迁移页应包含全部旧条目，got:\n%s", got.Body)
+	}
+	// 旧文件保留。
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatal("旧文件应保留不删")
+	}
+	// 再次启动（目录非空）不重复迁移。
+	s2 := NewWikiStore(dir, legacy)
+	if s2.Count() != 1 {
+		t.Fatalf("不应重复迁移，实际 %d 页", s2.Count())
+	}
+}
+
+// TestLegacyMissingOrCorrupt 旧文件不存在或损坏时静默跳过。
+func TestLegacyMissingOrCorrupt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "memories")
+	legacy := filepath.Join(t.TempDir(), "memories.json")
+	if err := os.WriteFile(legacy, []byte("{{{不是 JSON"), 0o644); err != nil {
+		t.Fatalf("写文件: %v", err)
+	}
+	if s := NewWikiStore(dir, legacy); s.Count() != 0 {
+		t.Fatalf("损坏旧文件应跳过迁移，实际 %d 页", s.Count())
+	}
+	if s := NewWikiStore(filepath.Join(t.TempDir(), "memories2"), filepath.Join(t.TempDir(), "不存在.json")); s.Count() != 0 {
+		t.Fatal("旧文件不存在应空启动")
+	}
 }

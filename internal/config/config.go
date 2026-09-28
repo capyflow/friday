@@ -169,9 +169,12 @@ type FileConfig struct {
 	AllowDirs []string `yaml:"allowDirs"`
 }
 
-// MemoryConfig 描述长期记忆。
+// MemoryConfig 描述长期记忆（wiki 页面仓库）。
 type MemoryConfig struct {
-	// File 记忆持久化 JSON 文件路径（默认 memories.json）。
+	// Dir 记忆 wiki 页面目录，每页一个 <id>.md 文件（默认 memories）。
+	Dir string `yaml:"dir"`
+	// File 旧版扁平记忆 JSON 文件路径（默认 memories.json）；
+	// wiki 目录为空时启动自动一次性迁入《用户档案》页，原文件保留。
 	File string `yaml:"file"`
 }
 
@@ -666,6 +669,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Admin.AccountFile == "" {
 		c.Admin.AccountFile = "admin-account.json"
+	}
+	if c.Memory.Dir == "" {
+		c.Memory.Dir = "memories"
 	}
 	if c.Memory.File == "" {
 		c.Memory.File = "memories.json"

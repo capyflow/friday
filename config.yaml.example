@@ -204,6 +204,8 @@ sessionFile: session.json
 #     - .
 #     - /home/user/documents
 
-# 长期记忆：机器人记住的用户事实（偏好/习惯等），同样落盘重启不丢。
+# 长期记忆：按主题分页的 wiki（偏好/习惯等），每页一个 <id>.md 文件，落盘重启不丢。
+# 旧版扁平 memories.json 仍在时，首次启动自动迁入《用户档案》页（原文件保留）。
 memory:
+  dir: memories
   file: memories.json

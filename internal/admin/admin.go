@@ -29,9 +29,11 @@
 //	POST   /api/todos         新增待办
 //	POST   /api/todos/:id     完成/重开待办（{"done":true|false}，缺省 true）
 //	DELETE /api/todos/:id     删除待办
-//	GET    /api/memories?q=   长期记忆列表/搜索
-//	POST   /api/memories      新增记忆
-//	DELETE /api/memories/:id  删除记忆
+//	GET    /api/wiki/pages      记忆页列表/搜索（?q= 关键词，命中附片段）
+//	POST   /api/wiki/pages      新建记忆页（标题已存在则更新该页）
+//	GET    /api/wiki/pages/:id  记忆页详情（含原始 markdown 正文）
+//	PUT    /api/wiki/pages/:id  更新记忆页
+//	DELETE /api/wiki/pages/:id  删除记忆页
 package admin
 
 import (
@@ -39,6 +41,7 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,7 +78,7 @@ type Info struct {
 	BaseURL    string
 	TaskFile   string
 	TodoFile   string
-	MemoryFile string
+	MemoryDir  string
 }
 
 // Server 是管理后台，同时承载网页聊天（web.Chat 挂载在同一端口）。
@@ -86,7 +89,7 @@ type Server struct {
 	sessions      map[string]time.Time // 会话 token → 过期时刻（内存态，重启需重新登录）
 	engine        *task.Engine
 	todos         *todo.Store
-	memory        *memory.Store
+	memory        *memory.WikiStore
 	schedule      *tools.ScheduleTaskTool  // 复用 LLM 工具的时间解析与建任务逻辑
 	chat          *web.Chat                // 网页聊天（可为 nil：不挂载聊天入口）
 	cfg           *config.Config           // 运行配置（热更新直接改写其中的 provider 字段）
@@ -105,7 +108,7 @@ type Options struct {
 	Accounts      *AccountStore
 	Engine        *task.Engine
 	Todos         *todo.Store
-	Memory        *memory.Store
+	Memory        *memory.WikiStore
 	Info          Info
 	Chat          *web.Chat
 	Cfg           *config.Config
@@ -192,9 +195,11 @@ func (s *Server) Start(_ context.Context) {
 	root.AddRouter([]string{http.MethodPost}, "/api/todos", s.wrap(s.handleAddTodo))
 	root.AddRouter([]string{http.MethodPost}, "/api/todos/:id", s.wrap(s.handleCompleteTodo))
 	root.AddRouter([]string{http.MethodDelete}, "/api/todos/:id", s.wrap(s.handleDeleteTodo))
-	root.AddRouter([]string{http.MethodGet}, "/api/memories", s.wrap(s.handleListMemories))
-	root.AddRouter([]string{http.MethodPost}, "/api/memories", s.wrap(s.handleAddMemory))
-	root.AddRouter([]string{http.MethodDelete}, "/api/memories/:id", s.wrap(s.handleDeleteMemory))
+	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages", s.wrap(s.handleListWikiPages))
+	root.AddRouter([]string{http.MethodPost}, "/api/wiki/pages", s.wrap(s.handleCreateWikiPage))
+	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages/:id", s.wrap(s.handleGetWikiPage))
+	root.AddRouter([]string{http.MethodPut}, "/api/wiki/pages/:id", s.wrap(s.handleUpdateWikiPage))
+	root.AddRouter([]string{http.MethodDelete}, "/api/wiki/pages/:id", s.wrap(s.handleDeleteWikiPage))
 
 	eng := vortex.NewVortexEngine(context.Background(),
 		vortex.WithPort(s.port),
@@ -385,7 +390,7 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 		"tasks":         map[string]any{"total": len(tasks), "byKind": byKind},
 		"todos":         map[string]any{"pending": pending},
 		"memories":      s.memory.Count(),
-		"files":         map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryFile},
+		"files":         map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
 	})
 }
 
@@ -423,34 +428,69 @@ func (s *Server) handleCancelTask(ctx *vhttp.Context) error {
 	})
 }
 
-// handleListMemories 记忆列表/搜索（?q= 关键词，留空返回全部）。
-func (s *Server) handleListMemories(ctx *vhttp.Context) error {
-	q := strings.TrimSpace(ctx.GinContext().Query("q"))
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"memories": s.memory.Search(q)})
+// wikiPageReq 是新建/更新记忆页的请求体。
+type wikiPageReq struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
-// handleAddMemory 新增一条记忆。
-func (s *Server) handleAddMemory(ctx *vhttp.Context) error {
-	var req struct {
-		Content string `json:"content"`
+// handleListWikiPages 记忆页列表/搜索（?q= 关键词，留空返回全部）。
+func (s *Server) handleListWikiPages(ctx *vhttp.Context) error {
+	q := strings.TrimSpace(ctx.GinContext().Query("q"))
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"pages": s.memory.Search(q)})
+}
+
+// handleGetWikiPage 返回一页完整内容（含原始 markdown 正文）。
+func (s *Server) handleGetWikiPage(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	p, ok := s.memory.Read(id)
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到记忆页 #" + id})
 	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p})
+}
+
+// handleCreateWikiPage 新建记忆页（标题已存在时更新该页）。
+func (s *Server) handleCreateWikiPage(ctx *vhttp.Context) error {
+	var req wikiPageReq
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	m, err := s.memory.Add(req.Content, "admin")
+	p, created, err := s.memory.Save("", req.Title, req.Body, "admin")
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"memory": m})
+	msg := fmt.Sprintf("已更新记忆页《%s》", p.Title)
+	if created {
+		msg = fmt.Sprintf("已新建记忆页《%s》", p.Title)
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p, "message": msg, "created": created})
 }
 
-// handleDeleteMemory 删除一条记忆。
-func (s *Server) handleDeleteMemory(ctx *vhttp.Context) error {
+// handleUpdateWikiPage 更新指定记忆页。
+func (s *Server) handleUpdateWikiPage(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	var req wikiPageReq
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	p, _, err := s.memory.Save(id, req.Title, req.Body, "admin")
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"page":    p,
+		"message": fmt.Sprintf("已保存记忆页《%s》", p.Title),
+	})
+}
+
+// handleDeleteWikiPage 删除一页记忆。
+func (s *Server) handleDeleteWikiPage(ctx *vhttp.Context) error {
 	id := ctx.GinContext().Param("id")
 	if !s.memory.Delete(id) {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到记忆 #" + id})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到记忆页 #" + id})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除记忆 #" + id})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除记忆页 #" + id})
 }
 
 // handleListTodos 待办清单（未完成在前）。

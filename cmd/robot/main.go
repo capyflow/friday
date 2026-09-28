@@ -162,10 +162,12 @@ func main() {
 		defer regMu.Unlock()
 		return currentReg
 	}
+	memStore := memory.NewWikiStore(cfg.Memory.Dir, cfg.Memory.File)
+	log.Printf("[记忆] wiki 页面目录：%s", cfg.Memory.Dir)
 	deps := robotagent.Deps{
 		Engine:    eng,
 		Todos:     todos,
-		Memory:    memory.NewStore(cfg.Memory.File),
+		Memory:    memStore,
 		Speaker:   speaker,
 		Displayer: displayer,
 		Player:    player,
@@ -292,7 +294,7 @@ func main() {
 			Engine:        eng,
 			Todos:         todos,
 			Memory:        deps.Memory,
-			Info:          admin.Info{Model: cfg.Provider.Model, BaseURL: cfg.Provider.BaseURL, TaskFile: cfg.TaskFile, TodoFile: cfg.TodoFile, MemoryFile: cfg.Memory.File},
+			Info:          admin.Info{Model: cfg.Provider.Model, BaseURL: cfg.Provider.BaseURL, TaskFile: cfg.TaskFile, TodoFile: cfg.TodoFile, MemoryDir: cfg.Memory.Dir},
 			Chat:          chat,
 			Cfg:           cfg,
 			ConfigPath:    *cfgPath,

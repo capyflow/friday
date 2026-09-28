@@ -207,8 +207,40 @@
   .approval-card .acts { display: flex; gap: 8px; justify-content: flex-end; }
   .src-user, .src-agent { color: var(--ok); font-size: 12px; }
   .src-admin { color: var(--blue); font-size: 12px; }
+  .src-migrate { color: var(--warn); font-size: 12px; }
   .empty { text-align: center; color: var(--muted-fg); font-size: 13px; padding: 26px; }
   .set-note { font-size: 12px; color: var(--muted-fg); line-height: 1.8; margin-top: 12px; }
+
+  /* ---------- 记忆 Wiki ---------- */
+  .wiki-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .wiki-toc { padding: 14px 12px 10px; }
+  .toc-item { display: block; width: 100%; text-align: left; border: none; background: none;
+              padding: 8px 10px; border-radius: 9px; font-size: 13px; color: var(--fg);
+              transition: background var(--tr); margin-bottom: 2px; }
+  .toc-item:hover { background: #F5F2FC; }
+  .toc-item.active { background: var(--primary-soft); color: var(--primary-deep); font-weight: 700; }
+  .toc-item .meta { display: block; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wiki-main { min-width: 0; }
+  .wiki-reader { padding: 18px 22px 22px; }
+  .wiki-head { display: flex; align-items: center; gap: 10px; }
+  .wiki-head h3 { flex: 1; font-size: 16px; }
+  .wiki-acts { display: flex; gap: 8px; }
+  #wikiMeta { margin: 2px 0 12px; }
+  #wikiBody { font-size: 14px; line-height: 1.75; }
+  /* 记忆 Wiki 正文排版（与聊天气泡 .md 同一套规则） */
+  .wiki-body p { margin: 0 0 8px; }
+  .wiki-body > :last-child { margin-bottom: 0; }
+  .wiki-body ul, .wiki-body ol { margin: 2px 0 8px; padding-left: 20px; }
+  .wiki-body li { margin: 1px 0; }
+  .wiki-body code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 5px; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .wiki-body pre { background: #1E1B2E; color: #E8E6F0; padding: 10px 12px; border-radius: 10px; overflow-x: auto; margin: 6px 0; }
+  .wiki-body pre code { background: none; padding: 0; color: inherit; }
+  .wiki-body a { color: var(--primary); }
+  .wiki-body table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+  .wiki-body th, .wiki-body td { border: 1px solid var(--border); padding: 4px 8px; }
+  .wiki-body blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--border); color: #555; }
+  .wiki-body h1, .wiki-body h2, .wiki-body h3, .wiki-body h4 { margin: 10px 0 4px; font-size: 15px; }
+  #wBody { width: 100%; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; line-height: 1.7; resize: vertical; }
 
   /* 全局调用轨迹视图（一条事件流） */
   .trace-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
@@ -299,6 +331,7 @@
     #whoBox .who-line { display: none; }
     #btnLogout { width: auto; padding: 8px 10px; }
     .view { padding: 14px; }
+    .wiki-layout { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -353,7 +386,7 @@
       <button class="nav-item" data-view="trace"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-trace"/></svg><span class="txt">调用轨迹</span></button>
       <button class="nav-item" data-view="auto"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-auto"/></svg><span class="txt">自动化</span></button>
       <button class="nav-item" data-view="todo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-todo"/></svg><span class="txt">待办</span></button>
-      <button class="nav-item" data-view="mem"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-mem"/></svg><span class="txt">记忆</span></button>
+      <button class="nav-item" data-view="wiki"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-mem"/></svg><span class="txt">记忆</span></button>
       <button class="nav-item" data-view="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-settings"/></svg><span class="txt">设置</span></button>
     </nav>
     <div class="grow"></div>
@@ -456,22 +489,43 @@
       </div>
     </section>
 
-    <!-- 记忆 -->
-    <section class="view" id="view-mem" hidden>
+    <!-- 记忆 Wiki -->
+    <section class="view" id="view-wiki" hidden>
       <div class="view-inner">
-        <h2>记忆 <span class="count" id="memCount"></span></h2>
-        <div class="panel">
-          <div class="msg" id="memMsg"></div>
-          <form id="memForm">
-            <input class="w1" id="mContent" placeholder="新增记忆，如：用户喜欢在晚饭后散步" required>
-            <button class="btn primary" type="submit">添加</button>
-            <input id="mQuery" placeholder="搜索记忆…">
-          </form>
-          <table>
-            <thead><tr><th>内容</th><th>来源</th><th>记录于</th><th></th></tr></thead>
-            <tbody id="memRows"></tbody>
-          </table>
-          <div class="empty" id="memEmpty" hidden>还没有任何记忆</div>
+        <h2>记忆 <span class="count" id="wikiCount"></span></h2>
+        <div class="wiki-layout">
+          <aside class="panel wiki-toc">
+            <input id="wQuery" placeholder="搜索记忆页…" style="width:100%; margin-bottom:10px" aria-label="搜索记忆页">
+            <button class="btn primary" id="btnWikiNew" style="width:100%; margin-bottom:10px" type="button">＋ 新建页面</button>
+            <div id="wikiToc"></div>
+            <div class="empty" id="wikiEmpty" hidden>还没有记忆页<br>对小五说"记住…"即可创建</div>
+          </aside>
+          <div class="wiki-main">
+            <div id="wikiHint" class="empty">从左侧选择一页查看</div>
+            <div id="wikiReader" class="panel wiki-reader" hidden>
+              <div class="wiki-head">
+                <h3 id="wikiTitle"></h3>
+                <div class="wiki-acts">
+                  <button class="btn" id="btnWikiEdit" type="button">编辑</button>
+                  <button class="btn danger" id="btnWikiDelete" type="button">删除</button>
+                </div>
+              </div>
+              <div class="meta" id="wikiMeta"></div>
+              <div class="wiki-body" id="wikiBody"></div>
+            </div>
+            <div id="wikiEditor" class="panel" hidden>
+              <div class="msg" id="wikiMsg"></div>
+              <form id="wikiForm" style="display:flex; flex-direction:column; gap:10px; margin-bottom:4px">
+                <input id="wTitle" placeholder="页面标题（主题名，如：用户偏好）" required>
+                <textarea id="wBody" rows="14" placeholder="markdown 正文…" required></textarea>
+                <div style="display:flex; gap:10px">
+                  <button class="btn primary" type="submit">保存</button>
+                  <button class="btn" type="button" id="btnWikiCancel">取消</button>
+                </div>
+              </form>
+              <div class="set-note">保存会整体替换页面正文；小五把页面内容当作该主题的长期记忆。</div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -606,7 +660,7 @@
 /* ---------- 基础 ---------- */
 const $ = id => document.getElementById(id);
 const kindName = { once: '单次', repeat: '多次', cron: '循环', agent: '智能' };
-const srcName  = { user: '用户', agent: '主动', admin: '后台' };
+const srcName  = { user: '用户', agent: '主动', admin: '后台', migrate: '迁移' };
 // 来源常量已随轨迹卡片去标识化移除；source 仍记录在轨迹数据中
 const KIND = { llm_in: 'LLM 输入', llm_out: 'LLM 输出', tool_req: '请求工具', tool: '工具结果', answer: '回答', error: '错误', task: '任务' };
 let loggedIn = false;
@@ -699,7 +753,7 @@ function showApp(username) {
   $('authView').hidden = true;
   $('app').hidden = false;
   showView('chat');
-  loadStatus(); loadTasks(); loadTodos(); loadMemories(); loadChatSessions(); loadHistory();
+  loadStatus(); loadTasks(); loadTodos(); loadWiki(); loadChatSessions(); loadHistory();
   pollApprovals(); // 审批卡片轮询（confirm 模式下危险操作需在此批准）
 }
 
@@ -1015,7 +1069,7 @@ $('btnLogout2').addEventListener('click', logout);
 
 /* ---------- 视图切换 ---------- */
 let currentView = 'chat';
-const viewLoaders = { status: loadStatus, auto: loadTasks, todo: loadTodos, mem: loadMemories,
+const viewLoaders = { status: loadStatus, auto: loadTasks, todo: loadTodos, wiki: loadWiki,
   trace: refreshTraceList,
   settings: () => { fillSettings(); loadSessions(); loadHeartbeat(); loadMCP(); loadPersona(); } };
 function showView(name) {
@@ -1042,7 +1096,7 @@ async function loadStatus() {
       ['LLM 模型', st.provider.model],
       ['待触发任务', st.tasks.total],
       ['待办未完成', st.todos ? st.todos.pending : 0],
-      ['长期记忆', st.memories],
+      ['记忆页面', st.memories],
       ['已运行', upStr(st.uptimeSeconds)],
       ['服务地址', location.host],
     ];
@@ -1092,7 +1146,7 @@ function fillSettings() {
     ['API 地址', st && st.provider.baseURL],
     ['任务文件', st && st.files.tasks],
     ['待办文件', st && st.files.todos],
-    ['记忆文件', st && st.files.memories],
+    ['记忆目录', st && st.files.memories],
     ['服务地址', location.host],
   ];
   $('settingsRows').innerHTML = rows.map(([k, v]) =>
@@ -1206,38 +1260,90 @@ async function loadTodos() {
   } catch (e) { toast('待办加载失败：' + e.message, true); }
 }
 
-/* ---------- 记忆 ---------- */
-$('memForm').addEventListener('submit', async e => {
-  e.preventDefault();
+/* ---------- 记忆 Wiki ---------- */
+let wikiPages = [];      // 目录（PageMeta 列表）
+let wikiCurrent = null;  // 当前查看的页面 ID
+async function loadWiki() {
   try {
-    await api('POST', '/api/memories', { content: $('mContent').value.trim() });
-    toast('已添加记忆');
-    $('mContent').value = '';
-    loadMemories(); loadStatus();
-  } catch (err) { showMsg('memMsg', err.message, false); }
-});
-$('mQuery').addEventListener('input', () => loadMemories());
-async function deleteMemory(id) {
-  if (!confirm('确定删除记忆 ' + id + '？')) return;
-  try { await api('DELETE', '/api/memories/' + id); toast('已删除'); loadMemories(); loadStatus(); }
-  catch (e) { showMsg('memMsg', e.message, false); }
-}
-async function loadMemories() {
-  try {
-    const q = $('mQuery').value.trim();
-    const r = await api('GET', '/api/memories' + (q ? '?q=' + encodeURIComponent(q) : ''));
-    const mems = r.memories || [];
-    $('memCount').textContent = mems.length ? mems.length + ' 条' : '';
-    $('memEmpty').hidden = mems.length > 0;
-    $('memRows').innerHTML = mems.map(m =>
-      '<tr>'
-      + '<td>' + esc(m.content) + '</td>'
-      + '<td><span class="src-' + esc(m.source || 'user') + '">' + (srcName[m.source] || m.source || '用户') + '</span></td>'
-      + '<td class="meta">' + fmtDT(m.createdAt) + '</td>'
-      + '<td><button class="btn danger" onclick="deleteMemory(\'' + m.id + '\')">删除</button></td>'
-      + '</tr>').join('');
+    const q = $('wQuery').value.trim();
+    const r = await api('GET', '/api/wiki/pages' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    wikiPages = r.pages || [];
+    $('wikiCount').textContent = wikiPages.length ? wikiPages.length + ' 页' : '';
+    $('wikiEmpty').hidden = wikiPages.length > 0;
+    $('wikiToc').innerHTML = wikiPages.map(p =>
+      '<button class="toc-item" type="button" data-id="' + esc(p.id) + '" onclick="openWikiPage(\'' + esc(p.id) + '\')">'
+      + esc(p.title)
+      + '<span class="meta">' + (p.snippet ? esc(p.snippet) : (srcName[p.source] || p.source || '') + ' · ' + fmtDT(p.updatedAt) + ' 更新') + '</span>'
+      + '</button>').join('');
   } catch (e) { toast('记忆加载失败：' + e.message, true); }
 }
+$('wQuery').addEventListener('input', () => loadWiki());
+async function openWikiPage(id) {
+  try {
+    const r = await api('GET', '/api/wiki/pages/' + encodeURIComponent(id));
+    const p = r.page;
+    wikiCurrent = p.id;
+    $('wikiHint').hidden = true;
+    $('wikiEditor').hidden = true;
+    $('wikiReader').hidden = false;
+    $('wikiTitle').textContent = p.title;
+    $('wikiMeta').textContent = (srcName[p.source] || p.source || '')
+      + (p.source ? ' · ' : '') + '更新于 ' + fmtDT(p.updatedAt);
+    $('wikiBody').innerHTML = renderMD(p.body);
+    document.querySelectorAll('#wikiToc .toc-item').forEach(b =>
+      b.classList.toggle('active', b.dataset.id === p.id));
+  } catch (e) { toast('页面加载失败：' + e.message, true); }
+}
+function wikiEditorShow(p) {
+  $('wikiReader').hidden = true;
+  $('wikiHint').hidden = true;
+  $('wikiEditor').hidden = false;
+  $('wikiEditor').dataset.id = p ? p.id : '';
+  $('wTitle').value = p ? p.title : '';
+  $('wBody').value = p ? p.body : '';
+  $('wTitle').focus();
+}
+$('btnWikiNew').addEventListener('click', () => wikiEditorShow(null));
+$('btnWikiEdit').addEventListener('click', async () => {
+  if (!wikiCurrent) return;
+  try {
+    const r = await api('GET', '/api/wiki/pages/' + encodeURIComponent(wikiCurrent));
+    wikiEditorShow(r.page);
+  } catch (e) { toast(e.message, true); }
+});
+$('btnWikiCancel').addEventListener('click', () => {
+  $('wikiEditor').hidden = true;
+  if (wikiCurrent) openWikiPage(wikiCurrent);
+  else $('wikiHint').hidden = false;
+});
+$('wikiForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const id = $('wikiEditor').dataset.id;
+  const body = { title: $('wTitle').value.trim(), body: $('wBody').value };
+  try {
+    const r = id
+      ? await api('PUT', '/api/wiki/pages/' + encodeURIComponent(id), body)
+      : await api('POST', '/api/wiki/pages', body);
+    toast(r.message || '已保存');
+    wikiCurrent = r.page.id;
+    $('wikiEditor').hidden = true;
+    await loadWiki();
+    openWikiPage(r.page.id);
+    loadStatus();
+  } catch (err) { showMsg('wikiMsg', err.message, false); }
+});
+$('btnWikiDelete').addEventListener('click', async () => {
+  if (!wikiCurrent) return;
+  if (!confirm('确定删除这页记忆？整页内容将不可恢复。')) return;
+  try {
+    await api('DELETE', '/api/wiki/pages/' + encodeURIComponent(wikiCurrent));
+    toast('已删除');
+    wikiCurrent = null;
+    $('wikiReader').hidden = true;
+    $('wikiHint').hidden = false;
+    loadWiki(); loadStatus();
+  } catch (e) { toast(e.message, true); }
+});
 
 /* ---------- 聊天 ---------- */
 const msgList = $('msgList'), scroller = $('chatScroller'),

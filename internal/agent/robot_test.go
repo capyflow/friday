@@ -32,7 +32,7 @@ func TestBuild(t *testing.T) {
 	registry := vxagent.NewRegistry()
 	eng := task.NewEngine(nil)
 	defer eng.Close()
-	mem := memory.NewStore("")
+	mem := memory.NewWikiStore("", "")
 	err := RegisterTools(registry, Deps{
 		Engine:    eng,
 		Memory:    mem,

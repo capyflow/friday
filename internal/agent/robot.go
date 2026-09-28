@@ -179,7 +179,7 @@ func messageText(m llm.Message) string {
 type Deps struct {
 	Engine    *task.Engine     // 任务排程器（单次/多次/循环/智能任务）
 	Todos     *todo.Store      // 待办清单仓库
-	Memory    *memory.Store    // 长期记忆仓库
+	Memory    *memory.WikiStore // 长期记忆 wiki 仓库（主题页面）
 	Speaker   output.Speaker   // 播报输出（硬件输出开启时使用）
 	Displayer output.Displayer // 屏幕输出（硬件输出开启时使用）
 	Player    audio.Player     // 音频播放器（硬件输出开启时使用）
@@ -272,7 +272,7 @@ func systemPrompt(cfg *config.Config) string {
 
 【天气查询】
 1. 用户问天气、要不要带伞、穿什么：调用 get_weather，city 填城市名；问"未来几天"时把预报转述清楚。
-2. 用户没指明城市：配置了默认城市就直接查并说明；没配置就先问用户所在城市，用户回答后可用 remember 记住（如"用户所在城市是上海"），下次直接查。
+2. 用户没指明城市：配置了默认城市就直接查并说明；没配置就先问用户所在城市，用户回答后可用 remember 记入"用户偏好"页（如"用户所在城市是上海"），下次直接查。
 `)
 	if cfg.Hardware.Enabled {
 		b.WriteString(`
@@ -287,11 +287,11 @@ func systemPrompt(cfg *config.Config) string {
 2. write_file/edit_file/exec_command 属于受控操作：confirm 审批模式下需用户在管理后台批准后才会执行，请把要做什么说清楚；收到"用户未批准"或"被权限系统拒绝"时不要反复重试同一操作。
 3. 执行 shell 命令用 exec_command（默认 30 秒超时，可通过 timeout 参数最长调到 10 分钟）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。
 
-【长期记忆】
-1. 用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、所在城市、身体状况等），或明确说"记住…"：调用 remember，content 用一句话概括（如"用户对花粉过敏"）。
-2. 用户修正或改变已知信息（如"我不爱喝X了""其实我喜欢Y""之前说错了"）：必须先 recall 相关关键词，找到与之矛盾的旧记忆，再用 remember 传 replaceId=旧记忆ID 覆盖（或先 forget 旧条目），绝不允许新旧矛盾的记忆并存。
-3. 回答需要用户背景信息，或用户问"还记得吗""我是不是说过"：调用 recall，q 填关键词；留空返回最近的记忆。
-4. 用户要求忘记某事：先 recall 拿到记忆 ID，再调用 forget。
+【长期记忆】（按主题分页的 wiki）
+1. 长期记忆按主题分页维护（如"用户偏好""家庭与重要的人""健康状况"）。用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、所在城市、身体状况等），或明确说"记住…"时：先 recall 用关键词查相关主题页，把新信息合并进该页正文后调用 remember 保存；没有合适页面才新建（title 起主题名）。
+2. remember 的 body 必须是该主题的完整正文（旧内容 + 新信息整合后的结果），保存会整体替换页面——不要只写增量。用户修正或改变已知信息（"我不爱喝X了""其实我喜欢Y""之前说错了"）：先 recall 找到对应页面，在正文中改写相应内容再 remember 保存，绝不允许同一页面内新旧矛盾并存。
+3. 回答需要用户背景信息，或用户问"还记得吗""我是不是说过"：调用 recall，q 填关键词拿到相关页面（含片段），需要完整内容再传 id 读整页。
+4. 用户要求忘记某事：先 recall 定位页面。整页都过时调用 forget 删除；只是部分过时就在正文中删改对应内容后 remember 保存。
 5. 记忆要克制：只记对管家服务有用的事实，不要记录敏感隐私（密码、财务），也不要每次对话都记。
 
 【注意】
