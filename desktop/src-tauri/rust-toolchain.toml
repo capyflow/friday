@@ -1,0 +1,4 @@
+# 桌面外壳工具链：tauri 2.12 要求 rustc ≥ 1.90，钉 stable 以免受全局默认版本影响
+# （本文件仅对本目录生效，不改用户全局 rustup default）。
+[toolchain]
+channel = "stable"

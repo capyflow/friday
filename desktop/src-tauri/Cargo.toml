@@ -1,0 +1,25 @@
+[package]
+name = "friday-desktop"
+version = "0.1.0"
+description = "Friday 个人管家桌面外壳"
+edition = "2021"
+
+# Rust 最小版本：跟随 tauri 2 官方要求
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] } # 透明弹窗需要私有 API（已配 macOSPrivateApi）
+tauri-plugin-shell = "2"                # sidecar 拉起内核
+tauri-plugin-global-shortcut = "2"      # Alt+Space 全局快捷键
+tauri-plugin-single-instance = "2"      # 防多开
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# 发布构建体积优化
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

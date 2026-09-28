@@ -9,6 +9,7 @@
 // 路由一览：
 //
 //	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
+//	GET    /palette           全局快捷键弹窗页（桌面外壳加载，公开静态；对话仍走 /api/chat）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
 //	POST   /api/upload        图片上传（需登录，multipart 字段 file）
 //	POST   /api/provider      热更新 LLM baseURL/model（需登录，写回 config.yaml）
@@ -66,6 +67,9 @@ import (
 
 //go:embed index.html
 var indexHTML []byte
+
+//go:embed palette.html
+var paletteHTML []byte
 
 const (
 	sessionCookie = "friday_admin_session"
@@ -148,6 +152,8 @@ func (s *Server) Start(_ context.Context) {
 	root := vhttp.NewRootGroup("/")
 	// 应用外壳（登录 + 聊天/运行状态/自动化/记忆/设置）：公开下发，数据接口各自鉴权。
 	root.AddStaticRouter("/", s.handleIndex)
+	// 全局快捷键弹窗页（桌面外壳加载）：公开下发，对话仍走需登录的 /api/chat。
+	root.AddStaticRouter("/palette", s.handlePalette)
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
@@ -315,6 +321,14 @@ func (s *Server) handleLogout(ctx *vhttp.Context) error {
 func (s *Server) handleIndex(ctx *vhttp.Context) error {
 	noCache(ctx)
 	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	return nil
+}
+
+// handlePalette 返回全局快捷键弹窗页（桌面外壳 Alt+Space 的透明窗口加载；
+// 与主窗口同源共享登录会话，浏览器直接访问 :port/palette 亦可用）。
+func (s *Server) handlePalette(ctx *vhttp.Context) error {
+	noCache(ctx)
+	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", paletteHTML)
 	return nil
 }
 

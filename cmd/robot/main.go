@@ -17,6 +17,15 @@
 // 启动后：
 //   - 终端 REPL 直接输入对话，内置命令 /help /tasks /cancel <id> /self-test /quit
 //   - 网页聊天 http://localhost:8080/（端口同管理后台）
+//
+// 桌面模式（供 Tauri 外壳拉起，见 desktop/）：
+//
+//	friday --desktop --data-dir <目录> --port 0
+//
+//   - 进程 chdir 到数据目录，config.yaml 与全部数据文件落该目录；
+//   - 无终端 REPL，外壳关闭 stdin 即优雅退出；
+//   - --port 0 自动挑空闲端口，服务就绪后向 stdout 打印一行
+//     FRIDAY_ADDR=http://127.0.0.1:<port>（外壳解析后导航窗口）。
 package main
 
 import (
@@ -24,9 +33,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,15 +70,59 @@ import (
 // 心跳任务的固定 ID：重启从任务文件恢复时按 ID 去重，避免重复注册。
 const heartbeatTaskID = "heartbeat"
 
+// version 构建时经 -ldflags "-X main.version=vX.Y.Z" 注入。
+var version = "dev"
+
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "配置文件路径")
+	desktop := flag.Bool("desktop", false, "桌面模式：数据落独立目录、无终端 REPL、stdin 关闭即退出（供 Tauri 桌面外壳拉起）")
+	dataDir := flag.String("data-dir", "", "数据目录（桌面模式：进程切换到该目录运行，默认取系统配置目录下的 Friday）")
+	portFlag := flag.Int("port", -1, "覆盖 admin.port；0 表示自动挑选空闲端口（桌面外壳依赖此参数定位服务地址）")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+
+	// 桌面模式：先落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
+	if *desktop {
+		dir := strings.TrimSpace(*dataDir)
+		if dir == "" {
+			base, err := os.UserConfigDir()
+			if err != nil {
+				log.Fatalf("桌面模式无法定位系统配置目录: %v", err)
+			}
+			dir = filepath.Join(base, "Friday")
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Fatalf("桌面模式创建数据目录失败: %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			log.Fatalf("桌面模式切换数据目录失败: %v", err)
+		}
+		log.Printf("[桌面] 数据目录：%s（config.yaml / 会话 / 待办 / 记忆均在此目录）", dir)
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("配置加载失败: %v", err)
 	}
-
+	if *portFlag >= 0 {
+		if *portFlag == 0 {
+			p, err := freePort()
+			if err != nil {
+				log.Fatalf("挑选空闲端口失败: %v", err)
+			}
+			cfg.Admin.Port = p
+		} else {
+			cfg.Admin.Port = *portFlag
+		}
+	}
+	if *desktop && !cfg.Admin.IsEnabled() {
+		log.Fatalf("桌面模式要求管理后台保持开启（admin.enabled 不能配成 false），外壳窗口依赖它提供界面")
+	}
+	log.Printf("[启动] Friday %s（provider=%s）", version, cfg.Provider.Model)
 	// 密钥未配置不阻断启动：网页/桌面端均可在「设置」页补配（写回 config.yaml）。
 	if cfg.ProviderAPIKey() == "" {
 		log.Printf("[配置] 未检测到 LLM API Key：对话功能暂不可用（不影响启动）。可在管理后台「设置」页填写，或设环境变量 FRIDAY_API_KEY（见 config.yaml provider.apiKeyEnv）")
@@ -316,6 +373,14 @@ func main() {
 			log.Printf("[管理后台] http://0.0.0.0:%d/admin（默认账号 admin/admin；可通过 FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD 或 config.yaml admin.username/password 预置）",
 				cfg.Admin.Port)
 		}
+		// 桌面模式：服务就绪后向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行解析 stdout
+		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）。
+		if *desktop {
+			if !waitReady(cfg.Admin.Port, 30*time.Second) {
+				log.Fatalf("桌面模式等待服务就绪超时（端口 %d）", cfg.Admin.Port)
+			}
+			fmt.Printf("FRIDAY_ADDR=http://127.0.0.1:%d\n", cfg.Admin.Port)
+		}
 	}
 
 	// handle 处理一行用户输入：分配请求 ID（链路日志前缀）并挂主会话，
@@ -371,6 +436,40 @@ func main() {
 		}
 		trace.End(logx.IDFrom(ctx), "")
 		fmt.Println()
+	}
+
+	// 桌面模式（docs/DESKTOP.md 生命周期一致性三层保证）：无终端 REPL。
+	// ① 外壳正常退出 → 向 stdin 写一行 /quit；② 外壳崩溃/被强杀 → stdin 管道 EOF；
+	// ③ 看门狗兜底：孤儿进程被过继给 launchd/init（ppid=1）即优雅退出
+	// （Windows 无进程过继机制，该检查恒不触发，退出依赖 ②）。
+	// 退出统一走 stop() → ctx 取消 → 各组件 defer Close 的优雅退出链。
+	// 桌面模式 stdout 只输出 FRIDAY_ADDR 一行（日志走 stderr），供外壳解析。
+	if *desktop {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if os.Getppid() == 1 {
+						log.Printf("[桌面] 检测到父进程已退出（ppid=1），优雅退出")
+						stop()
+						return
+					}
+				}
+			}
+		}()
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			if strings.TrimSpace(scanner.Text()) == "/quit" {
+				log.Printf("[桌面] 收到外壳退出指令（/quit），优雅退出")
+				break
+			}
+		}
+		stop()
+		return
 	}
 
 	fmt.Println("🤖 小五（Friday 个人管家）已启动（provider=" + cfg.Provider.Model + "）")
@@ -477,4 +576,35 @@ func printHelp() {
   /cancel <id>    取消任务
   /self-test      演示定时任务链路（无需 LLM）
   /quit           退出`)
+}
+
+// freePort 挑一个当前空闲的 TCP 端口（监听 :0 由内核分配后立刻关闭）。
+// 桌面外壳传 --port 0 依赖它：端口在占用检查与服务监听之间可能被抢走，
+// 但对单机个人应用是可接受的竞态。
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// waitReady 轮询本地管理后台直到 GET / 返回 200（服务真正开始接收请求）。
+// 桌面外壳依赖就绪后打印的 FRIDAY_ADDR 标记，过早打印会让外壳导航到白屏。
+func waitReady(port int, timeout time.Duration) bool {
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if resp, err := client.Get(url); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }

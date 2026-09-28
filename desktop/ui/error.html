@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Friday 内核已退出</title>
+<!-- 内核先死（如配置错误）时外壳导航到此错误页；死因与数据目录经 query 传入。 -->
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    background: #17171c; color: #ececf1; padding: 48px; text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 20px; font-weight: 600; color: #f87171; }
+  p { font-size: 14px; line-height: 1.8; color: rgba(236, 236, 241, .7); max-width: 640px; }
+  #reason {
+    max-width: 720px; padding: 12px 18px; border-radius: 10px;
+    background: rgba(248, 113, 113, .08); border: 1px solid rgba(248, 113, 113, .25);
+    color: #fca5a5; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    word-break: break-all; display: none;
+  }
+  code {
+    background: rgba(255, 255, 255, .08); padding: 2px 8px; border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    word-break: break-all;
+  }
+</style>
+</head>
+<body>
+  <h1>Friday 内核已退出</h1>
+  <div id="reason"></div>
+  <p id="configHint">
+    最常见原因：数据目录的 <code>config.yaml</code> 格式错误或字段不合法。
+    密钥未配置不会导致退出——可打开软件后在「设置」页直接填写 API 密钥
+    （任意 OpenAI 兼容服务商通用）；也可在数据目录
+    <code id="dir"></code> 下创建 <code>friday.env</code>（KEY=VALUE 格式，如
+    <code>FRIDAY_API_KEY=sk-...</code>），然后重新打开 Friday。
+  </p>
+  <p>完整内核日志见数据目录下的 <code>friday-kernel.log</code>。</p>
+<script>
+  const params = new URLSearchParams(location.search);
+  const reason = params.get('reason') || '';
+  const dir = params.get('dir') || '';
+  if (reason) {
+    const el = document.getElementById('reason');
+    el.textContent = reason;
+    el.style.display = 'block';
+  }
+  if (dir) document.getElementById('dir').textContent = dir;
+</script>
+</body>
+</html>

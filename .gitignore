@@ -36,3 +36,10 @@ logs/
 
 # 本地工具目录
 /.zcode/
+
+# 桌面端（docs/DESKTOP.md）：Tauri 外壳构建产物
+/desktop/src-tauri/target/
+/desktop/src-tauri/binaries/
+/desktop/src-tauri/resources/
+/desktop/src-tauri/icons/
+/desktop/src-tauri/gen/

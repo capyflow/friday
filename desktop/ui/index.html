@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Friday 启动中</title>
+<!-- 启动占位页：外壳解析内核 stdout 的 FRIDAY_ADDR 后 emit server-ready，本页跳转过去。 -->
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    background: #17171c; color: #ececf1;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  #logo { width: 72px; height: 72px; border-radius: 20px; position: relative;
+    background: linear-gradient(160deg, #6366f1, #8b5cf6);
+    box-shadow: 0 10px 40px rgba(99, 102, 241, .35); }
+  #logo::after { content: ""; position: absolute; inset: 20px; border-radius: 50%;
+    background: rgba(255, 255, 255, .92); }
+  h1 { font-size: 18px; font-weight: 500; }
+  #status { font-size: 13px; color: rgba(236, 236, 241, .55); }
+  #bar { width: 180px; height: 4px; border-radius: 2px; overflow: hidden;
+    background: rgba(255, 255, 255, .1); }
+  #bar i { display: block; width: 40%; height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(450%); } }
+  .err { color: #f87171; }
+</style>
+</head>
+<body>
+  <div id="logo"></div>
+  <h1>Friday 个人管家</h1>
+  <div id="bar"><i></i></div>
+  <div id="status">正在启动本地内核…</div>
+<script>
+  const status = document.getElementById('status');
+  let entered = false;
+
+  function enter(url) {
+    if (entered) return;
+    entered = true;
+    status.textContent = '内核已就绪，正在进入…';
+    location.replace(url);
+  }
+  function showDead(reason) {
+    if (entered) return;
+    entered = true;
+    status.classList.add('err');
+    status.textContent = '内核已退出' + (reason ? '：' + reason : '') + '。重新打开 Friday 重试；详见数据目录 friday-kernel.log。';
+  }
+
+  async function boot() {
+    if (!window.__TAURI__) {
+      // 无外壳环境（浏览器直接打开占位页）：仅提示，不做启动编排。
+      status.textContent = '未检测到桌面外壳：请从已安装的 Friday 应用启动。';
+      return;
+    }
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    // 三重保障防竞态：① 先查一次当前状态（事件可能在页面加载前就已发过）；
+    // ② 监听后续事件；③ 兜底轮询（事件丢失也能进入）。死因同理由 kernel_state 查询。
+    const apply = (s) => {
+      if (s.addr) enter(s.addr);
+      else if (s.dead) showDead(s.reason);
+      return !!(s.addr || s.dead);
+    };
+    if (await apply(await invoke('kernel_state'))) return;
+    await listen('server-ready', (e) => enter(e.payload));
+    await listen('kernel-dead', (e) => showDead(e.payload));
+    const poll = setInterval(async () => {
+      if (await apply(await invoke('kernel_state'))) clearInterval(poll);
+    }, 1500);
+    setTimeout(() => {
+      if (!entered) status.textContent = '仍在启动…若超过一分钟无响应，请重启应用并查看数据目录 friday-kernel.log';
+    }, 30000);
+  }
+  boot();
+</script>
+</body>
+</html>
