@@ -47,9 +47,10 @@ step "前置检查"
 command -v go >/dev/null || die "未安装 Go（https://go.dev/dl/）"
 command -v cargo >/dev/null || die "未安装 Rust（https://rustup.rs）"
 command -v npx >/dev/null || die "未安装 Node/npx（Tauri CLI 经 npx 运行）"
-# Windows 的 Python 官方安装包只提供 python.exe（python3 常是商店假别名），回退取 python。
-if command -v python3 >/dev/null; then PYTHON=python3
-elif command -v python >/dev/null; then PYTHON=python
+# Windows 的 Python 官方安装包只提供 python.exe（python3 常是商店假别名——
+# 能通过 command -v 但一运行就报错跳转商店），故需实测可执行性后再回退 python。
+if command -v python3 >/dev/null 2>&1 && python3 -c "" 2>/dev/null; then PYTHON=python3
+elif command -v python >/dev/null 2>&1 && python -c "" 2>/dev/null; then PYTHON=python
 else die "未安装 Python3（生成占位图标用）"; fi
 TAURI_CLI=(npx -y @tauri-apps/cli@^2)
 echo "go $(go version | awk '{print $3}') / rust $(rustc --version | awk '{print $2}') / tauri-cli ${TAURI_CLI[*]}"
