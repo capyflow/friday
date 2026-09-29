@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
+	"github.com/capyflow/vortexagent/ctxengine"
 	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/approval"
@@ -28,20 +29,11 @@ import (
 // 对"当前请求的会话"做输入快照，从而记录下发给模型的完整上下文。
 // approver 为审批队列：构建全局权限 Checker（规则翻译 + ApprovalUI 桥接），
 // nil 时按 off 语义兜底（exec_command 不注册、其余工具直通）。
-// 调用方在 Build 后经 Brain 初始化会话（池按 key 惰性创建）。
-func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, approver *approval.Queue) (*vxagent.Agent, error) {
-	// 密钥允许为空（未配置不影响启动，管理后台/待办/任务照常可用）：
-	// LLM 请求在配置密钥前会失败并提示去「设置」页配置。
-	apiKey := cfg.ProviderAPIKey()
-	temp := cfg.Provider.Temperature
-	provider, err := llm.NewProvider(llm.ProviderConfig{
-		Name:        "openai",
-		APIKey:      apiKey,
-		BaseURL:     cfg.Provider.BaseURL,
-		Model:       cfg.Provider.Model,
-		MaxTokens:   cfg.Provider.MaxTokens,
-		Temperature: &temp,
-	})
+// engine 为上下文引擎（ContextManager.Rebuild 产出），nil 时退化为
+// 「每轮发送完整历史」的旧行为。调用方在 Build 后经 Brain 初始化会话
+// （池按 key 惰性创建）。
+func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, approver *approval.Queue, engine *ctxengine.Engine) (*vxagent.Agent, error) {
+	provider, err := newProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("创建 LLM provider: %w", err)
 	}
@@ -55,13 +47,30 @@ func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, ap
 
 	prompt := systemPrompt(cfg)
 	ag := vxagent.New(vxagent.Options{
-		Provider:     provider,
-		Registry:     registry,
-		SystemPrompt: prompt,
-		Hooks:        buildHooks(pool, prompt),
-		Permissions:  perms,
+		Provider:      provider,
+		Registry:      registry,
+		SystemPrompt:  prompt,
+		Hooks:         buildHooks(pool, prompt),
+		Permissions:   perms,
+		ContextEngine: engine,
 	})
 	return ag, nil
+}
+
+// newProvider 按配置构建 LLM provider（Build 与上下文引擎摘要器共用）。
+// 密钥允许为空（未配置不影响启动，管理后台/待办/任务照常可用）：
+// LLM 请求在配置密钥前会失败并提示去「设置」页配置。
+func newProvider(cfg *config.Config) (llm.Provider, error) {
+	apiKey := cfg.ProviderAPIKey()
+	temp := cfg.Provider.Temperature
+	return llm.NewProvider(llm.ProviderConfig{
+		Name:        "openai",
+		APIKey:      apiKey,
+		BaseURL:     cfg.Provider.BaseURL,
+		Model:       cfg.Provider.Model,
+		MaxTokens:   cfg.Provider.MaxTokens,
+		Temperature: &temp,
+	})
 }
 
 // buildHooks 配置生命周期钩子：按请求 ID 记录完整调用链——LLM 每轮调用（轮次/
@@ -179,6 +188,7 @@ type Deps struct {
 	Engine    *task.Engine     // 任务排程器（单次/多次/循环/智能任务）
 	Todos     *todo.Store      // 待办清单仓库
 	Memory    *memory.WikiStore // 长期记忆 wiki 仓库（主题页面）
+	Ctx       *ContextManager  // 上下文引擎管理器（注册检索工具用，可为 nil）
 	Speaker   output.Speaker   // 播报输出（硬件输出开启时使用）
 	Displayer output.Displayer // 屏幕输出（硬件输出开启时使用）
 	Player    audio.Player     // 音频播放器（硬件输出开启时使用）
@@ -234,6 +244,18 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 	if d.Config.Tools.Exec.Mode != string(approval.ModeOff) {
 		if err := r.Add(NewExecCommandTool(d.Config.Tools.Exec.TimeoutSeconds())); err != nil {
 			return err
+		}
+	}
+	// 上下文检索工具（search_history / expand_chunk）：引擎启用时注册，供模型
+	// 按需回看已归档的早期对话——Ask 时框架会自动把检索指引追加到系统提示词。
+	// 每次重建先经 ContextManager.Rebuild 再走这里，Current 拿到的是新引擎。
+	if d.Ctx != nil {
+		if eng := d.Ctx.Current(); eng != nil {
+			for _, t := range ctxengine.NewTools(eng) {
+				if err := r.Add(t); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

@@ -30,6 +30,7 @@ type Config struct {
 	File         FileConfig        `yaml:"file"`
 	Admin        AdminConfig       `yaml:"admin"`
 	Memory       MemoryConfig      `yaml:"memory"`
+	Context      ContextConfig     `yaml:"context"`
 	Tools        ToolsConfig       `yaml:"tools"`
 	Permissions  PermissionsConfig `yaml:"permissions"`
 	Trace        TraceConfig       `yaml:"trace"`
@@ -178,11 +179,52 @@ type MemoryConfig struct {
 	File string `yaml:"file"`
 }
 
+// ContextConfig 描述单会话上下文引擎（ctxengine）：长会话不再线性膨胀——
+// 活跃上下文 = 交接摘要区 + 最近块原文 + 按需检索，原始历史不可变归档本地目录。
+// 比例/块数等 0 值交由框架默认（软阈值 0.7 / 硬阈值 0.95 / 摘要区 10% /
+// 保留最近 12 块 / 检索 5 条）。注意框架的发送前硬校验（hardRatio）在当前
+// 依赖版本未实际生效，实际防线是软阈值轮末归档 + 超窗自动裁剪重试一次。
+type ContextConfig struct {
+	// Enabled 是否启用（未配置默认开启）。关闭后行为与旧版一致：
+	// 每轮发送完整历史，不归档、不注册检索工具。
+	Enabled *bool `yaml:"enabled"`
+	// ArchiveDir 归档目录（默认 archive）：原始块与摘要按会话分子目录落盘，
+	// 桌面/容器模式随工作目录落在本机数据目录内。
+	ArchiveDir string `yaml:"archiveDir"`
+	// CandidateFacts 归档时抽取的候选事实是否写入记忆 wiki（默认开启，
+	// Source 标记为 agent，可在后台查看/编辑/删除）。显式 memory_save 仍是主通道。
+	CandidateFacts *bool `yaml:"candidateFacts"`
+	// WindowTokens 上下文窗口 token 数（0 = 按模型名查表，未知型号默认 128k；
+	// 框架仅精确匹配常见型号名，用非标准命名时建议显式配置）。
+	WindowTokens int `yaml:"windowTokens"`
+	// SoftRatio 归档触发软阈值（估算用量占比，默认 0.7）。
+	SoftRatio float64 `yaml:"softRatio"`
+	// HardRatio 发送前硬校验阈值（默认 0.95；见上：当前依赖版本未生效）。
+	HardRatio float64 `yaml:"hardRatio"`
+	// SummaryBudget 摘要区预算（占窗口比例，默认 0.10）。
+	SummaryBudget float64 `yaml:"summaryBudget"`
+	// KeepRecentBlocks 归档保留的最近块数（默认 12）。
+	KeepRecentBlocks int `yaml:"keepRecentBlocks"`
+	// RetrievalLimit search_history 默认返回条数（默认 5，上限 20）。
+	RetrievalLimit int `yaml:"retrievalLimit"`
+	// RetentionDays 归档保留天数（0 = 永久保留）。
+	RetentionDays int `yaml:"retentionDays"`
+}
+
+// IsEnabled 返回上下文引擎是否启用（未配置时默认开启）。
+func (c ContextConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// FactsEnabled 返回候选事实是否写入记忆 wiki（未配置时默认开启）。
+func (c ContextConfig) FactsEnabled() bool {
+	return c.CandidateFacts == nil || *c.CandidateFacts
+}
+
 // ToolsConfig 描述执行类工具。
 type ToolsConfig struct {
 	Exec ExecConfig `yaml:"exec"`
 }
-
 // ExecConfig 描述 exec_command 工具的审批与安全边界。策略经
 // internal/agent/permission.go 翻译成 vortexagent 全局权限层规则生效。
 type ExecConfig struct {
@@ -697,6 +739,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Memory.Dir == "" {
 		c.Memory.Dir = "memories"
+	}
+	if c.Context.ArchiveDir == "" {
+		c.Context.ArchiveDir = "archive"
 	}
 	if c.SessionFile == "" {
 		c.SessionFile = "session.json"

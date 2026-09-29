@@ -226,10 +226,16 @@ func main() {
 	}
 	memStore := memory.NewWikiStore(cfg.Memory.Dir, cfg.Memory.File)
 	log.Printf("[记忆] wiki 页面目录：%s", cfg.Memory.Dir)
+
+	// 上下文引擎：长会话不线性膨胀（摘要区 + 最近块 + 按需检索，原文不可变归档）。
+	// 引擎绑定 provider/model，随 Agent 重建路径一起重建（见 rebuild 闭包与热更新）。
+	ctxMgr := robotagent.NewContextManager(robotagent.WikiFactSink(memStore))
+
 	deps := robotagent.Deps{
 		Engine:    eng,
 		Todos:     todos,
 		Memory:    memStore,
+		Ctx:       ctxMgr,
 		Speaker:   speaker,
 		Displayer: displayer,
 		Player:    player,
@@ -237,9 +243,14 @@ func main() {
 		Approver:  approver,
 	}
 
-	// rebuild 重建注册表与 Agent（内置工具 + 当前在线的 MCP 工具），原子替换。
+	// rebuild 重建注册表与 Agent（上下文引擎 + 内置工具 + 当前在线的 MCP 工具），原子替换。
 	var brain *robotagent.Brain
 	rebuild := func(reason string) {
+		// 引擎重建失败（多为 provider 配置非法）仅告警：沿用旧实例，摘要器模型
+		// 可能落后一拍，归档与检索不受影响。
+		if err := ctxMgr.Rebuild(cfg); err != nil {
+			log.Printf("[重建] 上下文引擎重建失败（%s，沿用旧实例）: %v", reason, err)
+		}
 		reg := vxagent.NewRegistry()
 		if err := robotagent.RegisterTools(reg, deps); err != nil {
 			log.Printf("[重建] 注册内置工具失败（%s）: %v", reason, err)
@@ -250,7 +261,7 @@ func main() {
 				log.Printf("[重建] 注册 MCP 工具失败（%s）: %v", reason, err)
 			}
 		}
-		ag, err := robotagent.Build(cfg, reg, pool, approver)
+		ag, err := robotagent.Build(cfg, reg, pool, approver, ctxMgr.Current())
 		if err != nil {
 			log.Printf("[重建] 构建 Agent 失败（%s）: %v", reason, err)
 			return
@@ -262,16 +273,27 @@ func main() {
 		log.Printf("[重建] Agent 已重建（%s）", reason)
 	}
 
+	// 上下文引擎首建与启动日志。
+	if err := ctxMgr.Rebuild(cfg); err != nil {
+		log.Printf("[上下文] 引擎初始化失败（对话将不归档，修复配置后重启生效）: %v", err)
+	} else if ctxMgr.Current() != nil {
+		log.Printf("[上下文] 已启用：归档 %s，候选事实→%s",
+			cfg.Context.ArchiveDir,
+			map[bool]string{true: "记忆 wiki", false: "丢弃"}[cfg.Context.FactsEnabled()])
+	} else {
+		log.Printf("[上下文] 未启用（context.enabled: false），长会话历史完整发送")
+	}
+
 	// 首次构建。
 	registry := vxagent.NewRegistry()
 	if err := robotagent.RegisterTools(registry, deps); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
-	ag, err := robotagent.Build(cfg, registry, pool, approver)
+	ag, err := robotagent.Build(cfg, registry, pool, approver, ctxMgr.Current())
 	if err != nil {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
-	brain = robotagent.NewBrain(ag, pool)
+	brain = robotagent.NewBrain(ag, pool, ctxMgr)
 	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
 	if n := len(cfg.Custom.Commands); n > 0 {
 		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)

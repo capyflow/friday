@@ -190,11 +190,11 @@ func TestBrainPersistenceAcrossRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		pool := NewSessionPool(store)
-		ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
+		ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return NewBrain(ag, pool)
+		return NewBrain(ag, pool, nil)
 	}
 
 	// 第一轮对话（重启前）。
@@ -260,11 +260,11 @@ func TestBrainSessionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := NewSessionPool(store)
-	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
+	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	brain := NewBrain(ag, pool)
+	brain := NewBrain(ag, pool, nil)
 
 	if _, err := brain.Ask(WithSessionKey(context.Background(), "web"), "网页的话", nil, nil); err != nil {
 		t.Fatal(err)
@@ -307,11 +307,11 @@ func TestBrainReset(t *testing.T) {
 	t.Setenv("TEST_BRAIN_KEY", "sk-test")
 
 	pool := NewSessionPool(nil)
-	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0))
+	ag, err := Build(cfg, vxagent.NewRegistry(), pool, approval.New(string(approval.ModeOff), nil, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	brain := NewBrain(ag, pool)
+	brain := NewBrain(ag, pool, nil)
 
 	ctxA := WithSessionKey(context.Background(), "a")
 	ctxB := WithSessionKey(context.Background(), "b")

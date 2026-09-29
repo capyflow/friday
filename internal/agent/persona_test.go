@@ -99,7 +99,7 @@ func TestReloadPersona(t *testing.T) {
 	registry := vxagent.NewRegistry()
 	pool := NewSessionPool(nil)
 	approver := approval.New(string(approval.ModeOff), nil, 0)
-	brain := NewBrain(nil, pool) // Agent 由 Reload 构建后注入
+	brain := NewBrain(nil, pool, nil) // Agent 由 Reload 构建后注入（未接上下文引擎）
 
 	// 1. 切到不存在的人设：报错且配置不动。
 	if err := ReloadPersona(cfg, cfgPath, registry, brain, approver, "no-such", nil); err == nil {

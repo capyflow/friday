@@ -6,8 +6,8 @@ github.com/bytedance/sonic/loader v0.4.0 h1:olZ7lEqcxtZygCK9EKYKADnpQoYkRQxaeY2N
 github.com/bytedance/sonic/loader v0.4.0/go.mod h1:AR4NYCk5DdzZizZ5djGqQ92eEhCCcdf5x77udYiSJRo=
 github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1 h1:DQHByp3O5BS9QsRpx1iYXjI2oJh/WrvAq4QUOWQBTr8=
 github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1/go.mod h1:URuUAhBl/BDF7wk5BSSb1TstS34ShLBnjX2US8dvuE8=
-github.com/capyflow/vortexagent v0.0.0-20260924103122-0b22456e0fb0 h1:t0026SpbUBX/K65FLYVcNWotMqgd8tTW1I0iRrmquds=
-github.com/capyflow/vortexagent v0.0.0-20260924103122-0b22456e0fb0/go.mod h1:3NGimeVGvN/Nzqn3hds3chPTuOWL8AGM2n9ZYD4aFi0=
+github.com/capyflow/vortexagent v0.0.0-20260929103444-a0b8031fda9e h1:OEwIwZbsFQprgjKCysT6I25R3sZeFyqo8V9StA+4fIs=
+github.com/capyflow/vortexagent v0.0.0-20260929103444-a0b8031fda9e/go.mod h1:3NGimeVGvN/Nzqn3hds3chPTuOWL8AGM2n9ZYD4aFi0=
 github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f h1:yknZW0mnAFK5ZvUhYi0Gr0yKAFUiP2HNDHd4sl+ZlAU=
 github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f/go.mod h1:I0O8EH6fA36lj2piN0ZLLeaIEB/HQ9uVbp9CE8W/SC0=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=

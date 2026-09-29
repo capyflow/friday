@@ -64,3 +64,36 @@ func TestResolveAdminCredentials(t *testing.T) {
 		t.Fatalf("跨来源合并应合法: user=%q pass=%q err=%v", user, pass, err)
 	}
 }
+
+// TestContextDefaults 上下文引擎配置的默认值与开关语义：
+// 未配置默认启用、归档目录默认 archive；显式关闭必须生效。
+func TestContextDefaults(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if !cfg.Context.IsEnabled() {
+		t.Fatal("未配置时上下文引擎应默认启用")
+	}
+	if !cfg.Context.FactsEnabled() {
+		t.Fatal("未配置时候选事实应默认写入记忆")
+	}
+	if cfg.Context.ArchiveDir != "archive" {
+		t.Fatalf("归档目录默认应为 archive，实际 %q", cfg.Context.ArchiveDir)
+	}
+
+	no := false
+	cfg2 := &Config{Context: ContextConfig{Enabled: &no, CandidateFacts: &no}}
+	cfg2.applyDefaults()
+	if cfg2.Context.IsEnabled() {
+		t.Fatal("显式 enabled: false 应关闭引擎")
+	}
+	if cfg2.Context.FactsEnabled() {
+		t.Fatal("显式 candidateFacts: false 应关闭候选事实")
+	}
+
+	yes := true
+	cfg3 := &Config{Context: ContextConfig{Enabled: &yes}}
+	cfg3.applyDefaults()
+	if !cfg3.Context.IsEnabled() {
+		t.Fatal("显式 enabled: true 应启用引擎")
+	}
+}

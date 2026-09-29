@@ -2,6 +2,7 @@ package trace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,7 +90,9 @@ func TestLoadSkipsBrokenFile(t *testing.T) {
 func TestNoAutoEviction(t *testing.T) {
 	Init("")
 	for i := 0; i < 210; i++ { // 超过旧的 200 条上限
-		Begin("boot-"+string(rune('a'+i%26))+"-"+time.Now().Format("150405.000000000"), "web", "web", "x")
+		// ID 必须循环索引构造唯一：Windows 的 time.Now 粒度约 0.5ms，
+		// 快循环内时间戳会撞车，按 ID 去重后数量不足（曾稳定复现）。
+		Begin(fmt.Sprintf("boot-%03d", i), "web", "web", "x")
 	}
 	if n := len(List()); n < 210 {
 		t.Fatalf("轨迹应跟随对话历史不自动淘汰，实际仅 %d 条", n)

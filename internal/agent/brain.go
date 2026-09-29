@@ -7,9 +7,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
-	"time"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 	"github.com/capyflow/vortexagent/agent/sessionstore"
@@ -25,15 +23,21 @@ type Brain struct {
 	rw    sync.RWMutex
 	agent *vxagent.Agent
 	pool  *SessionPool
+	ctx   *ContextManager // 上下文引擎管理器（Reset 清归档、热更新重建用；可为 nil）
 
 	customMu sync.RWMutex          // 保护 custom（自定义指令表，SetCustom 可运行期替换）
 	custom   []config.CustomCommand // 自定义指令：触发词 → 提示词展开
 }
 
-// NewBrain 创建对话大脑。pool 为会话池（含持久化存储），由调用方构建。
-func NewBrain(ag *vxagent.Agent, pool *SessionPool) *Brain {
-	return &Brain{agent: ag, pool: pool}
+// NewBrain 创建对话大脑。pool 为会话池（含持久化存储），ctx 为上下文引擎
+// 管理器（均可为 nil：pool 无持久化则重启失忆，ctx 为 nil 则不治理上下文），
+// 由调用方构建。
+func NewBrain(ag *vxagent.Agent, pool *SessionPool, ctx *ContextManager) *Brain {
+	return &Brain{agent: ag, pool: pool, ctx: ctx}
 }
+
+// CtxMgr 返回上下文引擎管理器（热更新路径重建引擎用，可为 nil）。
+func (b *Brain) CtxMgr() *ContextManager { return b.ctx }
 
 // Ask 提问并等待完整回答。会话由 ctx 中的会话 key 决定（WithSessionKey，
 // 未设置时用网页会话）；onDelta 为本次请求的流式增量回调（可为 nil）；
@@ -91,15 +95,18 @@ func (b *Brain) sanitizeImages(sess *sessionstore.Session, idx, n int) {
 	keep = append(keep, llm.Content{Type: llm.ContentText,
 		Text: fmt.Sprintf("[用户发送了 %d 张图片，内容已于本轮处理]", n)})
 	msgs[idx].Content = keep
-	sess.ReplaceHistory(msgs, sessionstore.OffloadedChunk{
-		ID:       "img-sanitized-" + strconv.FormatInt(time.Now().UnixNano(), 10),
-		StartIdx: idx, EndIdx: idx + 1,
-	})
+	sess.ResetTo(msgs)
 }
 
-// Reset 清除指定会话的上下文：丢弃内存与持久层历史，下次对话新开会话。
+// Reset 清除指定会话的上下文：丢弃内存与持久层历史，下次对话新开会话；
+// 已归档的早期对话与引擎运行态一并清除——会话 ID 固定为 prefix+key，
+// 归档不清的话新会话会带出旧摘要区，等于没清干净。
 func (b *Brain) Reset(key string) {
-	b.pool.Reset(context.Background(), CurrentKey(key))
+	fullKey := CurrentKey(key)
+	b.pool.Reset(context.Background(), fullKey)
+	if b.ctx != nil {
+		b.ctx.ResetSession(context.Background(), sessionIDPrefix+fullKey)
+	}
 }
 
 // SetAgent 原子替换内部 Agent（热更新模型/供应商时使用）。

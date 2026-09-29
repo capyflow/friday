@@ -45,7 +45,7 @@ func TestBuild(t *testing.T) {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 
-	ag, err := Build(cfg, registry, NewSessionPool(nil), approval.New(string(approval.ModeConfirm), nil, 0))
+	ag, err := Build(cfg, registry, NewSessionPool(nil), approval.New(string(approval.ModeConfirm), nil, 0), nil)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

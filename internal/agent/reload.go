@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
+	"github.com/capyflow/vortexagent/ctxengine"
 
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
@@ -33,9 +34,24 @@ func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Reg
 	if apiKey != "" {
 		cfg.Provider.APIKey = apiKey
 	}
-	newAg, err := Build(cfg, registry, brain.Pool(), approver)
+	// 摘要器绑定 provider/model（构造后不可换），供应商变更须先重建引擎再 Build；
+	// Rebuild 失败（多为 provider 配置非法）时回滚配置放弃热更新。
+	if mgr := brain.CtxMgr(); mgr != nil {
+		if err := mgr.Rebuild(cfg); err != nil {
+			cfg.Provider.BaseURL, cfg.Provider.Model, cfg.Provider.APIKey = oldURL, oldModel, oldKey
+			return fmt.Errorf("重建上下文引擎失败: %w", err)
+		}
+	}
+	var engine *ctxengine.Engine
+	if mgr := brain.CtxMgr(); mgr != nil {
+		engine = mgr.Current()
+	}
+	newAg, err := Build(cfg, registry, brain.Pool(), approver, engine)
 	if err != nil {
 		cfg.Provider.BaseURL, cfg.Provider.Model, cfg.Provider.APIKey = oldURL, oldModel, oldKey
+		if mgr := brain.CtxMgr(); mgr != nil {
+			_ = mgr.Rebuild(cfg) // 尽力按回滚后的配置还原引擎（失败则沿用新引擎，仅摘要器模型领先一拍）
+		}
 		return err
 	}
 	brain.SetAgent(newAg)
@@ -90,7 +106,12 @@ func ReloadPersona(cfg *config.Config, configPath string, registry *vxagent.Regi
 	if presets != nil {
 		cfg.Persona.Presets = presets
 	}
-	newAg, err := Build(cfg, registry, brain.Pool(), approver)
+	// 人设只影响系统提示词，引擎无需重建；引擎为 nil（未启用）时 Build 自动退化。
+	var engine *ctxengine.Engine
+	if mgr := brain.CtxMgr(); mgr != nil {
+		engine = mgr.Current()
+	}
+	newAg, err := Build(cfg, registry, brain.Pool(), approver, engine)
 	if err != nil {
 		cfg.Persona.Active, cfg.Persona.Presets = oldActive, oldPresets
 		return err

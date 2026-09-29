@@ -213,3 +213,16 @@ sessionFile: session.json
 memory:
   dir: memories
   file: memories.json
+
+# 上下文引擎：长会话不再线性膨胀。活跃上下文 = 交接摘要区 + 最近块原文 +
+# 按需检索（模型可调 search_history / expand_chunk 回看已归档原文），
+# 原始历史不可变归档在 archiveDir，对话超窗口用量 70% 时轮末自动归档压缩。
+# 比例/块数留 0 走默认（软阈值 0.7 / 摘要区 10% / 保留最近 12 块 / 检索 5 条）。
+context:
+  enabled: true
+  archiveDir: archive
+  # 归档时抽取的候选事实自动写入记忆 wiki（source=agent，后台可改可删）
+  candidateFacts: true
+  # 上下文窗口 token 数：默认按模型名查表（未知型号按 128k，非标准命名时建议显式配）
+  # windowTokens: 65536
+  # retentionDays: 0        # 归档保留天数，0 = 永久
