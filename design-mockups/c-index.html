@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小五 · 新粗野主义设计稿（全页面）</title>
+<link rel="stylesheet" href="c.css">
+<style>
+  .cover { min-height: 100vh; padding: 48px 40px; }
+  .cover-inner { max-width: 980px; margin: 0 auto; }
+  .cover h1 { font-size: 44px; font-weight: 900; letter-spacing: -.01em; line-height: 1.25; margin-bottom: 10px; }
+  .cover h1 .hl { font-size: inherit; }
+  .cover .sub { font-weight: 700; color: var(--muted); margin-bottom: 34px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  a.tile { display: block; text-decoration: none; color: var(--ink);
+    border: var(--border); border-radius: var(--radius); padding: 20px;
+    box-shadow: var(--hard); background: var(--card);
+    transition: transform var(--tr), box-shadow var(--tr); }
+  a.tile:hover { transform: translate(-3px,-3px); box-shadow: 8px 8px 0 var(--ink); }
+  a.tile:active { transform: translate(0,0); box-shadow: none; }
+  a.tile h3 { font-size: 17px; font-weight: 900; margin-bottom: 6px; }
+  a.tile p { font-size: 13px; color: var(--muted); font-weight: 600; line-height: 1.65; }
+  a.tile .no { display: inline-block; font-size: 11px; font-weight: 900; letter-spacing: .1em;
+    background: var(--yellow); border: var(--border-thin); border-radius: 6px;
+    padding: 1px 8px; margin-bottom: 10px; box-shadow: 2px 2px 0 var(--ink); }
+  a.tile.is-orange { background: var(--orange); } a.tile.is-orange p { color: rgba(23,20,15,.7); }
+  a.tile.is-yellow { background: var(--yellow); } a.tile.is-yellow p { color: rgba(23,20,15,.7); }
+  a.tile.is-mint { background: var(--mint); } a.tile.is-mint p { color: rgba(23,20,15,.7); }
+  a.tile.is-sky { background: var(--sky); } a.tile.is-sky p { color: rgba(23,20,15,.7); }
+  @media (max-width: 860px) { .tiles { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="cover">
+  <div class="cover-inner">
+    <h1>小五 <span class="hl">UI 设计稿</span><br>新粗野主义 · 全页面</h1>
+    <p class="sub">Direction C 深化版 —— 点任意方块进入对应页面高保真稿，侧栏可互相跳转。</p>
+    <div class="tiles">
+      <a class="tile is-orange" href="c-chat.html"><span class="no">01</span><h3>聊天</h3><p>核心界面：对话流、打字态、悬浮输入条、危险操作审批卡。</p></a>
+      <a class="tile" href="c-status.html"><span class="no">02</span><h3>运行状态</h3><p>彩色状态卡 + Token 用量账本表格。</p></a>
+      <a class="tile" href="c-trace.html"><span class="no">03</span><h3>调用轨迹</h3><p>事件流列表：彩色 chip + 可展开的等宽正文。</p></a>
+      <a class="tile" href="c-auto.html"><span class="no">04</span><h3>自动化</h3><p>任务新建表单 + 徽章体系（单次/多次/循环/智能）。</p></a>
+      <a class="tile" href="c-todo.html"><span class="no">05</span><h3>待办</h3><p>勾选完成、划线态、增删。</p></a>
+      <a class="tile is-mint" href="c-wiki.html"><span class="no">06</span><h3>记忆 Wiki</h3><p>双栏：目录卡 + 阅读器，Markdown 排版。</p></a>
+      <a class="tile" href="c-settings.html"><span class="no">07</span><h3>设置</h3><p>面板堆叠：模型 / 人设 / MCP / 当前配置。</p></a>
+      <a class="tile is-yellow" href="c-login.html"><span class="no">08</span><h3>登录</h3><p>印章式圆标 + 硬投影卡片。</p></a>
+      <a class="tile" href="c-palette.html"><span class="no">09</span><h3>快捷面板</h3><p>桌面 Alt+Space 弹窗的深色舞台上的奶油面板。</p></a>
+      <a class="tile is-sky" href="c-spec.html"><span class="no">10</span><h3>组件规范</h3><p>配色 / 字级 / 按钮 / 徽章 / 表单一览（落地 Vue 的对照表）。</p></a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

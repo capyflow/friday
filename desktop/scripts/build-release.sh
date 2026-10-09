@@ -83,6 +83,12 @@ fi
   || die "$TAURI_DIR/icons 缺少图标文件"
 
 # ---- 4. Go 内核 sidecar：CGO_ENABLED=0 纯 Go 静态编译（约 16MB）----
+# 前端先于 Go 编译：web/（Vue3+Vite）构建产物内联为自包含 HTML，
+# 落在 internal/admin/webdist/，经 go:embed 打进 sidecar 二进制。
+step "构建网页前端（web → internal/admin/webdist）"
+( cd "$REPO_ROOT/web"
+  [ -d node_modules ] || npm install --no-audit --no-fund
+  npm run build )
 step "编译 Go 内核 sidecar"
 BIN_NAME="friday-$TRIPLE$EXE"
 mkdir -p "$TAURI_DIR/binaries"

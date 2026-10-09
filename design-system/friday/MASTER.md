@@ -6,207 +6,80 @@
 
 ---
 
-**Project:** Friday
-**Generated:** 2026-09-19 00:44:38
-**Category:** General
+**Project:** Friday（小五 · 个人生活管家）
+**Generated:** 2026-09-30（v5 现代简约双主题，基于 `design/modern-ui-preview` 分支样例落地；替代 v4 粗野 / v3 线条 / v2 暖调 / v1 AI 紫）
+**Category:** Personal AI Assistant / Consumer Productivity
+**样例基准：** 远端分支 `design/modern-ui-preview`（design-system/friday/ui-preview.html，9 屏 + GSAP）
 
 ---
 
-## Global Rules
+## 设计方向（Design Direction）
 
-### Color Palette
+**Quiet SaaS（浅）/ Quiet Glass（深）双主题**：中性锌灰色阶主导，墨色为行动色，
+靛蓝小面积点缀；克制圆角（8-12px）、极轻中性阴影、浅底深字的柔和标签；
+深色下升级为极光玻璃（磨砂卡片 + 极光光斑 + 靛紫渐变行动色）。
 
-| Role | Hex | CSS Variable |
-|------|-----|--------------|
-| Primary | `#7C3AED` | `--color-primary` |
-| On Primary | `#FFFFFF` | `--color-on-primary` |
-| Secondary | `#6366F1` | `--color-secondary` |
-| On Secondary | `#000000` | `--color-on-secondary` |
-| Accent/CTA | `#EC4899` | `--color-accent` |
-| On Accent/CTA | `#000000` | `--color-on-accent` |
-| Background | `#FAF5FF` | `--color-background` |
-| Foreground | `#0F172A` | `--color-foreground` |
-| Card | `#FFFFFF` | `--color-card` |
-| Card Foreground | `#0F172A` | `--color-card-foreground` |
-| Muted | `#F7F3FD` | `--color-muted` |
-| Muted Foreground | `#475569` | `--color-muted-foreground` |
-| Border | `#EFE7FC` | `--color-border` |
-| Destructive | `#DC2626` | `--color-destructive` |
-| On Destructive | `#FFFFFF` | `--color-on-destructive` |
-| Ring | `#7C3AED` | `--color-ring` |
-
-**Color Notes:** AI purple + generation pink
-
-### Typography
-
-- **Heading Font:** Varela Round
-- **Body Font:** Nunito Sans
-- **Mood:** soft, rounded, friendly, approachable, warm, gentle
-- **Google Fonts:** [Varela Round + Nunito Sans](https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@300;400;500;600;700&family=Varela+Round&display=swap)
-
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@300;400;500;600;700&family=Varela+Round&display=swap');
-```
-
-### Spacing Variables
-
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--space-xs` | `4px` / `0.25rem` | Tight gaps |
-| `--space-sm` | `8px` / `0.5rem` | Icon gaps, inline spacing |
-| `--space-md` | `16px` / `1rem` | Standard padding |
-| `--space-lg` | `24px` / `1.5rem` | Section padding |
-| `--space-xl` | `32px` / `2rem` | Large gaps |
-| `--space-2xl` | `48px` / `3rem` | Section margins |
-| `--space-3xl` | `64px` / `4rem` | Hero padding |
-
-### Shadow Depths
-
-| Level | Value | Usage |
-|-------|-------|-------|
-| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.05)` | Subtle lift |
-| `--shadow-md` | `0 4px 6px rgba(0,0,0,0.1)` | Cards, buttons |
-| `--shadow-lg` | `0 10px 15px rgba(0,0,0,0.1)` | Modals, dropdowns |
-| `--shadow-xl` | `0 20px 25px rgba(0,0,0,0.15)` | Hero images, featured cards |
+1. **双主题** — `html[data-theme="light|dark"]` 令牌覆盖；默认跟随系统，
+   localStorage `friday-theme` 持久化；index.html 头部内联预设防首帧闪烁。
+2. **极光背景** — 全站 fixed 光斑层（blur 120px × 3 团：靛/青/紫），深色 opacity .20
+   可见 + GSAP 有机漂移，浅色 opacity 0 仅点阵纹理。
+3. **行动色** — 浅色为墨 `#18181B`；深色为靛紫渐变 `linear-gradient(135deg,#6366F1,#7C3AED)`
+   （主按钮/用户气泡/发送键/品牌标），带 inset 高光与投影。
+4. **交互** — 160ms cubic-bezier(.4,0,.2,1)；按钮 hover 变底色不加位移；
+   发送键 active scale(.9)；GSAP：外壳入场/欢迎逐字/视图切换错峰/数字滚动/气泡弹出，
+   `prefers-reduced-motion` 全部降级。
+5. **语义标签一律「浅底深字」** — blue/warn/teal/cyan/accent subtle 底 + 同色深字；
+   深色下换半透明同色底。
 
 ---
 
-## Component Specs
+## Color Palette（完整令牌见 web/src/style.css :root 与 html[data-theme="dark"]）
 
-### Buttons
+| Role | Light | Dark |
+|------|-------|------|
+| bg | `#F6F6F8` | `#0A0A10` |
+| sidebar / card | `#FFFFFF` | `rgba(255,255,255,.025/.045)`（玻璃） |
+| fg / fg-2 / muted / faint | `#18181B / #3F3F46 / #71717A / #A1A1AA` | `#ECECF2 / #C5C6D2 / #8E90A0 / #606270` |
+| border / strong | `#E9E9ED / #D6D6DC` | `rgba(255,255,255,.08/.17)` |
+| primary（行动） | `#18181B` | `#6D6BF2`（hover 渐变） |
+| accent（点缀） | `#4338CA` | `#A5A2FF` |
+| danger / ok / warn / blue / teal / cyan | 语义色 + `-subtle` 浅底 | 深色换亮色 + 半透明底 |
 
-```css
-/* Primary Button */
-.btn-primary {
-  background: #EC4899;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-/* Secondary Button */
-.btn-secondary {
-  background: transparent;
-  color: #7C3AED;
-  border: 2px solid #7C3AED;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-```
-
-### Cards
-
-```css
-.card {
-  background: #FAF5FF;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: var(--shadow-md);
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-```
-
-### Inputs
-
-```css
-.input {
-  padding: 12px 16px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: border-color 200ms ease;
-}
-
-.input:focus {
-  border-color: #7C3AED;
-  outline: none;
-  box-shadow: 0 0 0 3px #7C3AED20;
-}
-```
-
-### Modals
-
-```css
-.modal-overlay {
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal {
-  background: white;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: var(--shadow-xl);
-  max-width: 500px;
-  width: 90%;
-}
-```
+阴影四档 `--shadow-xs/sm/md/overlay`（深色加重）；圆角 `12/8/6px`。
 
 ---
 
-## Style Guidelines
+## Component Specs（均已在 web/src/components 对应实现）
 
-**Style:** Minimalism & Swiss Style
-
-**Keywords:** Clean, simple, spacious, functional, white space, high contrast, geometric, sans-serif, grid-based, essential
-
-**Best For:** Enterprise apps, dashboards, documentation sites, SaaS platforms, professional tools
-
-**Key Effects:** Subtle hover (200-250ms), smooth transitions, sharp shadows if any, clear type hierarchy, fast loading
-
-### Page Pattern
-
-**Pattern Name:** Hero + Features + CTA
-
-- **Conversion Strategy:** Deep CTA placement. For CTA label text, verify at least 4.5:1 against the button fill; use 7:1 only when the product explicitly targets AAA normal-text contrast. Keep focus and component boundaries independently visible. Disable hero parallax under reduced motion and render its static final state.
-- **CTA Placement:** Hero (sticky) + Bottom
-- **Section Order:** Hero with headline/image > Value prop > Key features (3-5) > CTA section > Footer
+- **按钮** — `.btn` 描边 / `.primary` 墨（深色渐变+扫光）/ `.danger`；表格内 `.sm`
+- **欢迎态** — welcome-logo 呼吸光晕、标题逐字浮现（GSAP stagger）、副标题打字机轮播、
+  建议 chips（点击直接发送）
+- **Codex 风 composer** — `.inputbar` 大圆角胶囊（深色玻璃+靛紫 focus 光晕）、
+  圆形加号（旋转 45° 开弹窗）、圆形发送键（空输入禁用）
+- **加号弹窗** — `.popover` 玻璃圆角 18px：添加图片 / 计划模式 / 目标模式（互斥选中，
+  切 placeholder + 发送时加 `【计划】/【目标】` 前缀）/ 快捷创建（定时提醒、新建待办 → 预填输入框）
+- **聊天气泡** — 用户=primary、bot=白卡/玻璃、错误=红浅底；MD 排版（代码块墨底）
+- **表格** — 无外框、细线行、hover 浅底；徽章/chip 全部浅底深字
+- **状态卡** — 数字 GSAP 滚动（`data-count` + runCountUp），非数值 15px
+- **弹层三件套** — toast（墨色/深色玻璃）、modal、审批卡（左橙线玻璃卡）
+- **快捷面板 palette** — 深色玻璃同源令牌（靛紫 logo/光标）
 
 ---
 
 ## Anti-Patterns (Do NOT Use)
 
-
-### Additional Forbidden Patterns
-
-- ❌ **Emojis as icons** — Use SVG icons (Heroicons, Lucide, Simple Icons)
-- ❌ **Missing cursor:pointer** — All clickable elements must have cursor:pointer
-- ❌ **Layout-shifting hovers** — Avoid scale transforms that shift layout
-- ❌ **Low contrast text** — Maintain 4.5:1 minimum contrast ratio
-- ❌ **Instant state changes** — Always use transitions (150-300ms)
-- ❌ **Invisible focus states** — Focus states must be visible for a11y
+- ❌ 硬投影 / 点阵纹理 / 荧光黄章（v4 遗产，已全部移除）
+- ❌ 深色下用纯白卡片（必须玻璃 + 半透明令牌）
+- ❌ 语义标签用整块饱和大色底
+- ❌ 忽略 `prefers-reduced-motion`（GSAP 编排必须可降级）
+- ❌ 引入 CDN 字体/脚本（保持单文件离线；GSAP 走 npm 打包）
 
 ---
 
 ## Pre-Delivery Checklist
 
-Before delivering any UI code, verify:
-
-- [ ] No emojis used as icons (use SVG instead)
-- [ ] All icons from consistent icon set (Heroicons/Lucide)
-- [ ] `cursor-pointer` on all clickable elements
-- [ ] Hover states with smooth transitions (150-300ms)
-- [ ] Light mode: text contrast 4.5:1 minimum
-- [ ] Focus states visible for keyboard navigation
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive: 375px, 768px, 1024px, 1440px
-- [ ] No content hidden behind fixed navbars
-- [ ] No horizontal scroll on mobile
+- [ ] 双主题均过对比度（深色 body 自动跟踪）
+- [ ] 主题切换后 theme-color meta 同步
+- [ ] `npm run build` → `internal/admin/webdist/` → 重启 Go 服务（embed 编译期固化）
+- [ ] GSAP 动效在 reduced-motion 下为静态
+- [ ] 760px 断点：顶栏化、审批卡贴边、悬浮窗 fixed 逃逸滚动容器

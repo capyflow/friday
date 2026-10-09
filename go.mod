@@ -55,3 +55,5 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/capyflow/vortexagent => /home/aaron/com.capyflow/vortexagent-fix400

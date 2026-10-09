@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>组件规范 · 小五新粗野主义</title>
+<link rel="stylesheet" href="c.css">
+<style>
+  .spec { max-width: 920px; margin: 0 auto; padding: 44px 34px 80px; }
+  .spec h1 { font-size: 30px; font-weight: 900; margin-bottom: 6px; }
+  .spec .sub { color: var(--muted); font-weight: 700; font-size: 13px; margin-bottom: 34px; }
+  .spec section { margin-bottom: 34px; }
+  .spec h2 { font-size: 15px; font-weight: 900; margin-bottom: 14px; }
+  .spec h2 .no { display: inline-block; background: var(--yellow); border: var(--border-thin);
+    border-radius: 6px; padding: 0 8px; margin-right: 8px; box-shadow: 2px 2px 0 var(--ink); }
+  .demo { background: var(--card); border: var(--border); border-radius: var(--radius);
+    box-shadow: var(--hard-sm); padding: 22px; }
+  .swrow { display: flex; gap: 14px; flex-wrap: wrap; }
+  .sw { width: 120px; }
+  .sw i { display: block; height: 64px; border: var(--border); border-radius: 10px;
+    box-shadow: var(--hard-sm); margin-bottom: 8px; }
+  .sw b { font-size: 12px; font-weight: 900; display: block; }
+  .sw span { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .typerow p { margin-bottom: 10px; }
+  .btnrow, .chiprow, .baderow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .demo .formcol { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+  .note { font-size: 12px; color: var(--muted); font-weight: 600; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="spec">
+  <h1>组件规范 <span class="hl">Design Spec</span></h1>
+  <p class="sub">Direction C · 新粗野主义 —— 本页即落地 Vue 工程的对照表（web/src/style.css 令牌映射）。</p>
+
+  <section>
+    <h2><span class="no">01</span>配色 COLOR</h2>
+    <div class="demo">
+      <div class="swrow">
+        <div class="sw"><i style="background:#F7F0E3"></i><b>奶油纸底</b><span>--bg #F7F0E3</span></div>
+        <div class="sw"><i style="background:#FFFFFF"></i><b>卡片白</b><span>--card #FFFFFF</span></div>
+        <div class="sw"><i style="background:#17140F"></i><b>墨线/正文</b><span>--ink #17140F</span></div>
+        <div class="sw"><i style="background:#FF5C00"></i><b>烈橙 · 主强调</b><span>--orange #FF5C00</span></div>
+        <div class="sw"><i style="background:#FFD84D"></i><b>荧光黄 · 高亮</b><span>--yellow #FFD84D</span></div>
+        <div class="sw"><i style="background:#9FE7C0"></i><b>薄荷 · 成功</b><span>--mint #9FE7C0</span></div>
+        <div class="sw"><i style="background:#A8D4FF"></i><b>天蓝 · 信息</b><span>--sky #A8D4FF</span></div>
+        <div class="sw"><i style="background:#FF7B6B"></i><b>珊瑚红 · 危险</b><span>--red #FF7B6B</span></div>
+      </div>
+      <p class="note">分层 = 2px 墨线描边 + 硬投影（5px 5px 0 / 3px 3px 0），不使用弥散阴影与渐变。文字对比全部 ≥ 4.5:1（彩色块上用墨色文字）。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">02</span>字级 TYPE</h2>
+    <div class="demo typerow">
+      <p style="font-size:24px; font-weight:900">页面标题 24px / 900 · <b style="background:var(--yellow); padding:0 4px">关键词荧光高亮</b></p>
+      <p style="font-size:15px; font-weight:600">正文 15px / 400-600，行高 1.6 —— 小五的回复用这个字号。</p>
+      <p style="font-size:13px; font-weight:700">辅助 13px / 700，次级说明与表格正文。</p>
+      <p style="font-size:12px; font-weight:700" class="mono">META 12px 等宽 · 时间戳 / 路径 / 用量数字</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">03</span>按钮 BUTTON（hover 抬起 +2px，按下归位）</h2>
+    <div class="demo">
+      <div class="btnrow">
+        <button class="btn">默认描边</button>
+        <button class="btn primary">主操作 · 烈橙</button>
+        <button class="btn warn">次操作 · 黄</button>
+        <button class="btn good">确认 · 薄荷</button>
+        <button class="btn danger">危险 · 珊瑚红</button>
+        <button class="btn sm">小按钮</button>
+        <button class="btn icon">▣</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">04</span>徽章 / 状态点 / 轨迹 CHIP</h2>
+    <div class="demo">
+      <div class="baderow" style="margin-bottom:12px">
+        <span class="badge once">单次</span><span class="badge repeat">多次</span>
+        <span class="badge cron">循环</span><span class="badge agent">智能</span>
+        <span class="badge dingtalk">钉钉</span><span class="badge feishu">飞书</span><span class="badge repl">终端</span>
+      </div>
+      <div class="chiprow" style="margin-bottom:12px">
+        <span class="chip c-llm_in">LLM 输入</span><span class="chip c-llm_out">LLM 输出</span>
+        <span class="chip c-tool_req">请求工具</span><span class="chip c-tool">工具结果</span>
+        <span class="chip c-task">任务</span><span class="chip c-answer">回答</span><span class="chip c-error">错误</span>
+      </div>
+      <div class="chiprow">
+        <span><span class="dot ok"></span>在线</span>
+        <span><span class="dot run"></span>执行中</span>
+        <span><span class="dot bad"></span>离线</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">05</span>表单 FORM</h2>
+    <div class="demo">
+      <div class="formcol">
+        <input placeholder="描边输入框：hover 微抬，focus 抬起 + 硬投影" style="flex:1; min-width:260px">
+        <select><option>下拉选择</option></select>
+        <input type="checkbox" checked> <label>勾选（accent 橙）</label>
+      </div>
+      <div class="formcol" style="margin-top:12px">
+        <textarea rows="2" style="width:100%" placeholder="多行文本域…"></textarea>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">06</span>对话气泡 / 空态 / 审批卡</h2>
+    <div class="demo">
+      <div style="max-width:520px; display:flex; flex-direction:column; gap:12px">
+        <div class="mrow user"><div class="bubble" style="max-width:100%">用户消息 · 橙块墨线</div></div>
+        <div class="mrow bot"><div class="bubble" style="max-width:100%">小五回复 · 白卡墨线，<b>关键词荧光高亮</b>，<code>行内代码薄荷块</code></div></div>
+        <div class="empty">空状态：2px 虚线墨框 + 半透明白底</div>
+      </div>
+      <div style="margin-top:18px; max-width:420px">
+        <div class="approval-card">
+          <h4>⚠️ 危险操作待审批</h4>
+          <pre>exec: rm -rf /tmp/friday-cache</pre>
+          <div class="acts">
+            <button class="btn sm">拒绝</button>
+            <button class="btn sm primary">批准</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">07</span>交互签名（全部组件共用）</h2>
+    <div class="demo">
+      <p style="font-size:14px; font-weight:600; line-height:2">
+        · hover：元素向左上抬起 2px，投影从 3px 长到 5px（120ms ease-out）<br>
+        · active：按下归位、投影消失 —— 有"按图钉"的手感<br>
+        · focus（键盘）：3px 墨色外框 + 2px 偏移，全组件可见<br>
+        · 选中导航/目录：荧光黄块 + 硬投影；关键词高亮同源<br>
+        · <code>prefers-reduced-motion</code>：全部动效降级为瞬时
+      </p>
+    </div>
+  </section>
+</div>
+</body>
+</html>

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>方向 B · 柔雾奶感（Soft Mist）— 小五</title>
+<!--
+  设计稿（非生产代码）：方向 B —— 浅色柔雾/奶感
+  依据：ui-ux-pro-max / claymorphism 的柔化版（16-24px 大圆角、内+外双层柔影、
+  粉彩配色、轻盈过渡），面向消费级个人管家的亲和感。
+-->
+<style>
+  :root {
+    --bg: #FAF8FF;
+    --card: #FFFFFF;
+    --fg: #2B2540;
+    --muted: #8B85A0;
+    --line: #ECE8F8;
+    --lavender: #7C6CF6;
+    --lavender-deep: #6D5CE6;
+    --lavender-soft: #EEEBFF;
+    --coral: #FF6B57;
+    --coral-deep: #F04E38;
+    --grad-coral: linear-gradient(135deg, #FF8A66, #FF5C8A);
+    --radius: 22px;
+    --shadow-soft: 0 4px 14px rgba(93,76,214,.07), 0 16px 40px rgba(93,76,214,.08);
+    --shadow-plush: 0 2px 6px rgba(93,76,214,.08), 0 18px 44px rgba(93,76,214,.13);
+    --tr: 200ms cubic-bezier(.34,1.3,.64,1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "MiSans", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+  }
+  /* 柔雾背景光斑 */
+  .mist { position: fixed; inset: 0; z-index: 0; filter: blur(80px); opacity: .55; }
+  .mist i { position: absolute; border-radius: 50%; }
+  .mist i:nth-child(1) { width: 520px; height: 420px; left: -140px; top: -160px;
+    background: radial-gradient(circle, rgba(255,154,126,.5), transparent 65%); }
+  .mist i:nth-child(2) { width: 620px; height: 480px; right: -200px; top: -100px;
+    background: radial-gradient(circle, rgba(151,131,255,.35), transparent 65%); }
+  .mist i:nth-child(3) { width: 460px; height: 420px; left: 38%; bottom: -240px;
+    background: radial-gradient(circle, rgba(255,196,140,.35), transparent 65%); }
+
+  #app { position: relative; z-index: 1; display: flex; height: 100vh; }
+
+  /* 侧栏：白卡浮起 */
+  #sidebar { width: 228px; flex: none; display: flex; flex-direction: column;
+    padding: 22px 14px 16px; margin: 14px 0 14px 14px;
+    background: var(--card); border-radius: 26px; box-shadow: var(--shadow-soft);
+    border: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px 22px; }
+  .brand .avatar { width: 42px; height: 42px; border-radius: 16px; flex: none;
+    background: var(--grad-coral); color: #fff; display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 800;
+    box-shadow: 0 8px 20px rgba(255,107,87,.4), inset 0 -3px 6px rgba(0,0,0,.08), inset 0 2px 3px rgba(255,255,255,.4); }
+  .brand b { font-size: 17px; font-weight: 800; letter-spacing: .12em; }
+  #nav { display: flex; flex-direction: column; gap: 4px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; min-height: 44px; width: 100%;
+    text-align: left; border: none; background: none; padding: 0 13px;
+    border-radius: 15px; font-size: 14px; font-weight: 600; color: var(--muted);
+    transition: background var(--tr), color var(--tr); cursor: pointer; }
+  .nav-item:hover { background: #F5F2FF; color: var(--fg); }
+  .nav-item.active { background: var(--lavender-soft); color: var(--lavender-deep);
+    box-shadow: inset 0 1px 3px rgba(93,76,214,.08); }
+  .nav-item svg { flex: none; }
+  .grow { flex: 1; }
+  #whoBox { border-top: 1px dashed var(--line); padding: 12px 8px 0; font-size: 12px; color: var(--muted); }
+  #whoBox .who-line { display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
+    font-weight: 700; color: var(--fg); }
+  #btnLogout { width: 100%; display: flex; align-items: center; justify-content: center; gap: 7px;
+    background: #F6F4FF; border: none; color: var(--muted);
+    border-radius: 14px; padding: 10px 15px; font-size: 14px; font-weight: 700; cursor: pointer;
+    transition: all var(--tr);
+    box-shadow: inset 0 -2px 5px rgba(93,76,214,.06), inset 0 1px 2px rgba(255,255,255,.8); }
+  #btnLogout:hover { color: var(--coral-deep); background: #FFF1EE; }
+
+  /* 主区 */
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 14px 14px 14px 6px; gap: 10px; }
+  #chatHead { display: flex; align-items: center; gap: 10px; padding: 12px 20px;
+    background: var(--card); border-radius: 20px; box-shadow: var(--shadow-soft); border: 1px solid var(--line); }
+  #chatHead .title { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: .04em; color: var(--muted); }
+  .btn-icon { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
+    background: #F6F4FF; border: none; border-radius: 13px;
+    color: var(--muted); cursor: pointer; transition: all var(--tr); }
+  .btn-icon:hover { color: var(--lavender-deep); }
+
+  #chatScroller { flex: 1; overflow-y: auto; padding: 20px 12px 4px; }
+  #msgList { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .mrow { display: flex; gap: 8px; align-items: flex-end; }
+  .mrow.user { flex-direction: row-reverse; }
+  .bubble { max-width: 78%; padding: 12px 17px; border-radius: 20px; font-size: 15px;
+    line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+  .mrow.bot .bubble { background: var(--card); border: 1px solid var(--line);
+    border-bottom-left-radius: 7px; box-shadow: var(--shadow-soft); }
+  .mrow.user .bubble { background: var(--grad-coral); color: #fff; border-bottom-right-radius: 7px;
+    box-shadow: 0 10px 26px rgba(255,107,87,.35), inset 0 -3px 6px rgba(0,0,0,.06); }
+  .bubble b { color: inherit; }
+  .mrow.bot .bubble code { background: var(--lavender-soft); color: var(--lavender-deep);
+    padding: 1px 7px; border-radius: 7px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  .typing { display: inline-flex; gap: 4px; padding: 4px 2px; }
+  .typing i { width: 6px; height: 6px; border-radius: 50%; background: #CFC7F4;
+    animation: jump 1.2s ease-in-out infinite; }
+  .typing i:nth-child(2) { animation-delay: .15s; }
+  .typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes jump { 0%,60%,100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+  #chatFoot { padding: 0 12px 2px; }
+  .inputbar { max-width: 680px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end;
+    background: var(--card); border: 1px solid var(--line); border-radius: 24px;
+    padding: 9px 9px 9px 16px; box-shadow: var(--shadow-plush); transition: box-shadow var(--tr); }
+  .inputbar:focus-within { box-shadow: 0 2px 6px rgba(93,76,214,.08), 0 18px 44px rgba(93,76,214,.18); }
+  .inputbar textarea { flex: 1; border: none; resize: none; background: transparent; outline: none;
+    color: var(--fg); font: inherit; font-size: 15px; line-height: 1.5; max-height: 120px;
+    padding: 7px 0; }
+  .inputbar textarea::placeholder { color: #B9B3CC; }
+  .btn-send { width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
+    background: var(--grad-coral); color: #fff; border: none; border-radius: 15px; cursor: pointer;
+    box-shadow: 0 8px 20px rgba(255,107,87,.4), inset 0 -3px 5px rgba(0,0,0,.08);
+    transition: all var(--tr); }
+  .btn-send:hover { transform: translateY(-2px); box-shadow: 0 12px 26px rgba(255,107,87,.45), inset 0 -3px 5px rgba(0,0,0,.08); }
+  .btn-clip { width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
+    background: #F6F4FF; border: none; border-radius: 15px;
+    color: var(--muted); cursor: pointer; transition: all var(--tr); }
+  .btn-clip:hover { color: var(--lavender-deep); }
+
+  /* 审批卡片 */
+  #approvalBar { position: fixed; right: 24px; bottom: 24px; z-index: 90; width: 360px; }
+  .approval-card { background: var(--card); border: 1px solid #FFE3D2;
+    border-left: 5px solid #FFAA5C; border-radius: 20px; padding: 14px 16px;
+    box-shadow: var(--shadow-plush); }
+  .approval-card h4 { margin: 0 0 6px; font-size: 13px; color: #E8730C; }
+  .approval-card pre { margin: 6px 0 10px; font-size: 12px; white-space: pre-wrap; word-break: break-all;
+    max-height: 120px; overflow: auto; background: #FFF8F1; border-radius: 12px; padding: 9px 11px;
+    color: #9A6B4A; }
+  .acts { display: flex; gap: 8px; justify-content: flex-end; }
+  .acts .abtn { border-radius: 13px; padding: 8px 14px; font-size: 13px; font-weight: 700;
+    cursor: pointer; transition: all var(--tr); border: none;
+    background: #F6F4FF; color: var(--muted); }
+  .acts .abtn:hover { color: var(--fg); }
+  .acts .abtn.primary { background: var(--grad-coral); color: #fff;
+    box-shadow: 0 6px 16px rgba(255,107,87,.4); }
+</style>
+</head>
+<body>
+<div class="mist" aria-hidden="true"><i></i><i></i><i></i></div>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><div class="avatar">五</div><b>小五</b></div>
+    <nav id="nav">
+      <button class="nav-item active"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>聊天</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>运行状态</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>调用轨迹</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>自动化</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>待办</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>记忆</button>
+      <button class="nav-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>设置</button>
+    </nav>
+    <div class="grow"></div>
+    <div id="whoBox">
+      <div class="who-line"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>admin</div>
+      <button id="btnLogout"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>退出登录</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div id="chatHead">
+      <div class="title">聊天</div>
+      <button class="btn-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>
+    </div>
+    <div id="chatScroller">
+      <div id="msgList">
+        <div class="mrow user"><div class="bubble">帮我记个待办：周五早上还书</div></div>
+        <div class="mrow bot"><div class="bubble">已记入待办 <b>周五早上还书</b>，到时我会提醒你 📚</div></div>
+        <div class="mrow user"><div class="bubble">上海今天天气怎么样？</div></div>
+        <div class="mrow bot"><div class="bubble">上海今天 <b>多云转晴</b>，22–27°C，东南风 3 级。
+- 早晚偏凉，出门带件薄外套
+- 午后紫外线较强，注意防晒</div></div>
+        <div class="mrow bot"><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div></div>
+      </div>
+    </div>
+    <div id="chatFoot">
+      <div class="inputbar">
+        <button class="btn-clip"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+        <textarea rows="1" placeholder="和小五说点什么…"></textarea>
+        <button class="btn-send"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="approvalBar">
+  <div class="approval-card">
+    <h4>⚠️ 危险操作待审批</h4>
+    <pre>exec: rm -rf /tmp/friday-cache</pre>
+    <div class="acts">
+      <button class="abtn">拒绝</button>
+      <button class="abtn">批准并记住</button>
+      <button class="abtn primary">批准</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

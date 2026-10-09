@@ -158,6 +158,23 @@ cp config.yaml.example config.yaml         # 编辑确认 baseURL/model
 go run ./cmd/robot                         # 或 go build -o friday ./cmd/robot && ./friday
 ```
 
+### 前端（web/，Vue 3 + Vite）
+
+网页界面源码在 `web/`，`npm run build` 把 JS/CSS 内联为自包含 HTML，
+产物落在 `internal/admin/webdist/`，经 go:embed 打进二进制。
+仓库提交了构建产物，纯 Go 开发不需要 Node；改前端时：
+
+```bash
+cd web
+npm install      # 首次
+npm run dev      # 热更开发（http://localhost:5173，/api 代理到 8080 的 Go 服务）
+npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生效
+```
+
+`npm run build` 串两次 vite：先主应用（index.html），后快捷面板（palette.html，
+`emptyOutDir=false` 不清掉前者）——分开构建是为了两页 CSS 互不污染（palette
+要求 body 透明，供 Tauri 透明窗口用）。
+
 启动后两种入口：
 
 - **网页聊天**：浏览器打开 `http://localhost:8080/`（端口同管理后台）

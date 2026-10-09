@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自动化 · 小五</title>
+<link rel="stylesheet" href="c.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><div class="avatar">五</div><b>小五</b><span class="ver">FRIDAY v1</span></div>
+    <nav id="nav">
+      <a class="nav-item" href="c-chat.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>聊天</a>
+      <a class="nav-item" href="c-status.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>运行状态</a>
+      <a class="nav-item" href="c-trace.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>调用轨迹</a>
+      <a class="nav-item active" href="c-auto.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>自动化</a>
+      <a class="nav-item" href="c-todo.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>待办</a>
+      <a class="nav-item" href="c-wiki.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>记忆</a>
+      <a class="nav-item" href="c-settings.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>设置</a>
+    </nav>
+    <div class="grow"></div>
+    <div id="whoBox">
+      <div class="who-line">admin</div>
+      <button id="btnLogout">退出登录</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <section class="view">
+      <div class="view-inner">
+        <h2><span class="hl">自动化</span> <span class="count">4 条</span></h2>
+        <div class="panel">
+          <div class="panel-title"><span class="tag">NEW</span>新建任务</div>
+          <form>
+            <select style="min-width:110px"><option>单次</option><option>多次</option><option>循环</option><option>智能任务</option></select>
+            <input class="w1" placeholder="任务内容，如：该敷面膜了">
+            <input style="min-width:200px" placeholder="10分钟后 / 2026-09-01T20:00:00+08:00">
+            <button class="btn primary" type="button">添加任务</button>
+          </form>
+          <table>
+            <thead><tr><th>类型</th><th>内容</th><th>计划</th><th>下次触发</th><th></th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge once">单次</span></td><td>10 分钟后提醒我喝水</td><td class="meta">—</td><td class="mono">09-30 10:42</td><td><button class="btn sm danger">取消</button></td></tr>
+              <tr><td><span class="badge repeat">多次</span></td><td>番茄钟休息提醒</td><td class="meta">每 25分钟 ×4/4</td><td class="mono">09-30 11:05</td><td><button class="btn sm danger">取消</button></td></tr>
+              <tr><td><span class="badge cron">循环</span></td><td>早上问好 + 今日天气</td><td class="meta">cron: 0 8 * * *</td><td class="mono">10-01 08:00</td><td><button class="btn sm danger">取消</button></td></tr>
+              <tr><td><span class="badge agent">智能</span></td><td>看看 notes.txt，把今天要做的事告诉我</td><td class="meta">agent · cron: 0 9 * * *</td><td class="mono">10-01 09:00</td><td><button class="btn sm danger">取消</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

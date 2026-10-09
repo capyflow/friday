@@ -1,5 +1,7 @@
 // Package admin 提供Friday 管理后台：基于 vortexv3（Gin）的 REST API 与
-// 内嵌单页 Dashboard（go:embed，无外部静态文件依赖）。
+// 内嵌单页 Dashboard（go:embed，无外部静态文件依赖）。页面源码在仓库 web/ 目录
+// （Vue 3 + Vite），npm run build 产物内联为自包含 HTML 落在 internal/admin/webdist/，
+// 未构建时以占位页兜底，go build 始终可过。
 //
 // 鉴权：账号密码登录换取会话 Cookie（7 天有效）。
 // 账号来源：启动时由配置文件（admin.username/password）或环境变量
@@ -65,10 +67,10 @@ import (
 	"github.com/capyflow/friday/internal/web"
 )
 
-//go:embed index.html
+//go:embed webdist/index.html
 var indexHTML []byte
 
-//go:embed palette.html
+//go:embed webdist/palette.html
 var paletteHTML []byte
 
 const (
@@ -78,11 +80,11 @@ const (
 
 // Info 是由 main 注入的管家静态运行信息（展示用）。
 type Info struct {
-	Model      string
-	BaseURL    string
-	TaskFile   string
-	TodoFile   string
-	MemoryDir  string
+	Model     string
+	BaseURL   string
+	TaskFile  string
+	TodoFile  string
+	MemoryDir string
 }
 
 // Server 是管理后台，同时承载网页聊天（web.Chat 挂载在同一端口）。
@@ -403,14 +405,14 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 		pending = s.todos.CountPending()
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"startedAt":       s.startedAt.Format(time.RFC3339),
-		"uptimeSeconds":   int(time.Since(s.startedAt).Seconds()),
-		"provider":        map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
+		"startedAt":        s.startedAt.Format(time.RFC3339),
+		"uptimeSeconds":    int(time.Since(s.startedAt).Seconds()),
+		"provider":         map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
 		"apiKeyConfigured": s.cfg != nil && s.cfg.ProviderAPIKey() != "",
-		"tasks":           map[string]any{"total": len(tasks), "byKind": byKind},
-		"todos":           map[string]any{"pending": pending},
-		"memories":        s.memory.Count(),
-		"files":           map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
+		"tasks":            map[string]any{"total": len(tasks), "byKind": byKind},
+		"todos":            map[string]any{"pending": pending},
+		"memories":         s.memory.Count(),
+		"files":            map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
 	})
 }
 

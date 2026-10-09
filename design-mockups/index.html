@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小五 UI 重设计 · 三个方向</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #1C1917; color: #F5F1EA; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; padding: 40px; }
+  .wrap { max-width: 900px; width: 100%; }
+  h1 { font-size: 26px; margin-bottom: 6px; }
+  p.sub { color: rgba(245,241,234,.55); margin-bottom: 28px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  a.card { display: block; text-decoration: none; color: inherit; border-radius: 16px;
+           padding: 22px 20px; min-height: 190px; transition: transform 160ms ease; }
+  a.card:hover { transform: translateY(-4px); }
+  .a { background: linear-gradient(160deg, #17132B, #0E2030); border: 1px solid rgba(255,255,255,.14); }
+  .b { background: linear-gradient(160deg, #FFF3EE, #EFECFF); color: #2B2540; border: 1px solid #fff; }
+  .c { background: #F7F0E3; color: #17140F; border: 3px solid #17140F; box-shadow: 6px 6px 0 #17140F; }
+  .tag { font-size: 12px; opacity: .65; letter-spacing: .1em; margin-bottom: 10px; }
+  .card h2 { font-size: 19px; margin-bottom: 8px; }
+  .card p { font-size: 13px; line-height: 1.7; opacity: .8; }
+  .swatches { display: flex; gap: 6px; margin-top: 16px; }
+  .swatches i { width: 22px; height: 22px; border-radius: 6px; border: 1px solid rgba(0,0,0,.15); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>小五 UI 重设计 — 三个候选方向</h1>
+  <p class="sub">高保真静态稿（内容为示意）。点开全屏体验后挑一个，再落地到 Vue 工程；也可以混搭（如 B 的布局 + C 的配色）。</p>
+  <div class="grid">
+    <a class="card a" href="a-aurora-glass.html">
+      <div class="tag">DIRECTION A</div>
+      <h2>极光玻璃 · 深色</h2>
+      <p>深空底 + 极光渐变光晕 + 磨砂玻璃卡片。现代 AI 产品的沉浸感，夜间使用舒适。</p>
+      <div class="swatches"><i style="background:#7C5CFF"></i><i style="background:#4B9FFF"></i><i style="background:#2DD4FF"></i><i style="background:#0A0A16"></i></div>
+    </a>
+    <a class="card b" href="b-soft-mist.html">
+      <div class="tag">DIRECTION B</div>
+      <h2>柔雾奶感 · 浮岛</h2>
+      <p>浅色柔雾光斑 + 大圆角白卡浮岛 + 珊瑚橙渐变。亲和、轻盈，最像"生活管家"。</p>
+      <div class="swatches"><i style="background:#FF8A66"></i><i style="background:#FF5C8A"></i><i style="background:#7C6CF6"></i><i style="background:#FAF8FF"></i></div>
+    </a>
+    <a class="card c" href="c-neo-brutalism.html">
+      <div class="tag">DIRECTION C</div>
+      <h2>新粗野主义 · 墨线</h2>
+      <p>奶油底点阵 + 2px 墨线描边 + 硬投影色块。个性张扬、极强辨识度，godly 风的另一个极端。</p>
+      <div class="swatches"><i style="background:#FF5C00"></i><i style="background:#FFD84D"></i><i style="background:#9FE7C0"></i><i style="background:#F7F0E3"></i></div>
+    </a>
+  </div>
+</div>
+</body>
+</html>

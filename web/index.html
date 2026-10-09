@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 主题预设：在样式表加载前定好 data-theme，避免首帧闪烁（与 src/theme.js 同逻辑） -->
+<script>
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('friday-theme'); } catch (e) {}
+  if (!t) t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  document.documentElement.dataset.theme = t;
+})();
+</script>
+<meta name="theme-color" content="#F6F6F8">
+<title>小五</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%2318181B'/><text x='50' y='69' font-size='54' text-anchor='middle' fill='%23FAFAFA' font-family='sans-serif' font-weight='600'>五</text></svg>">
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

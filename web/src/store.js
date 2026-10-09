@@ -1,0 +1,22 @@
+// 全局状态：登录态 / 当前视图 / toast / 弹窗。轻量 reactive，无需 pinia。
+import { reactive } from 'vue'
+
+export const store = reactive({
+  loggedIn: false,
+  username: '',
+  view: 'chat',
+})
+
+export const toastState = reactive({ text: '', err: false, show: false })
+let toastTimer
+export function toast(text, isErr) {
+  toastState.text = text
+  toastState.err = !!isErr
+  toastState.show = true
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastState.show = false }, 2200)
+}
+
+export const modalState = reactive({ show: false, text: '' })
+export function showModal(text) { modalState.text = text; modalState.show = true }
+export function hideModal() { modalState.show = false }

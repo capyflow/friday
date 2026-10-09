@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>聊天 · 小五</title>
+<link rel="stylesheet" href="c.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><div class="avatar">五</div><b>小五</b><span class="ver">FRIDAY v1</span></div>
+    <nav id="nav">
+      <a class="nav-item active" href="c-chat.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>聊天</a>
+      <a class="nav-item" href="c-status.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>运行状态</a>
+      <a class="nav-item" href="c-trace.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>调用轨迹</a>
+      <a class="nav-item" href="c-auto.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>自动化</a>
+      <a class="nav-item" href="c-todo.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>待办</a>
+      <a class="nav-item" href="c-wiki.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>记忆</a>
+      <a class="nav-item" href="c-settings.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>设置</a>
+    </nav>
+    <div class="grow"></div>
+    <div id="whoBox">
+      <div class="who-line"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>admin</div>
+      <button id="btnLogout"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>退出登录</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <section id="view-chat" class="chat-shell">
+      <div id="chatHead">
+        <div class="title"><span class="hl">聊天</span></div>
+        <div class="more-wrap">
+          <button class="btn-icon" aria-label="更多操作"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>
+        </div>
+      </div>
+      <div id="chatScroller">
+        <div id="msgList">
+          <div class="mrow user"><div class="bubble">帮我记个待办：周五早上还书</div></div>
+          <div class="mrow bot"><div class="bubble">已记入待办 <b>周五早上还书</b>，到时我会提醒你 📚</div></div>
+          <div class="mrow user"><div class="bubble">上海今天天气怎么样？</div></div>
+          <div class="mrow bot"><div class="bubble">上海今天 <b>多云转晴</b>，22–27°C，东南风 3 级。
+- 早晚偏凉，出门带件薄外套
+- 午后紫外线较强，注意防晒</div></div>
+          <div class="mrow user"><div class="bubble">把这件事写进记忆：<code>每周五早上还书</code></div></div>
+          <div class="mrow bot"><div class="bubble">好，已写入记忆页 <b>生活习惯</b>，下次不用再交代啦。</div></div>
+          <div class="mrow bot"><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div></div>
+        </div>
+      </div>
+      <div id="chatFoot">
+        <div id="attachPreviews">
+          <div class="thumb"><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect width='64' height='64' fill='%23FFD84D'/%3E%3Ccircle cx='32' cy='32' r='14' fill='%23FF5C00'/%3E%3C/svg%3E" alt=""><button class="rm" aria-label="移除图片">×</button></div>
+          <div class="thumb"><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect width='64' height='64' fill='%239FE7C0'/%3E%3Crect x='18' y='18' width='28' height='28' fill='%2317140F'/%3E%3C/svg%3E" alt=""><button class="rm" aria-label="移除图片">×</button></div>
+        </div>
+        <div class="inputbar">
+          <button class="btn icon" aria-label="添加图片"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+          <textarea rows="1" placeholder="和小五说点什么…"></textarea>
+          <button class="btn primary" aria-label="发送"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="approvalBar">
+  <div class="approval-card">
+    <h4>⚠️ 危险操作待审批</h4>
+    <pre>exec: rm -rf /tmp/friday-cache</pre>
+    <div class="acts">
+      <button class="btn sm">拒绝</button>
+      <button class="btn sm">批准并记住</button>
+      <button class="btn sm primary">批准</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
