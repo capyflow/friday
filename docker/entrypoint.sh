@@ -3,6 +3,19 @@
 set -e
 
 CONFIG="${CONFIG_PATH:-/data/config.yaml}"
+ADMIN_BIND_PORT="${ADMIN_PORT:-8080}"
+
+# 容器健康检查依赖固定端口，禁止 0（随机端口）或无效值导致检测地址失配。
+case "$ADMIN_BIND_PORT" in
+    *[!0-9]*)
+        echo "ADMIN_PORT 必须是 1 到 65535 的端口号" >&2
+        exit 2
+        ;;
+esac
+if [ "${#ADMIN_BIND_PORT}" -gt 5 ] || [ "$ADMIN_BIND_PORT" -lt 1 ] || [ "$ADMIN_BIND_PORT" -gt 65535 ]; then
+    echo "ADMIN_PORT 必须是 1 到 65535 的端口号" >&2
+    exit 2
+fi
 
 if [ ! -f "$CONFIG" ]; then
     cp /usr/share/friday/config.yaml.example "$CONFIG"
@@ -14,4 +27,5 @@ if [ ! -f "$CONFIG" ]; then
     echo "==============================================================" >&2
 fi
 
-exec /usr/local/bin/robot -config "$CONFIG"
+# 显式覆盖播种配置和既有配置，让监听地址、映射与健康检查保持一致。
+exec /usr/local/bin/robot -config "$CONFIG" -host "${ADMIN_HOST:-0.0.0.0}" -port "$ADMIN_BIND_PORT"

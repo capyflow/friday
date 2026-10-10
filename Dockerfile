@@ -50,10 +50,11 @@ COPY config.yaml.example /usr/share/friday/config.yaml.example
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# 管理后台/网页聊天端口（改了 config 里 admin.port 的话同步调整映射，
-# 并用 -e ADMIN_PORT=<端口> 让健康检查跟随）。
+# 容器绑定全部网卡；入口脚本用 ADMIN_HOST/ADMIN_PORT 覆盖已有配置，
+# 服务监听与健康检查共用 ADMIN_PORT。自定义端口时同步调整映射。
 ENV TZ=Asia/Shanghai \
     CONFIG_PATH=/data/config.yaml \
+    ADMIN_HOST=0.0.0.0 \
     ADMIN_PORT=8080
 WORKDIR /data
 VOLUME /data
