@@ -48,9 +48,16 @@ const (
 
 // 业务元数据在 Goal.Meta 中的键名，随目标持久化、重启恢复。
 const (
-	metaKind      = "kind"
-	metaHeartbeat = "heartbeat"
-	metaChannel   = "channel"
+	metaKind                 = "kind"
+	metaHeartbeat            = "heartbeat"
+	metaChannel              = "channel"
+	metaTodoID               = "todoId"
+	metaNotificationParentID = "notificationParentId"
+)
+
+const (
+	StatusActive = "active"
+	StatusPaused = "paused"
 )
 
 // Task 是一条待触发的任务，Kind 决定哪些字段生效：
@@ -73,6 +80,11 @@ type Task struct {
 	Heartbeat bool `json:"heartbeat,omitempty"`
 	// Channel 可选推送通道名（agent 任务的输出投递过滤；空 = 全部可用通道）。
 	Channel string `json:"channel,omitempty"`
+	// Status 为空兼容旧数据，按 active 处理；paused 仅停止未来的入队。
+	Status string `json:"status,omitempty"`
+	// TodoID 由待办管理器维护，公开编辑任务时保留关联。
+	TodoID               string `json:"todoId,omitempty"`
+	NotificationParentID string `json:"notificationParentId,omitempty"`
 }
 
 // Callback 在任务到点时被调用，fn 在独立 goroutine 中执行。
@@ -237,6 +249,9 @@ func (e *Engine) Schedule(t Task) (Task, error) {
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now()
 	}
+	if t.Status == "" {
+		t.Status = StatusActive
+	}
 
 	g, err := buildGoal(t)
 	if err != nil {
@@ -266,6 +281,39 @@ func (e *Engine) Schedule(t Task) (Task, error) {
 	}
 	t.Next = g.GetNextRunAt()
 	return t, nil
+}
+
+// Get 返回未来任务（含暂停任务）；已入队的执行记录由通知中心查询。
+func (e *Engine) Get(id string) (Task, bool) {
+	for _, t := range e.List() {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return Task{}, false
+}
+
+// Update 替换未来任务定义；ID、创建时间、待办关联与当前暂停状态保持不变。
+// 仅可靠调度入口支持编辑，旧构造保留原注册/取消/回调协议。
+func (e *Engine) Update(id string, replacement Task) (Task, error) {
+	if e.reliable == nil {
+		return Task{}, fmt.Errorf("任务编辑需要可靠调度入口")
+	}
+	return e.reliable.update(id, replacement)
+}
+
+func (e *Engine) Pause(id string) (Task, error) {
+	if e.reliable == nil {
+		return Task{}, fmt.Errorf("任务暂停需要可靠调度入口")
+	}
+	return e.reliable.setPaused(id, true)
+}
+
+func (e *Engine) Resume(id string) (Task, error) {
+	if e.reliable == nil {
+		return Task{}, fmt.Errorf("任务恢复需要可靠调度入口")
+	}
+	return e.reliable.setPaused(id, false)
 }
 
 // Cancel 取消一条任务（单次/多次/循环通用），返回是否真的取消了。
@@ -393,6 +441,9 @@ func (e *Engine) onStatusChange(g *autonomous.Goal, _, nu autonomous.GoalStatus)
 // 依 Schedule 经框架触发器求得（once→At，允许过去时刻以立即补触发；repeat→
 // now+Interval；cron→下一满足时刻）。
 func buildGoal(t Task) (*autonomous.Goal, error) {
+	if t.Status != "" && t.Status != StatusActive && t.Status != StatusPaused {
+		return nil, fmt.Errorf("未知任务状态 %q", t.Status)
+	}
 	trigger := t.Kind
 	switch t.Kind {
 	case "":
@@ -419,6 +470,9 @@ func buildGoal(t Task) (*autonomous.Goal, error) {
 	g.Title = t.Text
 	g.Description = t.Text // 普通提醒按 Description 直投、列表按 Title 展示
 	g.Status = autonomous.GoalStatusActive
+	if t.Status == StatusPaused {
+		g.Status = autonomous.GoalStatusPaused
+	}
 	g.CreatedAt = t.CreatedAt
 	g.SetMeta(metaKind, string(t.Kind))
 	if t.Heartbeat {
@@ -426,6 +480,12 @@ func buildGoal(t Task) (*autonomous.Goal, error) {
 	}
 	if t.Channel != "" {
 		g.SetMeta(metaChannel, t.Channel)
+	}
+	if t.TodoID != "" {
+		g.SetMeta(metaTodoID, t.TodoID)
+	}
+	if t.NotificationParentID != "" {
+		g.SetMeta(metaNotificationParentID, t.NotificationParentID)
 	}
 
 	switch trigger {
@@ -455,11 +515,11 @@ func buildGoal(t Task) (*autonomous.Goal, error) {
 	return g, nil
 }
 
-// liveGoal 判断目标是否仍待触发：active/pending 且次数未耗尽。repeat 刚触发完
+// liveGoal 判断目标是否仍保留：active/pending/paused 且次数未耗尽。repeat 刚触发完
 // 最后一次、等待框架下轮标记 done 的窗口视为已结束，与"触发即移除"的对外
 // 表现一致（List 不可见、落盘即时消失）。
 func liveGoal(snap autonomous.Goal) bool {
-	if snap.Status != autonomous.GoalStatusActive && snap.Status != autonomous.GoalStatusPending {
+	if snap.Status != autonomous.GoalStatusActive && snap.Status != autonomous.GoalStatusPending && snap.Status != autonomous.GoalStatusPaused {
 		return false
 	}
 	return snap.Schedule.MaxRuns <= 0 || snap.RunCount < snap.Schedule.MaxRuns
@@ -468,13 +528,19 @@ func liveGoal(snap autonomous.Goal) bool {
 // taskView 把目标快照投影成对外的 Task 视图（List、落盘与回调共用）。
 func taskView(g autonomous.Goal) Task {
 	tk := Task{
-		ID:        g.ID,
-		Text:      g.Title,
-		Cron:      g.Schedule.Cron,
-		CreatedAt: g.CreatedAt,
-		Next:      g.NextRunAt,
-		Heartbeat: g.Meta[metaHeartbeat] == "1",
-		Channel:   g.Meta[metaChannel],
+		ID:                   g.ID,
+		Text:                 g.Title,
+		Cron:                 g.Schedule.Cron,
+		CreatedAt:            g.CreatedAt,
+		Next:                 g.NextRunAt,
+		Heartbeat:            g.Meta[metaHeartbeat] == "1",
+		Channel:              g.Meta[metaChannel],
+		TodoID:               g.Meta[metaTodoID],
+		NotificationParentID: g.Meta[metaNotificationParentID],
+		Status:               StatusActive,
+	}
+	if g.Status == autonomous.GoalStatusPaused {
+		tk.Status = StatusPaused
 	}
 	if k := Kind(g.Meta[metaKind]); k != "" {
 		tk.Kind = k

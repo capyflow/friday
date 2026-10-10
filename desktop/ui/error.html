@@ -35,9 +35,10 @@
     密钥未配置不会导致退出——可打开软件后在「设置」页直接填写 API 密钥
     （任意 OpenAI 兼容服务商通用）；也可在数据目录
     <code id="dir"></code> 下创建 <code>friday.env</code>（KEY=VALUE 格式，如
-    <code>FRIDAY_API_KEY=sk-...</code>），然后重新打开 Friday。
+    <code>FRIDAY_API_KEY=sk-...</code>），然后从系统托盘菜单选择「退出 Friday」，再重新打开。
   </p>
   <p>完整内核日志见数据目录下的 <code>friday-kernel.log</code>。</p>
+  <p>关闭窗口会隐藏到托盘。修复配置后，请先从托盘退出应用，以便重新启动内核。</p>
 <script>
   const params = new URLSearchParams(location.search);
   const reason = params.get('reason') || '';

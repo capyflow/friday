@@ -5,6 +5,9 @@ export const store = reactive({
   loggedIn: false,
   username: '',
   view: 'chat',
+  setupStatus: null,
+  setupSkipped: false,
+  unread: 0,
 })
 
 export const toastState = reactive({ text: '', err: false, show: false })

@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// 默认管理员账号：admin/admin（可通过启动配置或环境变量预置替换）。
+// 默认账号常量仅用于已有部署兼容；新部署必须完成首次设置或预置凭据。
 const (
 	DefaultUsername = "admin"
 	DefaultPassword = "admin"
@@ -24,11 +24,12 @@ const (
 
 // Account 是管理员账号（密码只存 bcrypt 哈希）。
 // 账号来源：启动时由配置文件或环境变量预置（见 config.ResolveAdminCredentials），
-// 未预置时使用默认账号 admin/admin。旧账号文件中的 mustChange 字段加载时被忽略。
+// 未预置时进入首次设置。旧账号文件中的 mustChange 字段加载时被忽略。
 type Account struct {
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"passwordHash"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Username      string    `json:"username"`
+	PasswordHash  string    `json:"passwordHash"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	SetupRequired bool      `json:"setupRequired,omitempty"`
 }
 
 // AccountStore 是管理员账号仓库：JSON 落盘，重启后账号不变。
@@ -39,7 +40,7 @@ type AccountStore struct {
 	initErr error
 }
 
-// NewAccountStore 创建账号仓库；仅文件不存在时初始化默认账号 admin/admin。
+// NewAccountStore 创建账号仓库；文件不存在时保存未初始化状态，不创建默认凭据。
 // 调用方须检查 Err；加载或初始化失败时仓库拒绝登录和更新，并保留原文件。
 func NewAccountStore(path string) *AccountStore {
 	s := &AccountStore{path: path}
@@ -51,15 +52,9 @@ func NewAccountStore(path string) *AccountStore {
 	if loaded {
 		return s
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(DefaultPassword), bcrypt.DefaultCost)
-	if err != nil {
-		s.initErr = fmt.Errorf("初始化默认账号失败: %w", err)
-		return s
-	}
 	acc := Account{
-		Username:     DefaultUsername,
-		PasswordHash: string(hash),
-		UpdatedAt:    time.Now(),
+		SetupRequired: true,
+		UpdatedAt:     time.Now(),
 	}
 	if err := s.saveLocked(acc); err != nil {
 		s.initErr = err
@@ -94,6 +89,13 @@ func (s *AccountStore) load() (bool, error) {
 	var acc Account
 	if err := json.Unmarshal(b, &acc); err != nil {
 		return false, fmt.Errorf("解析账号文件 %q 失败: %w", s.path, err)
+	}
+	if acc.SetupRequired {
+		if acc.Username != "" || acc.PasswordHash != "" {
+			return false, fmt.Errorf("账号文件 %q 的首次设置状态无效", s.path)
+		}
+		s.acc = acc
+		return true, nil
 	}
 	if strings.TrimSpace(acc.Username) == "" || utf8.RuneCountInString(acc.Username) > MaxUsernameLen {
 		return false, fmt.Errorf("账号文件 %q 的用户名无效", s.path)
@@ -140,7 +142,7 @@ func (s *AccountStore) saveLocked(acc Account) error {
 func (s *AccountStore) Login(username, password string) (Account, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.initErr != nil {
+	if s.initErr != nil || s.acc.SetupRequired {
 		return Account{}, false
 	}
 	if subtleMismatch(s.acc.Username, username) {
@@ -155,6 +157,17 @@ func (s *AccountStore) Login(username, password string) (Account, bool) {
 // Update 用给定的用户名与密码覆盖账号（启动预置凭据走此入口，见 main）。
 // 规则：用户名非空且 ≤32 字符；密码 ≥6 位。
 func (s *AccountStore) Update(username, password string) error {
+	return s.update(username, password, false)
+}
+
+var ErrAlreadyInitialized = errors.New("管理员账号已设置，请使用登录")
+
+// Initialize 仅允许未初始化的账号仓库设置一次；检查和落盘处于同一互斥锁。
+func (s *AccountStore) Initialize(username, password string) error {
+	return s.update(username, password, true)
+}
+
+func (s *AccountStore) update(username, password string, initialOnly bool) error {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("用户名不能为空")
@@ -174,6 +187,9 @@ func (s *AccountStore) Update(username, password string) error {
 	if s.initErr != nil {
 		return fmt.Errorf("账号仓库不可用: %w", s.initErr)
 	}
+	if initialOnly && !s.acc.SetupRequired {
+		return ErrAlreadyInitialized
+	}
 	acc := Account{
 		Username:     username,
 		PasswordHash: string(hash),
@@ -190,7 +206,7 @@ func (s *AccountStore) Update(username, password string) error {
 func (s *AccountStore) Current() Account {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Account{Username: s.acc.Username}
+	return Account{Username: s.acc.Username, SetupRequired: s.acc.SetupRequired}
 }
 
 // subtleMismatch 常量时间比较用户名，避免用户名枚举计时侧信道。

@@ -6,12 +6,20 @@ edition = "2021"
 
 # Rust 最小版本：跟随 tauri 2 官方要求
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] } # 透明弹窗需要私有 API（已配 macOSPrivateApi）
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] } # 透明弹窗与系统托盘
 tauri-plugin-shell = "2"                # sidecar 拉起内核
 tauri-plugin-global-shortcut = "2"      # Alt+Space 全局快捷键
 tauri-plugin-single-instance = "2"      # 防多开
+tauri-plugin-notification = "2"         # 用户授权后的系统提醒
+notify-rust = "4"                       # 非 macOS 同步派发结果，避免 prepared 被误算送达
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = "0.3"
+block2 = "0.6"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -30,6 +30,9 @@ func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Reg
 
 	return cfg.Apply(func(next *config.Config) error {
 		previous := next.Snapshot()
+		if apiKey == "" && strings.TrimRight(baseURL, "/") != strings.TrimRight(previous.Provider.BaseURL, "/") && previous.ProviderAPIKey() != "" {
+			return fmt.Errorf("更换 API 地址时请填写该服务的 API Key")
+		}
 		next.Provider.BaseURL, next.Provider.Model = baseURL, model
 		if apiKey != "" {
 			next.Provider.APIKey = apiKey

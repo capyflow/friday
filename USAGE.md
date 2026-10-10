@@ -14,8 +14,8 @@ go run ./cmd/robot --config config.yaml
 `--host` 可覆盖配置中的 `admin.host`，默认仅监听本机；桌面模式始终使用本机地址。
 
 管理员凭据由 `FRIDAY_ADMIN_USERNAME` / `FRIDAY_ADMIN_PASSWORD` 或
-`admin.username/password` 预置，两项须一起提供。首次不存在账号文件时保留默认
-`admin/admin` 兼容行为；损坏或不可读取的账号文件会停止启动并保留原路径。
+`admin.username/password` 预置，两项须一起提供。新部署在本机页面创建管理员账号，不能使用默认密码登录；已有账号保持兼容。
+损坏或不可读取的账号文件会停止启动并保留原路径。
 
 ## 任务、通知与恢复
 
@@ -74,4 +74,5 @@ docker compose logs -f
 
 ## 后续交付
 
-下一版本按 [P0 待办](docs/P0-TODO.md) 实施，条目包含交付范围、验收标准和真实联调所需条件。
+本轮 P0-01～04 的使用方法、API及模拟验收见 [P0 使用与验收](docs/P0-USAGE.md)。
+剩余真实联调与发布条件见 [P0 待办](docs/P0-TODO.md)。

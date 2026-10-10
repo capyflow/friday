@@ -1,0 +1,51 @@
+name: Friday checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/capyflow/*
+      GOPROXY: https://proxy.golang.org,direct
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Configure access to private Go dependencies
+        env:
+          MODULES_TOKEN: ${{ secrets.CAPYFLOW_MODULES_TOKEN }}
+        run: |
+          if [ -z "$MODULES_TOKEN" ]; then
+            echo "Set CAPYFLOW_MODULES_TOKEN with read access to the capyflow dependency repositories."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${MODULES_TOKEN}@github.com/".insteadOf https://github.com/
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm run check
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Verify committed web assets match source
+        run: git diff --exit-code -- internal/admin/webdist/
+      - name: Build Linux service
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/friday ./cmd/robot
+      - name: Exercise first run and persistent P0 flows with a local mock model
+        run: python3 scripts/p0_smoke.py --binary /tmp/friday

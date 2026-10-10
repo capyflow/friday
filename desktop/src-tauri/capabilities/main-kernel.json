@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-kernel",
+  "description": "主窗口内核页面仅可显式启用系统通知；Rust 再检查当前内核准确 origin。",
+  "local": false,
+  "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-enable-notifications", "allow-notifications-enabled"]
+}

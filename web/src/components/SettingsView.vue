@@ -5,6 +5,7 @@ import { api } from '../api.js'
 import { fmtDT } from '../format.js'
 import { store, toast } from '../store.js'
 import SelectBox from './SelectBox.vue'
+import ProviderSettings from './ProviderSettings.vue'
 
 const emit = defineEmits(['logout'])
 
@@ -16,18 +17,6 @@ const MCP_TYPE_OPTIONS = [
 /* ---------- 当前配置 / 模型 ---------- */
 const status = ref(null)
 const who = computed(() => store.username || '—')
-const pBaseURL = ref('')
-const pModel = ref('')
-const pAPIKey = ref('')
-const provMsg = reactive({ text: '', cls: '' })
-let provTimer = null
-function showProvMsg(t, ok) {
-  provMsg.text = t; provMsg.cls = ok ? 'ok' : 'err'
-  clearTimeout(provTimer); provTimer = setTimeout(() => { provMsg.text = '' }, 4000)
-}
-const apiKeyPlaceholder = computed(() => status.value?.apiKeyConfigured
-  ? '已配置——留空保持不变，输入新值可覆盖'
-  : '尚未配置：填入 sk-...（OpenAI 兼容服务商通用）')
 
 const settingsRows = computed(() => {
   const st = status.value
@@ -42,15 +31,9 @@ const settingsRows = computed(() => {
   ]
 })
 
-async function saveProvider() {
-  try {
-    const r = await api('POST', '/api/provider', {
-      baseURL: pBaseURL.value.trim(), model: pModel.value.trim(), apiKey: pAPIKey.value.trim(),
-    })
-    pAPIKey.value = ''   // 保存后清空输入框，避免密钥滞留页面
-    toast(r.message || '已生效')
-    showProvMsg(r.message || '已生效', true)
-  } catch (e) { showProvMsg(e.message, false) }
+async function providerSaved() {
+  try { status.value = await api('GET', '/api/status') } catch (e) { toast(e.message, true) }
+  window.dispatchEvent(new CustomEvent('friday:setup-refresh'))
 }
 
 /* ---------- 人设提示词 ---------- */
@@ -262,10 +245,6 @@ function removeMcpRow(i) { mcpServers.splice(i, 1) }
 
 onMounted(async () => {
   try { status.value = await api('GET', '/api/status') } catch (e) { /* 设置页仍可离线浏览 */ }
-  if (status.value) {
-    pBaseURL.value = status.value.provider.baseURL || ''
-    pModel.value = status.value.provider.model || ''
-  }
   loadSessions()
   loadHeartbeat()
   loadMCP()
@@ -280,22 +259,7 @@ onMounted(async () => {
 
       <div class="panel">
         <div class="panel-title">模型配置</div>
-        <form class="form-col" @submit.prevent="saveProvider">
-          <label>API 地址（baseURL）
-            <input v-model="pBaseURL" required style="width:100%; margin-top:4px">
-          </label>
-          <label>模型名（model）
-            <input v-model="pModel" required style="width:100%; margin-top:4px">
-          </label>
-          <label>API 密钥
-            <input v-model="pAPIKey" type="password" autocomplete="new-password" :placeholder="apiKeyPlaceholder" style="width:100%; margin-top:4px">
-          </label>
-          <button class="btn primary" type="submit" style="align-self:flex-start">保存并热生效</button>
-        </form>
-        <div class="msg" :class="provMsg.cls">{{ provMsg.text }}</div>
-        <div class="set-note">保存后立即热生效（无需重启，对话上下文保持连续），并写回 config.yaml。
-          密钥任意 OpenAI 兼容服务商通用：可直接在此填写（写盘 config.yaml 的 provider.apiKey），
-          或用环境变量 FRIDAY_API_KEY（兼容旧名 DEEPSEEK_API_KEY）；未配置不影响打开软件，仅对话不可用。</div>
+        <ProviderSettings :status="status" @saved="providerSaved" />
       </div>
 
       <div class="panel">

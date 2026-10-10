@@ -14,6 +14,8 @@ import NotificationsView from './components/NotificationsView.vue'
 import WikiView from './components/WikiView.vue'
 import SettingsView from './components/SettingsView.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
+import SetupView from './components/SetupView.vue'
+import { startNotifications, stopNotifications } from './notifications.js'
 
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
@@ -52,18 +54,28 @@ onMounted(() => {
   document.addEventListener('keydown', onKeydown)
   document.addEventListener('click', onDocClick)
   auroraDrift(document)
+  window.addEventListener('friday:setup-refresh', refreshSetup)
+  startNotifications()
 })
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('friday:setup-refresh', refreshSetup)
+  stopNotifications()
 })
 
-onMounted(async () => {
+onMounted(refreshSetup)
+
+async function refreshSetup() {
   try {
+    store.setupStatus = await api('GET', '/api/setup/status')
     const s = await api('GET', '/api/session')
-    if (s.authenticated) { store.loggedIn = true; store.username = s.username }
-  } catch (e) { /* 服务不可达时停在登录页 */ }
-})
+    store.loggedIn = !!s.authenticated
+    store.username = s.username || ''
+  } catch { /* 服务器暂不可达时保留当前界面 */ }
+}
+
+async function setupComplete() { store.setupSkipped = false; await refreshSetup() }
 
 /* 登录成功：外壳入场 */
 watch(() => store.loggedIn, async ok => {
@@ -102,7 +114,9 @@ async function logout() {
   <!-- 极光背景（深色可见光斑，浅色极淡点阵） -->
   <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 
-  <LoginView v-if="!store.loggedIn" />
+  <SetupView v-if="store.setupStatus?.accountRequired || (store.loggedIn && store.setupStatus?.providerRequired && !store.setupSkipped)"
+             :status="store.setupStatus" @account-created="refreshSetup" @completed="setupComplete" @skip="store.setupSkipped = true" />
+  <LoginView v-else-if="!store.loggedIn" />
 
   <div v-else id="app">
     <aside id="sidebar">
@@ -112,7 +126,7 @@ async function logout() {
                 :data-view="n.id" @click="store.view = n.id">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="'#' + n.icon"/></svg>
-          <span class="txt">{{ n.label }}</span>
+          <span class="txt">{{ n.label }}<span v-if="n.id === 'notifications' && store.unread" class="nav-unread" :aria-label="store.unread + ' 条未读通知'">{{ store.unread }}</span></span>
         </button>
       </nav>
       <div class="grow"></div>

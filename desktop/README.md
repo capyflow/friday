@@ -63,12 +63,13 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 ```
 
 - 数据目录：`~/Library/Application Support/Friday`（Win `%APPDATA%\Friday`、Linux `~/.config/Friday`），
-  首次启动外壳会把随包的 `config.yaml.example` 播种为该目录的 `config.yaml`
+  首次启动外壳会把随包的 `config.yaml.example` 播种为该目录的 `config.yaml`。
+- 新安装会进入首次设置页面创建管理员账号；已有有效账号文件保持兼容，删除账号文件不会恢复默认账号。
 - **API 密钥**：推荐直接在软件「设置」页填写（写盘 config.yaml，任意 OpenAI 兼容
   服务商通用）；也可用数据目录的 `friday.env`（KEY=VALUE 行式，如
   `FRIDAY_API_KEY=sk-...`，兼容旧名 DEEPSEEK_API_KEY）。未配置密钥不影响打开软件，
   仅对话不可用，界面会提示补配
-- 登录：默认 `admin/admin`（首次登录强制改密）；弹窗页与主窗口同源共享会话
+- 登录：新安装通过首次设置页面创建账号；已有旧版 `admin/admin` 账号保持兼容并可按页面提示改密。弹窗页与主窗口同源共享会话
 - 浏览器直访 `http://127.0.0.1:<port>/palette` 也能用弹窗页（无外壳时 Esc 降级为关闭标签）
 
 ## 运行时行为速查
@@ -76,14 +77,14 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 - **全局快捷键**：`Alt+Space` 唤起/隐藏 Spotlight 风格弹窗（改 `src-tauri/src/main.rs`
   顶部 `PALETTE_SHORTCUT` 常量一行即可换键）
 - **防多开**：再次启动唤起已有主窗口（single-instance 插件）
-- **退出一致性**（三层保证，详见 docs/DESKTOP.md 第二节）：
-  1. 关窗 → 壳向内核 stdin 写 `/quit`，3s 未退 kill 兜底
-  2. 壳崩溃/被强杀 → 内核读到 stdin EOF 自动优雅退出（零代码，OS 管道行为）
-  3. 内核 ppid=1 看门狗（30s）兜底孤儿进程（Windows 无进程过继，恒不触发）
+- **驻留与退出**：关闭主窗口会隐藏到托盘，内核继续运行；点击托盘「显示 Friday」恢复窗口，点击「退出 Friday」或系统退出菜单才结束进程。内核先死时会显示恢复提示。
+- **退出一致性**（详见 docs/DESKTOP.md 第二节）：退出应用后壳向内核 stdin 写 `/quit`，3s 未退 kill 兜底；壳崩溃/被强杀时 stdin EOF 和 ppid 看门狗负责收尾。
 - **内核先死**（如配置错误）：主窗口显示错误页并带出内核的最后一句报错；完整内核
   输出持续写在数据目录的 `friday-kernel.log`，排障先看它
 - **首次启动没有 LLM 密钥**：不影响打开软件——登录后在「设置」页直接填密钥即可
   （写盘 config.yaml，通用命名，任意 OpenAI 兼容服务商可用）
+- **系统通知**：在通知页点击「开启系统通知」才申请权限；未启用不弹系统提示。失败时仍能在通知中心查阅，浏览器页面关闭后需桌面驻留或外部通道接收提醒。
+- **隔离测试**：`FRIDAY_DESKTOP_DATA_DIR` 可指定绝对测试目录，避免影响已有账号、配置和任务；不能用它替代正常系统数据目录。
 
 ## 发布 / 签名
 
@@ -96,6 +97,6 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 
 ## 已知边界（首期）
 
-- 内核 vortexv3 绑定 `0.0.0.0`：桌面版服务对局域网可见（后续给 vortex 加 host 选项或依赖系统防火墙）
+- 桌面版服务强制监听 `127.0.0.1`；远程 Web 部署须显式设置 `--host` 或 `admin.host`
 - 弹窗透明在部分 Linux 窗管下可能退化为不透明
 - 外壳最终兜底是 kill：内核落盘均为原子写（tmp+rename），最多丢最后一次会话快照

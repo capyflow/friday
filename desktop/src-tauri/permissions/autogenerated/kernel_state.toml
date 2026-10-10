@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-kernel-state"
+description = "Enables the kernel_state command without any pre-configured scope."
+commands.allow = ["kernel_state"]
+
+[[permission]]
+identifier = "deny-kernel-state"
+description = "Denies the kernel_state command without any pre-configured scope."
+commands.deny = ["kernel_state"]

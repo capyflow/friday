@@ -31,6 +31,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -106,6 +107,9 @@ func main() {
 		log.Printf("[桌面] 数据目录：%s（config.yaml / 会话 / 待办 / 记忆均在此目录）", dir)
 	}
 
+	if err := config.EnsureInitial(*cfgPath); err != nil {
+		log.Fatalf("初始配置准备失败: %v", err)
+	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("配置加载失败: %v", err)
@@ -179,11 +183,22 @@ func main() {
 
 	// 先可靠入队再推进任务；工作器在 Brain 就绪后启动。
 	var runner *robotagent.TaskRunner
+	var todoStore *todo.Store
+	acceptReady := make(chan struct{})
 	targets := make([]notification.Target, 0, len(notifiers))
 	for _, n := range notifiers {
 		targets = append(targets, n)
 	}
 	notices, err := notification.New("notifications.json", func(workCtx context.Context, t task.Task) (text string, push bool, runErr error) {
+		if t.TodoID != "" {
+			allowed, err := todoStore.ShouldRemind(t)
+			if err != nil {
+				return "", false, err
+			}
+			if !allowed {
+				return "关联待办已完成、删除或更新，提醒已取消", false, nil
+			}
+		}
 		rctx := logx.WithID(workCtx, logx.NextID())
 		id := logx.IDFrom(rctx)
 		trace.Begin(id, "task", robotagent.SessionTask, t.Text)
@@ -207,7 +222,29 @@ func main() {
 		log.Fatalf("加载通知记录失败: %v", err)
 	}
 	notices.SetWebEnabled(cfg.Admin.IsEnabled())
-	eng := task.NewReliableEngineFile(func(_ context.Context, t task.Task) error { return notices.Enqueue(t) }, cfg.TaskFile)
+	if *desktop {
+		notices.SetDesktopDispatch(func(n notification.Notice) error {
+			payload, err := json.Marshal(map[string]string{"id": n.ID, "text": n.Text})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(os.Stdout, "FRIDAY_NOTICE=%s\n", payload)
+			return err
+		})
+	}
+	eng := task.NewReliableEngineFile(func(_ context.Context, t task.Task) error {
+		select {
+		case <-acceptReady:
+		default:
+			return fmt.Errorf("待办关联初始化尚未完成")
+		}
+		if allowed, err := todoStore.ShouldRemind(t); err != nil {
+			return err
+		} else if !allowed {
+			return nil
+		}
+		return notices.Enqueue(t)
+	}, cfg.TaskFile)
 	if err := eng.Err(); err != nil {
 		log.Fatalf("加载任务失败: %v", err)
 	}
@@ -216,10 +253,19 @@ func main() {
 
 	// 待办清单：JSON 落盘，重启不丢；agent 工具与管理后台"待办"页共用。
 	todos := todo.NewStore(cfg.TodoFile)
+	todoStore = todos
+	notices.SetDeliveryGuard(todos.ShouldRemind)
 	if err := todos.Err(); err != nil {
 		log.Fatalf("加载待办失败: %v", err)
 	}
 	log.Printf("[待办] 持久化文件：%s", cfg.TodoFile)
+	if err := todos.BindEngine(eng); err != nil {
+		log.Printf("[待办] 提醒同步待恢复（门卫已阻止错误触发）: %v", err)
+	}
+	if err := notices.RestoreSnoozes(eng); err != nil {
+		log.Fatalf("恢复稍后提醒失败: %v", err)
+	}
+	close(acceptReady)
 
 	// 会话持久化：JSON 落盘，重启不失忆；池按 key（web/repl/ding-*/feishu-*/task）隔离。
 	store, err := sessionstore.NewJSON(cfg.SessionFile)
@@ -421,8 +467,10 @@ func main() {
 		log.Printf("[网页入口] %s/（登录后：聊天 / 运行状态 / 自动化 / 通知 / 记忆 / 设置）", addr)
 		if user != "" {
 			log.Printf("[管理后台] %s/admin（账号 %s，来源：启动配置/环境变量）", addr, user)
+		} else if accounts.Current().SetupRequired {
+			log.Printf("[管理后台] %s/（请在本机页面创建管理员账号；远程部署可通过启动凭据预置）", addr)
 		} else {
-			log.Printf("[管理后台] %s/admin（默认账号 admin/admin；可通过 FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD 或 config.yaml admin.username/password 预置）", addr)
+			log.Printf("[管理后台] %s/admin（使用已有管理员账号）", addr)
 		}
 		// 桌面模式：服务就绪后向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行解析 stdout
 		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）。

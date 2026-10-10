@@ -4,13 +4,19 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -26,10 +32,189 @@ struct Kernel {
     addr: Mutex<Option<String>>,
     child: Mutex<Option<CommandChild>>,
     exited: AtomicBool,
+    quitting: AtomicBool,
     data_dir: PathBuf,
     last_stderr: Mutex<String>,
     dead_reason: Mutex<Option<String>>,
     palette_shortcut: Shortcut,
+}
+
+#[derive(serde::Deserialize)]
+struct NativeNotice {
+    id: String,
+    text: String,
+}
+
+#[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
+struct NativeHistory {
+    enabled: bool,
+    seen: BTreeSet<String>,
+}
+
+struct NativeNotifications {
+    history: Mutex<NativeHistory>,
+    path: PathBuf,
+    load_failed: bool,
+}
+
+impl NativeNotifications {
+    fn load(path: PathBuf) -> Self {
+        let (history, load_failed) = match std::fs::read(&path) {
+            Ok(data) => match serde_json::from_slice(&data) {
+                Ok(history) => (history, false),
+                Err(_) => (NativeHistory::default(), true),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                (NativeHistory::default(), false)
+            }
+            Err(_) => (NativeHistory::default(), true),
+        };
+        Self {
+            history: Mutex::new(history),
+            path,
+            load_failed,
+        }
+    }
+
+    fn save(&self, history: &NativeHistory) -> Result<(), String> {
+        if self.load_failed {
+            return Err("系统通知记录不可用，请检查数据目录".into());
+        }
+        let data = serde_json::to_vec(history).map_err(|_| "无法编码系统通知记录")?;
+        static NEXT_WRITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let tmp = self.path.with_extension(format!(
+            "json.tmp-{}-{}",
+            std::process::id(),
+            NEXT_WRITE.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|_| "无法创建系统通知记录临时文件")?;
+        let result = (|| -> std::io::Result<()> {
+            file.write_all(&data)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, &self.path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map_err(|_| "无法保存系统通知记录，请检查数据目录".into())
+    }
+
+    fn enable(&self) -> Result<(), String> {
+        let mut history = self.history.lock().unwrap();
+        let mut next = history.clone();
+        next.enabled = true;
+        self.save(&next)?;
+        *history = next;
+        Ok(())
+    }
+
+    fn enabled<F>(&self, check_permission: F) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<bool, String>,
+    {
+        if self.load_failed || !self.history.lock().unwrap().enabled {
+            return Ok(false);
+        }
+        check_permission()
+    }
+
+    // 必须同时有显式开启和现有系统权限；失败不标 seen，系统接受后才记录。
+    fn dispatch<F>(&self, notice: &NativeNotice, granted: bool, send: F) -> Result<bool, String>
+    where
+        F: FnOnce(&NativeNotice) -> Result<(), String>,
+    {
+        let mut history = self.history.lock().unwrap();
+        if self.load_failed || !history.enabled || !granted || history.seen.contains(&notice.id) {
+            return Ok(false);
+        }
+        send(notice)?;
+        history.seen.insert(notice.id.clone());
+        self.save(&history)?;
+        Ok(true)
+    }
+}
+
+fn parse_native_notice(line: &str) -> Option<NativeNotice> {
+    let raw = line.strip_prefix("FRIDAY_NOTICE=")?;
+    if raw.len() > 64 * 1024 {
+        return None;
+    }
+    let notice: NativeNotice = serde_json::from_str(raw).ok()?;
+    if notice.id.trim().is_empty() || notice.id.len() > 256 || notice.text.trim().is_empty() {
+        return None;
+    }
+    Some(notice)
+}
+
+fn trusted_notification_origin(label: &str, current: &str, kernel: Option<&str>) -> bool {
+    if label != "main" {
+        return false;
+    }
+    let (Ok(current), Some(kernel)) = (tauri::Url::parse(current), kernel) else {
+        return false;
+    };
+    let Ok(kernel) = tauri::Url::parse(kernel) else {
+        return false;
+    };
+    current.scheme() == "http"
+        && kernel.scheme() == "http"
+        && current.host_str() == Some("127.0.0.1")
+        && kernel.host_str() == Some("127.0.0.1")
+        && current.username().is_empty()
+        && current.password().is_none()
+        && current.origin() == kernel.origin()
+}
+
+#[tauri::command]
+async fn enable_notifications(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<bool, String> {
+    let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
+    let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
+    if !trusted_notification_origin(window.label(), current.as_str(), addr.as_deref()) {
+        return Err("当前窗口不能启用系统通知".into());
+    }
+    let cloned = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !request_native_permission(&cloned)? {
+            return Ok(false);
+        }
+        cloned.state::<NativeNotifications>().enable()?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "系统通知授权未完成".to_string())?
+}
+
+#[tauri::command]
+async fn notifications_enabled(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<bool, String> {
+    let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
+    let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
+    if !trusted_notification_origin(window.label(), current.as_str(), addr.as_deref()) {
+        return Err("当前窗口不能查询系统通知权限".into());
+    }
+    let cloned = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cloned
+            .state::<NativeNotifications>()
+            .enabled(|| native_permission_granted(&cloned))
+    })
+    .await
+    .map_err(|_| "无法查询系统通知权限".to_string())?
 }
 
 /// 内核状态快照：占位页主动查询用（防"就绪事件早于页面监听注册"的竞态）。
@@ -59,6 +244,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -77,33 +263,118 @@ fn main() {
                 .unwrap_or_else(|_| panic!("PALETTE_SHORTCUT 非法: {PALETTE_SHORTCUT}"));
             // 数据目录 = 系统配置目录/Friday（与内核 --desktop 缺省、docs/DESKTOP.md 一致）。
             // 注意不要用 app_config_dir()：v2 会再拼一层 identifier，产生 com.capyflow.friday/Friday。
-            let data_dir = app
-                .path()
-                .config_dir()
-                .expect("无法定位系统配置目录")
-                .join(DATA_DIR_NAME);
+            let data_dir = match std::env::var_os("FRIDAY_DESKTOP_DATA_DIR")
+                .filter(|value| !value.is_empty())
+            {
+                Some(value) => {
+                    let path = PathBuf::from(value);
+                    if !path.is_absolute() {
+                        return Err("FRIDAY_DESKTOP_DATA_DIR 必须为绝对路径".into());
+                    }
+                    path
+                }
+                None => app
+                    .path()
+                    .config_dir()
+                    .expect("无法定位系统配置目录")
+                    .join(DATA_DIR_NAME),
+            };
             std::fs::create_dir_all(&data_dir).expect("创建数据目录失败");
+            app.manage(NativeNotifications::load(
+                data_dir.join("desktop-notifications.json"),
+            ));
             app.manage(Kernel {
                 addr: Mutex::new(None),
                 child: Mutex::new(None),
                 exited: AtomicBool::new(false),
+                quitting: AtomicBool::new(false),
                 data_dir,
                 last_stderr: Mutex::new(String::new()),
                 dead_reason: Mutex::new(None),
                 palette_shortcut,
             });
+            setup_tray(app)?;
+            if let Some(win) = app.get_webview_window("main") {
+                let cloned = win.clone();
+                let handle = app.handle().clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        if !handle.state::<Kernel>().quitting.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            let _ = cloned.hide();
+                        }
+                    }
+                });
+            }
             app.global_shortcut().register(palette_shortcut)?;
             spawn_kernel(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![kernel_state])
+        .invoke_handler(tauri::generate_handler![
+            kernel_state,
+            enable_notifications,
+            notifications_enabled
+        ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
         .run(|app, event| {
-            if let RunEvent::Exit = event {
-                quit_kernel(app);
+            match event {
+                RunEvent::ExitRequested { code, api, .. } if code.is_none() => {
+                    // 系统菜单退出（Cmd-Q 等）仍正常终止内核。
+                    app.state::<Kernel>().quitting.store(true, Ordering::SeqCst);
+                    quit_kernel(app);
+                    let _ = api;
+                }
+                RunEvent::Exit => {
+                    app.state::<Kernel>().quitting.store(true, Ordering::SeqCst);
+                    quit_kernel(app);
+                }
+                _ => {}
             }
         });
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "显示 Friday", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 Friday", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
+        // 默认图标缺失仍提供可见入口，不依赖额外图片资源。
+        tauri::image::Image::new_owned(vec![109, 107, 242, 255].repeat(32 * 32), 32, 32)
+    });
+    TrayIconBuilder::with_id("friday")
+        .icon(icon)
+        .tooltip("Friday 个人管家")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main(app),
+            "quit" => {
+                app.state::<Kernel>().quitting.store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
 }
 
 /// 拉起 Go 内核 sidecar 并在后台线程解析其 stdout。
@@ -132,6 +403,31 @@ fn spawn_kernel(app: tauri::AppHandle) {
             match event {
                 CommandEvent::Stdout(line) => {
                     let line = String::from_utf8_lossy(&line).trim_end().to_string();
+                    if line.starts_with("FRIDAY_NOTICE=") {
+                        if let Some(notice) = parse_native_notice(&line) {
+                            let handle = app.clone();
+                            tauri::async_runtime::spawn_blocking(move || {
+                                let notifications = handle.state::<NativeNotifications>();
+                                let granted = notifications
+                                    .enabled(|| native_permission_granted(&handle))
+                                    .unwrap_or(false);
+                                match notifications.dispatch(&notice, granted, |notice| {
+                                    show_native_notice(&handle, notice)
+                                }) {
+                                    Ok(true) => {}
+                                    Ok(false) => eprintln!(
+                                        "[外壳] 系统通知未启用或已处理，详情保留在通知中心"
+                                    ),
+                                    Err(_) => {
+                                        eprintln!("[外壳] 系统通知未完成，请查看应用通知中心")
+                                    }
+                                }
+                            });
+                        } else {
+                            eprintln!("[外壳] 忽略无效的系统通知消息");
+                        }
+                        continue;
+                    }
                     kernel_log(&app, &line);
                     if let Some(addr) = line.trim().strip_prefix("FRIDAY_ADDR=") {
                         kernel_ready(&app, addr.trim().to_string());
@@ -163,7 +459,11 @@ fn spawn_kernel(app: tauri::AppHandle) {
 fn kernel_log(app: &tauri::AppHandle, line: &str) {
     eprintln!("[内核] {line}");
     let path = app.state::<Kernel>().data_dir.join("friday-kernel.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
     }
 }
@@ -176,10 +476,24 @@ fn kernel_ready(app: &tauri::AppHandle, addr: String) {
 }
 
 /// 内核先死（如配置错误）：主窗口显示错误页并带上死因（自动重启策略后续再加）。
+fn mark_kernel_dead(kernel: &Kernel, reason: &str) -> bool {
+    *kernel.addr.lock().unwrap() = None;
+    kernel.exited.store(true, Ordering::SeqCst);
+    if kernel.quitting.load(Ordering::SeqCst) {
+        return false;
+    }
+    *kernel.dead_reason.lock().unwrap() = Some(reason.to_string());
+    true
+}
+
 fn kernel_dead(app: &tauri::AppHandle, reason: String) {
     let kernel = app.state::<Kernel>();
-    kernel.exited.store(true, Ordering::SeqCst);
-    *kernel.dead_reason.lock().unwrap() = Some(reason.clone());
+    if !mark_kernel_dead(&kernel, &reason) {
+        return;
+    }
+    if let Some(win) = app.get_webview_window("palette") {
+        let _ = win.hide();
+    }
     let _ = app.emit("kernel-dead", reason.clone());
     if let Some(win) = app.get_webview_window("main") {
         // tauri 前端资源的本地 origin：macOS/Linux 为 tauri://localhost，Windows 为 http://tauri.localhost。
@@ -232,9 +546,7 @@ fn toggle_palette(app: &tauri::AppHandle) {
             }
         }
         None => {
-            let url: tauri::Url = format!("{addr}/palette")
-                .parse()
-                .expect("内核地址非法");
+            let url: tauri::Url = format!("{addr}/palette").parse().expect("内核地址非法");
             let win = WebviewWindowBuilder::new(app, "palette", WebviewUrl::External(url))
                 .title("Friday")
                 .inner_size(680.0, 420.0)
@@ -270,7 +582,10 @@ fn quit_kernel(app: &tauri::AppHandle) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    eprintln!("[外壳] 内核未在 {}s 内退出，kill 兜底", QUIT_GRACE.as_secs());
+    eprintln!(
+        "[外壳] 内核未在 {}s 内退出，kill 兜底",
+        QUIT_GRACE.as_secs()
+    );
     let _ = child.kill();
 }
 
@@ -287,7 +602,11 @@ fn seed_config(app: &tauri::AppHandle, data_dir: &PathBuf) {
         .expect("无法定位资源目录")
         .join("resources/config.yaml.example");
     match std::fs::copy(&resource, &dst) {
-        Ok(_) => eprintln!("[外壳] 已播种配置：{} ← {}", dst.display(), resource.display()),
+        Ok(_) => eprintln!(
+            "[外壳] 已播种配置：{} ← {}",
+            dst.display(),
+            resource.display()
+        ),
         Err(err) => panic!("播种 config.yaml 失败（{}）：{err}", resource.display()),
     }
 }
@@ -308,4 +627,314 @@ fn read_env_file(path: &PathBuf) -> Vec<(String, String)> {
             Some((k.trim().to_string(), v.trim().to_string()))
         })
         .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_native_permission(app: &tauri::AppHandle) -> Result<bool, String> {
+    app.notification()
+        .request_permission()
+        .map(|state| state == PermissionState::Granted)
+        .map_err(|_| "系统通知暂不可用，请使用通知中心".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_permission_granted(app: &tauri::AppHandle) -> Result<bool, String> {
+    app.notification()
+        .permission_state()
+        .map(|state| state == PermissionState::Granted)
+        .map_err(|_| "无法查询系统通知权限".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_native_notice(app: &tauri::AppHandle, notice: &NativeNotice) -> Result<(), String> {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary("Friday 提醒").body(&notice.text);
+    #[cfg(windows)]
+    notification.app_id(&app.config().identifier);
+    let _ = app;
+    notification
+        .show()
+        .map(|_| ())
+        .map_err(|_| "系统未接受通知".into())
+}
+
+#[cfg(target_os = "macos")]
+mod mac_notifications {
+    use super::*;
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+        UNNotificationRequest, UNNotificationSettings, UNUserNotificationCenter,
+    };
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
+
+    pub fn granted() -> Result<bool, String> {
+        let (tx, rx) = mpsc::channel();
+        let callback = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+            // 系统保证回调指针在回调期间有效，仅复制枚举值。
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            let _ = tx.send(
+                status == UNAuthorizationStatus::Authorized
+                    || status == UNAuthorizationStatus::Provisional,
+            );
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&callback);
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "无法查询系统通知权限".into())
+    }
+
+    pub fn request() -> Result<bool, String> {
+        let (tx, rx) = mpsc::channel();
+        let callback = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+            let _ = tx.send(granted.as_bool() && error.is_null());
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                &callback,
+            );
+        rx.recv_timeout(Duration::from_secs(60))
+            .map_err(|_| "系统授权未完成，请稍后重试".into())
+    }
+
+    pub fn show(notice: &NativeNotice) -> Result<(), String> {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str("Friday 提醒"));
+        content.setBody(&NSString::from_str(&notice.text));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&notice.id),
+            &content,
+            None,
+        );
+        let (tx, rx) = mpsc::channel();
+        let callback = RcBlock::new(move |error: *mut NSError| {
+            let _ = tx.send(error.is_null());
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&callback));
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(true) => Ok(()),
+            _ => Err("系统未接受通知".into()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_native_permission(_app: &tauri::AppHandle) -> Result<bool, String> {
+    mac_notifications::request()
+}
+#[cfg(target_os = "macos")]
+fn native_permission_granted(_app: &tauri::AppHandle) -> Result<bool, String> {
+    mac_notifications::granted()
+}
+#[cfg(target_os = "macos")]
+fn show_native_notice(_app: &tauri::AppHandle, notice: &NativeNotice) -> Result<(), String> {
+    mac_notifications::show(notice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn fixture_path() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "friday-native-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path.join("notifications.json")
+    }
+
+    #[test]
+    fn notification_command_only_accepts_current_kernel_main_origin() {
+        let addr = Some("http://127.0.0.1:18080");
+        assert!(trusted_notification_origin(
+            "main",
+            "http://127.0.0.1:18080/",
+            addr
+        ));
+        for (label, url) in [
+            ("palette", "http://127.0.0.1:18080"),
+            ("main", "http://127.0.0.1:18081"),
+            ("main", "http://localhost:18080"),
+            ("main", "https://remote.example"),
+            ("main", "tauri://localhost"),
+        ] {
+            assert!(!trusted_notification_origin(label, url, addr));
+        }
+        assert!(!trusted_notification_origin(
+            "main",
+            "http://127.0.0.1:18080",
+            None
+        ));
+    }
+
+    #[test]
+    fn notice_parser_rejects_empty_and_malformed_messages() {
+        assert!(
+            parse_native_notice("FRIDAY_NOTICE={\"id\":\"notice-1\",\"text\":\"提醒\"}").is_some()
+        );
+        for line in [
+            "FRIDAY_NOTICE=invalid",
+            "FRIDAY_NOTICE={\"id\":\"\",\"text\":\"提醒\"}",
+            "FRIDAY_NOTICE={\"id\":\"id\",\"text\":\" \"}",
+            "unrelated log",
+        ] {
+            assert!(parse_native_notice(line).is_none());
+        }
+    }
+
+    #[test]
+    fn dispatch_requires_opt_in_and_permission_and_persists_only_accepted_ids() {
+        let path = fixture_path();
+        let state = NativeNotifications::load(path.clone());
+        let notice = NativeNotice {
+            id: "notice-1".into(),
+            text: "private reminder".into(),
+        };
+        assert!(!state
+            .dispatch(&notice, true, |_| panic!("must not dispatch before opt in"))
+            .unwrap());
+        state.enable().unwrap();
+        assert!(!state
+            .dispatch(&notice, false, |_| panic!(
+                "must not request permission implicitly"
+            ))
+            .unwrap());
+        assert!(state
+            .dispatch(&notice, true, |_| Err("simulated OS rejection".into()))
+            .is_err());
+        assert!(!state.history.lock().unwrap().seen.contains(&notice.id));
+        assert!(state.dispatch(&notice, true, |_| Ok(())).unwrap());
+        assert!(!state
+            .dispatch(&notice, true, |_| panic!("must not repeat"))
+            .unwrap());
+        let restarted = NativeNotifications::load(path.clone());
+        assert!(!restarted
+            .dispatch(&notice, true, |_| panic!("must not repeat after restart"))
+            .unwrap());
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("private reminder"));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn damaged_history_disables_native_dispatch_without_overwriting_file() {
+        let path = fixture_path();
+        std::fs::write(&path, b"damaged").unwrap();
+        let state = NativeNotifications::load(path.clone());
+        assert!(state.enable().is_err());
+        let notice = NativeNotice {
+            id: "notice".into(),
+            text: "private".into(),
+        };
+        assert!(!state
+            .dispatch(&notice, true, |_| panic!(
+                "damaged history must fail closed"
+            ))
+            .unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"damaged");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn opt_in_save_failure_does_not_enable_delivery() {
+        let path = fixture_path();
+        let unavailable = path
+            .parent()
+            .unwrap()
+            .join("missing")
+            .join("notifications.json");
+        let state = NativeNotifications::load(unavailable);
+        assert!(state.enable().is_err());
+        assert!(!state.history.lock().unwrap().enabled);
+        let notice = NativeNotice {
+            id: "notice".into(),
+            text: "private".into(),
+        };
+        assert!(!state
+            .dispatch(&notice, true, |_| panic!(
+                "failed opt in must not enable dispatch"
+            ))
+            .unwrap());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_duplicate_messages_dispatch_once() {
+        let path = fixture_path();
+        let state = std::sync::Arc::new(NativeNotifications::load(path.clone()));
+        state.enable().unwrap();
+        let sent = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let sent = sent.clone();
+            workers.push(std::thread::spawn(move || {
+                let notice = NativeNotice {
+                    id: "same-notice".into(),
+                    text: "private".into(),
+                };
+                state
+                    .dispatch(&notice, true, |_| {
+                        sent.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn notification_status_is_read_only_and_never_prompts() {
+        let path = fixture_path();
+        let state = NativeNotifications::load(path.clone());
+        assert!(!state
+            .enabled(|| panic!("not opted in: no system permission request or query"))
+            .unwrap());
+        state.enable().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(state.enabled(|| Ok(true)).unwrap());
+        assert!(!state.enabled(|| Ok(false)).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let reopened = NativeNotifications::load(path.clone());
+        assert!(reopened.enabled(|| Ok(true)).unwrap());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn exited_kernel_drops_address_before_recovery_and_does_not_show_error_on_quit() {
+        let kernel = Kernel {
+            addr: Mutex::new(Some("http://127.0.0.1:18080".into())),
+            child: Mutex::new(None),
+            exited: AtomicBool::new(false),
+            quitting: AtomicBool::new(false),
+            data_dir: PathBuf::new(),
+            last_stderr: Mutex::new(String::new()),
+            dead_reason: Mutex::new(None),
+            palette_shortcut: PALETTE_SHORTCUT.parse().unwrap(),
+        };
+        assert!(mark_kernel_dead(&kernel, "simulated kernel failure"));
+        assert!(kernel.addr.lock().unwrap().is_none());
+        assert!(kernel.exited.load(Ordering::SeqCst));
+        assert_eq!(
+            kernel.dead_reason.lock().unwrap().as_deref(),
+            Some("simulated kernel failure")
+        );
+        kernel.quitting.store(true, Ordering::SeqCst);
+        assert!(!mark_kernel_dead(&kernel, "normal shutdown"));
+    }
 }

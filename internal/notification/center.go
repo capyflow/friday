@@ -28,33 +28,40 @@ type Target interface {
 type Resolver func(context.Context, task.Task) (string, bool, error)
 
 type Notice struct {
-	ID          string    `json:"id"`
-	TaskID      string    `json:"taskId"`
-	Text        string    `json:"text"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"lastError,omitempty"`
-	DeliveredTo []string  `json:"deliveredTo"`
-	Task        task.Task `json:"task"`
-	Prepared    bool      `json:"prepared"`
-	Push        bool      `json:"push"`
-	NextAttempt time.Time `json:"nextAttempt,omitempty"`
+	ID              string     `json:"id"`
+	TaskID          string     `json:"taskId"`
+	Text            string     `json:"text"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+	Attempts        int        `json:"attempts"`
+	LastError       string     `json:"lastError,omitempty"`
+	DeliveredTo     []string   `json:"deliveredTo"`
+	Task            task.Task  `json:"task"`
+	Prepared        bool       `json:"prepared"`
+	Push            bool       `json:"push"`
+	NextAttempt     time.Time  `json:"nextAttempt,omitempty"`
+	ReadAt          *time.Time `json:"readAt,omitempty"`
+	ParentID        string     `json:"parentId,omitempty"`
+	SnoozeTaskID    string     `json:"snoozeTaskId,omitempty"`
+	SnoozeAt        time.Time  `json:"snoozeAt,omitempty"`
+	SnoozeCommitted bool       `json:"snoozeCommitted,omitempty"`
 }
 
 type Center struct {
-	mu         sync.Mutex
-	processMu  sync.Mutex
-	path       string
-	notices    map[string]Notice
-	resolve    Resolver
-	targets    []Target
-	start      sync.Once
-	wake       chan struct{}
-	done       chan struct{}
-	started    bool
-	webEnabled bool
+	mu              sync.Mutex
+	processMu       sync.Mutex
+	path            string
+	notices         map[string]Notice
+	resolve         Resolver
+	targets         []Target
+	start           sync.Once
+	wake            chan struct{}
+	done            chan struct{}
+	started         bool
+	webEnabled      bool
+	desktopDispatch func(Notice) error
+	deliveryGuard   func(task.Task) (bool, error)
 }
 
 func New(path string, resolve Resolver, targets []Target) (*Center, error) {
@@ -115,7 +122,7 @@ func (c *Center) Enqueue(t task.Task) error {
 		return nil
 	}
 	now := time.Now()
-	n := Notice{ID: id, TaskID: t.ID, Task: t, Text: t.Text, Status: "pending", CreatedAt: now, UpdatedAt: now, DeliveredTo: []string{}}
+	n := Notice{ID: id, TaskID: t.ID, Task: t, Text: t.Text, Status: "pending", CreatedAt: now, UpdatedAt: now, DeliveredTo: []string{}, ParentID: t.NotificationParentID}
 	if err := c.putLocked(n); err != nil {
 		return err
 	}
@@ -124,17 +131,148 @@ func (c *Center) Enqueue(t task.Task) error {
 }
 
 func (c *Center) List() []Notice {
+	return c.ListForTask("")
+}
+
+func (c *Center) ListForTask(taskID string) []Notice {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := c.valuesLocked()
+	if taskID != "" {
+		filtered := make([]Notice, 0, len(out))
+		for _, n := range out {
+			if n.TaskID == taskID {
+				filtered = append(filtered, n)
+			}
+		}
+		out = filtered
+	}
 	if len(out) > 100 {
 		out = out[:100]
 	}
 	return out
 }
 
+func (c *Center) Unread() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, notice := range c.notices {
+		if notice.ReadAt == nil && notice.Prepared && notice.Push {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *Center) MarkRead(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.notices[id]
+	if !ok {
+		return fmt.Errorf("通知不存在")
+	}
+	if n.ReadAt != nil {
+		return nil
+	}
+	now := time.Now()
+	n.ReadAt = &now
+	return c.putLocked(n)
+}
+
+// Snooze 先持久化固定任务 ID/时间，再通过幂等 Schedule 接收；任务文件失败时
+// 保留待恢复计划，RetrySnoozes 在重启前恢复，避免创建多个延后提醒。
+func (c *Center) Snooze(id string, delay time.Duration, eng *task.Engine) (task.Task, error) {
+	if delay < time.Minute || delay > 7*24*time.Hour {
+		return task.Task{}, fmt.Errorf("稍后提醒须在1分钟至7天之间")
+	}
+	c.processMu.Lock()
+	defer c.processMu.Unlock()
+	c.mu.Lock()
+	n, ok := c.notices[id]
+	if !ok || !n.Prepared || !n.Push {
+		c.mu.Unlock()
+		return task.Task{}, fmt.Errorf("只有可见提醒可以延后")
+	}
+	if n.Task.TodoID != "" {
+		c.mu.Unlock()
+		return task.Task{}, fmt.Errorf("关联待办提醒请在待办页调整提醒时间，完成待办后会取消未来提醒")
+	}
+	if n.SnoozeTaskID == "" {
+		n.SnoozeTaskID = "snooze-" + n.ID
+		n.SnoozeAt = time.Now().Add(delay)
+		if err := c.putLocked(n); err != nil {
+			c.mu.Unlock()
+			return task.Task{}, err
+		}
+	}
+	c.mu.Unlock()
+	return c.scheduleSnooze(n, eng)
+}
+
+func (c *Center) scheduleSnooze(n Notice, eng *task.Engine) (task.Task, error) {
+	t := task.Task{ID: n.SnoozeTaskID, Text: n.Text, Kind: task.KindOnce, When: n.SnoozeAt, Next: n.SnoozeAt, Channel: n.Task.Channel, NotificationParentID: n.ID}
+	// 已触发/取消的延后任务不能由开机恢复再次创建。
+	if n.SnoozeCommitted {
+		if existing, ok := eng.Get(t.ID); ok {
+			return existing, nil
+		}
+		return t, nil
+	}
+	existing, exists := eng.Get(t.ID)
+	if exists {
+		t = existing
+	} else {
+		var err error
+		t, err = eng.Schedule(t)
+		if err != nil {
+			return task.Task{}, fmt.Errorf("延后计划已保存，但任务同步失败；修复存储后重试: %w", err)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.notices[n.ID]
+	current.SnoozeCommitted = true
+	now := time.Now()
+	current.ReadAt = &now
+	if err := c.putLocked(current); err != nil {
+		return task.Task{}, fmt.Errorf("延后任务已创建，但确认保存失败；重试会复用同一任务: %w", err)
+	}
+	return t, nil
+}
+
+func (c *Center) RestoreSnoozes(eng *task.Engine) error {
+	c.processMu.Lock()
+	defer c.processMu.Unlock()
+	c.mu.Lock()
+	values := c.valuesLocked()
+	c.mu.Unlock()
+	for _, n := range values {
+		if n.SnoozeTaskID != "" && !n.SnoozeCommitted {
+			if _, err := c.scheduleSnooze(n, eng); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // SetWebEnabled 只有管理后台实际启用时，通知中心才是可见的投递位置。
 func (c *Center) SetWebEnabled(enabled bool) { c.mu.Lock(); c.webEnabled = enabled; c.mu.Unlock() }
+
+// SetDesktopDispatch 接入桌面系统提示桥；真实内容始终保存在通知中心。
+func (c *Center) SetDesktopDispatch(dispatch func(Notice) error) {
+	c.mu.Lock()
+	c.desktopDispatch = dispatch
+	c.mu.Unlock()
+}
+
+// SetDeliveryGuard 每次尝试投递前检查关联是否仍然有效，包括已经准备结果的重试。
+func (c *Center) SetDeliveryGuard(guard func(task.Task) (bool, error)) {
+	c.mu.Lock()
+	c.deliveryGuard = guard
+	c.mu.Unlock()
+}
 
 func (c *Center) Retry(id string) error {
 	c.mu.Lock()
@@ -221,6 +359,8 @@ func (c *Center) ProcessOne(ctx context.Context) (bool, error) {
 	}
 	n.Status, n.UpdatedAt = "processing", time.Now()
 	webEnabled := c.webEnabled
+	desktopDispatch := c.desktopDispatch
+	deliveryGuard := c.deliveryGuard
 	n.Attempts++
 	if err := c.putLocked(n); err != nil {
 		c.mu.Unlock()
@@ -229,6 +369,16 @@ func (c *Center) ProcessOne(ctx context.Context) (bool, error) {
 	c.mu.Unlock()
 	workCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+	if deliveryGuard != nil {
+		allowed, err := deliveryGuard(n.Task)
+		if err != nil {
+			return true, c.fail(n, err)
+		}
+		if !allowed {
+			n.Status, n.Prepared, n.Push, n.LastError = "silent", true, false, "关联事项已完成、删除或更新，剩余投递已停止"
+			return true, c.put(n)
+		}
+	}
 	if !n.Prepared {
 		text, push, err := n.Task.Text, true, error(nil)
 		if c.resolve != nil {
@@ -255,6 +405,11 @@ func (c *Center) ProcessOne(ctx context.Context) (bool, error) {
 		}
 	}
 	matched := webEnabled && (n.Task.Channel == "" || n.Task.Channel == "web")
+	if desktopDispatch != nil {
+		if err := desktopDispatch(n); err != nil {
+			log.Printf("[通知] 桌面提示转交失败，内容保留在通知中心: %v", err)
+		}
+	}
 	var deliveryErr error
 	for _, target := range c.targets {
 		if n.Task.Channel != "" && n.Task.Channel != target.Name() {
@@ -298,7 +453,16 @@ func (c *Center) fail(n Notice, reason error) error {
 	return c.put(n)
 }
 
-func (c *Center) put(n Notice) error { c.mu.Lock(); defer c.mu.Unlock(); return c.putLocked(n) }
+func (c *Center) put(n Notice) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// 工作者在锁外执行期间，用户可能已读/延后；不得用旧快照覆盖这些独立字段。
+	if current, ok := c.notices[n.ID]; ok {
+		n.ReadAt = current.ReadAt
+		n.SnoozeTaskID, n.SnoozeAt, n.SnoozeCommitted = current.SnoozeTaskID, current.SnoozeAt, current.SnoozeCommitted
+	}
+	return c.putLocked(n)
+}
 
 func (c *Center) putLocked(n Notice) error {
 	n.UpdatedAt = time.Now()
@@ -319,6 +483,10 @@ func (c *Center) valuesLocked() []Notice {
 	out := make([]Notice, 0, len(c.notices))
 	for _, n := range c.notices {
 		n.DeliveredTo = slices.Clone(n.DeliveredTo)
+		if n.ReadAt != nil {
+			at := *n.ReadAt
+			n.ReadAt = &at
+		}
 		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool {

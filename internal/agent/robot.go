@@ -213,9 +213,13 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 	}
 	tools := []vxagent.Tool{
 		&tools_pkg.ScheduleTaskTool{Engine: d.Engine},
+		&tools_pkg.UpdateTaskTool{Engine: d.Engine},
+		&tools_pkg.PauseTaskTool{Engine: d.Engine},
+		&tools_pkg.ResumeTaskTool{Engine: d.Engine},
 		&tools_pkg.ListTasksTool{Engine: d.Engine},
 		&tools_pkg.CancelTaskTool{Engine: d.Engine},
 		&tools_pkg.AddTodoTool{Store: d.Todos},
+		&tools_pkg.UpdateTodoTool{Store: d.Todos},
 		&tools_pkg.ListTodosTool{Store: d.Todos},
 		&tools_pkg.CompleteTodoTool{Store: d.Todos},
 		&tools_pkg.DeleteTodoTool{Store: d.Todos},
@@ -279,10 +283,11 @@ func systemPrompt(cfg *config.Config) string {
 	b.WriteString("\n")
 	b.WriteString(`
 【待办清单】
-1. 用户交代要做的事但没有明确时间点（"记得买牛奶""周三前交房租"）：调用 add_todo 记入待办。
+1. 用户交代要做的事（"记得买牛奶""周三前交房租"）：调用 add_todo 记入待办。有截止时间时先 get_time，再用 dueAt 填带时区 RFC3339；截止时间本身不会自动提醒。
 2. 用户问"我有什么待办/今天要干什么"：调用 list_todos，按清单汇报。
 3. 用户做完某事（"房租交了"）：调用 complete_todo 标记完成（先用 list_todos 拿 ID）；说"这条不用了"调用 delete_todo；说"其实还没做完"调用 complete_todo 并 done=false。
-4. 有明确触发时间的不要只记待办：用 schedule_task 定提醒，可以两者配合——先 add_todo 记事、再定到点提醒。
+4. 用户明确要求待办提醒时，在 add_todo/update_todo 同时设置 remindAt（带时区RFC3339）或 in（相对时长），由系统建立关联。完成、删除或修改待办会取消/调整关联的未来提醒，禁止另建一份独立 schedule_task 造成重复。
+5. 修改待办用 update_todo，先列出拿ID和现有时间；完整替换时保留未修改字段，null移除时间。
 
 【定时任务】
 1. 单次提醒（"10分钟后提醒我敷面膜"）：调用 schedule_task，in 填相对时长（如 10分钟/2小时/1天/90s），text 填内容。
@@ -292,6 +297,7 @@ func systemPrompt(cfg *config.Config) string {
 5. 智能任务（"每天早上8点看看我的待办和天气，给我一份晨报"这类需要自主判断的任务）：调用 schedule_task，agent=true，text 填完整的任务指令，到点后由你自主决策执行。
 6. 查看/取消任务：调用 list_tasks / cancel_task（先列出拿 ID 再取消，单次/多次/循环/智能通用）。
 7. 查询当前时间调用 get_time。
+8. 修改未来任务用 update_task，先 list_tasks 获取现有定义和 ID；暂停/恢复用 pause_task/resume_task，只影响未来触发，已开始的执行保留记录。
 
 【天气查询】
 1. 用户问天气、要不要带伞、穿什么：调用 get_weather，city 填城市名；问"未来几天"时把预报转述清楚。

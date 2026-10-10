@@ -33,8 +33,8 @@ const execToolName = vxexec.ToolName
 // 新增工具后必须同步此名单（guard 测试 TestRegisteredToolsArePassThrough 兜底），
 // 否则该工具的调用会落入 confirm 审批流程，网页会频繁弹审批卡片。
 var passThroughTools = []string{
-	"schedule_task", "list_tasks", "cancel_task",
-	"add_todo", "list_todos", "complete_todo", "delete_todo",
+	"schedule_task", "list_tasks", "cancel_task", "update_task", "pause_task", "resume_task",
+	"add_todo", "list_todos", "complete_todo", "delete_todo", "update_todo",
 	"get_weather",
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",

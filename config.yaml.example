@@ -100,14 +100,14 @@ taskFile: tasks.json
 # 增删改即写回，重启不丢。
 todoFile: todos.json
 
-# HTTP 服务（vortexv3）：默认开启，打开 http://localhost:8080/ 登录后进入统一界面
+# HTTP 服务（vortexv3）：默认开启，打开 http://localhost:8080/ 进入统一界面
 #（聊天 / 待办 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
-# 账号默认 admin/admin（登录页仅登录，不提供改号），建议通过下面字段或环境变量预置。
+# 新部署首次启动会在本机页面创建管理员账号；远程/Docker 部署应通过下面字段或环境变量预置。
 admin:
   enabled: true               # 写 false 关闭后台
   host: 127.0.0.1             # 默认仅本机；Docker 通过 ADMIN_HOST=0.0.0.0 显式开放
   port: 8080
-  accountFile: admin-account.json   # 管理员账号文件（bcrypt 哈希落盘）；删除即恢复默认 admin/admin
+  accountFile: admin-account.json   # 管理员账号文件（bcrypt 哈希落盘）；删除后需重新初始化
   # 启动预置账号（可选，须同时提供）：设置后每次启动以它覆盖账号文件里的账号。
   # 环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD 优先于下面两个字段。
   # username: aaron

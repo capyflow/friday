@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "主窗口（本地占位页）最小权限：监听 server-ready 事件并导航到内核地址。",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "allow-kernel-state"]
 }

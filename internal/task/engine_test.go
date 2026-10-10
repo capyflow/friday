@@ -103,16 +103,21 @@ func TestRepeatFiresNTimes(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
-	for eng.Len() != 0 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(remaining)
+		mu.Unlock()
+		if n == 3 && eng.Len() == 0 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	mu.Lock()
-	if len(remaining) != 3 {
-		mu.Unlock()
-		t.Fatalf("应恰好触发 3 次，实际 %d 次（%v）", len(remaining), remaining)
-	}
 	copyRem := append([]int(nil), remaining...)
 	mu.Unlock()
+	if len(copyRem) != 3 {
+		t.Fatalf("应恰好触发 3 次，实际 %d 次（%v）", len(copyRem), copyRem)
+	}
 	if copyRem[0] != 2 || copyRem[1] != 1 || copyRem[2] != 0 {
 		t.Fatalf("剩余次数应递减 2,1,0，got %v", copyRem)
 	}

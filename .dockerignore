@@ -6,6 +6,12 @@
 
 # 本地运行数据与密钥（挂在 /data 卷里，不烤进镜像）
 config.yaml
+data/
+.env
+.env.*
+!.env.example
+todos.json
+notifications.json
 session.json
 tasks.json
 memories.json
@@ -17,6 +23,16 @@ notes.txt
 
 # 本地产物与非构建必需目录
 robot
+web/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/
+desktop/src-tauri/resources/
+desktop/src-tauri/icons/
+.mimosa/
+.workbuddy/
+.zcodeignore
+.DS_Store
+**/.DS_Store
 design-system/
 docs/
 archive/

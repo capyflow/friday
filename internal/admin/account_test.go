@@ -10,7 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// TestDefaultAccount 文件不存在时初始化默认账号 admin/admin。
+// TestDefaultAccount 新部署进入首次设置，不启用默认账号。
 func TestDefaultAccount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
 	s := NewAccountStore(path)
@@ -18,12 +18,11 @@ func TestDefaultAccount(t *testing.T) {
 		t.Fatalf("初始化账号: %v", err)
 	}
 
-	acc, ok := s.Login(DefaultUsername, DefaultPassword)
-	if !ok {
-		t.Fatal("默认账号 admin/admin 应可登录")
+	if _, ok := s.Login(DefaultUsername, DefaultPassword); ok {
+		t.Fatal("新部署不应启用默认账号 admin/admin")
 	}
-	if acc.Username != DefaultUsername {
-		t.Fatalf("用户名应为 admin，got %q", acc.Username)
+	if !s.Current().SetupRequired || !NewAccountStore(path).Current().SetupRequired {
+		t.Fatal("首次设置状态必须持久化并在重启后保留")
 	}
 	if _, ok := s.Login(DefaultUsername, "wrong"); ok {
 		t.Fatal("错误密码不应登录成功")
@@ -79,8 +78,8 @@ func TestUpdateValidation(t *testing.T) {
 		}
 	}
 	// 校验失败不应影响原账号。
-	if _, ok := s.Login(DefaultUsername, DefaultPassword); !ok {
-		t.Fatal("校验失败不应破坏原账号")
+	if !s.Current().SetupRequired {
+		t.Fatal("校验失败不应改变未初始化状态")
 	}
 }
 

@@ -47,7 +47,7 @@
     if (entered) return;
     entered = true;
     status.classList.add('err');
-    status.textContent = '内核已退出' + (reason ? '：' + reason : '') + '。重新打开 Friday 重试；详见数据目录 friday-kernel.log。';
+    status.textContent = '内核已退出' + (reason ? '：' + reason : '') + '。请先从托盘菜单退出 Friday，再重新打开；详见数据目录 friday-kernel.log。';
   }
 
   async function boot() {

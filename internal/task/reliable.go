@@ -118,6 +118,9 @@ func (r *reliableScheduler) schedule(t Task) (Task, error) {
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now()
 	}
+	if t.Status == "" {
+		t.Status = StatusActive
+	}
 	var err error
 	t.Next, err = firstRun(t, time.Now())
 	if err != nil {
@@ -130,6 +133,115 @@ func (r *reliableScheduler) schedule(t Task) (Task, error) {
 	}
 	r.signal()
 	return t, nil
+}
+
+func (r *reliableScheduler) update(id string, t Task) (Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return Task{}, r.err
+	}
+	if r.closed {
+		return Task{}, ErrClosed
+	}
+	old, ok := r.tasks[id]
+	if !ok {
+		return Task{}, fmt.Errorf("未找到任务 #%s", id)
+	}
+	if old.TodoID != "" {
+		return Task{}, fmt.Errorf("关联待办提醒请使用 update_todo 修改待办内容和时间")
+	}
+	t.ID, t.CreatedAt, t.TodoID, t.Status, t.Heartbeat = old.ID, old.CreatedAt, old.TodoID, old.Status, old.Heartbeat
+	t.NotificationParentID = old.NotificationParentID
+	if t.Status == "" {
+		t.Status = StatusActive
+	}
+	if t.Kind == "" {
+		switch {
+		case !t.When.IsZero():
+			t.Kind = KindOnce
+		case t.Interval > 0:
+			t.Kind = KindRepeat
+		case t.Cron != "":
+			t.Kind = KindCron
+		}
+	}
+	t.Remaining = t.Times
+	var err error
+	if t.Next, err = firstRun(t, time.Now()); err != nil {
+		return Task{}, err
+	}
+	// 正文/通道编辑不重置剩余次数或已定计划；改定时规则才开始新的计划。
+	if old.Kind == t.Kind && old.When.Equal(t.When) && old.Interval == t.Interval && old.Times == t.Times && old.Cron == t.Cron {
+		t.Next, t.Remaining = old.Next, old.Remaining
+	}
+	next := maps.Clone(r.tasks)
+	next[id] = t
+	if err := r.commit(next); err != nil {
+		return Task{}, err
+	}
+	r.signal()
+	return t, nil
+}
+
+func (r *reliableScheduler) setPaused(id string, paused bool) (Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return Task{}, r.err
+	}
+	if r.closed {
+		return Task{}, ErrClosed
+	}
+	t, ok := r.tasks[id]
+	if !ok {
+		return Task{}, fmt.Errorf("未找到任务 #%s", id)
+	}
+	status := StatusActive
+	if paused {
+		status = StatusPaused
+	}
+	if t.Status == status || t.Status == "" && !paused {
+		return t, nil
+	}
+	t.Status = status
+	if !paused {
+		var err error
+		if t.Next, err = resumeRun(t, time.Now()); err != nil {
+			return Task{}, err
+		}
+	}
+	next := maps.Clone(r.tasks)
+	next[id] = t
+	if err := r.commit(next); err != nil {
+		return Task{}, err
+	}
+	r.signal()
+	return t, nil
+}
+
+// resumeRun: 过去的单次保留原时刻立即补触发；interval 跳到下一未来锚点，
+// cron 重算下一未来时刻。跳过暂停期间的周期不消费剩余次数。
+func resumeRun(t Task, now time.Time) (time.Time, error) {
+	g, err := buildGoal(t)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if t.Next.After(now) {
+		return t.Next, nil
+	}
+	switch g.Schedule.Type {
+	case autonomous.ScheduleOneShot:
+		return t.When, nil
+	case autonomous.ScheduleInterval:
+		if t.Next.IsZero() {
+			return now.Add(t.Interval), nil
+		}
+		next := t.Next.Add((now.Sub(t.Next)/t.Interval + 1) * t.Interval)
+		return next, nil
+	default:
+		return firstRun(t, now)
+	}
 }
 
 func (r *reliableScheduler) cancelTask(id string) (bool, error) {
@@ -217,6 +329,9 @@ func (r *reliableScheduler) tick(now time.Time) time.Duration {
 	defer r.mu.Unlock()
 	wait := maxSleep
 	for _, t := range taskValues(r.tasks) {
+		if t.Status == StatusPaused {
+			continue
+		}
 		if t.Next.After(now) {
 			if d := t.Next.Sub(now); d < wait {
 				wait = d
@@ -246,9 +361,7 @@ func (r *reliableScheduler) tick(now time.Time) time.Duration {
 			if t.Remaining <= 0 {
 				delete(next, t.ID)
 			} else {
-				for !t.Next.After(now) {
-					t.Next = t.Next.Add(t.Interval)
-				}
+				t.Next = t.Next.Add((now.Sub(t.Next)/t.Interval + 1) * t.Interval)
 				next[t.ID] = t
 			}
 		default:
@@ -263,6 +376,9 @@ func (r *reliableScheduler) tick(now time.Time) time.Duration {
 	}
 	// 刚推进的循环任务也参与下次唤醒时间计算。
 	for _, t := range r.tasks {
+		if t.Status == StatusPaused {
+			continue
+		}
 		if d := t.Next.Sub(now); d < wait {
 			wait = d
 		}

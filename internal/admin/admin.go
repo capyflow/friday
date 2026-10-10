@@ -46,6 +46,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -205,6 +206,9 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/admin", s.handleRedirectRoot)
 	root.AddStaticRouter("/traces", s.handleRedirectRoot)
 	root.AddRouter([]string{http.MethodGet}, "/api/session", s.wrapPublic(s.handleSession))
+	root.AddRouter([]string{http.MethodGet}, "/api/setup/status", s.wrapPublic(s.handleSetupStatus))
+	root.AddRouter([]string{http.MethodPost}, "/api/setup", s.wrapPublic(s.handleSetup))
+	root.AddRouter([]string{http.MethodPost}, "/api/provider/test", s.wrap(s.handleProviderTest))
 	root.AddRouter([]string{http.MethodPost}, "/api/login", s.wrapPublic(s.handleLogin))
 	root.AddRouter([]string{http.MethodGet}, "/api/traces", s.wrap(s.handleListTraces))
 	root.AddRouter([]string{http.MethodGet}, "/api/traces/:id", s.wrap(s.handleGetTrace))
@@ -213,9 +217,14 @@ func (s *Server) Handler() http.Handler {
 	root.AddRouter([]string{http.MethodGet}, "/api/status", s.wrap(s.handleStatus))
 	root.AddRouter([]string{http.MethodGet}, "/api/tasks", s.wrap(s.handleListTasks))
 	root.AddRouter([]string{http.MethodPost}, "/api/tasks", s.wrap(s.handleCreateTask))
+	root.AddRouter([]string{http.MethodPut}, "/api/tasks/:id", s.wrap(s.handleUpdateTask))
+	root.AddRouter([]string{http.MethodPost}, "/api/tasks/:id/pause", s.wrap(s.handlePauseTask))
+	root.AddRouter([]string{http.MethodPost}, "/api/tasks/:id/resume", s.wrap(s.handleResumeTask))
 	root.AddRouter([]string{http.MethodDelete}, "/api/tasks/:id", s.wrap(s.handleCancelTask))
 	root.AddRouter([]string{http.MethodGet}, "/api/todos", s.wrap(s.handleListTodos))
 	root.AddRouter([]string{http.MethodPost}, "/api/todos", s.wrap(s.handleAddTodo))
+	root.AddRouter([]string{http.MethodPut}, "/api/todos/:id", s.wrap(s.handleUpdateTodo))
+	root.AddRouter([]string{http.MethodPost}, "/api/todos/reconcile", s.wrap(s.handleReconcileTodos))
 	root.AddRouter([]string{http.MethodPost}, "/api/todos/:id", s.wrap(s.handleCompleteTodo))
 	root.AddRouter([]string{http.MethodDelete}, "/api/todos/:id", s.wrap(s.handleDeleteTodo))
 	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages", s.wrap(s.handleListWikiPages))
@@ -226,6 +235,8 @@ func (s *Server) Handler() http.Handler {
 	if s.notifications != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/notifications", s.wrap(s.handleNotifications))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/retry", s.wrap(s.handleRetryNotification))
+		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/read", s.wrap(s.handleReadNotification))
+		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/snooze", s.wrap(s.handleSnoozeNotification))
 	}
 
 	var handler *gin.Engine
@@ -583,10 +594,14 @@ func (s *Server) handleListTodos(ctx *vhttp.Context) error {
 	if s.todos == nil {
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": []todo.Todo{}})
 	}
-	if err := s.todos.Err(); err != nil {
+	if err := s.todos.LoadError(); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": s.todos.List()})
+	syncError := ""
+	if err := s.todos.SyncError(); err != nil {
+		syncError = err.Error()
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": s.todos.List(), "syncError": syncError})
 }
 
 // handleAddTodo 新增一条待办。
@@ -595,12 +610,14 @@ func (s *Server) handleAddTodo(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
 	}
 	var req struct {
-		Text string `json:"text"`
+		Text     string     `json:"text"`
+		DueAt    *time.Time `json:"dueAt"`
+		RemindAt *time.Time `json:"remindAt"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	td, err := s.todos.Add(req.Text)
+	td, err := s.todos.AddWithDeadline(req.Text, req.DueAt, req.RemindAt)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
@@ -616,7 +633,9 @@ func (s *Server) handleCompleteTodo(ctx *vhttp.Context) error {
 	var req struct {
 		Done *bool `json:"done"`
 	}
-	if err := ctx.UnmarshalBody(&req); err == nil && req.Done != nil {
+	if err := ctx.UnmarshalBody(&req); err != nil && !errors.Is(err, io.EOF) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象，done须为布尔值"})
+	} else if req.Done != nil {
 		done = *req.Done
 	}
 	id := ctx.GinContext().Param("id")

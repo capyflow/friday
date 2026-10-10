@@ -105,20 +105,26 @@ type storedTask struct {
 	CreatedAt string `json:"createdAt"`           // RFC3339
 	Next      string `json:"next,omitempty"`      // 下次计划触发时刻（旧文件可缺省）
 	// agent 任务扩展字段。
-	Heartbeat bool   `json:"heartbeat,omitempty"`
-	Channel   string `json:"channel,omitempty"`
+	Heartbeat            bool   `json:"heartbeat,omitempty"`
+	Channel              string `json:"channel,omitempty"`
+	Status               string `json:"status,omitempty"`
+	TodoID               string `json:"todoId,omitempty"`
+	NotificationParentID string `json:"notificationParentId,omitempty"`
 }
 
 func newStoredTask(t Task) storedTask {
 	st := storedTask{
-		ID:        t.ID,
-		Text:      t.Text,
-		Kind:      t.Kind,
-		Times:     t.Times,
-		Remaining: t.Remaining,
-		Cron:      t.Cron,
-		Heartbeat: t.Heartbeat,
-		Channel:   t.Channel,
+		ID:                   t.ID,
+		Text:                 t.Text,
+		Kind:                 t.Kind,
+		Times:                t.Times,
+		Remaining:            t.Remaining,
+		Cron:                 t.Cron,
+		Heartbeat:            t.Heartbeat,
+		Channel:              t.Channel,
+		Status:               t.Status,
+		TodoID:               t.TodoID,
+		NotificationParentID: t.NotificationParentID,
 	}
 	if !t.When.IsZero() {
 		st.When = t.When.Format(time.RFC3339Nano)
@@ -141,7 +147,7 @@ func newStoredTask(t Task) storedTask {
 // []storedTask 不变（人工可读、旧文件直接可用），缓存已成功落盘的独立快照。
 // LoadAll/Get 返回副本，框架推进 Goal 后 Save 失败不会污染已提交的内存状态。
 //
-// 落盘只保留"存活"目标（active/pending 且次数未耗尽）：终态与已触发完的
+// 落盘只保留"存活"目标（active/pending/paused 且次数未耗尽）：终态与已触发完的
 // 单次/多次任务即时从文件消失，等价旧引擎"触发即移除"的落盘时序。
 // mu 同时承担旧引擎 saveMu 的职责：串行化"写 tmp + rename"，避免并发落盘互踩。
 type goalStore struct {
@@ -278,14 +284,20 @@ func (s *goalStore) persistLocked() error {
 // toTask 校验并还原落盘条目；字段缺失或非法时返回 false，load 据此拒绝覆盖文件。
 func (st storedTask) toTask() (Task, bool) {
 	t := Task{
-		ID:        st.ID,
-		Text:      st.Text,
-		Kind:      st.Kind,
-		Times:     st.Times,
-		Remaining: st.Remaining,
-		Cron:      st.Cron,
-		Heartbeat: st.Heartbeat,
-		Channel:   st.Channel,
+		ID:                   st.ID,
+		Text:                 st.Text,
+		Kind:                 st.Kind,
+		Times:                st.Times,
+		Remaining:            st.Remaining,
+		Cron:                 st.Cron,
+		Heartbeat:            st.Heartbeat,
+		Channel:              st.Channel,
+		Status:               st.Status,
+		TodoID:               st.TodoID,
+		NotificationParentID: st.NotificationParentID,
+	}
+	if t.Status == "" {
+		t.Status = StatusActive
 	}
 	var err error
 	if st.Next != "" {
