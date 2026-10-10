@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,9 @@ import (
 func TestDefaultAccount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
 	s := NewAccountStore(path)
+	if err := s.Err(); err != nil {
+		t.Fatalf("初始化账号: %v", err)
+	}
 
 	acc, ok := s.Login(DefaultUsername, DefaultPassword)
 	if !ok {
@@ -97,14 +101,131 @@ func TestLegacyAccountFileWithMustChange(t *testing.T) {
 	}
 }
 
-// TestCorruptAccountFile 账号文件损坏时回退默认账号（可重新进入系统）。
+// TestCorruptAccountFile 账号文件损坏时拒绝登录和更新，保留原文件供恢复。
 func TestCorruptAccountFile(t *testing.T) {
+	for _, data := range []string{
+		"{{{不是 JSON", "", "null", `{}`,
+		`{"username":"admin","passwordHash":"not-bcrypt"}`,
+		`{"username":"admin","passwordHash":"$2a$04$!` + strings.Repeat("A", 52) + `"}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "admin-account.json")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatalf("写文件: %v", err)
+			}
+			s := NewAccountStore(path)
+			if err := s.Err(); err == nil {
+				t.Fatal("损坏文件应返回初始化错误")
+			}
+			if _, ok := s.Login(DefaultUsername, DefaultPassword); ok {
+				t.Fatal("损坏时不能启用默认账号 admin/admin")
+			}
+			if err := s.Update("replacement", "secret123"); err == nil {
+				t.Fatal("损坏时不能用预置凭据覆盖账号文件")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != data {
+				t.Fatalf("应保留原文件，got %q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestUnreadableAccountPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin-account.json")
-	if err := os.WriteFile(path, []byte("{{{不是 JSON"), 0o600); err != nil {
-		t.Fatalf("写文件: %v", err)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	s := NewAccountStore(path)
-	if _, ok := s.Login(DefaultUsername, DefaultPassword); !ok {
-		t.Fatal("损坏时应回退默认账号 admin/admin")
+	if s.Err() == nil {
+		t.Fatal("无法读取的路径应返回错误")
+	}
+	if _, ok := s.Login(DefaultUsername, DefaultPassword); ok {
+		t.Fatal("读取失败时不能启用默认凭据")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("原路径应保留，info=%v err=%v", info, err)
+	}
+}
+
+func TestDanglingAccountSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "admin-account.json")
+	missing := filepath.Join(dir, "missing.json")
+	if err := os.Symlink(missing, path); err != nil {
+		t.Fatal(err)
+	}
+	s := NewAccountStore(path)
+	if s.Err() == nil {
+		t.Fatal("悬空链接不能视为首次初始化")
+	}
+	if _, ok := s.Login(DefaultUsername, DefaultPassword); ok {
+		t.Fatal("悬空链接不能启用默认凭据")
+	}
+	got, err := os.Readlink(path)
+	if err != nil || got != missing {
+		t.Fatalf("原符号链接应保留，got=%q err=%v", got, err)
+	}
+}
+
+func TestAccountInitializationSaveFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-dir", "admin-account.json")
+	s := NewAccountStore(path)
+	if s.Err() == nil {
+		t.Fatal("首次保存失败应返回错误")
+	}
+	if _, ok := s.Login(DefaultUsername, DefaultPassword); ok {
+		t.Fatal("首次保存失败不能启用未持久化的默认账号")
+	}
+}
+
+func TestAccountUpdateSaveFailureKeepsCurrentAccount(t *testing.T) {
+	for _, failure := range []string{"create", "rename"} {
+		t.Run(failure, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "admin-account.json")
+			s := NewAccountStore(path)
+			if err := s.Update("original", "original123"); err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backup := filepath.Join(dir, "account-backup.json")
+			if err := os.Rename(path, backup); err != nil {
+				t.Fatal(err)
+			}
+			if failure == "create" {
+				// 临时文件的目录不可用；已保存的原账号仍位于 backup。
+				s.path = filepath.Join(dir, "missing-dir", "admin-account.json")
+			} else if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Update("replacement", "replacement123"); err == nil {
+				t.Fatal("持久化失败必须返回错误")
+			}
+			if _, ok := s.Login("original", "original123"); !ok {
+				t.Fatal("更新失败必须保持原账号可登录")
+			}
+			if _, ok := s.Login("replacement", "replacement123"); ok {
+				t.Fatal("更新失败不能启用新账号")
+			}
+			if cur := s.Current(); cur.Username != "original" {
+				t.Fatalf("Current 应保留原账号，got %+v", cur)
+			}
+			got, err := os.ReadFile(backup)
+			if err != nil || !bytes.Equal(got, original) {
+				t.Fatalf("原账号文件发生变化，err=%v", err)
+			}
+			if _, ok := NewAccountStore(backup).Login("original", "original123"); !ok {
+				t.Fatal("重新加载后应仍可用原账号登录")
+			}
+			tmpFiles, err := filepath.Glob(filepath.Join(dir, ".admin-account.json.tmp-*"))
+			if err != nil || len(tmpFiles) != 0 {
+				t.Fatalf("临时文件应清理，files=%v err=%v", tmpFiles, err)
+			}
+		})
 	}
 }

@@ -44,7 +44,10 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -54,12 +57,14 @@ import (
 	vxagent "github.com/capyflow/vortexagent/agent"
 	vortex "github.com/capyflow/vortexv3"
 	vhttp "github.com/capyflow/vortexv3/server/http"
+	"github.com/gin-gonic/gin"
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
+	"github.com/capyflow/friday/internal/notification"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/tools"
@@ -89,6 +94,7 @@ type Info struct {
 
 // Server 是管理后台，同时承载网页聊天（web.Chat 挂载在同一端口）。
 type Server struct {
+	host          string
 	port          int
 	accounts      *AccountStore
 	sessMu        sync.Mutex
@@ -98,18 +104,21 @@ type Server struct {
 	memory        *memory.WikiStore
 	schedule      *tools.ScheduleTaskTool  // 复用 LLM 工具的时间解析与建任务逻辑
 	chat          *web.Chat                // 网页聊天（可为 nil：不挂载聊天入口）
-	cfg           *config.Config           // 运行配置（热更新直接改写其中的 provider 字段）
+	cfg           *config.Config           // 运行配置（热更新通过串行事务发布快照）
 	regFn         func() *vxagent.Registry // 工具注册表 getter（MCP 重建后指针会变）
 	configPath    string                   // config.yaml 路径（热更新写回）
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
-	heartbeatFile string                   // HEARTBEAT.md 路径
+	mcpUpdateMu   sync.Mutex
+	notifications *notification.Center
+	heartbeatFile string // HEARTBEAT.md 路径
 	info          Info
 	startedAt     time.Time
 }
 
 // Options 汇总管理后台的构建参数。
 type Options struct {
+	Host          string
 	Port          int
 	Accounts      *AccountStore
 	Engine        *task.Engine
@@ -123,13 +132,18 @@ type Options struct {
 	Approver      *approval.Queue
 	Mcp           *mcp.Manager
 	HeartbeatFile string
+	Notifications *notification.Center
 }
 
-// New 创建管理后台。accounts 为账号仓库（默认 admin/admin，首次登录强制改号）；
+// New 创建管理后台。accounts 为账号仓库（默认 admin/admin，可通过启动配置预置）；
 // chat 为网页聊天服务（可为 nil）；cfg/registry/configPath 支撑模型热更新
 // （三者任一为零值则不挂载热更新接口）；approver/mcp 支撑审批卡片与 MCP 状态页（可为 nil）。
 func New(o Options) *Server {
+	if strings.TrimSpace(o.Host) == "" {
+		o.Host = "127.0.0.1"
+	}
 	return &Server{
+		host:          o.Host,
 		port:          o.Port,
 		accounts:      o.Accounts,
 		sessions:      make(map[string]time.Time),
@@ -146,11 +160,12 @@ func New(o Options) *Server {
 		heartbeatFile: o.HeartbeatFile,
 		info:          o.Info,
 		startedAt:     time.Now(),
+		notifications: o.Notifications,
 	}
 }
 
-// Start 启动 HTTP 服务（vortex 在后台 goroutine 中运行，不阻塞）。
-func (s *Server) Start(_ context.Context) {
+// Handler 保留 vortexv3 路由/响应约定，由本服务管理监听地址和关闭生命周期。
+func (s *Server) Handler() http.Handler {
 	root := vhttp.NewRootGroup("/")
 	// 应用外壳（登录 + 聊天/运行状态/自动化/记忆/设置）：公开下发，数据接口各自鉴权。
 	root.AddStaticRouter("/", s.handleIndex)
@@ -208,12 +223,43 @@ func (s *Server) Start(_ context.Context) {
 	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages/:id", s.wrap(s.handleGetWikiPage))
 	root.AddRouter([]string{http.MethodPut}, "/api/wiki/pages/:id", s.wrap(s.handleUpdateWikiPage))
 	root.AddRouter([]string{http.MethodDelete}, "/api/wiki/pages/:id", s.wrap(s.handleDeleteWikiPage))
+	if s.notifications != nil {
+		root.AddRouter([]string{http.MethodGet}, "/api/notifications", s.wrap(s.handleNotifications))
+		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/retry", s.wrap(s.handleRetryNotification))
+	}
 
-	eng := vortex.NewVortexEngine(context.Background(),
+	var handler *gin.Engine
+	_ = vortex.NewVortexEngine(context.Background(),
 		vortex.WithPort(s.port),
+		vortex.WithHttpServerOptions(func(e *gin.Engine) {
+			handler = e
+			_ = e.SetTrustedProxies([]string{"127.0.0.1", "::1"})
+		}),
 		vortex.WithHttpRouterRootGroup(root),
 	)
-	eng.Start()
+	return handler
+}
+
+// Start 在绑定失败时同步返回错误，默认仅监听本机；取消 ctx 时关闭 HTTP 服务。
+func (s *Server) Start(ctx context.Context) error {
+	l, err := net.Listen("tcp", net.JoinHostPort(s.host, strconv.Itoa(s.port)))
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
+	go func() {
+		if err := server.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("[管理后台] HTTP 服务退出: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	return nil
 }
 
 // ---------- 会话 ----------
@@ -348,7 +394,6 @@ func (s *Server) handleUpdateProvider(ctx *vhttp.Context) error {
 	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.BaseURL, req.Model, req.APIKey); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
-	s.info.Model, s.info.BaseURL = req.Model, req.BaseURL
 	msg := "模型配置已热生效，并已写回 config.yaml"
 	if req.APIKey != "" {
 		msg = "模型配置与 API 密钥已热生效，并已写回 config.yaml"
@@ -395,6 +440,9 @@ func (s *Server) handleGetTrace(ctx *vhttp.Context) error {
 
 // handleStatus 返回管家运行状态。
 func (s *Server) handleStatus(ctx *vhttp.Context) error {
+	if err := s.engine.Err(); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
 	tasks := s.engine.List()
 	byKind := map[string]int{}
 	for _, t := range tasks {
@@ -402,13 +450,21 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 	}
 	var pending int
 	if s.todos != nil {
+		if err := s.todos.Err(); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+		}
 		pending = s.todos.CountPending()
+	}
+	model, baseURL, keyConfigured := s.info.Model, s.info.BaseURL, false
+	if s.cfg != nil {
+		cfg := s.cfg.Snapshot()
+		model, baseURL, keyConfigured = cfg.Provider.Model, cfg.Provider.BaseURL, cfg.ProviderAPIKey() != ""
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"startedAt":        s.startedAt.Format(time.RFC3339),
 		"uptimeSeconds":    int(time.Since(s.startedAt).Seconds()),
-		"provider":         map[string]string{"model": s.info.Model, "baseURL": s.info.BaseURL},
-		"apiKeyConfigured": s.cfg != nil && s.cfg.ProviderAPIKey() != "",
+		"provider":         map[string]string{"model": model, "baseURL": baseURL},
+		"apiKeyConfigured": keyConfigured,
 		"tasks":            map[string]any{"total": len(tasks), "byKind": byKind},
 		"todos":            map[string]any{"pending": pending},
 		"memories":         s.memory.Count(),
@@ -418,6 +474,9 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 
 // handleListTasks 返回任务列表。
 func (s *Server) handleListTasks(ctx *vhttp.Context) error {
+	if err := s.engine.Err(); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"tasks": s.engine.List()})
 }
 
@@ -441,7 +500,11 @@ func (s *Server) handleCreateTask(ctx *vhttp.Context) error {
 // handleCancelTask 取消一条任务。
 func (s *Server) handleCancelTask(ctx *vhttp.Context) error {
 	id := ctx.GinContext().Param("id")
-	if !s.engine.Cancel(id) {
+	ok, err := s.engine.CancelErr(id)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
+	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到任务 #" + id})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
@@ -520,6 +583,9 @@ func (s *Server) handleListTodos(ctx *vhttp.Context) error {
 	if s.todos == nil {
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": []todo.Todo{}})
 	}
+	if err := s.todos.Err(); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": s.todos.List()})
 }
 
@@ -554,7 +620,10 @@ func (s *Server) handleCompleteTodo(ctx *vhttp.Context) error {
 		done = *req.Done
 	}
 	id := ctx.GinContext().Param("id")
-	td, ok := s.todos.Complete(id, done)
+	td, ok, err := s.todos.Complete(id, done)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
 	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
 	}
@@ -567,7 +636,11 @@ func (s *Server) handleDeleteTodo(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
 	}
 	id := ctx.GinContext().Param("id")
-	if !s.todos.Delete(id) {
+	ok, err := s.todos.Delete(id)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
+	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除待办 #" + id})

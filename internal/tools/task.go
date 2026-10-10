@@ -193,7 +193,11 @@ func (t *CancelTaskTool) Call(_ context.Context, args map[string]any) (string, e
 	if id == "" {
 		return "", fmt.Errorf("缺少参数 id")
 	}
-	if t.Engine.Cancel(id) {
+	ok, err := t.Engine.CancelErr(id)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		return fmt.Sprintf("已取消任务 #%s", id), nil
 	}
 	return fmt.Sprintf("未找到任务 #%s", id), nil

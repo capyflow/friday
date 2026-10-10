@@ -19,8 +19,8 @@ import (
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
-	tools_pkg "github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/todo"
+	tools_pkg "github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/usage"
 )
@@ -33,6 +33,7 @@ import (
 // 「每轮发送完整历史」的旧行为。调用方在 Build 后经 Brain 初始化会话
 // （池按 key 惰性创建）。
 func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, approver *approval.Queue, engine *ctxengine.Engine) (*vxagent.Agent, error) {
+	cfg = cfg.Snapshot()
 	provider, err := newProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("创建 LLM provider: %w", err)
@@ -61,6 +62,7 @@ func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, ap
 // 密钥允许为空（未配置不影响启动，管理后台/待办/任务照常可用）：
 // LLM 请求在配置密钥前会失败并提示去「设置」页配置。
 func newProvider(cfg *config.Config) (llm.Provider, error) {
+	cfg = cfg.Snapshot()
 	apiKey := cfg.ProviderAPIKey()
 	temp := cfg.Provider.Temperature
 	return llm.NewProvider(llm.ProviderConfig{
@@ -185,15 +187,15 @@ func messageText(m llm.Message) string {
 
 // Deps 汇总 RegisterTools 需要的管家能力依赖。
 type Deps struct {
-	Engine    *task.Engine     // 任务排程器（单次/多次/循环/智能任务）
-	Todos     *todo.Store      // 待办清单仓库
+	Engine    *task.Engine      // 任务排程器（单次/多次/循环/智能任务）
+	Todos     *todo.Store       // 待办清单仓库
 	Memory    *memory.WikiStore // 长期记忆 wiki 仓库（主题页面）
-	Ctx       *ContextManager  // 上下文引擎管理器（注册检索工具用，可为 nil）
-	Speaker   output.Speaker   // 播报输出（硬件输出开启时使用）
-	Displayer output.Displayer // 屏幕输出（硬件输出开启时使用）
-	Player    audio.Player     // 音频播放器（硬件输出开启时使用）
-	Config    *config.Config   // 运行配置（文件白名单、硬件开关、天气默认城市等）
-	Approver  *approval.Queue  // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
+	Ctx       *ContextManager   // 上下文引擎管理器（注册检索工具用，可为 nil）
+	Speaker   output.Speaker    // 播报输出（硬件输出开启时使用）
+	Displayer output.Displayer  // 屏幕输出（硬件输出开启时使用）
+	Player    audio.Player      // 音频播放器（硬件输出开启时使用）
+	Config    *config.Config    // 运行配置（文件白名单、硬件开关、天气默认城市等）
+	Approver  *approval.Queue   // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
 }
 
 // RegisterTools 把管家全部业务工具注册进 Registry。

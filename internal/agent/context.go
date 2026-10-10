@@ -54,6 +54,7 @@ func (m *ContextManager) Current() *ctxengine.Engine {
 // 配置变更后调用。失败时保留旧引擎并返回错误——摘要器模型可能落后一拍，
 // 归档与检索不受影响。引擎构建失败最常见原因是 provider 配置非法。
 func (m *ContextManager) Rebuild(cfg *config.Config) error {
+	cfg = cfg.Snapshot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !cfg.Context.IsEnabled() {
@@ -96,7 +97,7 @@ func (m *ContextManager) Rebuild(cfg *config.Config) error {
 
 // ResetSession 清除会话的引擎运行态与已归档数据（Brain.Reset 调用）：
 // 归档不清的话，同 ID 新会话首轮 Build 会带出旧摘要区，等于没清干净。
-func (m *ContextManager) ResetSession(ctx context.Context, sessionID string) {
+func (m *ContextManager) ResetSession(ctx context.Context, sessionID string) error {
 	m.mu.Lock()
 	engine, archive := m.engine, m.archive
 	m.mu.Unlock()
@@ -104,11 +105,12 @@ func (m *ContextManager) ResetSession(ctx context.Context, sessionID string) {
 		engine.DropState(sessionID)
 	}
 	if archive == nil {
-		return
+		return nil
 	}
 	if err := archive.DeleteSession(ctx, sessionID); err != nil {
-		log.Printf("[上下文] 清除会话归档失败（%s）: %v", sessionID, err)
+		return fmt.Errorf("清除会话归档失败: %w", err)
 	}
+	return nil
 }
 
 // Close 停止 retention goroutine（预留：优雅退出时调用；不调也不泄漏进程外资源）。

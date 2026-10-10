@@ -492,7 +492,7 @@ func TestPersistOverdueOnceFiresImmediately(t *testing.T) {
 	}
 }
 
-// TestPersistCorruptFile 文件损坏时空启动不崩溃，且后续可正常注册。
+// TestPersistCorruptFile 文件损坏时保留原文件，拒绝注册避免覆盖用户数据。
 func TestPersistCorruptFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.json")
 	if err := os.WriteFile(path, []byte("{{{不是 JSON"), 0o644); err != nil {
@@ -504,8 +504,11 @@ func TestPersistCorruptFile(t *testing.T) {
 	if eng.Len() != 0 {
 		t.Fatalf("损坏文件应空启动，实际 %d 条", eng.Len())
 	}
-	if _, err := eng.Schedule(Task{When: time.Now().Add(time.Minute), Text: "x"}); err != nil {
-		t.Fatalf("空启动后应可注册: %v", err)
+	if _, err := eng.Schedule(Task{When: time.Now().Add(time.Minute), Text: "x"}); err == nil {
+		t.Fatal("损坏文件必须拒绝注册")
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "{{{不是 JSON" {
+		t.Fatalf("必须保留原文件: bytes=%q err=%v", b, err)
 	}
 }
 

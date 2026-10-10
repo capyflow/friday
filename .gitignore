@@ -7,6 +7,8 @@ config.yaml
 
 # 运行时持久化文件（任务/记忆/管理员账号）
 /tasks.json
+/todos.json
+/notifications.json
 /memories.json
 /admin-account.json
 

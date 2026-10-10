@@ -10,12 +10,14 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config 是 Friday 整体配置。
 type Config struct {
+	runtimeMu    *sync.RWMutex
 	Provider     ProviderConfig    `yaml:"provider"`
 	Audio        AudioConfig       `yaml:"audio"`
 	ASR          ASRConfig         `yaml:"asr"`
@@ -79,12 +81,14 @@ type CustomConfig struct {
 
 // AdminConfig 描述管理后台（vortexv3 HTTP 服务）。
 type AdminConfig struct {
+	// Host 默认仅允许本机访问；Docker/远程部署显式配置 0.0.0.0。
+	Host string `yaml:"host"`
 	// Enabled 默认开启；配置里写 enabled: false 显式关闭。
 	Enabled *bool `yaml:"enabled"`
 	// Port 监听端口（默认 8080）。
 	Port int `yaml:"port"`
 	// AccountFile 管理员账号文件（默认 admin-account.json）。
-	// 内置默认账号 admin/admin，首次登录强制重新设置用户名与密码；
+	// 首次初始化默认账号 admin/admin，启动配置可预置用户名与密码；
 	// 账号以 bcrypt 哈希落盘，重启后以设置的账号为准。
 	AccountFile string `yaml:"accountFile"`
 	// Username/Password 启动时预置的管理员账号（可选，两者须同时提供）。
@@ -225,6 +229,7 @@ func (c ContextConfig) FactsEnabled() bool {
 type ToolsConfig struct {
 	Exec ExecConfig `yaml:"exec"`
 }
+
 // ExecConfig 描述 exec_command 工具的审批与安全边界。策略经
 // internal/agent/permission.go 翻译成 vortexagent 全局权限层规则生效。
 type ExecConfig struct {
@@ -431,6 +436,8 @@ func Load(path string) (*Config, error) {
 // 以及 provider.apiKey（apiKey 为空串表示不动已有密钥）：以 yaml.Node 方式编辑
 // （保留注释与原有结构），临时文件 + rename 原子写回。
 func UpdateProvider(path, baseURL, model, apiKey string) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取配置失败: %w", err)
@@ -467,6 +474,8 @@ func UpdateProvider(path, baseURL, model, apiKey string) error {
 // （保留文件其余部分的注释与结构；mcp 段不存在时追加），临时文件 + rename 原子写回。
 // servers 允许为空（写空列表，表示清空全部 MCP 服务器）。
 func UpdateMcpServers(path string, servers []McpServerConfig) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取配置失败: %w", err)
@@ -562,6 +571,8 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 // 以 yaml.Node 方式编辑（保留文件其余部分的注释与结构；persona 段不存在时追加），
 // 临时文件 + rename 原子写回。presets 允许为空（写空列表，表示清空自定义覆盖）。
 func UpdatePersona(path, active string, presets []Persona) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取配置失败: %w", err)
@@ -667,10 +678,11 @@ func marshalNode(doc *yaml.Node) ([]byte, error) {
 // 指定的环境变量，再回退通用名 FRIDAY_API_KEY 与旧名 DEEPSEEK_API_KEY（兼容）。
 // 全部为空表示未配置——允许启动，对话在配置密钥前不可用。
 func (c *Config) ProviderAPIKey() string {
-	if c.Provider.APIKey != "" {
-		return c.Provider.APIKey
+	p := c.Snapshot().Provider
+	if p.APIKey != "" {
+		return p.APIKey
 	}
-	for _, name := range []string{c.Provider.APIKeyEnv, "FRIDAY_API_KEY", "DEEPSEEK_API_KEY"} {
+	for _, name := range []string{p.APIKeyEnv, "FRIDAY_API_KEY", "DEEPSEEK_API_KEY"} {
 		if v := os.Getenv(name); v != "" {
 			return v
 		}
@@ -730,6 +742,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Admin.Port == 0 {
 		c.Admin.Port = 8080
+	}
+	if c.Admin.Host == "" {
+		c.Admin.Host = "127.0.0.1"
 	}
 	if c.Admin.AccountFile == "" {
 		c.Admin.AccountFile = "admin-account.json"

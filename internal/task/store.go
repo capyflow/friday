@@ -3,8 +3,10 @@ package task
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,26 +20,41 @@ type fileStore struct {
 	path string
 }
 
-// load 读取任务列表；文件不存在或损坏时返回 nil（空启动，不阻塞机器人）。
-func (s *fileStore) load() []Task {
+// load 读取任务列表；仅文件不存在时空启动，损坏或不可读文件保留并报错。
+func (s *fileStore) load() ([]Task, error) {
 	if s == nil || s.path == "" {
-		return nil
+		return nil, nil
 	}
 	b, err := os.ReadFile(s.path)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			if _, statErr := os.Lstat(s.path); os.IsNotExist(statErr) {
+				return nil, nil
+			}
+		}
+		return nil, fmt.Errorf("读取任务文件 %q 失败，已保留原文件；修复文件后重启: %w", s.path, err)
 	}
 	var stored []storedTask
-	if err := json.Unmarshal(b, &stored); err != nil {
-		return nil
+	if err := json.Unmarshal(b, &stored); err != nil || strings.TrimSpace(string(b)) == "null" {
+		if err == nil {
+			err = fmt.Errorf("必须是任务数组，不能为 null")
+		}
+		return nil, fmt.Errorf("任务文件 %q 损坏，已保留原文件；修复文件后重启: %w", s.path, err)
 	}
 	tasks := make([]Task, 0, len(stored))
-	for _, st := range stored {
-		if t, ok := st.toTask(); ok {
-			tasks = append(tasks, t)
+	ids := make(map[string]bool, len(stored))
+	for i, st := range stored {
+		t, ok := st.toTask()
+		if !ok || t.ID == "" || ids[t.ID] {
+			return nil, fmt.Errorf("任务文件 %q 第 %d 条内容无效或 ID 重复，已保留原文件；修复文件后重启", s.path, i+1)
 		}
+		if _, err := buildGoal(t); err != nil {
+			return nil, fmt.Errorf("任务文件 %q 第 %d 条无效，已保留原文件；修复文件后重启: %w", s.path, i+1, err)
+		}
+		ids[t.ID] = true
+		tasks = append(tasks, t)
 	}
-	return tasks
+	return tasks, nil
 }
 
 // save 原子写回任务快照；未启用持久化（nil 或空路径）时为空操作。
@@ -53,14 +70,29 @@ func (s *fileStore) save(tasks []Task) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
+	f, err := os.CreateTemp(filepath.Dir(s.path), "."+filepath.Base(s.path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("创建任务临时文件失败: %w", err)
 	}
-	return os.Rename(tmp, s.path)
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return fmt.Errorf("写入任务临时文件失败: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("同步任务临时文件失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("关闭任务临时文件失败: %w", err)
+	}
+	if err := os.Rename(f.Name(), s.path); err != nil {
+		return fmt.Errorf("替换任务文件失败: %w", err)
+	}
+	return nil
 }
 
-// storedTask 是 Task 的落盘形态（不含派生字段 Next，启动时重算）。
+// storedTask 是 Task 的落盘形态，保留 Next 以便重启后保持周期任务计划时刻。
 type storedTask struct {
 	ID        string `json:"id"`
 	Text      string `json:"text"`
@@ -71,6 +103,7 @@ type storedTask struct {
 	Remaining int    `json:"remaining,omitempty"` // repeat：剩余次数
 	Cron      string `json:"cron,omitempty"`      // cron：表达式
 	CreatedAt string `json:"createdAt"`           // RFC3339
+	Next      string `json:"next,omitempty"`      // 下次计划触发时刻（旧文件可缺省）
 	// agent 任务扩展字段。
 	Heartbeat bool   `json:"heartbeat,omitempty"`
 	Channel   string `json:"channel,omitempty"`
@@ -96,45 +129,74 @@ func newStoredTask(t Task) storedTask {
 	if !t.CreatedAt.IsZero() {
 		st.CreatedAt = t.CreatedAt.Format(time.RFC3339Nano)
 	}
+	if !t.Next.IsZero() {
+		st.Next = t.Next.Format(time.RFC3339Nano)
+	}
 	return st
 }
 
 // ─── GoalStore 适配器 ───
 
 // goalStore 把 JSON 任务文件适配成框架的 autonomous.GoalStore：磁盘格式保持
-// []storedTask 不变（人工可读、旧文件直接可用），内存侧缓存 Goal 指针供框架
-// 调度器复用（LoadAll/Get 返回与调度器共享的指针，框架就地推进状态）。
+// []storedTask 不变（人工可读、旧文件直接可用），缓存已成功落盘的独立快照。
+// LoadAll/Get 返回副本，框架推进 Goal 后 Save 失败不会污染已提交的内存状态。
 //
 // 落盘只保留"存活"目标（active/pending 且次数未耗尽）：终态与已触发完的
 // 单次/多次任务即时从文件消失，等价旧引擎"触发即移除"的落盘时序。
 // mu 同时承担旧引擎 saveMu 的职责：串行化"写 tmp + rename"，避免并发落盘互踩。
 type goalStore struct {
-	mu    sync.Mutex
-	file  *fileStore // nil 表示仅内存（不持久化）
-	goals map[string]*autonomous.Goal
+	mu      sync.Mutex
+	file    *fileStore // nil 表示仅内存（不持久化）
+	goals   map[string]*autonomous.Goal
+	loaded  bool
+	loadErr error
 }
 
 func newGoalStore(file *fileStore) *goalStore {
 	return &goalStore{file: file, goals: make(map[string]*autonomous.Goal)}
 }
 
-// LoadAll 从文件恢复全部目标（框架启动时调用）：逐条经 buildGoal 重建，
-// 非法行记日志跳过，不阻塞启动。
+// LoadAll 首次从文件恢复全部目标，此后返回已提交快照的副本。
 func (s *goalStore) LoadAll() ([]*autonomous.Goal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tasks := s.file.load()
-	goals := make([]*autonomous.Goal, 0, len(tasks))
+	if err := s.loadLocked(); err != nil {
+		return nil, err
+	}
+	goals := make([]*autonomous.Goal, 0, len(s.goals))
+	for _, g := range s.goals {
+		snap := g.Snapshot()
+		goals = append(goals, &snap)
+	}
+	return goals, nil
+}
+
+func (s *goalStore) loadLocked() error {
+	if s.loaded {
+		return s.loadErr
+	}
+	s.loaded = true
+	tasks, err := s.file.load()
+	if err != nil {
+		s.loadErr = err
+		return err
+	}
 	for _, t := range tasks {
 		g, err := buildGoal(t)
 		if err != nil {
-			log.Printf("[task] 恢复任务 %s 失败: %v", t.ID, err)
-			continue
+			s.loadErr = fmt.Errorf("恢复任务 %q 失败，修复文件后重启: %w", t.ID, err)
+			return s.loadErr
 		}
+		g.SetNextRunAt(t.Next)
 		s.goals[g.ID] = g
-		goals = append(goals, g)
 	}
-	return goals, nil
+	return nil
+}
+
+func (s *goalStore) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadLocked()
 }
 
 // Save 框架每次状态推进后的落盘入口：存活目标更新缓存并写盘，非存活
@@ -142,50 +204,78 @@ func (s *goalStore) LoadAll() ([]*autonomous.Goal, error) {
 func (s *goalStore) Save(g *autonomous.Goal) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if liveGoal(g.Snapshot()) {
-		s.goals[g.ID] = g
-	} else {
-		delete(s.goals, g.ID)
+	if err := s.loadLocked(); err != nil {
+		return err
 	}
-	s.persistLocked()
+	snap := g.Snapshot()
+	previous, existed := s.goals[snap.ID]
+	if liveGoal(snap) {
+		s.goals[snap.ID] = &snap
+	} else {
+		delete(s.goals, snap.ID)
+	}
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.goals[snap.ID] = previous
+		} else {
+			delete(s.goals, snap.ID)
+		}
+		return err
+	}
 	return nil
 }
 
 func (s *goalStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.loadLocked(); err != nil {
+		return err
+	}
+	previous, existed := s.goals[id]
+	if !existed {
+		return nil // 框架 RemoveGoal 在预先落盘删除后再次调用；无需重复写盘
+	}
 	delete(s.goals, id)
-	s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.goals[id] = previous
+		return err
+	}
 	return nil
 }
 
 func (s *goalStore) Get(id string) (*autonomous.Goal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.loadLocked(); err != nil {
+		return nil, err
+	}
 	g, ok := s.goals[id]
 	if !ok {
 		return nil, fmt.Errorf("任务 %q 不存在", id)
 	}
-	return g, nil
+	snap := g.Snapshot()
+	return &snap, nil
 }
 
 // persistLocked 把当前存活目标整体快照原子写回文件。
-func (s *goalStore) persistLocked() {
+func (s *goalStore) persistLocked() error {
 	if s.file == nil {
-		return
+		return nil
 	}
 	tasks := make([]Task, 0, len(s.goals))
 	for _, g := range s.goals {
 		if snap := g.Snapshot(); liveGoal(snap) {
+			if snap.Schedule.Type == autonomous.ScheduleOneShot && snap.NextRunAt.IsZero() {
+				snap.NextRunAt = snap.Schedule.At
+			}
 			tasks = append(tasks, taskView(snap))
 		}
 	}
-	if err := s.file.save(tasks); err != nil {
-		log.Printf("[task] 持久化失败: %v", err)
-	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	return s.file.save(tasks)
 }
 
-// toTask 校验并还原落盘条目；字段缺失或非法（如手工编辑出错）时返回 false 跳过。
+// toTask 校验并还原落盘条目；字段缺失或非法时返回 false，load 据此拒绝覆盖文件。
 func (st storedTask) toTask() (Task, bool) {
 	t := Task{
 		ID:        st.ID,
@@ -198,6 +288,11 @@ func (st storedTask) toTask() (Task, bool) {
 		Channel:   st.Channel,
 	}
 	var err error
+	if st.Next != "" {
+		if t.Next, err = time.Parse(time.RFC3339Nano, st.Next); err != nil {
+			return Task{}, false
+		}
+	}
 	if st.When != "" {
 		if t.When, err = time.Parse(time.RFC3339Nano, st.When); err != nil {
 			return Task{}, false

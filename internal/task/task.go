@@ -2,6 +2,8 @@
 // 无限循环（cron）与智能任务（agent）共用一个 Task 模型与到点回调；agent 通过
 // schedule_task 工具注册，到点后普通提醒直投通知渠道，智能任务交给 agent 自主决策。
 //
+// 生产入口 NewReliableEngineFile 先完成可靠入队再推进任务，见 reliable.go。
+// 以下框架说明适用于兼容入口 NewEngine / NewEngineFile。
 // 调度与执行编排整体复用 vortexagent 的 autonomous.AutonomousAgent，不在本项目
 // 重复实现：唤醒主循环、到期集合计算、各调度类型的推进（once 终态、repeat 锚定
 // 推进不随执行延迟漂移、cron 推进）、MaxRuns 终态与失败熔断、"先落盘后回调"的
@@ -95,14 +97,17 @@ func ParseCron(spec string) (string, error) {
 // Engine 是统一任务排程器：调度、唤醒与执行编排委托 autonomous.AutonomousAgent，
 // 本包只做 Task 映射、校验与回调派发。
 type Engine struct {
-	mu     sync.Mutex // 保护 ids / closed
-	ids    map[string]struct{}
-	agent  *autonomous.AutonomousAgent
-	store  *goalStore
-	cb     Callback
-	ready  chan struct{} // 框架主循环就绪（scheduler 已装载）后关闭
-	cancel context.CancelFunc
-	closed bool
+	mu         sync.Mutex // 保护 ids / closed
+	ids        map[string]struct{}
+	agent      *autonomous.AutonomousAgent
+	store      *goalStore
+	cb         Callback
+	ready      chan struct{} // 框架主循环就绪（scheduler 已装载）后关闭
+	cancel     context.CancelFunc
+	closed     bool
+	startupErr error
+	readyOnce  sync.Once
+	reliable   *reliableScheduler
 }
 
 // NewEngine 创建排程器（不持久化）。cb 为到点回调，可为 nil。
@@ -128,7 +133,9 @@ func newEngine(cb Callback, file *fileStore) *Engine {
 	// 恢复：预填 ID 去重表（心跳等固定 ID 任务重启后不重复注册）并打日志；
 	// 目标本身由框架启动时经 store.LoadAll 装载。
 	if file != nil {
-		if tasks := file.load(); len(tasks) > 0 {
+		tasks, err := file.load()
+		e.startupErr = err
+		if err == nil && len(tasks) > 0 {
 			for _, t := range tasks {
 				e.ids[t.ID] = struct{}{}
 			}
@@ -149,29 +156,67 @@ func newEngine(cb Callback, file *fileStore) *Engine {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
-	go e.agent.Run(ctx)
+	if e.startupErr != nil {
+		e.readyOnce.Do(func() { close(e.ready) })
+		return e
+	}
+	go func() {
+		if err := e.agent.Run(ctx); err != nil && ctx.Err() == nil {
+			e.mu.Lock()
+			e.startupErr = err
+			e.mu.Unlock()
+			e.readyOnce.Do(func() { close(e.ready) })
+		}
+	}()
 	go func() {
 		for e.agent.Goals() == nil { // Run 装载完目标并建好 scheduler 即就绪
-			time.Sleep(2 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-e.ready:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
 		}
-		close(e.ready)
+		e.readyOnce.Do(func() { close(e.ready) })
 	}()
 	return e
 }
 
 // waitReady 等框架主循环就绪。就绪前 AddGoal 只落盘不入调度器（目标会被静默
 // 漏触发），因此所有依赖调度器的公开方法先过这道门；就绪通常在构造后毫秒级。
-func (e *Engine) waitReady() {
+func (e *Engine) waitReady() error {
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
 	select {
 	case <-e.ready:
+		return e.Err()
 	case <-time.After(5 * time.Second):
+		return fmt.Errorf("任务引擎启动超时")
 	}
+}
+
+// Err 返回恢复错误；损坏文件不能被空任务列表覆盖。
+func (e *Engine) Err() error {
+	if e.reliable != nil {
+		return e.reliable.err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.startupErr
 }
 
 // Schedule 注册一条任务，返回补全后的任务（含 ID/CreatedAt/Remaining/Next）。
 // id 为空自动生成；Kind 为空时按已填字段推断（When→once、Interval→repeat、Cron→cron）。
 // once 的 When 已过期时由框架立即补触发。注册成功即落盘（启用持久化时）。
 func (e *Engine) Schedule(t Task) (Task, error) {
+	if e.reliable != nil {
+		return e.reliable.schedule(t)
+	}
 	if t.ID == "" {
 		t.ID = newID()
 	}
@@ -198,7 +243,9 @@ func (e *Engine) Schedule(t Task) (Task, error) {
 		return Task{}, err
 	}
 
-	e.waitReady()
+	if err := e.waitReady(); err != nil {
+		return Task{}, err
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -223,28 +270,49 @@ func (e *Engine) Schedule(t Task) (Task, error) {
 
 // Cancel 取消一条任务（单次/多次/循环通用），返回是否真的取消了。
 func (e *Engine) Cancel(id string) bool {
-	e.waitReady()
+	ok, _ := e.CancelErr(id)
+	return ok
+}
+
+func (e *Engine) CancelErr(id string) (bool, error) {
+	if e.reliable != nil {
+		return e.reliable.cancelTask(id)
+	}
+	if err := e.waitReady(); err != nil {
+		return false, err
+	}
 	e.mu.Lock()
 	if _, ok := e.ids[id]; !ok {
 		e.mu.Unlock()
-		return false
+		return false, nil
 	}
-	delete(e.ids, id)
 	e.mu.Unlock()
+	// 先提交文件删除；失败时不碰仍然运行的调度器。
+	if err := e.store.Delete(id); err != nil {
+		return false, err
+	}
 
 	if err := e.agent.RemoveGoal(id); err != nil {
 		log.Printf("[task] 取消任务 %s 失败: %v", id, err)
 		e.mu.Lock()
 		e.ids[id] = struct{}{}
 		e.mu.Unlock()
-		return false
+		return false, err
 	}
-	return true
+	e.mu.Lock()
+	delete(e.ids, id)
+	e.mu.Unlock()
+	return true, nil
 }
 
 // List 返回当前所有待触发的任务（按下次触发时间升序）。
 func (e *Engine) List() []Task {
-	e.waitReady()
+	if e.reliable != nil {
+		return e.reliable.list()
+	}
+	if e.waitReady() != nil {
+		return nil
+	}
 	out := make([]Task, 0)
 	for _, g := range e.agent.Goals() {
 		if liveGoal(g) {
@@ -257,7 +325,12 @@ func (e *Engine) List() []Task {
 
 // Len 返回当前待触发任务数量。
 func (e *Engine) Len() int {
-	e.waitReady()
+	if e.reliable != nil {
+		return len(e.reliable.list())
+	}
+	if e.waitReady() != nil {
+		return 0
+	}
 	n := 0
 	for _, g := range e.agent.Goals() {
 		if liveGoal(g) {
@@ -270,6 +343,10 @@ func (e *Engine) Len() int {
 // Close 关闭引擎：停止框架主循环，之后 Schedule 返回 ErrClosed。
 // 每次变更已实时落盘，无需额外快照。
 func (e *Engine) Close() {
+	if e.reliable != nil {
+		e.reliable.close()
+		return
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -277,6 +354,7 @@ func (e *Engine) Close() {
 	}
 	e.closed = true
 	e.mu.Unlock()
+	e.readyOnce.Do(func() { close(e.ready) })
 	e.cancel()
 }
 

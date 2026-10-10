@@ -105,6 +105,7 @@ todoFile: todos.json
 # 账号默认 admin/admin（登录页仅登录，不提供改号），建议通过下面字段或环境变量预置。
 admin:
   enabled: true               # 写 false 关闭后台
+  host: 127.0.0.1             # 默认仅本机；Docker 通过 ADMIN_HOST=0.0.0.0 显式开放
   port: 8080
   accountFile: admin-account.json   # 管理员账号文件（bcrypt 哈希落盘）；删除即恢复默认 admin/admin
   # 启动预置账号（可选，须同时提供）：设置后每次启动以它覆盖账号文件里的账号。
@@ -140,7 +141,7 @@ admin:
 #     allowOpenIDs: []
 #     pushChatIDs: []
 
-# 会话持久化：对话历史按会话独立落盘（web/repl/ding-*/feishu-*/task），
+# 会话持久化：网页/终端/钉钉/飞书共用 web 主会话，智能任务使用 task 独立会话，
 # 重启自动恢复，不失忆。清除上下文按会话粒度（管理后台"设置 → 会话管理"）。
 sessionFile: session.json
 

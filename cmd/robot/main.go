@@ -20,12 +20,12 @@
 //
 // 桌面模式（供 Tauri 外壳拉起，见 desktop/）：
 //
-//	friday --desktop --data-dir <目录> --port 0
+//		friday --desktop --data-dir <目录> --port 0
 //
-//   - 进程 chdir 到数据目录，config.yaml 与全部数据文件落该目录；
-//   - 无终端 REPL，外壳关闭 stdin 即优雅退出；
-//   - --port 0 自动挑空闲端口，服务就绪后向 stdout 打印一行
-//     FRIDAY_ADDR=http://127.0.0.1:<port>（外壳解析后导航窗口）。
+//	  - 进程 chdir 到数据目录，config.yaml 与全部数据文件落该目录；
+//	  - 无终端 REPL，外壳关闭 stdin 即优雅退出；
+//	  - --port 0 自动挑空闲端口，服务就绪后向 stdout 打印一行
+//	    FRIDAY_ADDR=http://127.0.0.1:<port>（外壳解析后导航窗口）。
 package main
 
 import (
@@ -59,6 +59,7 @@ import (
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
+	"github.com/capyflow/friday/internal/notification"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
@@ -78,6 +79,7 @@ func main() {
 	desktop := flag.Bool("desktop", false, "桌面模式：数据落独立目录、无终端 REPL、stdin 关闭即退出（供 Tauri 桌面外壳拉起）")
 	dataDir := flag.String("data-dir", "", "数据目录（桌面模式：进程切换到该目录运行，默认取系统配置目录下的 Friday）")
 	portFlag := flag.Int("port", -1, "覆盖 admin.port；0 表示自动挑选空闲端口（桌面外壳依赖此参数定位服务地址）")
+	hostFlag := flag.String("host", "", "覆盖 admin.host（默认 127.0.0.1；远程部署显式用 0.0.0.0）")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
 	if *showVersion {
@@ -119,6 +121,12 @@ func main() {
 			cfg.Admin.Port = *portFlag
 		}
 	}
+	if *hostFlag != "" {
+		cfg.Admin.Host = *hostFlag
+	}
+	if *desktop {
+		cfg.Admin.Host = "127.0.0.1"
+	}
 	if *desktop && !cfg.Admin.IsEnabled() {
 		log.Fatalf("桌面模式要求管理后台保持开启（admin.enabled 不能配成 false），外壳窗口依赖它提供界面")
 	}
@@ -152,8 +160,11 @@ func main() {
 	}
 
 	// 通知渠道：普通任务到点与智能任务 [推送] 的投递目标。
-	// console 负责本地可见（硬件输出关闭时自动降级为空实现）；钉钉/飞书按配置挂载。
-	notifiers := []robotagent.Notifier{&robotagent.ConsoleNotifier{Speaker: speaker, Displayer: displayer}}
+	// 仅注册真正有输出的通道；网页通知中心始终保存提醒。
+	notifiers := []robotagent.Notifier{}
+	if speaker != nil || displayer != nil {
+		notifiers = append(notifiers, &robotagent.ConsoleNotifier{Speaker: speaker, Displayer: displayer})
+	}
 	if cfg.Chan.Dingtalk.PushWebhook != "" {
 		notifiers = append(notifiers, &dingtalk.WebhookNotifier{Webhook: cfg.Chan.Dingtalk.PushWebhook})
 	}
@@ -166,43 +177,48 @@ func main() {
 	approver := approval.New(cfg.Tools.Exec.Mode, cfg.Tools.Exec.Allowlist, 0)
 	log.Printf("[审批] exec 模式=%s，白名单 %d 条，超时 %s", approver.Mode(), len(cfg.Tools.Exec.Allowlist), approver.Timeout())
 
-	// 智能任务运行器在 Brain 就绪后赋值（引擎回调经闭包引用）。
+	// 先可靠入队再推进任务；工作器在 Brain 就绪后启动。
 	var runner *robotagent.TaskRunner
-	eng := task.NewEngineFile(func(t task.Task) {
-		// 每次任务触发视为独立请求：分配请求 ID，投递日志串在同一条链路上。
-		rctx := logx.WithID(ctx, logx.NextID())
+	targets := make([]notification.Target, 0, len(notifiers))
+	for _, n := range notifiers {
+		targets = append(targets, n)
+	}
+	notices, err := notification.New("notifications.json", func(workCtx context.Context, t task.Task) (text string, push bool, runErr error) {
+		rctx := logx.WithID(workCtx, logx.NextID())
 		id := logx.IDFrom(rctx)
 		trace.Begin(id, "task", robotagent.SessionTask, t.Text)
+		defer func() {
+			if runErr != nil {
+				trace.End(id, runErr.Error())
+			} else {
+				trace.End(id, "")
+			}
+		}()
 		if t.Kind == task.KindAgent {
-			logx.Printf(rctx, "[智能任务] 到点：%s", t.Text)
-			if runner != nil {
-				runner.Run(rctx, t)
+			if runner == nil {
+				return "", false, fmt.Errorf("智能任务运行器尚未就绪")
 			}
-			trace.End(id, "")
-			return
+			return runner.Prepare(rctx, t)
 		}
-		logx.Printf(rctx, "[任务] 到点：%s", t.Text)
-		delivered := 0
-		for _, n := range notifiers {
-			if err := n.Notify(rctx, t.Text); err != nil {
-				logx.Printf(rctx, "[任务] 投递到 %s 失败: %v", n.Name(), err)
-				trace.Record(rctx, "error", "投递到 %s 失败：%v", n.Name(), err)
-				continue
-			}
-			delivered++
-		}
-		if delivered > 0 {
-			trace.Record(rctx, "task", "提醒已投递到 %d 个通知渠道", delivered)
-		} else {
-			trace.Record(rctx, "task", "无可用通知渠道（未开硬件输出且未配置钉钉/飞书推送），提醒仅记录日志")
-		}
-		trace.End(id, "")
-	}, cfg.TaskFile)
+		trace.Record(rctx, "task", "提醒已保存到通知中心：%s", t.Text)
+		return t.Text, true, nil
+	}, targets)
+	if err != nil {
+		log.Fatalf("加载通知记录失败: %v", err)
+	}
+	notices.SetWebEnabled(cfg.Admin.IsEnabled())
+	eng := task.NewReliableEngineFile(func(_ context.Context, t task.Task) error { return notices.Enqueue(t) }, cfg.TaskFile)
+	if err := eng.Err(); err != nil {
+		log.Fatalf("加载任务失败: %v", err)
+	}
 	defer eng.Close()
 	log.Printf("[任务] 持久化文件：%s（重启自动恢复）", cfg.TaskFile)
 
 	// 待办清单：JSON 落盘，重启不丢；agent 工具与管理后台"待办"页共用。
 	todos := todo.NewStore(cfg.TodoFile)
+	if err := todos.Err(); err != nil {
+		log.Fatalf("加载待办失败: %v", err)
+	}
 	log.Printf("[待办] 持久化文件：%s", cfg.TodoFile)
 
 	// 会话持久化：JSON 落盘，重启不失忆；池按 key（web/repl/ding-*/feishu-*/task）隔离。
@@ -246,30 +262,35 @@ func main() {
 	// rebuild 重建注册表与 Agent（上下文引擎 + 内置工具 + 当前在线的 MCP 工具），原子替换。
 	var brain *robotagent.Brain
 	rebuild := func(reason string) {
-		// 引擎重建失败（多为 provider 配置非法）仅告警：沿用旧实例，摘要器模型
-		// 可能落后一拍，归档与检索不受影响。
-		if err := ctxMgr.Rebuild(cfg); err != nil {
-			log.Printf("[重建] 上下文引擎重建失败（%s，沿用旧实例）: %v", reason, err)
-		}
-		reg := vxagent.NewRegistry()
-		if err := robotagent.RegisterTools(reg, deps); err != nil {
-			log.Printf("[重建] 注册内置工具失败（%s）: %v", reason, err)
+		if err := cfg.Apply(func(next *config.Config) error {
+			return brain.Reconfigure(func() (*vxagent.Agent, error) {
+				if err := ctxMgr.Rebuild(next); err != nil {
+					return nil, err
+				}
+				reg := vxagent.NewRegistry()
+				localDeps := deps
+				localDeps.Config = next
+				if err := robotagent.RegisterTools(reg, localDeps); err != nil {
+					return nil, err
+				}
+				if mcpMgr != nil {
+					if err := mcpMgr.RegisterTools(reg); err != nil {
+						return nil, err
+					}
+				}
+				ag, err := robotagent.Build(next, reg, pool, approver, ctxMgr.Current())
+				if err != nil {
+					return nil, err
+				}
+				regMu.Lock()
+				currentReg = reg
+				regMu.Unlock()
+				return ag, nil
+			})
+		}); err != nil {
+			log.Printf("[重建] Agent 重建失败（%s）: %v", reason, err)
 			return
 		}
-		if mcpMgr != nil {
-			if err := mcpMgr.RegisterTools(reg); err != nil {
-				log.Printf("[重建] 注册 MCP 工具失败（%s）: %v", reason, err)
-			}
-		}
-		ag, err := robotagent.Build(cfg, reg, pool, approver, ctxMgr.Current())
-		if err != nil {
-			log.Printf("[重建] 构建 Agent 失败（%s）: %v", reason, err)
-			return
-		}
-		brain.SetAgent(ag)
-		regMu.Lock()
-		currentReg = reg
-		regMu.Unlock()
 		log.Printf("[重建] Agent 已重建（%s）", reason)
 	}
 
@@ -359,6 +380,9 @@ func main() {
 
 	if cfg.Admin.IsEnabled() {
 		accounts := admin.NewAccountStore(cfg.Admin.AccountFile)
+		if err := accounts.Err(); err != nil {
+			log.Fatalf("加载管理员账号失败（原文件已保留）: %v", err)
+		}
 		// 启动预置凭据（配置文件 admin.username/password 或环境变量
 		// FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD）：提供即覆盖现有账号。
 		user, pass, err := cfg.ResolveAdminCredentials()
@@ -372,13 +396,15 @@ func main() {
 			log.Printf("[管理后台] 已按启动配置设置管理员账号 %s（每次启动以配置/环境变量为准）", user)
 		}
 		chat := web.New(brain, "uploads")
+		current := cfg.Snapshot()
 		adminServer := admin.New(admin.Options{
+			Host:          cfg.Admin.Host,
 			Port:          cfg.Admin.Port,
 			Accounts:      accounts,
 			Engine:        eng,
 			Todos:         todos,
 			Memory:        deps.Memory,
-			Info:          admin.Info{Model: cfg.Provider.Model, BaseURL: cfg.Provider.BaseURL, TaskFile: cfg.TaskFile, TodoFile: cfg.TodoFile, MemoryDir: cfg.Memory.Dir},
+			Info:          admin.Info{Model: current.Provider.Model, BaseURL: current.Provider.BaseURL, TaskFile: cfg.TaskFile, TodoFile: cfg.TodoFile, MemoryDir: cfg.Memory.Dir},
 			Chat:          chat,
 			Cfg:           cfg,
 			ConfigPath:    *cfgPath,
@@ -386,14 +412,17 @@ func main() {
 			Approver:      approver,
 			Mcp:           mcpMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
+			Notifications: notices,
 		})
-		adminServer.Start(ctx)
-		log.Printf("[网页入口] http://0.0.0.0:%d/（登录后：聊天 / 运行状态 / 自动化 / 记忆 / 设置）", cfg.Admin.Port)
+		if err := adminServer.Start(ctx); err != nil {
+			log.Fatalf("启动管理后台失败: %v", err)
+		}
+		addr := "http://" + net.JoinHostPort(cfg.Admin.Host, fmt.Sprint(cfg.Admin.Port))
+		log.Printf("[网页入口] %s/（登录后：聊天 / 运行状态 / 自动化 / 通知 / 记忆 / 设置）", addr)
 		if user != "" {
-			log.Printf("[管理后台] http://0.0.0.0:%d/admin（账号 %s，来源：启动配置/环境变量）", cfg.Admin.Port, user)
+			log.Printf("[管理后台] %s/admin（账号 %s，来源：启动配置/环境变量）", addr, user)
 		} else {
-			log.Printf("[管理后台] http://0.0.0.0:%d/admin（默认账号 admin/admin；可通过 FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD 或 config.yaml admin.username/password 预置）",
-				cfg.Admin.Port)
+			log.Printf("[管理后台] %s/admin（默认账号 admin/admin；可通过 FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD 或 config.yaml admin.username/password 预置）", addr)
 		}
 		// 桌面模式：服务就绪后向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行解析 stdout
 		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）。
@@ -404,6 +433,9 @@ func main() {
 			fmt.Printf("FRIDAY_ADDR=http://127.0.0.1:%d\n", cfg.Admin.Port)
 		}
 	}
+	noticeCtx, stopNotices := context.WithCancel(ctx)
+	notices.Start(noticeCtx)
+	defer func() { eng.Close(); stopNotices(); notices.Wait(); ctxMgr.Close() }()
 
 	// handle 处理一行用户输入：分配请求 ID（链路日志前缀）并挂主会话，
 	// 内置命令直接处理，其余经 Brain 交给 agent（流式增量打印到终端）。
@@ -428,7 +460,10 @@ func main() {
 			return
 		case strings.HasPrefix(line, "/cancel "):
 			id := strings.TrimSpace(strings.TrimPrefix(line, "/cancel "))
-			if eng.Cancel(id) {
+			ok, err := eng.CancelErr(id)
+			if err != nil {
+				fmt.Printf("取消任务失败: %v\n", err)
+			} else if ok {
 				fmt.Printf("已取消任务 #%s\n", id)
 			} else {
 				fmt.Printf("未找到任务 #%s\n", id)
@@ -494,7 +529,7 @@ func main() {
 		return
 	}
 
-	fmt.Println("🤖 小五（Friday 个人管家）已启动（provider=" + cfg.Provider.Model + "）")
+	fmt.Println("🤖 小五（Friday 个人管家）已启动（provider=" + cfg.Snapshot().Provider.Model + "）")
 	fmt.Println("对我说\"10分钟后提醒我喝水\"\"记个待办：买牛奶\"\"上海天气\"，或 /help 查看命令。")
 	// stdin 在独立 goroutine 中读取：主循环 select 监听 ctx，
 	// 保证 SIGTERM/Ctrl+C 时即使阻塞在等待输入也能立即退出（并触发 Close 快照）。

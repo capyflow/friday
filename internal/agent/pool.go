@@ -7,7 +7,6 @@ package agent
 
 import (
 	"context"
-	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -22,7 +21,7 @@ const sessionIDPrefix = "friday-"
 
 // 常用会话 key。
 const (
-	SessionWeb  = "web" // 主会话：所有对话渠道共用
+	SessionWeb  = "web"  // 主会话：所有对话渠道共用
 	SessionRepl = "repl" // 已废弃：REPL 并入主会话，保留常量兼容旧数据读取
 	SessionTask = "task" // 心跳/智能任务专用（独立于主对话）
 )
@@ -112,19 +111,20 @@ func (p *SessionPool) Get(ctx context.Context, key string) *sessionstore.Session
 
 // Save 把会话快照写入持久层（Ask 结束后调用；store 未启用时为空操作）。
 // 同时刷新该会话的最后活跃时刻。
-func (p *SessionPool) Save(ctx context.Context, s *sessionstore.Session) {
+func (p *SessionPool) Save(ctx context.Context, s *sessionstore.Session) error {
 	if s == nil {
-		return
+		return nil
 	}
 	p.mu.Lock()
 	p.active[sessionKeyOf(s)] = time.Now()
 	p.mu.Unlock()
 	if p.store == nil {
-		return
+		return nil
 	}
 	if err := p.store.Save(ctx, s); err != nil {
-		log.Printf("[会话] 持久化失败: %v", err)
+		return err
 	}
+	return nil
 }
 
 // sessionKeyOf 从会话 ID 还原池内 key（ID 固定为 prefix+key）。
@@ -153,16 +153,17 @@ func (p *SessionPool) History(ctx context.Context, key string) []llm.Message {
 }
 
 // Reset 清除指定会话：丢弃内存与持久层中的历史，下次对话从新会话开始。
-func (p *SessionPool) Reset(ctx context.Context, key string) {
+func (p *SessionPool) Reset(ctx context.Context, key string) error {
+	if p.store != nil {
+		if err := p.store.Delete(ctx, sessionIDPrefix+key); err != nil {
+			return err
+		}
+	}
 	p.mu.Lock()
 	delete(p.sess, key)
 	delete(p.active, key)
 	p.mu.Unlock()
-	if p.store != nil {
-		if err := p.store.Delete(ctx, sessionIDPrefix+key); err != nil {
-			log.Printf("[会话] 清除持久会话 %s 失败: %v", key, err)
-		}
-	}
+	return nil
 }
 
 // List 返回内存中全部会话概要（按 key 排序）。

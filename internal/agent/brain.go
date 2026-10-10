@@ -6,6 +6,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -25,7 +26,7 @@ type Brain struct {
 	pool  *SessionPool
 	ctx   *ContextManager // 上下文引擎管理器（Reset 清归档、热更新重建用；可为 nil）
 
-	customMu sync.RWMutex          // 保护 custom（自定义指令表，SetCustom 可运行期替换）
+	customMu sync.RWMutex           // 保护 custom（自定义指令表，SetCustom 可运行期替换）
 	custom   []config.CustomCommand // 自定义指令：触发词 → 提示词展开
 }
 
@@ -43,7 +44,7 @@ func (b *Brain) CtxMgr() *ContextManager { return b.ctx }
 // 未设置时用网页会话）；onDelta 为本次请求的流式增量回调（可为 nil）；
 // imgs 为随消息发送的图片内容（可为 nil），会作为一条独立的用户消息
 // 紧邻问题文本之前注入会话。
-func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta)) (string, error) {
+func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta)) (answer string, err error) {
 	key := CurrentKey(SessionKeyFrom(ctx))
 	keyMu := b.pool.Lock(key)
 	keyMu.Lock()
@@ -53,14 +54,18 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	text = b.expandCustom(text)
 
 	b.rw.RLock()
+	defer b.rw.RUnlock()
 	ag := b.agent
-	b.rw.RUnlock()
 	if onDelta != nil {
 		ag = ag.WithDelta(onDelta) // 流式增量只发给本次请求的订阅者
 	}
 
 	sess := b.pool.Get(ctx, key)
-	defer b.pool.Save(ctx, sess)
+	defer func() {
+		if saveErr := b.pool.Save(context.WithoutCancel(ctx), sess); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("保存对话失败: %w", saveErr))
+		}
+	}()
 
 	if len(imgs) == 0 {
 		return ag.Ask(ctx, sess, text)
@@ -71,7 +76,7 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	// 避免大体积 base64 常驻会话（每轮重复上传、内存膨胀）。
 	preLen := len(sess.Messages())
 	sess.Add(llm.Message{Role: llm.RoleUser, Content: imgs})
-	answer, err := ag.Ask(ctx, sess, text)
+	answer, err = ag.Ask(ctx, sess, text)
 	if err != nil {
 		sess.Rollback(preLen)
 		return answer, err
@@ -101,12 +106,32 @@ func (b *Brain) sanitizeImages(sess *sessionstore.Session, idx, n int) {
 // Reset 清除指定会话的上下文：丢弃内存与持久层历史，下次对话新开会话；
 // 已归档的早期对话与引擎运行态一并清除——会话 ID 固定为 prefix+key，
 // 归档不清的话新会话会带出旧摘要区，等于没清干净。
-func (b *Brain) Reset(key string) {
+func (b *Brain) Reset(key string) error {
 	fullKey := CurrentKey(key)
-	b.pool.Reset(context.Background(), fullKey)
-	if b.ctx != nil {
-		b.ctx.ResetSession(context.Background(), sessionIDPrefix+fullKey)
+	mu := b.pool.Lock(fullKey)
+	mu.Lock()
+	defer mu.Unlock()
+	b.rw.RLock()
+	defer b.rw.RUnlock()
+	if err := b.pool.Reset(context.Background(), fullKey); err != nil {
+		return err
 	}
+	if b.ctx != nil {
+		return b.ctx.ResetSession(context.Background(), sessionIDPrefix+fullKey)
+	}
+	return nil
+}
+
+// Reconfigure 等待在途请求落盘后构建并切换 Agent；失败保留原实例。
+func (b *Brain) Reconfigure(build func() (*vxagent.Agent, error)) error {
+	b.rw.Lock()
+	defer b.rw.Unlock()
+	ag, err := build()
+	if err != nil {
+		return err
+	}
+	b.agent = ag
+	return nil
 }
 
 // SetAgent 原子替换内部 Agent（热更新模型/供应商时使用）。

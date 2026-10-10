@@ -2,9 +2,10 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,71 +33,116 @@ type Account struct {
 
 // AccountStore 是管理员账号仓库：JSON 落盘，重启后账号不变。
 type AccountStore struct {
-	mu   sync.Mutex
-	path string // 为空表示不持久化（测试用）
-	acc  Account
+	mu      sync.Mutex
+	path    string // 为空表示不持久化（测试用）
+	acc     Account
+	initErr error
 }
 
-// NewAccountStore 创建账号仓库；文件不存在时初始化默认账号 admin/admin。
+// NewAccountStore 创建账号仓库；仅文件不存在时初始化默认账号 admin/admin。
+// 调用方须检查 Err；加载或初始化失败时仓库拒绝登录和更新，并保留原文件。
 func NewAccountStore(path string) *AccountStore {
 	s := &AccountStore{path: path}
-	if s.load() {
+	loaded, err := s.load()
+	if err != nil {
+		s.initErr = err
+		return s
+	}
+	if loaded {
 		return s
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(DefaultPassword), bcrypt.DefaultCost)
 	if err != nil {
-		panic("admin: 初始化默认账号失败: " + err.Error())
+		s.initErr = fmt.Errorf("初始化默认账号失败: %w", err)
+		return s
 	}
-	s.acc = Account{
+	acc := Account{
 		Username:     DefaultUsername,
 		PasswordHash: string(hash),
 		UpdatedAt:    time.Now(),
 	}
-	s.saveLocked()
+	if err := s.saveLocked(acc); err != nil {
+		s.initErr = err
+		return s
+	}
+	s.acc = acc
 	return s
 }
 
-// load 从文件加载账号；文件不存在返回 false（走默认初始化），损坏时同样回退默认并告警。
-func (s *AccountStore) load() bool {
+// Err 返回加载或初始化错误；恢复原文件后需重新创建仓库。
+func (s *AccountStore) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initErr
+}
+
+// load 从文件加载账号；只有路径确实不存在才允许默认初始化。
+func (s *AccountStore) load() (bool, error) {
 	if s.path == "" {
-		return false
+		return false, nil
 	}
 	b, err := os.ReadFile(s.path)
 	if err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			// ReadFile 对悬空符号链接也返回不存在，不能将它当作首次启动。
+			if _, statErr := os.Lstat(s.path); errors.Is(statErr, os.ErrNotExist) {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("读取账号文件 %q 失败: %w", s.path, err)
 	}
 	var acc Account
-	if err := json.Unmarshal(b, &acc); err != nil || acc.Username == "" || acc.PasswordHash == "" {
-		log.Printf("[admin] 账号文件损坏，已回退默认账号 admin/admin: %v", err)
-		return false
+	if err := json.Unmarshal(b, &acc); err != nil {
+		return false, fmt.Errorf("解析账号文件 %q 失败: %w", s.path, err)
+	}
+	if strings.TrimSpace(acc.Username) == "" || utf8.RuneCountInString(acc.Username) > MaxUsernameLen {
+		return false, fmt.Errorf("账号文件 %q 的用户名无效", s.path)
+	}
+	if _, err := bcrypt.Cost([]byte(acc.PasswordHash)); err != nil {
+		return false, fmt.Errorf("账号文件 %q 的密码哈希无效: %w", s.path, err)
+	}
+	// Cost 只解析哈希头；实际校验还可发现损坏的盐编码。
+	if err := bcrypt.CompareHashAndPassword([]byte(acc.PasswordHash), nil); err != nil && !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+		return false, fmt.Errorf("账号文件 %q 的密码哈希无效: %w", s.path, err)
 	}
 	s.acc = acc
-	return true
+	return true, nil
 }
 
 // saveLocked 原子写回（调用方须持有 mu）。
-func (s *AccountStore) saveLocked() {
+func (s *AccountStore) saveLocked(acc Account) error {
 	if s.path == "" {
-		return
+		return nil
 	}
-	b, err := json.MarshalIndent(s.acc, "", "  ")
+	b, err := json.MarshalIndent(acc, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("编码账号失败: %w", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		log.Printf("[admin] 账号持久化失败: %v", err)
-		return
+	f, err := os.CreateTemp(filepath.Dir(s.path), "."+filepath.Base(s.path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("创建账号临时文件失败: %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		log.Printf("[admin] 账号持久化失败: %v", err)
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return fmt.Errorf("写入账号临时文件失败: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("关闭账号临时文件失败: %w", err)
+	}
+	if err := os.Rename(f.Name(), s.path); err != nil {
+		return fmt.Errorf("替换账号文件失败: %w", err)
+	}
+	return nil
 }
 
 // Login 校验用户名与密码；成功返回账号信息（不含密码哈希）。
 func (s *AccountStore) Login(username, password string) (Account, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.initErr != nil {
+		return Account{}, false
+	}
 	if subtleMismatch(s.acc.Username, username) {
 		return Account{}, false
 	}
@@ -125,12 +171,18 @@ func (s *AccountStore) Update(username, password string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.acc = Account{
+	if s.initErr != nil {
+		return fmt.Errorf("账号仓库不可用: %w", s.initErr)
+	}
+	acc := Account{
 		Username:     username,
 		PasswordHash: string(hash),
 		UpdatedAt:    time.Now(),
 	}
-	s.saveLocked()
+	if err := s.saveLocked(acc); err != nil {
+		return err
+	}
+	s.acc = acc
 	return nil
 }
 

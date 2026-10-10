@@ -87,7 +87,9 @@ func (s *Server) handleClearContext(ctx *vhttp.Context) error {
 	if key == "" {
 		key = "web"
 	}
-	s.chat.ResetContext(key)
+	if err := s.chat.ResetContext(key); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "清除失败: " + err.Error()})
+	}
 	// 轨迹生命周期跟随对话历史：清上下文时该会话的调用轨迹一并清除。
 	removed := trace.ClearSession(key)
 	msg := "会话 " + key + " 上下文已清除"
@@ -143,7 +145,7 @@ func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 func (s *Server) handleMCPConfigGet(ctx *vhttp.Context) error {
 	servers := []config.McpServerConfig{}
 	if s.cfg != nil {
-		servers = s.cfg.Mcp.Servers
+		servers = s.cfg.Snapshot().Mcp.Servers
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"servers": servers})
 }
@@ -152,6 +154,8 @@ func (s *Server) handleMCPConfigGet(ctx *vhttp.Context) error {
 // 并经管理器热生效（新增的拉起、移除的停止、变更的重启，工具清单变化自动重建 Agent）。
 // 请求体 {"servers":[{"name":"x","command":"npx","args":["-y","pkg"],"env":{"K":"V"}}]}。
 func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
+	s.mcpUpdateMu.Lock()
+	defer s.mcpUpdateMu.Unlock()
 	if s.cfg == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
 	}
@@ -188,7 +192,14 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 		seen[key] = true
 	}
 
-	// 热生效（先应用运行时，再落盘；落盘失败不影响已生效配置）。
+	// 保存失败不改变配置或拉起进程；文件更新与其它配置事务串行。
+	if err := s.cfg.Apply(func(next *config.Config) error {
+		next.Mcp.Servers = req.Servers
+		return config.UpdateMcpServers(s.configPath, req.Servers)
+	}); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "保存 MCP 配置失败: " + err.Error()})
+	}
+	// 应用回调会读取已提交快照，不在 Config 写锁内调用。
 	var applyErr error
 	if s.mcp != nil {
 		live := make([]mcp.ServerConfig, 0, len(req.Servers))
@@ -200,17 +211,12 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 		}
 		applyErr = s.mcp.Apply(ctx.Context(), live)
 	}
-	s.cfg.Mcp.Servers = req.Servers
 	msg := "MCP 配置已保存并热生效（新增拉起 / 移除停止 / 变更重启）"
 	if s.mcp == nil {
 		msg = "MCP 配置已保存，重启服务后生效"
 	}
 	if applyErr != nil {
 		msg += "；部分服务器连接失败：" + applyErr.Error()
-	}
-	if err := config.UpdateMcpServers(s.configPath, req.Servers); err != nil {
-		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
-			"message": msg + "；但写回 config.yaml 失败：" + err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
 }
@@ -226,6 +232,8 @@ func (s *Server) handleMCPStatus(ctx *vhttp.Context) error {
 
 // handleMCPReconnect 手动重连一台 MCP 服务器（断开旧进程并重新拉起握手）。
 func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
+	s.mcpUpdateMu.Lock()
+	defer s.mcpUpdateMu.Unlock()
 	if s.mcp == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "MCP 未启用"})
 	}
@@ -241,8 +249,9 @@ func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
 // builtin=true 表示该 ID 有内置版本（覆盖后可"恢复内置"）；
 // custom=true 表示该条是自定义数据（删除不影响内置原文）。
 func (s *Server) handleGetPersona(ctx *vhttp.Context) error {
+	cfg := s.cfg.Snapshot()
 	customByID := map[string]config.Persona{}
-	for _, p := range s.cfg.Persona.Presets {
+	for _, p := range cfg.Persona.Presets {
 		customByID[p.ID] = p
 	}
 	builtinIDs := map[string]bool{}
@@ -265,13 +274,13 @@ func (s *Server) handleGetPersona(ctx *vhttp.Context) error {
 		}
 		out = append(out, item{p.ID, p.Name, p.Tagline, p.Prompt, true, false})
 	}
-	for _, p := range s.cfg.Persona.Presets {
+	for _, p := range cfg.Persona.Presets {
 		if builtinIDs[p.ID] {
 			continue // 覆盖内置的已在上面输出
 		}
 		out = append(out, item{p.ID, p.Name, p.Tagline, p.Prompt, false, true})
 	}
-	active := s.cfg.Persona.Active
+	active := cfg.Persona.Active
 	if active == "" {
 		active = "default"
 	}

@@ -37,6 +37,9 @@ type ConsoleNotifier struct {
 func (n *ConsoleNotifier) Name() string { return "console" }
 
 func (n *ConsoleNotifier) Notify(ctx context.Context, text string) error {
+	if n.Speaker == nil && n.Displayer == nil {
+		return fmt.Errorf("未配置本地输出")
+	}
 	if n.Speaker != nil {
 		if err := n.Speaker.Speak(ctx, text); err != nil {
 			return err
@@ -66,15 +69,25 @@ type TaskRunner struct {
 // Run 执行一条到点的智能任务：构造 prompt → agent 决策 → 按输出协议投递。
 // 全程留痕（source=task，session=task）。
 func (r *TaskRunner) Run(ctx context.Context, t task.Task) {
+	body, push, err := r.Prepare(ctx, t)
+	if err != nil {
+		if ctx.Err() == nil {
+			logx.Printf(ctx, "[智能任务] 执行失败: %v", err)
+			trace.Record(ctx, "error", "智能任务执行失败：%v", err)
+		}
+		return
+	}
+	if push {
+		r.deliver(ctx, t, body)
+	}
+}
+
+// Prepare 将模型决策和投递分开；结果持久化后重试通知不再重复运行模型/工具。
+func (r *TaskRunner) Prepare(ctx context.Context, t task.Task) (string, bool, error) {
 	prompt := r.buildPrompt(t)
 	answer, err := r.Ask.Ask(WithSessionKey(ctx, SessionTask), prompt, nil, nil)
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		logx.Printf(ctx, "[智能任务] 执行失败: %v", err)
-		trace.Record(ctx, "error", "智能任务执行失败：%v", err)
-		return
+		return "", false, err
 	}
 
 	body, push := parseAgentOutput(answer)
@@ -85,9 +98,12 @@ func (r *TaskRunner) Run(ctx context.Context, t task.Task) {
 	case r.inQuiet(r.now()):
 		logx.Printf(ctx, "[智能任务] 静默时段（%s），只记轨迹不推送", r.QuietHours)
 		trace.Record(ctx, "task", "静默时段（%s）：内容已记录，不推送", r.QuietHours)
+	case strings.TrimSpace(body) == "":
+		trace.Record(ctx, "task", "agent 推送正文为空，跳过投递")
 	default:
-		r.deliver(ctx, t, body)
+		return body, true, nil
 	}
+	return body, false, nil
 }
 
 // buildPrompt 构造智能任务 prompt：任务指令 + 当前时间 + 输出协议说明；

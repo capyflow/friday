@@ -61,7 +61,7 @@ func (c *Chat) sweepUploads() {
 }
 
 // ResetContext 清除指定会话的对话上下文（key 为空时清除默认网页会话）。
-func (c *Chat) ResetContext(key string) { c.brain.Reset(key) }
+func (c *Chat) ResetContext(key string) error { return c.brain.Reset(key) }
 
 // Brain 返回对话大脑（热更新时替换其内部 Agent；会话池经其获取）。
 func (c *Chat) Brain() *agent.Brain { return c.brain }

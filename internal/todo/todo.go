@@ -7,8 +7,8 @@ package todo
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,52 +27,91 @@ type Todo struct {
 
 // Store 是待办仓库。
 type Store struct {
-	mu    sync.Mutex
-	path  string // 为空表示不持久化（测试用）
-	todos []Todo
+	mu      sync.Mutex
+	path    string // 为空表示不持久化（测试用）
+	todos   []Todo
+	loadErr error // 已有文件不可读取时禁止覆盖，修复文件并重启后恢复
 }
 
-// NewStore 创建待办仓库并从 path 加载；文件不存在或损坏时空启动。
+// NewStore 创建待办仓库并从 path 加载；仅文件不存在时以空仓库启动。
+// 已有文件损坏或不可读时保留原文件，Err 和所有修改操作返回恢复错误。
 func NewStore(path string) *Store {
 	s := &Store{path: path}
 	s.load()
 	return s
 }
 
-// load 从文件加载待办；损坏时忽略（与任务/记忆落盘相同的容错策略）。
+// load 从文件加载待办，不把损坏或不可读文件误当作首次启动。
 func (s *Store) load() {
 	if s.path == "" {
 		return
 	}
 	b, err := os.ReadFile(s.path)
 	if err != nil {
+		_, statErr := os.Lstat(s.path)
+		if !os.IsNotExist(err) || !os.IsNotExist(statErr) {
+			s.loadErr = fmt.Errorf("读取待办文件 %q 失败，已保留原文件；修复文件后重启: %w", s.path, err)
+		}
 		return
 	}
 	var ts []Todo
-	if err := json.Unmarshal(b, &ts); err != nil {
-		log.Printf("[todo] 待办文件损坏，已忽略: %v", err)
+	if err := json.Unmarshal(b, &ts); err != nil || strings.TrimSpace(string(b)) == "null" {
+		if err == nil {
+			err = fmt.Errorf("必须是待办数组，不能为 null")
+		}
+		s.loadErr = fmt.Errorf("待办文件 %q 损坏，已保留原文件；修复文件后重启: %w", s.path, err)
 		return
+	}
+	ids := make(map[string]bool, len(ts))
+	for i, td := range ts {
+		if td.ID == "" || strings.TrimSpace(td.Text) == "" || ids[td.ID] {
+			s.loadErr = fmt.Errorf("待办文件 %q 第 %d 条内容无效或 ID 重复，已保留原文件；修复文件后重启", s.path, i+1)
+			return
+		}
+		ids[td.ID] = true
 	}
 	s.todos = ts
 }
 
-// saveLocked 原子写回（调用方须持有 mu）。
-func (s *Store) saveLocked() {
+// Err 返回加载错误；列表调用方应检查它，避免把恢复失败显示为空列表。
+func (s *Store) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadErr
+}
+
+// saveLocked 原子写回候选快照；成功后调用方才提交内存变更（须持有 mu）。
+func (s *Store) saveLocked(todos []Todo) error {
+	if s.loadErr != nil {
+		return s.loadErr
+	}
 	if s.path == "" {
-		return
+		return nil
 	}
-	b, err := json.MarshalIndent(s.todos, "", "  ")
+	b, err := json.MarshalIndent(todos, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("编码待办失败: %w", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		log.Printf("[todo] 持久化失败: %v", err)
-		return
+	f, err := os.CreateTemp(filepath.Dir(s.path), "."+filepath.Base(s.path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("创建待办临时文件失败: %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		log.Printf("[todo] 持久化失败: %v", err)
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return fmt.Errorf("写入待办临时文件失败: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("同步待办临时文件失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("关闭待办临时文件失败: %w", err)
+	}
+	if err := os.Rename(f.Name(), s.path); err != nil {
+		return fmt.Errorf("替换待办文件失败: %w", err)
+	}
+	return nil
 }
 
 // Add 新增一条待办并落盘，返回新待办。
@@ -83,13 +122,21 @@ func (s *Store) Add(text string) (Todo, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return Todo{}, s.loadErr
+	}
 	t := Todo{
 		ID:        "t" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		Text:      text,
 		CreatedAt: time.Now(),
 	}
-	s.todos = append(s.todos, t)
-	s.saveLocked()
+	candidate := make([]Todo, len(s.todos)+1)
+	copy(candidate, s.todos)
+	candidate[len(s.todos)] = t
+	if err := s.saveLocked(candidate); err != nil {
+		return Todo{}, err
+	}
+	s.todos = candidate
 	return t, nil
 }
 
@@ -98,6 +145,12 @@ func (s *Store) List() []Todo {
 	s.mu.Lock()
 	out := make([]Todo, len(s.todos))
 	copy(out, s.todos)
+	for i := range out {
+		if out[i].DoneAt != nil {
+			doneAt := *out[i].DoneAt
+			out[i].DoneAt = &doneAt
+		}
+	}
 	s.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Done != out[j].Done {
@@ -111,41 +164,62 @@ func (s *Store) List() []Todo {
 	return out
 }
 
-// Complete 标记/取消完成一条待办，返回更新后的待办；未找到时返回 false。
+// Complete 标记/取消完成一条待办；未找到时返回 false，落盘失败不修改待办。
 // ID 容忍 "#t..." 形式（list_todos 展示时带 # 前缀，模型会原样传回）。
-func (s *Store) Complete(id string, done bool) (Todo, bool) {
+func (s *Store) Complete(id string, done bool) (Todo, bool, error) {
 	id = normalizeID(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return Todo{}, false, s.loadErr
+	}
 	for i, t := range s.todos {
 		if t.ID == id {
-			s.todos[i].Done = done
+			t.Done = done
 			if done {
 				now := time.Now()
-				s.todos[i].DoneAt = &now
+				t.DoneAt = &now
 			} else {
-				s.todos[i].DoneAt = nil
+				t.DoneAt = nil
 			}
-			s.saveLocked()
-			return s.todos[i], true
+			candidate := make([]Todo, len(s.todos))
+			copy(candidate, s.todos)
+			candidate[i] = t
+			if err := s.saveLocked(candidate); err != nil {
+				return Todo{}, false, err
+			}
+			s.todos = candidate
+			if t.DoneAt != nil {
+				doneAt := *t.DoneAt
+				t.DoneAt = &doneAt
+			}
+			return t, true, nil
 		}
 	}
-	return Todo{}, false
+	return Todo{}, false, nil
 }
 
-// Delete 按 ID 删除一条待办，返回是否删除了。
-func (s *Store) Delete(id string) bool {
+// Delete 按 ID 删除一条待办，落盘失败时保留待办并返回错误。
+func (s *Store) Delete(id string) (bool, error) {
 	id = normalizeID(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return false, s.loadErr
+	}
 	for i, t := range s.todos {
 		if t.ID == id {
-			s.todos = append(s.todos[:i], s.todos[i+1:]...)
-			s.saveLocked()
-			return true
+			candidate := make([]Todo, 0, len(s.todos)-1)
+			candidate = append(candidate, s.todos[:i]...)
+			candidate = append(candidate, s.todos[i+1:]...)
+			if err := s.saveLocked(candidate); err != nil {
+				return false, err
+			}
+			s.todos = candidate
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // CountPending 返回未完成待办条数（管理后台状态页展示用）。

@@ -55,6 +55,9 @@ func (t *ListTodosTool) Description() string {
 func (t *ListTodosTool) Schema() map[string]any { return map[string]any{"type": "object"} }
 
 func (t *ListTodosTool) Call(_ context.Context, _ map[string]any) (string, error) {
+	if err := t.Store.Err(); err != nil {
+		return "", err
+	}
 	todos := t.Store.List()
 	if len(todos) == 0 {
 		return "待办清单是空的。", nil
@@ -104,7 +107,10 @@ func (t *CompleteTodoTool) Call(_ context.Context, args map[string]any) (string,
 	if v, ok := args["done"].(bool); ok {
 		done = v
 	}
-	td, ok := t.Store.Complete(id, done)
+	td, ok, err := t.Store.Complete(id, done)
+	if err != nil {
+		return "", err
+	}
 	if !ok {
 		return fmt.Sprintf("未找到待办 #%s", id), nil
 	}
@@ -140,7 +146,11 @@ func (t *DeleteTodoTool) Call(_ context.Context, args map[string]any) (string, e
 	if id == "" {
 		return "", fmt.Errorf("缺少参数 id")
 	}
-	if t.Store.Delete(id) {
+	deleted, err := t.Store.Delete(id)
+	if err != nil {
+		return "", err
+	}
+	if deleted {
 		return fmt.Sprintf("已删除待办 #%s", id), nil
 	}
 	return fmt.Sprintf("未找到待办 #%s", id), nil
