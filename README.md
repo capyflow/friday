@@ -26,7 +26,9 @@
     自主决策与行动（如"每天早上8点给我一份晨报：日期、天气、今日待办"），
     输出首行 `[推送]`/`[静默]` 决定是否打扰用户
 - **提醒投递**：任务到点/智能任务推送统一走通知渠道——钉钉（pushWebhook）/
-  飞书（pushChatIDs），硬件输出开启时叠加本地播报/显示；全程留痕调用轨迹
+  飞书（pushChatIDs），硬件输出开启时叠加本地播报/显示；启用网页时内容始终保留在
+  **通知**页（`notifications.json`）。任务先可靠入队再推进次数；远程投递失败最多自动
+  重试 5 次，之后可在通知页重试，跳过已成功记录的通道；全程留痕调用轨迹
 - **心跳巡检**（对标 OpenClaw HEARTBEAT.md）：agent 定期醒来读 `HEARTBEAT.md` 清单自主检查
   （清单在管理后台"设置"页可编辑）；静默时段（`heartbeat.quietHours`，如 23:00-07:00）
   照常执行但只记轨迹不推送
@@ -50,6 +52,8 @@
   `admin.username`/`admin.password`，或环境变量 `FRIDAY_ADMIN_USERNAME`/`FRIDAY_ADMIN_PASSWORD`
   （优先），两者须成对提供，每次启动以它覆盖账号文件（bcrypt 哈希落盘）。
   登录页只提供登录，改账号通过启动配置完成
+  本地与桌面默认只监听 `127.0.0.1`；远程部署显式设置 `admin.host` 或 `--host`。
+  账号文件损坏/无法读取会拒绝启动并保留原文件，不再自动重置默认密码。
 - **调用轨迹**：聊天页点"调用轨迹"弹出右侧抽屉，按请求查看 agent 的完整调用链：
   每轮 LLM 调用（token/耗时）、模型请求的工具与参数、工具返回结果、最终回答与错误；
   任务到点触发同样留痕。数据落盘 `traces.json`（最近 200 条）
@@ -131,15 +135,17 @@
 # 1. 构建并启动（capyflow/* 为私有 Go 模块，构建需传 SSH 凭据）
 docker compose up -d --build
 
-# 2. 首次运行会自动生成 data/config.yaml 与 .env：
+# 2. 首次运行会自动复制 data/config.yaml：
 #    - data/config.yaml：补全 provider 段（baseURL / model / apiKeyEnv），
 #      建议顺手配 weather.defaultCity（默认城市）
-#    - .env：填入真实密钥（变量名与 apiKeyEnv 对应，如 STEP_API_KEY=sk-xxx）
+#    - 手动创建 .env：填入真实密钥（默认 FRIDAY_API_KEY=sk-xxx），
+#      并预置 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD
 #    改完重启生效：docker compose restart
 ```
 
-服务地址：`http://<主机IP>:8090`（管理后台 `/admin`；端口由 `data/config.yaml` 的
-`admin.port` 决定，compose 里 `ports`/`ADMIN_PORT` 同步调整）。日常运维：
+服务地址：`http://<主机IP>:8090`（管理后台 `/admin`）。默认宿主 8090 → 容器 8080；
+`FRIDAY_HOST_PORT` 控制宿主端口，`ADMIN_PORT` 同时控制容器实际监听与健康检查，并覆盖
+配置文件中的 `admin.port`。容器显式使用 `ADMIN_HOST=0.0.0.0`。日常运维：
 
 ```bash
 docker compose logs -f        # 看日志
@@ -153,7 +159,7 @@ docker compose down           # 停止（数据都在 ./data，不丢）
 
 ```bash
 go mod tidy
-export STEP_API_KEY=sk-xxx                 # 密钥环境变量（名与 config.yaml apiKeyEnv 一致）
+export FRIDAY_API_KEY=sk-xxx               # 密钥环境变量（名与 config.yaml apiKeyEnv 一致）
 cp config.yaml.example config.yaml         # 编辑确认 baseURL/model
 go run ./cmd/robot                         # 或 go build -o friday ./cmd/robot && ./friday
 ```
@@ -166,14 +172,18 @@ go run ./cmd/robot                         # 或 go build -o friday ./cmd/robot 
 
 ```bash
 cd web
-npm install      # 首次
+npm ci           # 首次，使用 lock 文件固定依赖
 npm run dev      # 热更开发（http://localhost:5173，/api 代理到 8080 的 Go 服务）
+npm run check    # ESLint + 安全/聊天/审批/通知组件回归测试
 npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生效
 ```
 
 `npm run build` 串两次 vite：先主应用（index.html），后快捷面板（palette.html，
 `emptyOutDir=false` 不清掉前者）——分开构建是为了两页 CSS 互不污染（palette
 要求 body 透明，供 Tauri 透明窗口用）。
+
+稳定性修复的行为与故障恢复方式见 [docs/STABILITY.md](docs/STABILITY.md)。
+完整使用说明见 [USAGE.md](USAGE.md)，下一阶段交付清单见 [P0 待办](docs/P0-TODO.md)。
 
 启动后两种入口：
 
