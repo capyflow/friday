@@ -11,6 +11,7 @@ import { store, toast } from '../store.js'
 const messages = reactive([])      // { role: 'user'|'bot'|'err', text, images?: string[], streaming?: bool }
 const input = ref('')
 const busy = ref(false)
+const clearing = ref(false)
 const menuOpen = ref(false)
 const popOpen = ref(false)
 const mode = ref(null)             // null | 'plan' | 'goal'
@@ -22,10 +23,14 @@ const popWrap = ref(null)
 const titleEl = ref(null)
 const rotatorEl = ref(null)
 const pendingImages = reactive([]) // { file, url }
+const imageURLs = new Set()
+let request = null
+let disposed = false
+let messagesVersion = 0
 const SIZE_LIMIT = 5 * 1024 * 1024
 
 const MODE_TEXT = {
-  plan: ['计划模式', '描述你的任务，小五会先输出计划、经你确认后再执行…'],
+  plan: ['计划模式', '描述你的任务，向小五请求制定计划…'],
   goal: ['目标模式', '描述你的目标，成果定义越清晰效果越好…'],
 }
 const SUGGESTS = ['10 分钟后提醒我喝水', '记个待办：买牛奶', '上海今天天气怎么样', '每天早上 8 点叫我起床']
@@ -33,7 +38,7 @@ const PHRASES = ['提醒、待办、天气，都可以交给我', '说一句话�
                  '本地运行，数据只属于你', '到点了，我会主动提醒你']
 
 const welcome = computed(() => messages.length === 0)
-const sendDisabled = computed(() => busy.value || (!input.value.trim() && !pendingImages.length))
+const sendDisabled = computed(() => busy.value || clearing.value || (!input.value.trim() && !pendingImages.length))
 const placeholder = computed(() => (mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'))
 
 /* ---------- 滚动 ---------- */
@@ -117,10 +122,12 @@ watch(welcome, v => {
 
 /* ---------- 历史 ---------- */
 async function loadHistory() {
+  const version = messagesVersion
   let list = []
   try {
     list = (await api('GET', '/api/chat/history?session=web')).messages || []
   } catch (e) { /* 拉取失败按空会话处理 */ }
+  if (disposed || version !== messagesVersion) return
   messages.splice(0, messages.length, ...list.map(m => ({
     role: m.role === 'user' ? 'user' : 'bot', text: m.text,
   })))
@@ -130,11 +137,13 @@ async function loadHistory() {
 /* ---------- 附件：归一化压缩 + 预览 + 上传 ---------- */
 function removePreview(p) {
   const i = pendingImages.indexOf(p)
-  if (i >= 0) { URL.revokeObjectURL(p.url); pendingImages.splice(i, 1) }
+  if (i >= 0 && !busy.value) { pendingImages.splice(i, 1); releaseUnusedImages() }
 }
-function clearPendingImages() {
-  pendingImages.forEach(p => URL.revokeObjectURL(p.url))
-  pendingImages.splice(0, pendingImages.length)
+function releaseUnusedImages() {
+  const used = new Set([...pendingImages.map(p => p.url), ...messages.flatMap(m => m.images || [])])
+  for (const url of imageURLs) {
+    if (!used.has(url)) { URL.revokeObjectURL(url); imageURLs.delete(url) }
+  }
 }
 
 // normalizeImage 把任意图片统一转为 JPEG：≤5MB 保持原尺寸仅转格式；
@@ -161,36 +170,51 @@ async function normalizeImage(file) {
   const attempts = file.size > SIZE_LIMIT
     ? [[2048, .85], [2048, .7], [2048, .55], [1536, .7], [1280, .6], [1024, .5]]
     : [[Infinity, .9], [2048, .85], [2048, .7], [1280, .6]]
-  for (const [maxDim, q] of attempts) {
-    const blob = await draw(maxDim, q)
-    if (blob && blob.size <= SIZE_LIMIT) {
-      return { file: toJPG(blob), down: file.size > SIZE_LIMIT,
-               note: (file.size / 1048576).toFixed(1) + 'MB → ' + (blob.size / 1048576).toFixed(1) + 'MB' }
+  try {
+    for (const [maxDim, q] of attempts) {
+      const blob = await draw(maxDim, q)
+      if (blob && blob.size <= SIZE_LIMIT) {
+        return { file: toJPG(blob), down: file.size > SIZE_LIMIT,
+                 note: (file.size / 1048576).toFixed(1) + 'MB → ' + (blob.size / 1048576).toFixed(1) + 'MB' }
+      }
     }
-  }
-  return null
+    return null
+  } finally { bitmap.close() }
 }
 
 async function onFilesPicked(ev) {
-  for (const f of ev.target.files) {
+  const files = Array.from(ev.target.files || [])
+  ev.target.value = ''
+  for (const f of files) {
+    if (busy.value || clearing.value || disposed) break
     if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (!f.type.startsWith('image/')) { toast('仅支持图片文件', true); continue }
-    const r = await normalizeImage(f)
+    let r
+    try { r = await normalizeImage(f) } catch { r = null }
+    if (busy.value || clearing.value || disposed) break
     if (!r) { toast('图片无法解码，已跳过', true); continue }
+    if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (r.down) toast('图片过大，已降采样：' + r.note)
-    pendingImages.push({ file: r.file, url: URL.createObjectURL(r.file) })
+    const url = URL.createObjectURL(r.file)
+    imageURLs.add(url)
+    pendingImages.push({ file: r.file, url })
   }
-  ev.target.value = ''
 }
 
-async function uploadImages() {
+async function uploadImages(images, signal) {
   const ids = []
-  for (const p of pendingImages) {
+  for (const p of images) {
     const fd = new FormData()
     fd.append('file', p.file)
-    const res = await fetch('/api/upload', { method: 'POST', body: fd })
+    const res = await fetch('/api/upload', { method: 'POST', body: fd, signal })
+    if (res.status === 401) {
+      toast('登录已过期，请重新登录', true)
+      store.loggedIn = false
+      throw new Error('登录已过期，请重新登录')
+    }
     const data = await res.json()
     if (!res.ok) throw new Error((data.body && data.body.error) || ('上传失败 HTTP ' + res.status))
+    if (!data.body?.id) throw new Error('上传响应缺少图片 ID，请重试')
     ids.push(data.body.id)
   }
   return ids
@@ -203,9 +227,11 @@ function setPop(open) {
   if (open) nextTick(() => { const el = document.getElementById('addPopover'); if (el) popIn(el) })
 }
 function setMode(m) {
+  if (busy.value || clearing.value) return
   mode.value = mode.value === m ? null : m
 }
 function fill(text) {
+  if (busy.value || clearing.value) return
   input.value = text
   nextTick(() => { inputEl.value && inputEl.value.focus(); autoGrow() })
 }
@@ -222,113 +248,121 @@ function onInputKeydown(e) {
 }
 
 async function sendChat(presetText) {
-  const raw = typeof presetText === 'string' ? presetText : input.value.trim()
-  if (mode.value && raw) {
-    // 计划/目标模式：以轻量前缀把意图带给小五
-    const tag = mode.value === 'plan' ? '【计划】' : '【目标】'
-    raw = tag + raw
-    mode.value = null
+  if (busy.value || clearing.value || disposed) return
+  const draft = {
+    text: typeof presetText === 'string' ? presetText : input.value,
+    mode: mode.value,
+    images: [...pendingImages],
   }
-  if ((!raw && !pendingImages.length) || busy.value) return
+  const text = draft.text.trim()
+  if (!text && !draft.images.length) return
+  messagesVersion++
+  // 当前模式传递文字意图，不承诺后端强制的计划/确认工作流。
+  const raw = text && draft.mode ? (draft.mode === 'plan' ? '【计划】' : '【目标】') + text : text
   setPop(false)
   busy.value = true
+  mode.value = null
   input.value = ''
+  // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
+  pendingImages.splice(0, pendingImages.length)
   autoGrow()
-
-  let ids = []
-  const images = pendingImages.map(p => p.url)
-  try { ids = pendingImages.length ? await uploadImages() : [] }
-  catch (e) {
-    toast(e.message, true)
-    busy.value = false
-    return
-  }
-
-  messages.push({ role: 'user', text: raw, images })
-  clearPendingImages()
-  messages.push({ role: 'typing' })
-  popLastBubble()
-  nextTick(() => stick(true))
-
-  const typingIdx = () => messages.findIndex(m => m.role === 'typing')
-  const end = () => {
-    const i = typingIdx()
+  const controller = new AbortController()
+  request = controller
+  const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
+  const typing = reactive({ role: 'typing' })
+  let submitted = false
+  let bot = null
+  const removeTyping = () => {
+    const i = messages.indexOf(typing)
     if (i >= 0) messages.splice(i, 1)
-    busy.value = false
-    nextTick(() => inputEl.value && inputEl.value.focus())
   }
-
-  fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: raw, attachments: ids, session: 'web' }),
-  }).then(res => {
+  let reader
+  try {
+    const ids = await uploadImages(draft.images, controller.signal)
+    if (disposed || controller.signal.aborted) return
+    messages.push(user, typing)
+    submitted = true
+    popLastBubble()
+    nextTick(() => stick(true))
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: raw, attachments: ids, session: 'web' }),
+      signal: controller.signal,
+    })
     if (res.status === 401) {
       store.loggedIn = false
       toast('登录已过期，请重新登录', true)
-      end()
       return
     }
     if (!res.ok || !res.body) throw new Error('HTTP ' + res.status)
-    const reader = res.body.getReader()
+    reader = res.body.getReader()
     const decoder = new TextDecoder('utf-8')
     let buf = ''
-    let bot = null
-    let acc = ''
+    let done = false
     const handle = ev => {
       let data
-      try { data = JSON.parse(ev) } catch (_) { return }
-      if (data.error) {
-        if (bot) { bot.streaming = false }
-        messages.push({ role: 'err', text: data.error })
-        popLastBubble()
-        end()
-        return
-      }
+      try { data = JSON.parse(ev) } catch { throw new Error('聊天响应格式异常') }
+      if (data.error) throw new Error(data.error)
       if (data.delta) {
-        const i = typingIdx()
-        if (i >= 0) messages.splice(i, 1)
+        removeTyping()
         if (!bot) {
           bot = reactive({ role: 'bot', text: '', streaming: true })
           messages.push(bot)
         }
-        acc += data.delta
-        bot.text = acc
+        bot.text += data.delta
         nextTick(() => stick())
       }
-      if (data.done) {
-        if (bot) {
-          bot.streaming = false
-          if (!bot.text) bot.text = '……'
-        } else {
-          messages.push({ role: 'bot', text: '……' })
-        }
-        nextTick(() => stick())
-        end()
-        if (store.view === 'trace') window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
-      }
+      if (data.done) done = true
     }
-    const pump = () => reader.read().then(r => {
-      if (r.done) {
-        if (bot) bot.streaming = false
-        end()
-        return
-      }
-      buf += decoder.decode(r.value, { stream: true })
+    const consume = () => {
+      buf = buf.replace(/\r\n/g, '\n')
       let idx
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
+      while (!done && (idx = buf.indexOf('\n\n')) >= 0) {
         const chunk = buf.slice(0, idx)
         buf = buf.slice(idx + 2)
-        if (chunk.startsWith('data:')) handle(chunk.slice(5).trim())
+        const data = chunk.split('\n').filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart()).join('\n')
+        if (data) handle(data)
       }
-      return pump()
-    })
-    return pump()
-  }).catch(e => {
-    messages.push({ role: 'err', text: '连接不上小五（' + e.message + '），请稍后再试。' })
-    popLastBubble()
-    end()
-  })
+    }
+    while (!done) {
+      const chunk = await reader.read()
+      if (disposed || controller.signal.aborted) return
+      buf += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+      consume()
+      if (chunk.done) break
+    }
+    if (!done) throw new Error('回复连接已中断')
+    if (!bot) messages.push({ role: 'bot', text: '……' })
+    nextTick(() => stick())
+    if (store.view === 'trace') window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
+  } catch (e) {
+    if (disposed || controller.signal.aborted || !store.loggedIn) return
+    input.value = draft.text
+    mode.value = draft.mode
+    pendingImages.push(...draft.images)
+    nextTick(autoGrow)
+    if (submitted) {
+      // 未收到回复时撤销乐观消息；已有部分输出则保留，方便检查失败前的结果。
+      if (!bot) {
+        const i = messages.indexOf(user)
+        if (i >= 0) messages.splice(i, 1)
+      }
+      messages.push({ role: 'err', text: e.message + '，输入和图片已保留，可以重试。' })
+      popLastBubble()
+    } else { toast(e.message + '，输入和图片已保留，可以重试。', true) }
+  } finally {
+    if (reader) {
+      try { await reader.cancel() } catch { /* 连接已关闭 */ }
+      reader.releaseLock()
+    }
+    if (bot) bot.streaming = false
+    removeTyping()
+    if (request === controller) request = null
+    busy.value = false
+    if (!disposed) nextTick(() => inputEl.value && inputEl.value.focus())
+  }
 }
 
 /* ---------- 更多菜单 ---------- */
@@ -345,6 +379,10 @@ onMounted(() => {
   loadHistory()
 })
 onUnmounted(() => {
+  disposed = true
+  request?.abort()
+  imageURLs.forEach(url => URL.revokeObjectURL(url))
+  imageURLs.clear()
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onKeydown)
   if (rotatorStop) clearTimeout(rotatorStop)
@@ -352,12 +390,18 @@ onUnmounted(() => {
 
 function goTraces() { menuOpen.value = false; store.view = 'trace' }
 async function clearContext() {
+  if (busy.value || clearing.value) return
   menuOpen.value = false
+  clearing.value = true
+  messagesVersion++
   try {
     const r = await api('POST', '/api/context/clear', { session: 'web' })
+    if (disposed) return
     messages.splice(0, messages.length)
+    releaseUnusedImages()
     toast(r.message || '上下文已清除')
-  } catch (e) { toast(e.message, true) }
+  } catch (e) { if (!disposed) toast(e.message, true) }
+  finally { clearing.value = false }
 }
 </script>
 
@@ -373,7 +417,7 @@ async function clearContext() {
           <button class="menu-item" role="menuitem" @click="goTraces">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-route"/></svg>调用轨迹
           </button>
-          <button class="menu-item" role="menuitem" @click="clearContext">
+          <button class="menu-item" role="menuitem" :disabled="busy || clearing" @click="clearContext">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-reset"/></svg>清除上下文
           </button>
         </div>
@@ -387,7 +431,7 @@ async function clearContext() {
         <h3 class="welcome-title" ref="titleEl">你好，我是小五</h3>
         <p class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
         <div class="welcome-suggests">
-          <button v-for="s in SUGGESTS" :key="s" class="suggest" @click="sendChat(s)">{{ s }}</button>
+          <button v-for="s in SUGGESTS" :key="s" class="suggest" :disabled="busy || clearing" @click="sendChat(s)">{{ s }}</button>
         </div>
       </div>
       <!-- 对话态 -->
@@ -424,13 +468,13 @@ async function clearContext() {
           <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
         </div>
       </div>
-      <div class="inputbar">
+      <div class="inputbar" :aria-busy="busy || clearing">
         <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
-                @click.stop="setPop(!popOpen)">
+                :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
-        <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入"
+        <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入" :disabled="busy || clearing"
                   @keydown="onInputKeydown" @input="autoGrow"></textarea>
         <button class="ib-btn send-btn" aria-label="发送" title="发送" :disabled="sendDisabled" @click="sendChat()">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
@@ -447,7 +491,7 @@ async function clearContext() {
           <button class="pop-item pop-anim" :class="{ selected: mode === 'plan' }" @click="setMode('plan'); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></span>
             <span class="pl">计划</span>
-            <span class="pd">描述你的任务，执行前会先输出计划</span>
+            <span class="pd">向小五请求制定任务计划</span>
           </button>
           <button class="pop-item pop-anim" :class="{ selected: mode === 'goal' }" @click="setMode('goal'); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>

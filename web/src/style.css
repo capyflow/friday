@@ -514,6 +514,9 @@ html[data-theme="dark"] .inputbar:focus-within {
                      padding: 8px 6px 8px 10px; border-radius: 0; outline: none; }
 .inputbar textarea, .inputbar textarea:focus,
 .inputbar textarea:hover { border-color: transparent; box-shadow: none; outline: none; transform: none; }
+/* 背景与聚焦提示由外层输入栏提供，覆盖深色主题的通用 textarea 样式。 */
+html[data-theme="dark"] .inputbar textarea {
+  background: transparent; border-color: transparent; box-shadow: none; }
 .inputbar textarea::placeholder { color: var(--faint-fg); }
 .ib-btn { flex: none; width: 34px; height: 34px; border-radius: 50%;
           display: grid; place-items: center; border: none;

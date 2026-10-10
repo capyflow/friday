@@ -10,6 +10,7 @@ import StatusView from './components/StatusView.vue'
 import TraceView from './components/TraceView.vue'
 import AutoView from './components/AutoView.vue'
 import TodoView from './components/TodoView.vue'
+import NotificationsView from './components/NotificationsView.vue'
 import WikiView from './components/WikiView.vue'
 import SettingsView from './components/SettingsView.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
@@ -20,6 +21,7 @@ const NAV = [
   { id: 'trace', icon: 'i-trace', label: '调用轨迹' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
   { id: 'todo', icon: 'i-todo', label: '待办' },
+  { id: 'notifications', icon: 'i-bell', label: '通知' },
   { id: 'wiki', icon: 'i-mem', label: '记忆' },
 ]
 
@@ -79,6 +81,7 @@ async function logout() {
 <template>
   <!-- SVG 图标（Lucide 风格描边） -->
   <svg style="display:none" aria-hidden="true">
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></symbol>
     <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></symbol>
     <symbol id="i-status" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
     <symbol id="i-trace" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
@@ -158,6 +161,7 @@ async function logout() {
       <Transition name="view"><TraceView v-if="store.view === 'trace'" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><TodoView v-if="store.view === 'todo'" /></Transition>
+      <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>
       <Transition name="view"><WikiView v-if="store.view === 'wiki'" /></Transition>
       <Transition name="view"><SettingsView v-if="store.view === 'settings'" @logout="logout" /></Transition>
     </main>
