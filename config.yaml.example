@@ -168,10 +168,15 @@ sessionFile: session.json
 
 # 全局权限附加规则（对所有工具生效，含 MCP）。基础策略由 tools.exec 派生，
 # 此处只做补充与例外：
+#   mode  —— 全局权限模式（参照 zcode 多档权限，设置页可在线切换热生效）：
+#            confirm（默认，写文件/改配置/白名单外命令逐次网页批准）
+#            acceptEdits（写文件/改 MCP 配置免审批，执行命令仍审批）
+#            fullAccess（全部免审批，毁灭性命令黑名单仍强制拦截）
 #   mcp   —— MCP 工具是否进网页审批：allow（默认，免审批）| confirm
 #   allow —— 附加放行规则，"工具名" 或 "工具名:参数模式"
 #   deny  —— 附加拒绝规则，任何模式（含用户批准）下命中即拒
 # permissions:
+#   mode: confirm
 #   mcp: allow
 #   allow:
 #     - mcp_muse_*
