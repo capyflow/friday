@@ -213,8 +213,12 @@ label { font-size: 12.5px; color: var(--muted-fg); }
 .panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
          padding: 18px 20px; box-shadow: var(--shadow-xs); }
 .panel + .panel { margin-top: 14px; }
-.panel form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
-.panel form input.w1 { flex: 1; min-width: 160px; }
+.panel form { display: flex; gap: 8px 10px; flex-wrap: wrap; margin-bottom: 14px; }
+/* label 列自带宽度下限并让输入框填满：标签文字宽度不再被 datetime 控件的
+   固有宽度绑架——窄窗口/平台字体差异下标签不会溢出被相邻项盖住 */
+.panel form > label { display: flex; flex-direction: column; gap: 5px;
+  flex: 1 1 180px; min-width: 180px; }
+.panel form > label > input { width: 100%; min-width: 0; }
 .panel-title { font-size: 13.5px; font-weight: 650; margin-bottom: 12px; }
 .panel-title .count { font-weight: 400; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -230,9 +234,7 @@ td.done { text-decoration: line-through; opacity: .5; }
 .meta { color: var(--muted-fg); font-size: 12px; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
         font-variant-numeric: tabular-nums; }
-.st-cell { font-size: 12px; white-space: nowrap; }
 #settingsRows td:first-child { width: 110px; }
-#tTimes { max-width: 90px; }
 
 .badge { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px;
          color: var(--fg-2); background: var(--bg-subtle); display: inline-block;

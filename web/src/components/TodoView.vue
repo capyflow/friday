@@ -134,15 +134,15 @@ onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clock
         </div>
         <div class="msg" :class="msg.cls" role="status">{{ msg.text }}</div>
         <form @submit.prevent="submit" :aria-busy="submitting">
-          <label class="w1" style="display:flex;flex-direction:column;gap:5px">
+          <label>
             <span class="meta">内容</span>
             <input v-model="text" aria-label="待办内容" placeholder="新增待办，如：交房租" :disabled="submitting" required>
           </label>
-          <label style="display:flex;flex-direction:column;gap:5px">
+          <label>
             <span class="meta">截止时间（本地，可选）</span>
             <input v-model="dueAt" type="datetime-local" aria-label="截止时间" :disabled="submitting">
           </label>
-          <label style="display:flex;flex-direction:column;gap:5px">
+          <label>
             <span class="meta">提醒时间（本地，可选）</span>
             <input v-model="remindAt" type="datetime-local" aria-label="提醒时间" :disabled="submitting">
           </label>
