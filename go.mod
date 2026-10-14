@@ -3,7 +3,7 @@ module github.com/capyflow/friday
 go 1.25.5
 
 require (
-	github.com/capyflow/vortexagent v0.0.0-20261009162916-21be69f7ee7f
+	github.com/capyflow/vortexagent v0.0.0-20261014084044-66f2a578013f
 	github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f
 	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	github.com/k2-fsa/sherpa-onnx-go v1.13.7
