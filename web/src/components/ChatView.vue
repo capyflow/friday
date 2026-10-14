@@ -284,7 +284,23 @@ async function pauseChat() {
 
 function newBot() {
   return reactive({ role: 'bot', text: '', streaming: true, paused: false,
-                    steps: [], thinking: '', thinkOpen: true })
+                    steps: [], thinking: '', thinkOpen: false })
+}
+
+// 思考预览行（Qoder 风）：默认状态只显示一行，取思考文本最新非空行的尾部，
+// 随增量不断更新；没有思考文本时退回最后一个步骤，再退回空串（外层兜底文案）。
+const THINK_LINE_MAX = 120
+function thinkPreview(m) {
+  const lines = (m.thinking || '').split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = lines[i].trim()
+    if (!s) continue
+    return s.length > THINK_LINE_MAX ? '…' + s.slice(-THINK_LINE_MAX) : s
+  }
+  const steps = m.steps || []
+  const last = steps[steps.length - 1]
+  if (last) return (last.kind === 'round' ? '思考' : last.name) + (last.detail ? ' ' + last.detail : '')
+  return ''
 }
 
 // streamTurn 跑一次 SSE 对话（发送与继续共用）：userMsg 为乐观插入的用户气泡
@@ -352,6 +368,11 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       }
       if (data.step) {
         ensureBot().steps.push(data.step)
+        nextTick(() => stick())
+      }
+      if (data.plan) {
+        ensureBot().plan = data.plan
+        watchPlan(data.plan.id)
         nextTick(() => stick())
       }
       if (data.delta) {
@@ -441,8 +462,10 @@ async function sendChat(presetText) {
   }
   const text = draft.text.trim()
   if (!text && !draft.images.length) return
-  // 当前模式传递文字意图，不承诺后端强制的计划/确认工作流。
-  const raw = text && draft.mode ? (draft.mode === 'plan' ? '【计划】' : '【目标】') + text : text
+  // 计划与目标都走后端 mode 字段：计划=可审阅清单 + 确认后逐步执行；
+  // 目标=登记成后台多轮推进的即时目标。不再往消息里拼 【计划】/【目标】 前缀。
+  const reqMode = draft.mode === 'plan' || draft.mode === 'goal' ? draft.mode : undefined
+  const raw = text
   setPop(false)
   // 暂停期间发新问题 = 中止上次任务、开启下一段对话（服务端同步丢弃暂停现场）。
   phase.value = 'streaming'
@@ -456,12 +479,73 @@ async function sendChat(presetText) {
   const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   await streamTurn({
     url: '/api/chat',
-    body: { message: raw, session: 'web' },
+    body: { message: raw, session: 'web', mode: reqMode },
     userMsg: user,
     draft,
     prepare: async signal => uploadImages(draft.images, signal),
   })
 }
+
+/* ---------- 计划卡：确认后靠轮询同步步骤进度（不新建 SSE 通道，关标签页也不影响执行） ---------- */
+const PLAN_STATE = {
+  draft: '制定中', awaiting_confirm: '待确认', running: '执行中',
+  paused: '已暂停', completed: '已完成', failed: '未完成', canceled: '已取消',
+}
+const STEP_STATE = { pending: '·', running: '…', done: '✓', failed: '✕', skipped: '−' }
+const PLAN_DONE_STATES = ['completed', 'failed', 'canceled']
+const planTimers = new Map()
+
+async function refreshPlan(id) {
+  try {
+    const r = await api('GET', '/api/plans/' + encodeURIComponent(id))
+    const target = messages.find(m => m.plan && m.plan.id === id)
+    if (target && r.plan) target.plan = { ...target.plan, ...r.plan }
+    if (!target) stopWatchingPlan(id)
+    else if (PLAN_DONE_STATES.includes(r.plan?.state)) stopWatchingPlan(id)
+  } catch (e) { /* 计划状态刷新失败不打断聊天，下一轮轮询再试 */ }
+}
+
+function stopWatchingPlan(id) {
+  const t = planTimers.get(id)
+  if (t) clearInterval(t)
+  planTimers.delete(id)
+}
+
+function watchPlan(id) {
+  if (!id || planTimers.has(id)) return
+  planTimers.set(id, setInterval(() => refreshPlan(id), 2500))
+  refreshPlan(id)
+}
+
+async function confirmPlan(id, approve) {
+  try {
+    const r = await api('POST', '/api/plans/' + encodeURIComponent(id) + '/confirm', { approve })
+    toast(r.message || '已处理')
+    if (approve) watchPlan(id)
+    await refreshPlan(id)
+  } catch (e) { toast(e.message, true) }
+}
+
+async function planAction(id, action) {
+  try {
+    const r = await api('POST', '/api/plans/' + encodeURIComponent(id) + '/' + action, {})
+    toast(r.message || '已处理')
+    if (action === 'resume') watchPlan(id)
+    await refreshPlan(id)
+  } catch (e) { toast(e.message, true) }
+}
+
+async function stepAction(id, n, action) {
+  try {
+    const r = await api('POST',
+      '/api/plans/' + encodeURIComponent(id) + '/steps/' + n + '/' + action, {})
+    toast(r.message || '已处理')
+    watchPlan(id)
+    await refreshPlan(id)
+  } catch (e) { toast(e.message, true) }
+}
+
+onUnmounted(() => { for (const id of planTimers.keys()) stopWatchingPlan(id) })
 
 async function resumeChat() {
   if (phase.value !== 'paused' || clearing.value || disposed) return
@@ -546,11 +630,13 @@ async function clearContext() {
           </div>
           <div v-else class="bubble" :class="{ md: m.role === 'bot' }">
             <template v-if="m.role === 'bot'">
-              <!-- 思考过程（zcode 风）：轮次与工具调用实时展示，完成后折叠 -->
+              <!-- 思考过程（Qoder 风）：默认一行实时预览，点击展开全部思考与步骤 -->
               <div v-if="(m.steps && m.steps.length) || m.thinking" class="think" :class="{ open: m.thinkOpen }">
-                <button class="think-head" type="button" @click="m.thinkOpen = !m.thinkOpen">
+                <button class="think-head" type="button" :title="m.thinkOpen ? '收起思考过程' : '展开思考过程'"
+                        @click="m.thinkOpen = !m.thinkOpen">
                   <span class="think-dot" :class="{ live: m.streaming && !m.paused }"></span>
-                  <span class="think-title">{{ m.streaming && !m.paused ? '思考中…'
+                  <span class="think-title">{{ m.streaming && !m.paused
+                    ? (thinkPreview(m) || '思考中…')
                     : '思考过程 · ' + (m.steps ? m.steps.length : 0) + ' 步' }}</span>
                   <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
@@ -571,6 +657,44 @@ async function clearContext() {
               <span v-html="renderMD(m.text)"></span>
               <span v-if="m.streaming" class="cursor"></span>
               <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
+              <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
+                <div class="pc-head">
+                  <b>{{ m.plan.title || '计划' }}</b>
+                  <span class="chip">{{ PLAN_STATE[m.plan.state] || m.plan.state }}</span>
+                  <span class="meta">共 {{ (m.plan.steps || []).length }} 步</span>
+                </div>
+                <div v-if="m.plan.summary" class="pc-summary">{{ m.plan.summary }}</div>
+                <ol class="pc-steps">
+                  <li v-for="st in m.plan.steps" :key="st.n" :class="'step-' + st.state">
+                    <span class="pc-state">{{ STEP_STATE[st.state] || '·' }}</span>
+                    <span class="pc-title">{{ st.title }}</span>
+                    <span v-if="st.detail" class="meta">{{ st.detail }}</span>
+                    <span v-if="st.in || st.out" class="meta">{{ st.in + st.out }} tokens</span>
+                    <span v-if="st.error" class="pc-error">{{ st.error }}</span>
+                    <span v-if="st.state === 'failed'" class="pc-acts">
+                      <button class="btn sm" type="button" @click="stepAction(m.plan.id, st.n, 'retry')">重试</button>
+                      <button class="btn sm" type="button" @click="stepAction(m.plan.id, st.n, 'skip')">跳过</button>
+                    </span>
+                  </li>
+                </ol>
+                <div v-if="m.plan.error" class="pc-error">{{ m.plan.error }}</div>
+                <div class="pc-acts">
+                  <template v-if="m.plan.state === 'awaiting_confirm'">
+                    <button class="btn sm primary" type="button" @click="confirmPlan(m.plan.id, true)">确认执行</button>
+                    <button class="btn sm" type="button" @click="confirmPlan(m.plan.id, false)">先不做</button>
+                  </template>
+                  <template v-else-if="m.plan.state === 'running'">
+                    <button class="btn sm" type="button" @click="planAction(m.plan.id, 'pause')">暂停</button>
+                  </template>
+                  <template v-else-if="m.plan.state === 'paused'">
+                    <button class="btn sm primary" type="button" @click="planAction(m.plan.id, 'resume')">继续</button>
+                    <button class="btn sm" type="button" @click="planAction(m.plan.id, 'cancel')">取消</button>
+                  </template>
+                  <template v-else-if="m.plan.state === 'completed' || m.plan.state === 'failed' || m.plan.state === 'canceled'">
+                    <span class="meta">已结束</span>
+                  </template>
+                </div>
+              </div>
             </template>
             <template v-else>
               {{ m.text }}

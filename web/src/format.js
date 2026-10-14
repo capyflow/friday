@@ -21,4 +21,4 @@ export function upStr(sec) {
 
 export const kindName = { once: '单次', repeat: '多次', cron: '循环', agent: '智能' }
 export const srcName = { user: '用户', agent: '主动', admin: '后台', migrate: '迁移' }
-export const EV_TITLE = { llm_in: 'LLM 输入', llm_out: 'LLM 输出', tool_req: '请求工具', tool: '工具结果', answer: '回答', error: '错误', task: '任务' }
+export const EV_TITLE = { llm_in: 'LLM 输入', llm_out: 'LLM 输出', tool_req: '请求工具', tool: '工具结果', answer: '回答', error: '错误', task: '任务', approval: '审批', pause: '已暂停', budget: '成本闸门', skill: '技能', plan_step: '计划步骤', goal_run: '目标运行', goal_step: '目标步骤' }

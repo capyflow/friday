@@ -15,7 +15,7 @@ const SetupStub = defineComponent({ name: 'SetupView', props: ['status'], emits:
   template: '<section data-setup><button @click="$emit(\'skip\')">skip</button><button @click="$emit(\'completed\')">complete</button><button @click="$emit(\'account-created\')">account</button></section>' })
 let wrapper, setupStatus, session
 beforeEach(() => {
-  Object.assign(store, { loggedIn: false, username: '', view: 'chat', setupStatus: null, setupSkipped: false, unread: 0 })
+  Object.assign(store, { loggedIn: false, username: '', view: 'chat', settingsOpen: false, setupStatus: null, setupSkipped: false, unread: 0 })
   setupStatus = { accountRequired: false, providerRequired: false }
   session = { authenticated: false }
   api.mockReset().mockImplementation((_method, url) => Promise.resolve(url === '/api/setup/status' ? setupStatus : session))
@@ -27,7 +27,7 @@ async function showApp() {
   wrapper = mount(App, { global: { stubs: {
     SetupView: SetupStub, LoginView: { template: '<div data-login />' }, ChatView: true, StatusView: true,
     TraceView: true, AutoView: true, TodoView: true, NotificationsView: true, WikiView: true,
-    SettingsView: true, ApprovalCards: true,
+    SettingsModal: true, ApprovalCards: true,
   } } })
   await flushPromises()
 }
@@ -84,6 +84,29 @@ describe('App 首次设置路由和通知接线', () => {
     await flushPromises()
     expect(wrapper.find('#app').exists()).toBe(true)
     expect(store.loggedIn).toBe(true)
+  })
+
+  it('侧栏设置按钮弹出设置弹窗，关闭事件复位开关', async () => {
+    session = { authenticated: true, username: 'owner' }
+    await showApp()
+    expect(wrapper.findComponent({ name: 'SettingsModal' }).exists()).toBe(false)
+    await wrapper.get('.foot-btn').trigger('click')
+    expect(store.settingsOpen).toBe(true)
+    expect(wrapper.get('.foot-btn').attributes('aria-expanded')).toBe('true')
+    wrapper.getComponent({ name: 'SettingsModal' }).vm.$emit('close')
+    await flushPromises()
+    expect(store.settingsOpen).toBe(false)
+  })
+
+  it('退出登录同时关闭设置弹窗', async () => {
+    session = { authenticated: true, username: 'owner' }
+    await showApp()
+    store.settingsOpen = true
+    await flushPromises()
+    wrapper.getComponent({ name: 'SettingsModal' }).vm.$emit('logout')
+    await flushPromises()
+    expect(store.settingsOpen).toBe(false)
+    expect(store.loggedIn).toBe(false)
   })
 
   it('登录后通知导航显示未读数，启动轮询，卸载停止并移除事件', async () => {

@@ -1,9 +1,10 @@
 <script setup>
 // 全局调用轨迹（一条事件流，跟随对话历史）。5s 轮询，内容无变化不重渲染；
 // 监听聊天页发出的 friday:trace-refresh 事件在回复完成时立即刷新。
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api, traceAPI } from '../api.js'
 import { EV_TITLE, fmtClock, fmtNum, prettyJSON } from '../format.js'
+import { store } from '../store.js'
 
 const events = ref([])
 const stats = reactive({ requests: 0, in: 0, out: 0 })
@@ -33,9 +34,15 @@ function bodyOf(e) {
 }
 function toggle(e) { e._open = !e._open }
 
+// filtered 是"只看某一次多步运行"（计划 plan-<id> / 目标 goal-<id>）的开关。
+const filtered = computed(() => store.traceFilter || '')
+function clearFilter() { store.traceFilter = '' }
+
 async function refresh() {
   try {
-    const body = await traceAPI('/api/traces')
+    const query = filtered.value
+      ? '/api/traces?session=' + encodeURIComponent(filtered.value) : '/api/traces'
+    const body = await traceAPI(query)
     const j = JSON.stringify(body)
     if (j === lastJSON) return
     lastJSON = j
@@ -49,6 +56,7 @@ onMounted(async () => {
   refresh()
   timer = setInterval(() => { if (auto.value) refresh() }, 5000)
   window.addEventListener('friday:trace-refresh', refresh)
+  watch(filtered, () => { lastJSON = ''; refresh() })
 })
 onUnmounted(() => {
   clearInterval(timer)
@@ -59,7 +67,13 @@ onUnmounted(() => {
 <template>
   <section class="view" id="view-trace">
     <div class="view-inner">
-      <h2>调用轨迹 <span class="count">全局一条调用流 · 跟随对话历史（清除上下文时一并清除）</span></h2>
+      <h2>调用轨迹
+        <span v-if="filtered" class="trace-filter">
+          只看 {{ filtered }}
+          <button type="button" aria-label="清除轨迹过滤" @click="clearFilter">×</button>
+        </span>
+        <span v-else class="count">全局一条调用流 · 跟随对话历史（清除上下文时一并清除）</span>
+      </h2>
       <div class="trace-bar">
         <div id="traceStats">{{ statsLine }}</div>
         <label><input v-model="auto" type="checkbox"> 自动刷新</label>

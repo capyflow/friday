@@ -5,9 +5,11 @@ export const store = reactive({
   loggedIn: false,
   username: '',
   view: 'chat',
+  settingsOpen: false,
   setupStatus: null,
   setupSkipped: false,
   unread: 0,
+  traceFilter: '',   // 调用轨迹的会话过滤（如 goal-<id> / plan-<id>，从自动化页跳转带入）
 })
 
 export const toastState = reactive({ text: '', err: false, show: false })

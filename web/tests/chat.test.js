@@ -71,11 +71,18 @@ afterEach(() => {
 })
 
 describe('聊天发送和失败恢复', () => {
-  it.each([[null, '任务'], ['计划', '【计划】任务'], ['目标', '【目标】任务']])('发送 %s 模式', async (mode, expected) => {
+  // 计划走协议字段（后端据此产清单并等确认）；目标模式暂仍传文字意图，待目标链路落地。
+  it.each([
+    [null, '任务', undefined],
+    ['计划', '任务', 'plan'],
+    ['目标', '任务', 'goal'],
+  ])('发送 %s 模式', async (mode, expected, expectedMode) => {
     await mountChat()
     if (mode) await modeButton(mode).trigger('click')
     await send('任务')
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).message).toBe(expected)
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.message).toBe(expected)
+    expect(body.mode).toBe(expectedMode)
     expect(wrapper.get('textarea').element.value).toBe('')
     expect(wrapper.get('[aria-label="发送"]').element.disabled).toBe(true)
     expect(wrapper.find('.mrow.user').text()).toBe(expected)
@@ -112,7 +119,9 @@ describe('聊天发送和失败恢复', () => {
     expect(revoke).not.toHaveBeenCalled()
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ body: { id: 'photo.jpg' } })))
     await send()
-    expect(JSON.parse(fetchMock.mock.calls[2][1].body).message).toBe('【计划】制定计划')
+    const retried = JSON.parse(fetchMock.mock.calls[2][1].body)
+    expect(retried.message).toBe('制定计划')
+    expect(retried.mode).toBe('plan')
     expect(wrapper.find('#attachPreviews img').exists()).toBe(false)
     expect(revoke).not.toHaveBeenCalled()
   })
@@ -195,6 +204,91 @@ describe('聊天发送和失败恢复', () => {
     await send()
     expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body).message).toBe('新问题')
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/chat/resume')).toHaveLength(1)
+  })
+
+  it('计划帧渲染计划卡；确认后打计划接口并刷新状态', async () => {
+    const plan = {
+      id: 'p1', title: '周末采购', state: 'awaiting_confirm',
+      steps: [{ n: 1, title: '查清单', state: 'pending' }, { n: 2, title: '下单', state: 'pending' }],
+    }
+    fetchMock.mockResolvedValueOnce(stream([{ plan }, { delta: '拆好了' }, { done: true }]))
+    await mountChat()
+    await modeButton('计划').trigger('click')
+    await send('帮我准备周末采购')
+    await flushPromises()
+
+    const card = wrapper.get('.plan-card')
+    expect(card.attributes('data-plan')).toBe('p1')
+    expect(card.text()).toContain('周末采购')
+    expect(card.text()).toContain('待确认')
+    expect(card.findAll('.pc-steps li')).toHaveLength(2)
+    expect(card.text()).toContain('先不做')
+
+    api.mockImplementation((method, url) => Promise.resolve(
+      method === 'POST' && url.endsWith('/confirm') ? { message: '已确认' }
+        : method === 'GET' && url === '/api/plans/p1' ? { plan: { ...plan, state: 'running' } } : {}))
+    await card.findAll('.pc-acts button')[0].trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/plans/p1/confirm', { approve: true })
+    expect(api).toHaveBeenCalledWith('GET', '/api/plans/p1')
+    await flushPromises()
+    expect(wrapper.get('.plan-card').text()).toContain('执行中')
+  })
+
+  it('失败步骤给出重试与跳过；已结束计划不反复刷新', async () => {
+    const plan = {
+      id: 'p2', title: '带失败步的计划', state: 'paused', error: '预算已用满',
+      steps: [{ n: 1, title: '查清单', state: 'failed', error: '工具报错' }, { n: 2, title: '下单', state: 'pending' }],
+    }
+    fetchMock.mockResolvedValueOnce(stream([{ plan }, { done: true }]))
+    await mountChat()
+    await send('随便')
+    await flushPromises()
+
+    const card = wrapper.get('.plan-card')
+    expect(card.text()).toContain('预算已用满')
+    expect(card.findAll('.pc-acts button').map(b => b.text())).toEqual(['重试', '跳过', '继续', '取消'])
+    api.mockClear()
+    await card.findAll('.pc-acts button')[1].trigger('click')   // 跳过失败步
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/plans/p2/steps/1/skip', {})
+  })
+
+  it('思考过程默认一行实时更新，点击展开查看全部', async () => {
+    let controller
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
+    const enc = new TextEncoder()
+    // 挂在 body 上：jsdom 仅对已挂载元素失效样式缓存，v-show 切换后 isVisible 才可信
+    wrapper = mount(ChatView, { attachTo: document.body })
+    await flushPromises()
+    await send('查天气')
+    const push = async ev => {
+      controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
+      await flushPromises()
+    }
+    // 思考中默认收起：标题实时展示最新一行，正文不可见
+    await push({ thinking: '先看用户想要什么' })
+    expect(wrapper.get('.think-title').text()).toBe('先看用户想要什么')
+    expect(wrapper.get('.think-body').isVisible()).toBe(false)
+    // 新一行思考到来后，这一行随之更新
+    await push({ thinking: '\n再查天气数据' })
+    expect(wrapper.get('.think-title').text()).toBe('再查天气数据')
+    // 单行展示取最新行尾部，超长时省略头部
+    await push({ thinking: '\n长文' + '甲'.repeat(200) + '收尾' })
+    expect(wrapper.get('.think-title').text().startsWith('…')).toBe(true)
+    expect(wrapper.get('.think-title').text().endsWith('收尾')).toBe(true)
+    // 点击展开：能看到全部思考内容；再点击收起
+    await wrapper.get('.think-head').trigger('click')
+    expect(wrapper.get('.think-body').isVisible()).toBe(true)
+    expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再查天气数据\n长文' + '甲'.repeat(200) + '收尾')
+    await wrapper.get('.think-head').trigger('click')
+    expect(wrapper.get('.think-body').isVisible()).toBe(false)
+    // 回复完成：折叠为步骤摘要
+    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'ok' } })
+    await push({ delta: '今天晴' })
+    await push({ done: true })
+    expect(wrapper.get('.think-title').text()).toBe('思考过程 · 1 步')
+    expect(wrapper.get('.think-body').isVisible()).toBe(false)
   })
 
   it('晚到的历史响应不能覆盖刚发送的消息', async () => {

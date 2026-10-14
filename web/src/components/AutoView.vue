@@ -1,17 +1,18 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
-import { fmtDT, kindName } from '../format.js'
-import { toast } from '../store.js'
+import { fmtDT, fmtNum, kindName } from '../format.js'
+import { store, toast } from '../store.js'
 import SelectBox from './SelectBox.vue'
 
 const MODE_OPTIONS = [{ value: 'once', label: '单次' }, { value: 'repeat', label: '有限多次' }, { value: 'cron', label: '循环' }]
 const CHANNEL_OPTIONS = [{ value: '', label: '全部可用通道' }, { value: 'web', label: '通知中心' },
   { value: 'dingtalk', label: '钉钉' }, { value: 'feishu', label: '飞书' }, { value: 'console', label: '本地输出' }]
 const STATUS_NAME = { pending: '待处理', processing: '处理中', delivered: '已送达', failed: '失败', silent: '静默' }
-const emptyDraft = () => ({ text: '', mode: 'once', arg: '', interval: '', times: 3, every: '', channel: '', agent: false })
+const emptyDraft = () => ({ text: '', mode: 'once', arg: '', interval: '', times: 3, every: '', channel: '', agent: false, goal: false, maxSteps: '', maxTokens: '', skill: '' })
 const draft = reactive(emptyDraft())
 const tasks = ref([])
+const goals = ref({})        // 目标 id → {running, usedTokens, stepsLimit, tokensLimit}
 const editing = ref(null)
 const textInput = ref(null)
 const message = ref('')
@@ -38,19 +39,66 @@ async function edit(t) {
   if (saving.value || busy.has(t.id)) return
   editing.value = t
   Object.assign(draft, { text: t.text, mode: taskMode(t), arg: t.when || t.next || '', interval: duration(t) || '',
-    times: t.times || 3, every: t.cron || '', channel: t.channel || '', agent: t.kind === 'agent' })
+    times: t.times || 3, every: t.cron || '', channel: t.channel || '', agent: t.kind === 'agent',
+    goal: !!t.goal, maxSteps: t.maxSteps ?? '', maxTokens: t.maxTokens ?? '', skill: t.skill || '' })
   message.value = ''
   await nextTick()
   textInput.value?.focus()
 }
+async function loadGoals() {
+  try {
+    const r = await api('GET', '/api/goals')
+    const map = {}
+    for (const g of r.goals || []) map[g.id] = g
+    if (alive) goals.value = map
+  } catch (e) { /* 目标进度拉不到不影响任务管理，下次轮询再试 */ }
+}
+
+function viewRuns(session) {
+  store.traceFilter = session
+  store.view = 'trace'
+}
+
+async function stopGoal(t) {
+  if (!confirm('停止「' + t.text + '」当前这次推进？已完成的步骤结果仍会送达。')) return
+  try {
+    const r = await api('POST', '/api/goals/' + encodeURIComponent(t.id) + '/stop', {})
+    message.value = ''
+    toast(r.message || '已请求停止')
+    await loadGoals()
+  } catch (e) { toast(e.message, true) }
+}
+
 async function loadTasks() {
   try {
     const r = await api('GET', '/api/tasks')
     if (alive) tasks.value = r.tasks || []
   } catch (e) { if (alive) toast('任务加载失败：' + e.message, true) }
 }
+// onAgentToggle 取消"智能任务"时一并取消"目标"：目标必须是智能任务。
+function onAgentToggle() {
+  if (!draft.agent) { draft.goal = false; draft.maxSteps = ''; draft.maxTokens = ''; draft.skill = '' }
+}
+
 function formBody() {
+  const goal = !!(draft.agent && draft.goal)
   const body = { text: draft.text.trim(), agent: draft.agent, channel: draft.channel }
+  if (goal) {
+    body.goal = true
+    const steps = String(draft.maxSteps ?? '').trim()
+    const tokens = String(draft.maxTokens ?? '').trim()
+    if (steps) {
+      const n = Number(steps)
+      if (!Number.isInteger(n) || n < 1) throw new Error('目标步数至少为 1 的整数')
+      body.maxSteps = n
+    }
+    if (tokens) {
+      const n = Number(tokens)
+      if (!Number.isInteger(n) || n < 1) throw new Error('目标 token 预算至少为 1 的整数')
+      body.maxTokens = n
+    }
+    if (draft.skill.trim()) body.skill = draft.skill.trim()
+  }
   if (!body.text) throw new Error('请填写任务内容')
   if (draft.mode === 'once') {
     const arg = draft.arg.trim()
@@ -78,7 +126,7 @@ async function submit() {
     if (!alive) return
     toast(r.message || (id ? '未来安排已更新' : '任务已添加'))
     resetForm()
-    await loadTasks()
+    await refreshAll()
   } catch (e) { if (alive) message.value = e.message } finally { saving.value = false }
 }
 async function changeStatus(t) {
@@ -89,7 +137,7 @@ async function changeStatus(t) {
     const r = await api('POST', '/api/tasks/' + encodeURIComponent(t.id) + '/' + action, {})
     if (!alive) return
     toast(r.message || (action === 'pause' ? '未来触发已暂停' : '任务已恢复'))
-    await loadTasks()
+    await refreshAll()
   } catch (e) { if (alive) toast('操作失败：' + e.message, true) } finally { busy.delete(t.id) }
 }
 async function remove(t) {
@@ -100,7 +148,7 @@ async function remove(t) {
     if (!alive) return
     toast(r.message || '未来安排已取消')
     if (editing.value?.id === t.id) resetForm()
-    await loadTasks()
+    await refreshAll()
   } catch (e) { if (alive) toast('取消失败：' + e.message, true) } finally { busy.delete(t.id) }
 }
 async function history(t) {
@@ -114,7 +162,9 @@ async function history(t) {
     if (alive) histories[t.id] = (r.notifications || []).filter(n => n.taskId === t.id)
   } catch (e) { if (alive) historyError.value = '执行历史加载失败：' + e.message } finally { historyBusy.value = false }
 }
-onMounted(() => { loadTasks(); poll = setInterval(loadTasks, 5000) })
+function refreshAll() { return Promise.all([loadTasks(), loadGoals()]) }
+
+onMounted(() => { refreshAll(); poll = setInterval(refreshAll, 5000) })
 onBeforeUnmount(() => { alive = false; clearInterval(poll) })
 </script>
 
@@ -133,7 +183,13 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
           <label v-if="draft.mode === 'repeat'">总次数<input v-model="draft.times" aria-label="总次数" type="number" min="2" step="1" required :disabled="saving"></label>
           <label v-if="draft.mode === 'cron'">循环规则<input v-model="draft.every" aria-label="循环规则" required :disabled="saving" placeholder="每天早上8点 / 0 8 * * *"></label>
           <label>通知通道<SelectBox v-model="draft.channel" :options="CHANNEL_OPTIONS" aria-label="通知通道" :disabled="saving" /></label>
-          <label class="task-check"><input v-model="draft.agent" type="checkbox" :disabled="saving">智能任务：到点执行指令</label>
+          <label class="task-check"><input v-model="draft.agent" type="checkbox" :disabled="saving" @change="onAgentToggle">智能任务：到点执行指令</label>
+          <label v-if="draft.agent" class="task-check"><input v-model="draft.goal" type="checkbox" :disabled="saving">目标：多轮自主推进直到办成</label>
+          <template v-if="draft.agent && draft.goal">
+            <label>步数上限<input v-model="draft.maxSteps" type="number" min="1" step="1" aria-label="目标步数上限" :disabled="saving" placeholder="默认按配置"></label>
+            <label>Token 预算<input v-model="draft.maxTokens" type="number" min="1" step="1000" aria-label="目标 token 预算" :disabled="saving" placeholder="默认按配置"></label>
+            <label>技能（可留空）<input v-model="draft.skill" aria-label="目标钉住的技能" :disabled="saving" placeholder="见设置 → 技能"></label>
+          </template>
           <p v-if="editing" class="meta task-wide">当前{{ editing.status === 'paused' ? '已暂停' : '启用' }}，原计划下次 {{ fmtDT(editing.next) }}。修改定时规则后重新计算计划及总次数；正文或通道修改保留剩余次数。</p>
           <p v-if="message" class="msg err task-wide" role="alert">{{ message }}</p>
           <div class="task-actions task-wide">
@@ -144,10 +200,14 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
       </div>
       <div class="task-list">
         <article v-for="t in tasks" :key="t.id" class="panel task-card" :data-task-id="t.id">
-          <div class="task-header"><span class="badge" :class="t.kind">{{ kindName[t.kind] || t.kind }}</span><strong>{{ t.text }}</strong><span class="meta">{{ t.status === 'paused' ? '已暂停' : '启用' }}</span></div>
-          <div class="meta task-details"><span>{{ plan(t) }}</span><span>{{ channelName(t.channel) }}</span><span>{{ t.status === 'paused' ? '原计划下次' : '下次触发' }} {{ fmtDT(t.next) }}</span></div>
+          <div class="task-header"><span class="badge" :class="t.kind">{{ kindName[t.kind] || t.kind }}</span><span v-if="t.goal" class="badge goal">目标</span><strong>{{ t.text }}</strong><span class="meta">{{ t.status === 'paused' ? '已暂停' : '启用' }}</span><span v-if="goals[t.id]?.running" class="meta"><i class="spin"></i>推进中</span></div>
+          <div class="meta task-details"><span>{{ plan(t) }}</span><span>{{ channelName(t.channel) }}</span><span>{{ t.status === 'paused' ? '原计划下次' : '下次触发' }} {{ fmtDT(t.next) }}</span>
+            <span v-if="t.goal">{{ fmtNum((goals[t.id]?.usedTokens) || 0) }} / {{ fmtNum(goals[t.id]?.tokensLimit || t.maxTokens || 0) }} tokens</span>
+            <span v-if="t.goal && t.skill">技能 {{ t.skill }}</span></div>
           <p v-if="t.todoId" class="meta">关联待办提醒，请在待办页面管理。</p>
           <div class="task-actions" :aria-busy="busy.has(t.id)">
+            <button v-if="t.goal" class="btn" type="button" @click="viewRuns('goal-' + t.id)">查看执行轮次</button>
+            <button v-if="t.goal && goals[t.id]?.running" class="btn" type="button" @click="stopGoal(t)">停止这次推进</button>
             <template v-if="!t.todoId">
               <button class="btn" :disabled="busy.has(t.id) || saving" @click="edit(t)">编辑</button>
               <button class="btn" :disabled="busy.has(t.id) || saving && editing?.id === t.id" @click="changeStatus(t)">{{ t.status === 'paused' ? '恢复' : '暂停' }}</button>

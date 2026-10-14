@@ -84,7 +84,9 @@ function onKeydown(e) {
       e.preventDefault()
       if (activeIdx.value >= 0) choose(props.options[activeIdx.value])
       break
-    case 'Escape': case 'Tab': e.preventDefault(); close(); break
+    case 'Escape': case 'Tab':
+      // 列表展开时这两个键只收起列表，不冒泡给弹窗的关闭逻辑
+      e.preventDefault(); e.stopPropagation(); close(); break
   }
 }
 

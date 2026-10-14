@@ -12,7 +12,7 @@ import AutoView from './components/AutoView.vue'
 import TodoView from './components/TodoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
 import WikiView from './components/WikiView.vue'
-import SettingsView from './components/SettingsView.vue'
+import SettingsModal from './components/SettingsModal.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
 import SetupView from './components/SetupView.vue'
 import { startNotifications, stopNotifications } from './notifications.js'
@@ -85,6 +85,7 @@ watch(() => store.loggedIn, async ok => {
 async function logout() {
   try { await api('POST', '/api/logout', {}) } catch (e) {}
   userPopOpen.value = false
+  store.settingsOpen = false
   store.loggedIn = false
   toast('已退出登录')
 }
@@ -109,6 +110,15 @@ async function logout() {
     <symbol id="i-todo" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+    <!-- 设置导航 -->
+    <symbol id="i-model" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+    <symbol id="i-persona" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-mcp" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6.3a5 5 0 1 1 7.5 6.3z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4a1.75 1.75 0 0 1 0 3.5h-3a1.75 1.75 0 0 0 0 3.5h4"/></symbol>
+    <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
   </svg>
 
   <!-- 极光背景（深色可见光斑，浅色极淡点阵） -->
@@ -160,8 +170,9 @@ async function logout() {
           <span class="u-name">{{ store.username }}</span>
           <svg class="u-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
-        <button class="foot-btn" :class="{ active: store.view === 'settings' }" aria-label="设置"
-                @click="store.view = 'settings'">
+        <button class="foot-btn" :class="{ active: store.settingsOpen }" aria-label="设置"
+                aria-haspopup="dialog" :aria-expanded="store.settingsOpen"
+                @click="store.settingsOpen = true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-settings"/></svg>
         </button>
       </div>
@@ -177,9 +188,10 @@ async function logout() {
       <Transition name="view"><TodoView v-if="store.view === 'todo'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>
       <Transition name="view"><WikiView v-if="store.view === 'wiki'" /></Transition>
-      <Transition name="view"><SettingsView v-if="store.view === 'settings'" @logout="logout" /></Transition>
     </main>
   </div>
+
+  <SettingsModal v-if="store.settingsOpen" @close="store.settingsOpen = false" @logout="logout" />
 
   <ApprovalCards />
   <div id="toast" :class="{ show: toastState.show, err: toastState.err }" role="status" aria-live="polite">{{ toastState.text }}</div>
