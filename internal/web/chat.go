@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/capyflow/vortexagent/llm"
@@ -34,14 +35,38 @@ var uploadNameRe = regexp.MustCompile(`^[0-9a-f]{32}\.(png|jpg|webp)$`)
 
 // Chat 是网页聊天服务：经 Brain 与 agent 对话（网页会话 key 固定 web，
 // 可通过请求体 session 字段切换到其他会话查看/续聊）。
+// 支持对话暂停/继续：暂停取消进行中的生成（及时止损），被中断的问答记录在
+// paused 中可一键继续；暂停期间发新问题则丢弃暂停记录、开启新对话。
 type Chat struct {
 	brain      *agent.Brain
 	uploadsDir string
+
+	mu     sync.Mutex
+	runs   map[string]*chatRun    // 会话 key → 进行中的对话（可暂停）
+	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（内存态，重启丢失）
+}
+
+// PausedTurn 是一次被暂停的问答：原问题与已生成的部分回答（继续时重新注入会话）。
+type PausedTurn struct {
+	Question string `json:"question"`
+	Partial  string `json:"partial"`
+}
+
+// chatRun 记录一次进行中的对话：cancel 用于暂停；pausing 标记区分"用户暂停"
+// 与"客户端断开"（前者要保存现场供继续，后者直接丢弃）。
+type chatRun struct {
+	cancel  context.CancelFunc
+	pausing bool
 }
 
 // New 创建网页聊天服务。uploadsDir 为图片上传目录（随服务启动清理过期文件）。
 func New(brain *agent.Brain, uploadsDir string) *Chat {
-	c := &Chat{brain: brain, uploadsDir: uploadsDir}
+	c := &Chat{
+		brain:      brain,
+		uploadsDir: uploadsDir,
+		runs:       map[string]*chatRun{},
+		paused:     map[string]*PausedTurn{},
+	}
 	c.sweepUploads()
 	return c
 }
@@ -120,8 +145,16 @@ func (c *Chat) HandleUpload(ctx *vhttp.Context) error {
 
 // HandleSSE 处理一次对话：请求体 {"message":"...", "attachments":["<上传id>", ...],
 // "session":"<可选会话key，默认 web>"}，响应为 SSE 流。由 admin 包挂载到
-// POST /api/chat（需登录）；LLM 增量在 Ask 回调里同步写出并 flush，
-// 客户端断开时取消 ctx 中止对话。
+// POST /api/chat（需登录）；LLM 增量与思考过程在回调里同步写出并 flush，
+// 客户端断开或用户暂停（POST /api/chat/stop）时取消 ctx 中止对话。
+//
+// SSE 帧协议（data: JSON）：
+//
+//	{"delta": "..."}                       回答文本增量
+//	{"thinking": "..."}                    思考内容增量（思考型模型）
+//	{"step": {kind,name,detail,status}}    思考过程事件（轮次/工具调用）
+//	{"paused": true, "partial": "..."}     对话被用户暂停（部分回答已保存可继续）
+//	{"done": true} / {"done": true, "error": "..."}
 func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 	var req struct {
 		Message     string   `json:"message"`
@@ -151,6 +184,83 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 		req.Message = fmt.Sprintf("（用户发来了 %d 张图片）", len(imgs))
 	}
 
+	// 全局单对话：所有渠道共用同一个主会话，网页端不支持切换到其他会话。
+	key := agent.SessionWeb
+	// 暂停期间发新问题 = 中止被暂停的对话、开启下一段（用户"及时止损"）。
+	c.clearPaused(key)
+
+	question := strings.TrimSpace(req.Message)
+	return c.stream(ctx, key, question, imgs, "", func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+		logx.Printf(rctx, "[网页] 输入: %s（图片 %d 张，会话 %s）", question, len(imgs), key)
+		return c.brain.Ask(rctx, question, imgs, onDelta)
+	})
+}
+
+// HandleResume 继续被暂停的对话（POST /api/chat/resume，SSE 流式，协议同 /api/chat）：
+// 把原问题与已生成的部分回答重新注入会话后让模型接着完成。
+// 继续过程同样可暂停（部分回答在原有基础上累加）。
+func (c *Chat) HandleResume(ctx *vhttp.Context) error {
+	key := agent.SessionWeb
+	turn := c.takePaused(key)
+	if turn == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有可继续的暂停对话"})
+	}
+	logx.Printf(logx.WithID(ctx.Context(), logx.NextID()), "[网页] 继续被暂停的对话: %s", logx.Truncate(turn.Question, 80))
+	return c.stream(ctx, key, turn.Question, nil, turn.Partial, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+		return c.brain.Resume(rctx, key, turn.Question, turn.Partial, onDelta)
+	})
+}
+
+// HandleStop 暂停当前进行中的对话（POST /api/chat/stop）：取消后端生成
+// （token 即刻停止），已生成的部分回答保存为暂停现场，可 POST /api/chat/resume 继续。
+func (c *Chat) HandleStop(ctx *vhttp.Context) error {
+	key := agent.SessionWeb
+	c.mu.Lock()
+	run := c.runs[key]
+	if run != nil {
+		run.pausing = true // 先标记再取消：Ask 返回时据此保存暂停现场
+	}
+	c.mu.Unlock()
+	if run == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有进行中的对话"})
+	}
+	run.cancel()
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已暂停，可点击继续接着完成，或直接输入新问题开启新对话"})
+}
+
+// PausedTurn 返回会话的暂停现场（无则 nil），供历史接口与页面恢复展示。
+func (c *Chat) PausedTurn(key string) *PausedTurn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pt := c.paused[key]
+	if pt == nil {
+		return nil
+	}
+	cp := *pt
+	return &cp
+}
+
+// clearPaused 丢弃会话的暂停现场（新问题 = 放弃被暂停的对话）。
+func (c *Chat) clearPaused(key string) {
+	c.mu.Lock()
+	delete(c.paused, key)
+	c.mu.Unlock()
+}
+
+// takePaused 原子取出并移除暂停现场（继续时使用；再次暂停会以累加的部分回答重新存入）。
+func (c *Chat) takePaused(key string) *PausedTurn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pt := c.paused[key]
+	delete(c.paused, key)
+	return pt
+}
+
+// stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、
+// 订阅思考过程事件、桥接暂停，ask 在独立上下文中执行对话并返回完整回答。
+// partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）。
+func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Content, partialBase string,
+	ask func(rctx context.Context, onDelta func(llm.Delta)) (string, error)) error {
 	gin := ctx.GinContext()
 	gin.Header("Content-Type", "text/event-stream; charset=utf-8")
 	gin.Header("Cache-Control", "no-cache")
@@ -161,11 +271,15 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.InternalError,
 			map[string]string{"error": "连接不支持流式响应"})
 	}
+
+	var wmu sync.Mutex // delta 回调与事件泵并发写流
 	write := func(v any) error {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return err
 		}
+		wmu.Lock()
+		defer wmu.Unlock()
 		if _, err := fmt.Fprintf(gin.Writer, "data: %s\n\n", b); err != nil {
 			return err
 		}
@@ -175,14 +289,47 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 
 	rctx, cancel := context.WithCancel(logx.WithID(ctx.Context(), logx.NextID()))
 	defer cancel()
-	// 全局单对话：所有渠道共用同一个主会话，网页端不支持切换到其他会话。
-	key := agent.SessionWeb
 	rctx = agent.WithSessionKey(rctx, key)
-	logx.Printf(rctx, "[网页] 输入: %s（图片 %d 张，会话 %s）", req.Message, len(imgs), key)
-	trace.Begin(logx.IDFrom(rctx), "web", key, req.Message)
+	trace.Begin(logx.IDFrom(rctx), "web", key, question)
+
+	// 登记进行中的对话（暂停接口按会话 key 取消），退出时注销。
+	run := &chatRun{cancel: cancel}
+	c.mu.Lock()
+	c.runs[key] = run
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.runs, key)
+		c.mu.Unlock()
+	}()
+
+	// 思考过程事件泵：订阅本请求的过程事件转发给前端；连接结束即停。
+	steps, stopSteps := agent.SubscribeSteps(logx.IDFrom(rctx))
+	defer stopSteps()
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		for {
+			select {
+			case <-rctx.Done():
+				return
+			case s, ok := <-steps:
+				if !ok {
+					return
+				}
+				_ = write(map[string]any{"step": s})
+			}
+		}
+	}()
 
 	streamed := ""
-	answer, err := c.brain.Ask(rctx, strings.TrimSpace(req.Message), imgs, func(d llm.Delta) {
+	answer, err := ask(rctx, func(d llm.Delta) {
+		if d.Thinking != "" {
+			if werr := write(map[string]string{"thinking": d.Thinking}); werr != nil {
+				cancel() // 客户端已断开，中止对话
+				return
+			}
+		}
 		if d.Text == "" {
 			return
 		}
@@ -191,9 +338,25 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 			cancel() // 客户端已断开，中止对话
 		}
 	})
+	cancel() // 对话已结束（完成或中止）：停掉事件泵再等它退出，避免正常路径死锁
+	<-pumpDone
+
 	if err != nil {
 		if rctx.Err() != nil {
-			return nil // 客户端断开或程序退出，连接已失效
+			// 被暂停（而非客户端断开）：保存现场并告知前端可继续。
+			c.mu.Lock()
+			pausing := run.pausing
+			if pausing {
+				c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed}
+			}
+			c.mu.Unlock()
+			if pausing {
+				logx.Printf(rctx, "[网页] 对话被暂停（已生成 %d 字，可继续）", len([]rune(streamed)))
+				trace.Record(rctx, "pause", "对话被用户暂停，已生成 %d 字可继续", len([]rune(streamed)))
+				_ = write(map[string]any{"paused": true, "partial": streamed})
+				_ = write(map[string]any{"done": true})
+			}
+			return nil
 		}
 		logx.Printf(rctx, "agent 出错: %v", err)
 		trace.End(logx.IDFrom(rctx), err.Error())

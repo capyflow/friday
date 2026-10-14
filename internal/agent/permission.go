@@ -1,9 +1,12 @@
 // permission.go 把 exec 审批策略翻译成 vortexagent 全局权限层（PermissionChecker）
 // 规则，并把框架的 ApprovalUI 审批问询桥接到管理后台的审批队列（approval.Queue）：
 //
-//   - 模式映射：tools.exec.mode auto→whitelist（仅规则命中可执行）、
-//     confirm→confirm（规则命中直行，其余进网页审批）、off→confirm（此时
-//     exec_command 不注册，其余工具经直通规则放行，模式无实际作用）。
+//   - 模式映射：permissions.mode（全局权限模式）优先——fullAccess→框架
+//     full_access（全部放行，deny 黑名单仍拦截）；其余按 tools.exec.mode
+//     auto→whitelist（仅规则命中可执行）、confirm→confirm（规则命中直行，
+//     其余进网页审批）、off→confirm（此时 exec_command 不注册，其余工具经
+//     直通规则放行，模式无实际作用）。acceptEdits 不改 Checker（exec 照旧），
+//     只经审批队列的编辑免审标记放行 write/edit/mcp_edit 的内部审批。
 //   - allow 规则：安全工具直通名单（裸工具名）+ exec 白名单（exec_command:<条目>，
 //     由框架命令匹配器做 shell 语义段级校验）+ MCP 策略 + permissions.allow。
 //   - deny 规则：毁灭性命令黑名单（exec_command:<pattern>，任何模式下命中即拒）
@@ -28,8 +31,8 @@ import (
 const execToolName = vxexec.ToolName
 
 // passThroughTools 是与危险操作审批无关的工具：权限层直接放行，保持历史行为
-// （安全工具免审批直行；write_file/edit_file 的审批仍由各自内部走 approval.Queue，
-// 保留 auto 直执 / confirm 入队与文件内容详情语义）。
+// （安全工具免审批直行；write_file/edit_file/mcp_edit 的变更操作审批仍由各自
+// 内部走 approval.Queue，保留 auto 直执 / confirm 入队与操作详情语义）。
 // 新增工具后必须同步此名单（guard 测试 TestRegisteredToolsArePassThrough 兜底），
 // 否则该工具的调用会落入 confirm 审批流程，网页会频繁弹审批卡片。
 var passThroughTools = []string{
@@ -39,13 +42,22 @@ var passThroughTools = []string{
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",
 	"read_file", "list_files", "write_file", "edit_file",
+	"mcp_edit",
 }
 
 // NewPermissionChecker 按配置组装框架权限 Checker。规则格式错误返回错误，
 // 调用方应视为致命（Build 快失败），不带残缺策略运行。
+//
+// 模式决策（permissions.mode 全局权限模式优先，参照 zcode 多档权限）：
+//   - fullAccess → 框架 full_access：全部放行（deny 黑名单仍强制拦截）；
+//   - 其余按 exec 模式映射：auto → whitelist（仅规则命中可执行）、
+//     confirm/off → confirm（off 时 exec_command 不注册，其余工具经直通规则放行）。
 func NewPermissionChecker(cfg *config.Config, q *approval.Queue) (*vxagent.Checker, error) {
 	mode := vxagent.ModeConfirm
-	if cfg.Tools.Exec.Mode == string(approval.ModeAuto) {
+	switch {
+	case cfg.Permissions.BypassesAll():
+		mode = vxagent.ModeFullAccess
+	case cfg.Tools.Exec.Mode == string(approval.ModeAuto):
 		mode = vxagent.ModeWhitelist
 	}
 

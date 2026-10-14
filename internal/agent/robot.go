@@ -16,6 +16,7 @@ import (
 	"github.com/capyflow/friday/internal/audio"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/logx"
+	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
 	"github.com/capyflow/friday/internal/task"
@@ -87,6 +88,13 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 				info.Round, info.Model, info.Usage.InputTokens, info.Usage.OutputTokens,
 				info.Duration, info.Err)
 			usage.Add(int64(info.Usage.InputTokens), int64(info.Usage.OutputTokens))
+			// 思考过程事件：每轮 LLM 调用一条（含耗时与 token，失败也如实发布）。
+			roundDetail := fmt.Sprintf("耗时 %.1fs · %d+%d tokens", info.Duration.Seconds(),
+				info.Usage.InputTokens, info.Usage.OutputTokens)
+			if info.Err != nil {
+				roundDetail += " · " + info.Err.Error()
+			}
+			PublishStep(ctx, Step{Kind: "round", Detail: roundDetail})
 			// 此刻会话内容 = 本轮发给模型的完整输入（助手消息在调用返回后才入会话）。
 			// 第 1 轮额外带上系统提示词，凑齐真实上下文全貌。
 			msgs := msgsToTrace(pool.Get(ctx, SessionKeyFrom(ctx)).Messages())
@@ -113,16 +121,22 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 		},
 		OnBeforeToolCall: func(ctx context.Context, name string, args map[string]any) error {
 			logx.Printf(ctx, "[tool] -> %s %v", name, args)
+			PublishStep(ctx, Step{Kind: "tool", Name: name, Status: "run",
+				Detail: summarizeArgs(args)})
 			return nil
 		},
 		OnAfterToolCall: func(ctx context.Context, name string, _ map[string]any, result string, err error) {
 			if err != nil {
 				logx.Printf(ctx, "[tool] <- %s 失败: %v", name, err)
 				trace.Record(ctx, "tool", "工具 %s 执行失败：%v", name, err)
+				PublishStep(ctx, Step{Kind: "tool", Name: name, Status: "fail",
+					Detail: logx.Truncate(err.Error(), 160)})
 				return
 			}
 			logx.Printf(ctx, "[tool] <- %s: %s", name, logx.Truncate(result, 120))
 			trace.Record(ctx, "tool", "工具 %s 返回：%s", name, logx.Truncate(result, 500))
+			PublishStep(ctx, Step{Kind: "tool", Name: name, Status: "ok",
+				Detail: logx.Truncate(result, 160)})
 		},
 		OnFinish: func(ctx context.Context, answer string) {
 			logx.Printf(ctx, "[agent] 回答: %s", logx.Truncate(answer, 200))
@@ -133,6 +147,21 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 			trace.Record(ctx, "error", "%v", err)
 		},
 	}
+}
+
+// summarizeArgs 把工具参数压成一行摘要（思考过程展示用）。
+func summarizeArgs(args map[string]any) string {
+	if cmd, ok := args["command"].(string); ok && cmd != "" {
+		return logx.Truncate(cmd, 160)
+	}
+	if path, ok := args["path"].(string); ok && path != "" {
+		return logx.Truncate(path, 160)
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return logx.Truncate(string(b), 160)
 }
 
 // traceMsg 是轨迹里一条消息的可序列化投影。
@@ -187,15 +216,17 @@ func messageText(m llm.Message) string {
 
 // Deps 汇总 RegisterTools 需要的管家能力依赖。
 type Deps struct {
-	Engine    *task.Engine      // 任务排程器（单次/多次/循环/智能任务）
-	Todos     *todo.Store       // 待办清单仓库
-	Memory    *memory.WikiStore // 长期记忆 wiki 仓库（主题页面）
-	Ctx       *ContextManager   // 上下文引擎管理器（注册检索工具用，可为 nil）
-	Speaker   output.Speaker    // 播报输出（硬件输出开启时使用）
-	Displayer output.Displayer  // 屏幕输出（硬件输出开启时使用）
-	Player    audio.Player      // 音频播放器（硬件输出开启时使用）
-	Config    *config.Config    // 运行配置（文件白名单、硬件开关、天气默认城市等）
-	Approver  *approval.Queue   // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
+	Engine     *task.Engine      // 任务排程器（单次/多次/循环/智能任务）
+	Todos      *todo.Store       // 待办清单仓库
+	Memory     *memory.WikiStore // 长期记忆 wiki 仓库（主题页面）
+	Ctx        *ContextManager   // 上下文引擎管理器（注册检索工具用，可为 nil）
+	Speaker    output.Speaker    // 播报输出（硬件输出开启时使用）
+	Displayer  output.Displayer  // 屏幕输出（硬件输出开启时使用）
+	Player     audio.Player      // 音频播放器（硬件输出开启时使用）
+	Config     *config.Config    // 运行配置（文件白名单、硬件开关、天气默认城市等）
+	Approver   *approval.Queue   // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
+	Mcp        *mcp.Manager      // MCP 服务器管理器（mcp_edit 工具用，可为 nil）
+	ConfigPath string            // config.yaml 路径（mcp_edit 写回用）
 }
 
 // RegisterTools 把管家全部业务工具注册进 Registry。
@@ -232,6 +263,7 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.ListFilesTool{FileTools: fileTools},
 		&tools_pkg.WriteFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.EditFileTool{FileTools: fileTools, Approver: approver},
+		&tools_pkg.McpEditTool{Manager: d.Mcp, Config: d.Config, ConfigPath: d.ConfigPath, Approver: approver},
 	}
 	if d.Config.Hardware.Enabled {
 		tools = append(tools,
@@ -302,6 +334,12 @@ func systemPrompt(cfg *config.Config) string {
 【天气查询】
 1. 用户问天气、要不要带伞、穿什么：调用 get_weather，city 填城市名；问"未来几天"时把预报转述清楚。
 2. 用户没指明城市：配置了默认城市就直接查并说明；没配置就先问用户所在城市，用户回答后可用 remember 记入"用户偏好"页（如"用户所在城市是上海"），下次直接查。
+
+【MCP 扩展工具】（mcp_edit：接入/管理外部 MCP 服务器，变更热生效无需重启）
+1. 用户发来 MCP 配置或要求接入某个外部工具/数据源（"帮我接入这个 mcp""把 blinko 配置上"）：调用 mcp_edit，action=add；远程服务器填 url/headers（鉴权令牌放 headers，如 {"Authorization":"Bearer ..."}），本地命令服务器填 command/args/env。
+2. 用户问已接入了哪些 MCP/外部工具：action=list 查看全部（含连接状态与工具数）；action=get 加 name 看单台配置与工具清单。
+3. 修改用 action=update（只传要改的字段，其余保留）；不再使用用 action=remove；连接异常时先 list 看状态，配置没问题时 action=restart 重连。
+4. 涉及变更（add/update/remove）在 confirm 审批模式下需用户在网页批准；凭据类信息不写入长期记忆。
 `)
 	if cfg.Hardware.Enabled {
 		b.WriteString(`

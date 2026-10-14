@@ -13,10 +13,14 @@
 //	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
 //	GET    /palette           全局快捷键弹窗页（桌面外壳加载，公开静态；对话仍走 /api/chat）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
+//	POST   /api/chat/stop     暂停当前回复（需登录，已生成部分可继续）
+//	POST   /api/chat/resume   继续被暂停的对话（需登录，SSE 流式）
 //	POST   /api/upload        图片上传（需登录，multipart 字段 file）
 //	POST   /api/provider      热更新 LLM baseURL/model（需登录，写回 config.yaml）
 //	GET    /api/persona       人设提示词配置（当前生效 ID + 全部预设，需登录）
 //	POST   /api/persona       切换人设/保存自定义人设（需登录，热生效并写回 config.yaml）
+//	GET    /api/permissions   全局权限模式与审批策略（需登录）
+//	POST   /api/permissions   切换权限模式 confirm/acceptEdits/fullAccess（需登录，热生效并写回 config.yaml）
 //	POST   /api/context/clear 清除对话上下文（需登录）
 //	GET    /admin /traces     旧地址，重定向回 /
 //	GET    /api/traces        调用轨迹列表（鉴权）
@@ -174,6 +178,8 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/palette", s.handlePalette)
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
+		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
+		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
 		root.AddRouter([]string{http.MethodGet}, "/api/sessions", s.wrap(s.handleListSessions))
@@ -184,6 +190,8 @@ func (s *Server) Handler() http.Handler {
 		if s.chat != nil {
 			root.AddRouter([]string{http.MethodGet}, "/api/persona", s.wrap(s.handleGetPersona))
 			root.AddRouter([]string{http.MethodPost}, "/api/persona", s.wrap(s.handleSetPersona))
+			root.AddRouter([]string{http.MethodGet}, "/api/permissions", s.wrap(s.handleGetPermissions))
+			root.AddRouter([]string{http.MethodPost}, "/api/permissions", s.wrap(s.handleSetPermissions))
 		}
 	}
 	if s.heartbeatFile != "" {

@@ -60,9 +60,12 @@ func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	if key == "" {
 		key = "web"
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"session": key, "messages": out,
-	})
+	// 被暂停的问答随历史返回（页面刷新后仍可继续）。
+	body := map[string]any{"session": key, "messages": out}
+	if pt := s.chat.PausedTurn(key); pt != nil {
+		body["paused"] = pt
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, body)
 }
 
 // handleListSessions 返回全部会话概要（key、消息数、最后活跃）。
@@ -242,6 +245,48 @@ func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已重连 " + name})
+}
+
+// handleGetPermissions 返回全局权限模式与相关策略（设置页展示）。
+func (s *Server) handleGetPermissions(ctx *vhttp.Context) error {
+	out := map[string]any{"mode": config.PermModeConfirm, "execMode": "", "mcp": "allow"}
+	if s.cfg != nil {
+		cfg := s.cfg.Snapshot()
+		out["mode"] = cfg.Permissions.EffectiveMode()
+		out["execMode"] = cfg.Tools.Exec.Mode
+		if cfg.Permissions.MCP != "" {
+			out["mcp"] = cfg.Permissions.MCP
+		}
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, out)
+}
+
+// handleSetPermissions 切换全局权限模式（confirm/acceptEdits/fullAccess）：
+// 经 agent.ReloadPermissions 热生效（重建权限 Checker + 更新审批队列编辑免审
+// 标记）并写回 config.yaml。body {"mode": "acceptEdits"}。
+func (s *Server) handleSetPermissions(ctx *vhttp.Context) error {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if s.cfg == nil || s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置或聊天服务未启用，权限模式无法热生效"})
+	}
+	if err := agent.ReloadPermissions(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.Mode); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	mode := s.cfg.Snapshot().Permissions.EffectiveMode()
+	hint := map[string]string{
+		config.PermModeConfirm:     "危险操作需网页批准",
+		config.PermModeAcceptEdits: "写文件/改 MCP 配置免审批，执行命令仍需批准",
+		config.PermModeFullAccess:  "全部免审批（毁灭性命令黑名单仍拦截）",
+	}[mode]
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
+		"mode":    mode,
+		"message": "权限模式已切换为 " + mode + "并热生效（" + hint + "），已写回 config.yaml",
+	})
 }
 
 // handleGetPersona 返回人设提示词配置：当前生效 ID + 全部可用预设

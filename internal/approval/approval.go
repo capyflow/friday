@@ -84,6 +84,9 @@ type Queue struct {
 	timeout   time.Duration
 	seq       int64
 	pending   map[int64]*request
+	// editsFree 编辑类内部审批（write_file/edit_file/mcp_edit 变更）免审批开关：
+	// permissions.mode 为 acceptEdits/fullAccess 时开启（运行时经设置页热切换）。
+	editsFree bool
 }
 
 // New 创建审批队列。mode 非法时回退为 confirm（最保守）；allowlist 为 exec
@@ -108,6 +111,30 @@ func New(mode string, allowlist []string, timeout time.Duration) *Queue {
 
 // Mode 返回当前审批模式。
 func (q *Queue) Mode() Mode { return q.mode }
+
+// SetEditsFree 设置编辑类内部审批免审批开关（permissions.mode 切换时由热更新
+// 路径调用；只影响 write_file/edit_file/mcp_edit 的内部审批，exec 与权限层无关）。
+func (q *Queue) SetEditsFree(free bool) {
+	q.mu.Lock()
+	q.editsFree = free
+	q.mu.Unlock()
+}
+
+// EditsFree 返回编辑类内部审批是否免审批。
+func (q *Queue) EditsFree() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.editsFree
+}
+
+// InternalApprovalRequired 返回编辑类工具（write_file/edit_file/mcp_edit 变更）
+// 当前是否需要走内部网页审批：仅 confirm 模式且未开启编辑免审批时需要。
+// auto/off 模式沿用历史行为（直接放行）。
+func (q *Queue) InternalApprovalRequired() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.mode == ModeConfirm && !q.editsFree
+}
 
 // Timeout 返回审批等待时长。
 func (q *Queue) Timeout() time.Duration { return q.timeout }

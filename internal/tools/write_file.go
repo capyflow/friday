@@ -56,10 +56,10 @@ func (t *FileTools) resolveWrite(path string) (string, error) {
 	return final, nil
 }
 
-// requestWriteApproval 在 confirm 模式下为文件写入/编辑发起审批；
-// 其余模式直接放行（off 只禁用 exec，文件工具不受影响）。
+// requestWriteApproval 在 confirm 模式（且未开启编辑免审批）下为文件写入/编辑
+// 发起审批；auto/off 模式与 acceptEdits/fullAccess 权限模式直接放行。
 func requestWriteApproval(ctx context.Context, q *approval.Queue, tool, path, detail string) error {
-	if q == nil || q.Mode() != approval.ModeConfirm {
+	if q == nil || !q.InternalApprovalRequired() {
 		return nil
 	}
 	trace.Record(ctx, "approval", "%s 请求写入 %s，等待网页审批（超时 %s）", tool, path, q.Timeout())

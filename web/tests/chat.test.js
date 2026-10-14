@@ -148,7 +148,7 @@ describe('聊天发送和失败恢复', () => {
     expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:photo')
   })
 
-  it('等待回复时阻止重复发送，卸载取消请求并释放图片', async () => {
+  it('等待回复时主按钮变为暂停且不重复发送，卸载取消请求并释放图片', async () => {
     let controller
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ body: { id: 'photo.jpg' } })))
       .mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
@@ -157,7 +157,10 @@ describe('聊天发送和失败恢复', () => {
     await modeButton('计划').trigger('click')
     await send('计划任务')
     expect(wrapper.get('textarea').element.disabled).toBe(true)
-    await wrapper.get('[aria-label="发送"]').trigger('click')
+    // 回复中主按钮变为"暂停回复"：点击走暂停接口，不会重发消息
+    const halt = wrapper.get('[aria-label="暂停回复"]')
+    expect(halt.element.disabled).toBe(false)
+    await halt.trigger('click')
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const signal = fetchMock.mock.calls[1][1].signal
     wrapper.unmount()
@@ -166,6 +169,32 @@ describe('聊天发送和失败恢复', () => {
     expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:photo')
     controller.close()
     await flushPromises()
+  })
+
+  it('暂停后可继续，暂停期间输入新问题则开启新对话', async () => {
+    fetchMock.mockResolvedValueOnce(stream([{ delta: '部分' }, { paused: true, partial: '部分' }, { done: true }]))
+      .mockResolvedValueOnce(stream([{ delta: '续' }, { done: true }]))
+    await mountChat()
+    await send('写个故事')
+    // 暂停现场：气泡带已暂停标记，主按钮变为"继续上次任务"
+    expect(wrapper.find('.paused-chip').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="继续上次任务"]').element.disabled).toBe(false)
+    // 空输入点击 = 继续：请求 resume 接口
+    await wrapper.get('[aria-label="继续上次任务"]').trigger('click')
+    await flushPromises()
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/chat/resume')
+    const bots = wrapper.findAll('.mrow.bot')
+    expect(bots.at(-1).text()).toContain('续')
+    expect(wrapper.find('.paused-chip').exists()).toBe(false)
+    // 再次暂停后输入新问题：点击发送新消息（不请求 resume）
+    fetchMock.mockResolvedValueOnce(stream([{ delta: 'X' }, { paused: true, partial: 'X' }, { done: true }]))
+    await send('换个话题')
+    expect(wrapper.find('.paused-chip').exists()).toBe(true)
+    await wrapper.get('textarea').setValue('新问题')
+    fetchMock.mockResolvedValueOnce(stream([{ delta: '答' }, { done: true }]))
+    await send()
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body).message).toBe('新问题')
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/chat/resume')).toHaveLength(1)
   })
 
   it('晚到的历史响应不能覆盖刚发送的消息', async () => {

@@ -178,8 +178,12 @@ func main() {
 
 	// 危险操作审批队列：exec_command 经全局权限层（白名单/黑名单/模式）桥接到
 	// 此处审批；write_file/edit_file 在 confirm 模式直接入队。
+	// permissions.mode（confirm/acceptEdits/fullAccess）决定全局审批强度：
+	// 编辑类内部审批在 acceptEdits/fullAccess 下放行（设置页可在线切换）。
 	approver := approval.New(cfg.Tools.Exec.Mode, cfg.Tools.Exec.Allowlist, 0)
-	log.Printf("[审批] exec 模式=%s，白名单 %d 条，超时 %s", approver.Mode(), len(cfg.Tools.Exec.Allowlist), approver.Timeout())
+	approver.SetEditsFree(cfg.Permissions.EditsAutoApproved())
+	log.Printf("[审批] 权限模式=%s，exec 模式=%s，白名单 %d 条，超时 %s",
+		cfg.Permissions.EffectiveMode(), approver.Mode(), len(cfg.Tools.Exec.Allowlist), approver.Timeout())
 
 	// 先可靠入队再推进任务；工作器在 Brain 就绪后启动。
 	var runner *robotagent.TaskRunner
@@ -280,12 +284,16 @@ func main() {
 		regMu      sync.Mutex
 		currentReg *vxagent.Registry
 		mcpMgr     *mcp.Manager
+		rebuild    func(string)
 	)
 	regFn := func() *vxagent.Registry {
 		regMu.Lock()
 		defer regMu.Unlock()
 		return currentReg
 	}
+	// MCP 管理器先于 Agent 首建创建（mcp_edit 工具依赖它），onChange 触发 rebuild；
+	// rebuild 在下方赋值，首次 Apply 发生在 brain 就绪之后，不会提前触发。
+	mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
 	memStore := memory.NewWikiStore(cfg.Memory.Dir, cfg.Memory.File)
 	log.Printf("[记忆] wiki 页面目录：%s", cfg.Memory.Dir)
 
@@ -294,20 +302,22 @@ func main() {
 	ctxMgr := robotagent.NewContextManager(robotagent.WikiFactSink(memStore))
 
 	deps := robotagent.Deps{
-		Engine:    eng,
-		Todos:     todos,
-		Memory:    memStore,
-		Ctx:       ctxMgr,
-		Speaker:   speaker,
-		Displayer: displayer,
-		Player:    player,
-		Config:    cfg,
-		Approver:  approver,
+		Engine:     eng,
+		Todos:      todos,
+		Memory:     memStore,
+		Ctx:        ctxMgr,
+		Speaker:    speaker,
+		Displayer:  displayer,
+		Player:     player,
+		Config:     cfg,
+		Approver:   approver,
+		Mcp:        mcpMgr,
+		ConfigPath: *cfgPath,
 	}
 
 	// rebuild 重建注册表与 Agent（上下文引擎 + 内置工具 + 当前在线的 MCP 工具），原子替换。
 	var brain *robotagent.Brain
-	rebuild := func(reason string) {
+	rebuild = func(reason string) {
 		if err := cfg.Apply(func(next *config.Config) error {
 			return brain.Reconfigure(func() (*vxagent.Agent, error) {
 				if err := ctxMgr.Rebuild(next); err != nil {
@@ -370,8 +380,8 @@ func main() {
 	regMu.Unlock()
 
 	// MCP 服务器：随 Friday 拉起，工具动态注册（前缀 mcp_<server>_），崩溃自动重启。
-	// 管理器始终创建（无配置时为空跑）：管理后台在线添加 MCP 服务器可即时生效。
-	mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
+	// 管理器已提前创建（mcp_edit 工具依赖）；此处按配置首次拉起，之后聊天里经
+	// mcp_edit 增删改查均可即时生效。
 	if len(cfg.Mcp.Servers) > 0 {
 		servers := make([]mcp.ServerConfig, 0, len(cfg.Mcp.Servers))
 		for _, s := range cfg.Mcp.Servers {

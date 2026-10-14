@@ -8,9 +8,11 @@ import { api } from '../api.js'
 import { renderMD } from '../md.js'
 import { store, toast } from '../store.js'
 
-const messages = reactive([])      // { role: 'user'|'bot'|'err', text, images?: string[], streaming?: bool }
+const messages = reactive([])      // { role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, steps?, thinking?, thinkOpen?, paused? }
 const input = ref('')
-const busy = ref(false)
+const phase = ref('idle')          // 对话阶段：idle（空闲）| streaming（回复中）| paused（已暂停可继续）
+const pausedTurn = ref(null)       // 暂停现场镜像 { question, partial }（服务端为准）
+const busy = computed(() => phase.value === 'streaming')
 const clearing = ref(false)
 const menuOpen = ref(false)
 const popOpen = ref(false)
@@ -38,7 +40,12 @@ const PHRASES = ['提醒、待办、天气，都可以交给我', '说一句话�
                  '本地运行，数据只属于你', '到点了，我会主动提醒你']
 
 const welcome = computed(() => messages.length === 0)
-const sendDisabled = computed(() => busy.value || clearing.value || (!input.value.trim() && !pendingImages.length))
+const canSendNew = computed(() => !!input.value.trim() || pendingImages.length > 0)
+const sendDisabled = computed(() => clearing.value || (phase.value === 'idle' && !canSendNew.value))
+const sendLabel = computed(() =>
+  phase.value === 'streaming' ? '暂停回复'
+    : phase.value === 'paused' && !canSendNew.value ? '继续上次任务'
+    : '发送')
 const placeholder = computed(() => (mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'))
 
 /* ---------- 滚动 ---------- */
@@ -124,13 +131,24 @@ watch(welcome, v => {
 async function loadHistory() {
   const version = messagesVersion
   let list = []
+  let paused = null
   try {
-    list = (await api('GET', '/api/chat/history?session=web')).messages || []
+    const r = await api('GET', '/api/chat/history?session=web')
+    list = r.messages || []
+    paused = r.paused || null
   } catch (e) { /* 拉取失败按空会话处理 */ }
   if (disposed || version !== messagesVersion) return
   messages.splice(0, messages.length, ...list.map(m => ({
     role: m.role === 'user' ? 'user' : 'bot', text: m.text,
   })))
+  // 恢复暂停现场：渲染被暂停的问答，发送键变为"继续"。
+  if (paused && paused.question) {
+    messages.push({ role: 'user', text: paused.question })
+    messages.push({ role: 'bot', text: paused.partial || '', paused: true,
+                    steps: [], thinking: '', thinkOpen: false })
+    phase.value = 'paused'
+    pausedTurn.value = paused
+  }
   if (messages.length) nextTick(() => stick(true))
 }
 
@@ -236,7 +254,7 @@ function fill(text) {
   nextTick(() => { inputEl.value && inputEl.value.focus(); autoGrow() })
 }
 
-/* ---------- 发送（SSE 流式） ---------- */
+/* ---------- 发送（SSE 流式）：发送 / 暂停 / 继续 ---------- */
 function autoGrow() {
   const el = inputEl.value
   if (!el) return
@@ -244,31 +262,38 @@ function autoGrow() {
   el.style.height = Math.min(el.scrollHeight, 140) + 'px'
 }
 function onInputKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat() }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    if (phase.value !== 'streaming') sendChat()
+  }
+}
+// 主按钮一位三态：回复中=暂停；暂停且无输入=继续；其余=发送（暂停时输入新问题
+// 即丢弃上次任务、开启新对话）。
+function onSendClick() {
+  if (phase.value === 'streaming') { pauseChat(); return }
+  if (phase.value === 'paused' && !canSendNew.value) { resumeChat(); return }
+  sendChat()
 }
 
-async function sendChat(presetText) {
-  if (busy.value || clearing.value || disposed) return
-  const draft = {
-    text: typeof presetText === 'string' ? presetText : input.value,
-    mode: mode.value,
-    images: [...pendingImages],
-  }
-  const text = draft.text.trim()
-  if (!text && !draft.images.length) return
+async function pauseChat() {
+  if (phase.value !== 'streaming') return
+  try { await api('POST', '/api/chat/stop', { session: 'web' }) }
+  catch (e) { if (!disposed) toast(e.message, true) }
+  // 服务端取消后以 {paused:true} 收尾流，状态在 streamTurn 的帧处理里落定
+}
+
+function newBot() {
+  return reactive({ role: 'bot', text: '', streaming: true, paused: false,
+                    steps: [], thinking: '', thinkOpen: true })
+}
+
+// streamTurn 跑一次 SSE 对话（发送与继续共用）：userMsg 为乐观插入的用户气泡
+//（继续时为 null）；prepare 在建立连接前上传图片返回附件 ID；出错时按 draft
+// 恢复输入现场（继续失败则回到"已暂停"状态）。
+async function streamTurn({ url, body, userMsg, draft, prepare }) {
   messagesVersion++
-  // 当前模式传递文字意图，不承诺后端强制的计划/确认工作流。
-  const raw = text && draft.mode ? (draft.mode === 'plan' ? '【计划】' : '【目标】') + text : text
-  setPop(false)
-  busy.value = true
-  mode.value = null
-  input.value = ''
-  // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
-  pendingImages.splice(0, pendingImages.length)
-  autoGrow()
   const controller = new AbortController()
   request = controller
-  const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   const typing = reactive({ role: 'typing' })
   let submitted = false
   let bot = null
@@ -278,16 +303,20 @@ async function sendChat(presetText) {
   }
   let reader
   try {
-    const ids = await uploadImages(draft.images, controller.signal)
-    if (disposed || controller.signal.aborted) return
-    messages.push(user, typing)
+    if (prepare) {
+      const ids = await prepare(controller.signal)
+      if (disposed || controller.signal.aborted) return
+      body = { ...body, attachments: ids }
+    }
+    if (userMsg) messages.push(userMsg)
+    messages.push(typing)
     submitted = true
     popLastBubble()
     nextTick(() => stick(true))
-    const res = await fetch('/api/chat', {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: raw, attachments: ids, session: 'web' }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
     if (res.status === 401) {
@@ -295,23 +324,50 @@ async function sendChat(presetText) {
       toast('登录已过期，请重新登录', true)
       return
     }
-    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status)
+    if (!res.ok || !res.body) {
+      let msg = 'HTTP ' + res.status
+      try {
+        const data = await res.json()
+        if (data.body && data.body.error) msg = data.body.error
+      } catch { /* 非 JSON 响应保持状态码提示 */ }
+      throw new Error(msg)
+    }
     reader = res.body.getReader()
     const decoder = new TextDecoder('utf-8')
     let buf = ''
     let done = false
+    let paused = false
+    const ensureBot = () => {
+      removeTyping()
+      if (!bot) { bot = newBot(); messages.push(bot) }
+      return bot
+    }
     const handle = ev => {
       let data
       try { data = JSON.parse(ev) } catch { throw new Error('聊天响应格式异常') }
       if (data.error) throw new Error(data.error)
-      if (data.delta) {
-        removeTyping()
-        if (!bot) {
-          bot = reactive({ role: 'bot', text: '', streaming: true })
-          messages.push(bot)
-        }
-        bot.text += data.delta
+      if (data.thinking) {
+        ensureBot().thinking += data.thinking
         nextTick(() => stick())
+      }
+      if (data.step) {
+        ensureBot().steps.push(data.step)
+        nextTick(() => stick())
+      }
+      if (data.delta) {
+        ensureBot().text += data.delta
+        nextTick(() => stick())
+      }
+      if (data.paused) {
+        // 对话被暂停：保留已生成部分，发送键变为"继续"。
+        paused = true
+        removeTyping()
+        if (bot) { bot.paused = true; bot.streaming = false }
+        phase.value = 'paused'
+        pausedTurn.value = {
+          question: (draft && draft.text) || (userMsg && userMsg.text) || '',
+          partial: data.partial || (bot && bot.text) || '',
+        }
       }
       if (data.done) done = true
     }
@@ -333,36 +389,84 @@ async function sendChat(presetText) {
       consume()
       if (chunk.done) break
     }
-    if (!done) throw new Error('回复连接已中断')
-    if (!bot) messages.push({ role: 'bot', text: '……' })
+    if (!done && !paused) throw new Error('回复连接已中断')
+    if (!bot && !paused) messages.push({ role: 'bot', text: '……' })
+    if (!paused) {
+      // 正常完成：收起思考过程、清掉历史暂停标记（任务已续完或已放弃），回到空闲。
+      phase.value = 'idle'
+      pausedTurn.value = null
+      if (bot) { bot.streaming = false; bot.thinkOpen = false }
+      for (const m of messages) { if (m.paused) m.paused = false }
+    }
     nextTick(() => stick())
     if (store.view === 'trace') window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
   } catch (e) {
     if (disposed || controller.signal.aborted || !store.loggedIn) return
-    input.value = draft.text
-    mode.value = draft.mode
-    pendingImages.push(...draft.images)
-    nextTick(autoGrow)
+    if (draft) {
+      input.value = draft.text
+      mode.value = draft.mode
+      pendingImages.push(...draft.images)
+      nextTick(autoGrow)
+    } else {
+      phase.value = 'paused' // 继续失败：回到可继续状态
+    }
     if (submitted) {
       // 未收到回复时撤销乐观消息；已有部分输出则保留，方便检查失败前的结果。
-      if (!bot) {
-        const i = messages.indexOf(user)
+      if (!bot && userMsg) {
+        const i = messages.indexOf(userMsg)
         if (i >= 0) messages.splice(i, 1)
       }
-      messages.push({ role: 'err', text: e.message + '，输入和图片已保留，可以重试。' })
+      messages.push({ role: 'err', text: e.message + (draft ? '，输入和图片已保留，可以重试。' : '') })
       popLastBubble()
-    } else { toast(e.message + '，输入和图片已保留，可以重试。', true) }
+    } else { toast(e.message + (draft ? '，输入和图片已保留，可以重试。' : ''), true) }
   } finally {
     if (reader) {
       try { await reader.cancel() } catch { /* 连接已关闭 */ }
       reader.releaseLock()
     }
-    if (bot) bot.streaming = false
     removeTyping()
+    if (bot && phase.value !== 'paused') bot.streaming = false
     if (request === controller) request = null
-    busy.value = false
+    if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
     if (!disposed) nextTick(() => inputEl.value && inputEl.value.focus())
   }
+}
+
+async function sendChat(presetText) {
+  if (clearing.value || disposed || phase.value === 'streaming') return
+  const draft = {
+    text: typeof presetText === 'string' ? presetText : input.value,
+    mode: mode.value,
+    images: [...pendingImages],
+  }
+  const text = draft.text.trim()
+  if (!text && !draft.images.length) return
+  // 当前模式传递文字意图，不承诺后端强制的计划/确认工作流。
+  const raw = text && draft.mode ? (draft.mode === 'plan' ? '【计划】' : '【目标】') + text : text
+  setPop(false)
+  // 暂停期间发新问题 = 中止上次任务、开启下一段对话（服务端同步丢弃暂停现场）。
+  phase.value = 'streaming'
+  pausedTurn.value = null
+  for (const m of messages) { if (m.paused) m.paused = false }
+  mode.value = null
+  input.value = ''
+  // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
+  pendingImages.splice(0, pendingImages.length)
+  autoGrow()
+  const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
+  await streamTurn({
+    url: '/api/chat',
+    body: { message: raw, session: 'web' },
+    userMsg: user,
+    draft,
+    prepare: async signal => uploadImages(draft.images, signal),
+  })
+}
+
+async function resumeChat() {
+  if (phase.value !== 'paused' || clearing.value || disposed) return
+  phase.value = 'streaming'
+  await streamTurn({ url: '/api/chat/resume', body: { session: 'web' } })
 }
 
 /* ---------- 更多菜单 ---------- */
@@ -442,8 +546,31 @@ async function clearContext() {
           </div>
           <div v-else class="bubble" :class="{ md: m.role === 'bot' }">
             <template v-if="m.role === 'bot'">
+              <!-- 思考过程（zcode 风）：轮次与工具调用实时展示，完成后折叠 -->
+              <div v-if="(m.steps && m.steps.length) || m.thinking" class="think" :class="{ open: m.thinkOpen }">
+                <button class="think-head" type="button" @click="m.thinkOpen = !m.thinkOpen">
+                  <span class="think-dot" :class="{ live: m.streaming && !m.paused }"></span>
+                  <span class="think-title">{{ m.streaming && !m.paused ? '思考中…'
+                    : '思考过程 · ' + (m.steps ? m.steps.length : 0) + ' 步' }}</span>
+                  <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div v-show="m.thinkOpen" class="think-body">
+                  <div v-if="m.thinking" class="think-text">{{ m.thinking }}</div>
+                  <div v-for="(s, si) in m.steps || []" :key="si" class="step-line">
+                    <span class="step-ico" :class="s.kind === 'round' ? 'round' : (s.status || 'run')">
+                      <template v-if="s.kind === 'round'">·</template>
+                      <template v-else-if="s.status === 'ok'">✓</template>
+                      <template v-else-if="s.status === 'fail'">✕</template>
+                      <template v-else><i class="spin"></i></template>
+                    </span>
+                    <span class="step-name">{{ s.kind === 'round' ? '思考' : s.name }}</span>
+                    <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
+                  </div>
+                </div>
+              </div>
               <span v-html="renderMD(m.text)"></span>
               <span v-if="m.streaming" class="cursor"></span>
+              <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             </template>
             <template v-else>
               {{ m.text }}
@@ -462,23 +589,29 @@ async function clearContext() {
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <div id="attachPreviews">
-        <div v-for="p in pendingImages" :key="p.url" class="thumb">
-          <img :src="p.url" alt="">
-          <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
-        </div>
-      </div>
       <div class="inputbar" :aria-busy="busy || clearing">
-        <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
-                :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
-        <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
-        <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入" :disabled="busy || clearing"
-                  @keydown="onInputKeydown" @input="autoGrow"></textarea>
-        <button class="ib-btn send-btn" aria-label="发送" title="发送" :disabled="sendDisabled" @click="sendChat()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
-        </button>
+        <!-- 图片附件在输入容器内部：有图时撑起整个输入框（zcode 风） -->
+        <div v-if="pendingImages.length" id="attachPreviews">
+          <div v-for="p in pendingImages" :key="p.url" class="thumb">
+            <img :src="p.url" alt="">
+            <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
+          </div>
+        </div>
+        <div class="input-row">
+          <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
+                  :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
+          <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入" :disabled="busy || clearing"
+                    @keydown="onInputKeydown" @input="autoGrow"></textarea>
+          <button class="ib-btn send-btn" :class="{ 'halt-btn': phase === 'streaming', 'resume-btn': sendLabel === '继续上次任务' }"
+                  :aria-label="sendLabel" :title="sendLabel" :disabled="sendDisabled" @click="onSendClick">
+            <svg v-if="phase === 'streaming'" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+            <svg v-else-if="sendLabel === '继续上次任务'" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.6v12.8c0 .9 1 1.5 1.8 1L20 13a1.2 1.2 0 0 0 0-2L9.8 4.6C9 4.1 8 4.7 8 5.6Z"/></svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
+          </button>
+        </div>
 
         <!-- 加号弹窗 -->
         <div v-show="popOpen" ref="popWrap" class="popover" id="addPopover">

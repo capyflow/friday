@@ -170,7 +170,8 @@ func callProvider(ctx context.Context, client *http.Client, req providerTestRequ
 		content = []map[string]any{{"type": "text", "text": "This is a one-pixel test image. Reply with OK if you can receive it."},
 			{"type": "image_url", "image_url": map[string]string{"url": providerTestImage}}}
 	}
-	body, _ := json.Marshal(map[string]any{"model": req.Model, "messages": []map[string]any{{"role": "user", "content": content}}, "max_tokens": 16, "stream": false})
+	// 思考型模型会先消耗 token 思考再作答，预算太小会得到空 content。
+	body, _ := json.Marshal(map[string]any{"model": req.Model, "messages": []map[string]any{{"role": "user", "content": content}}, "max_tokens": 512, "stream": false})
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, req.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return providerCheck{Status: "unknown", Code: "invalid_request", Message: "无法创建模型请求"}
@@ -213,7 +214,9 @@ func callProvider(ctx context.Context, client *http.Client, req providerTestRequ
 		Error   json.RawMessage `json:"error"`
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content          json.RawMessage `json:"content"`
+				ReasoningContent string          `json:"reasoning_content"`
+				Reasoning        string          `json:"reasoning"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -221,7 +224,10 @@ func callProvider(ctx context.Context, client *http.Client, req providerTestRequ
 		return providerCheck{Status: "unknown", Code: "invalid_response", Message: "服务未返回有效的对话响应，请确认使用 OpenAI 兼容接口"}
 	}
 	var text string
-	if err := json.Unmarshal(decoded.Choices[0].Message.Content, &text); err != nil || strings.TrimSpace(text) == "" {
+	contentOK := json.Unmarshal(decoded.Choices[0].Message.Content, &text) == nil && strings.TrimSpace(text) != ""
+	reasoning := strings.TrimSpace(decoded.Choices[0].Message.ReasoningContent + decoded.Choices[0].Message.Reasoning)
+	// content 为空但返回了思考内容的响应仍是兼容的（思考型模型 token 预算内未作答）。
+	if !contentOK && reasoning == "" {
 		return providerCheck{Status: "unknown", Code: "incompatible", Message: "服务返回了空内容或不兼容的响应"}
 	}
 	message := "文本连接测试通过"

@@ -160,6 +160,53 @@ func TestApprovalUIBridge(t *testing.T) {
 	}
 }
 
+// TestPermissionGlobalMode 全局权限模式（permissions.mode）的映射与效果：
+// fullAccess → 框架 full_access（白名单外放行，毁灭性黑名单仍拦截）；
+// acceptEdits 不改变 Checker（exec 照旧，编辑免审走审批队列标记）。
+func TestPermissionGlobalMode(t *testing.T) {
+	build := func(permMode string) *vxagent.Checker {
+		cfg := &config.Config{}
+		cfg.Tools.Exec.Mode = string(approval.ModeConfirm)
+		cfg.Permissions.Mode = permMode
+		c, err := NewPermissionChecker(cfg, approval.New(string(approval.ModeAuto), nil, 0))
+		if err != nil {
+			t.Fatalf("组装权限层失败: %v", err)
+		}
+		return c
+	}
+
+	// fullAccess：exec 白名单外也放行。
+	c := build(config.PermModeFullAccess)
+	if c.Mode() != vxagent.ModeFullAccess {
+		t.Fatalf("fullAccess 应映射为 full_access，实际 %s", c.Mode())
+	}
+	if v, _ := c.Check(context.Background(), vxagent.CallInfo{Tool: execToolName, Args: map[string]any{"command": "whoami"}}); v != vxagent.VerdictAllow {
+		t.Error("fullAccess 下白名单外命令应放行")
+	}
+	// fullAccess 下 deny 黑名单仍强制拦截。
+	if v, _ := c.Check(context.Background(), vxagent.CallInfo{Tool: execToolName, Args: map[string]any{"command": "rm -rf /tmp"}}); v != vxagent.VerdictDeny {
+		t.Error("fullAccess 下毁灭性命令黑名单应仍然拦截")
+	}
+	// 附加 deny 规则同样生效。
+	cfgDeny := &config.Config{}
+	cfgDeny.Tools.Exec.Mode = string(approval.ModeConfirm)
+	cfgDeny.Permissions.Mode = config.PermModeFullAccess
+	cfgDeny.Permissions.Deny = []string{execToolName + ":curl"}
+	cDeny, err := NewPermissionChecker(cfgDeny, approval.New(string(approval.ModeAuto), nil, 0))
+	if err != nil {
+		t.Fatalf("组装权限层失败: %v", err)
+	}
+	if v, _ := cDeny.Check(context.Background(), vxagent.CallInfo{Tool: execToolName, Args: map[string]any{"command": "curl example.com"}}); v != vxagent.VerdictDeny {
+		t.Error("fullAccess 下附加 deny 规则应仍然拦截")
+	}
+
+	// acceptEdits：Checker 保持 confirm 语义（编辑免审走审批队列标记，不影响 exec 策略）。
+	ce := build(config.PermModeAcceptEdits)
+	if ce.Mode() != vxagent.ModeConfirm {
+		t.Fatalf("acceptEdits 不应改变 Checker 模式，实际 %s", ce.Mode())
+	}
+}
+
 // TestRegisteredToolsArePassThrough 是防回归 guard：所有注册的内置工具必须在
 // 权限直通名单（或 exec_command）。新增工具漏配时 confirm 模式会静默进入网页
 // 审批流程，此测试让它编译期即可发现。

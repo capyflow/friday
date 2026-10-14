@@ -256,9 +256,24 @@ func (e ExecConfig) TimeoutSeconds() int {
 	return e.Timeout
 }
 
+// 权限模式（permissions.mode，参照 zcode 的多档权限设计）。
+const (
+	// PermModeConfirm 默认：写文件/改 MCP 配置进网页审批，exec 按 tools.exec.mode 策略。
+	PermModeConfirm = "confirm"
+	// PermModeAcceptEdits 编辑类操作（write_file/edit_file/mcp_edit 变更）免审批直行，
+	// exec_command 白名单外仍进网页审批——"日常改东西不问，跑命令仍把关"。
+	PermModeAcceptEdits = "acceptEdits"
+	// PermModeFullAccess 全部免审批直行；毁灭性命令黑名单（deny 规则）仍强制拦截。
+	PermModeFullAccess = "fullAccess"
+)
+
 // PermissionsConfig 描述全局工具权限层（vortexagent PermissionChecker）的附加// 规则。基础策略由 tools.exec 派生（模式/白名单/毁灭性黑名单/安全工具直通），
 // 此处只做补充与例外，对所有工具（含 MCP）生效。
 type PermissionsConfig struct {
+	// Mode 全局权限模式：confirm（默认，危险操作网页审批）| acceptEdits（编辑类
+	// 免审批，执行命令仍审批）| fullAccess（全部免审批，黑名单仍拦截）。
+	// 管理后台"设置"页可在线切换（热生效）。
+	Mode string `yaml:"mode"`
 	// MCP 控制 MCP 工具（mcp_<server>_<tool>）是否需要网页审批：
 	// allow（默认，免审批）| confirm（每次调用进审批队列）。
 	MCP string `yaml:"mcp"`
@@ -266,6 +281,41 @@ type PermissionsConfig struct {
 	Allow []string `yaml:"allow"`
 	// Deny 附加全局拒绝规则，任何模式（含用户批准）下命中即拒。
 	Deny []string `yaml:"deny"`
+}
+
+// NormalizePermissionMode 规范化权限模式：空串视为 confirm，容忍 accept-edits /
+// full_access / bypass-permissions 等写法别名；非法值返回错误。
+func NormalizePermissionMode(s string) (string, error) {
+	flat := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.TrimSpace(s)))
+	switch flat {
+	case "", "confirm", "default":
+		return PermModeConfirm, nil
+	case "acceptedits":
+		return PermModeAcceptEdits, nil
+	case "fullaccess", "bypasspermissions", "bypass":
+		return PermModeFullAccess, nil
+	default:
+		return "", fmt.Errorf("未知权限模式 %q（可选 confirm / acceptEdits / fullAccess）", s)
+	}
+}
+
+// EffectiveMode 返回规范化后的权限模式（未配置视为 confirm）。
+func (p PermissionsConfig) EffectiveMode() string {
+	m, err := NormalizePermissionMode(p.Mode)
+	if err != nil {
+		return PermModeConfirm
+	}
+	return m
+}
+
+// EditsAutoApproved 返回编辑类操作（write_file/edit_file/mcp_edit 变更）是否免审批。
+func (p PermissionsConfig) EditsAutoApproved() bool {
+	return p.EffectiveMode() != PermModeConfirm
+}
+
+// BypassesAll 返回是否全部免审批（fullAccess；deny 黑名单不受影响）。
+func (p PermissionsConfig) BypassesAll() bool {
+	return p.EffectiveMode() == PermModeFullAccess
 }
 
 // TraceConfig 描述调用轨迹的持久化。
@@ -567,6 +617,44 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 	return os.Rename(tmp, path)
 }
 
+// UpdatePermissionMode 热更新 config.yaml 中的 permissions.mode：以 yaml.Node
+// 方式编辑（保留注释与原有结构；permissions 段不存在时追加），临时文件 + rename
+// 原子写回。mode 须为已校验的规范值（confirm / acceptEdits / fullAccess）。
+func UpdatePermissionMode(path, mode string) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	perms := mappingValue(root, "permissions")
+	if perms == nil || perms.Kind != yaml.MappingNode {
+		perms = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "permissions"},
+			perms)
+	}
+	setMappingKey(perms, "mode", mode)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
 // UpdatePersona 热更新 config.yaml 中的 persona 配置（active + 自定义预设列表）：
 // 以 yaml.Node 方式编辑（保留文件其余部分的注释与结构；persona 段不存在时追加），
 // 临时文件 + rename 原子写回。presets 允许为空（写空列表，表示清空自定义覆盖）。
@@ -787,6 +875,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Provider.Name != "openai" {
 		return fmt.Errorf("config: provider.name 仅支持 openai（OpenAI 兼容层），当前为 %q", c.Provider.Name)
+	}
+	if _, err := NormalizePermissionMode(c.Permissions.Mode); err != nil {
+		return fmt.Errorf("config: permissions.mode 非法: %v", err)
 	}
 	return nil
 }

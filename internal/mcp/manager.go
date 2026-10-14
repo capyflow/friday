@@ -339,6 +339,16 @@ func (m *Manager) StatusList() []Status {
 	return out
 }
 
+// ServerTools 返回某在线服务器当前提供的工具清单（未连接返回 nil）。
+func (m *Manager) ServerTools(name string) []Tool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cli, ok := m.clients[name]; ok {
+		return cli.Tools()
+	}
+	return nil
+}
+
 // Restart 手动重连一台服务器：断开旧进程并按当前配置重新拉起（用于设置页重连按钮）。
 func (m *Manager) Restart(name string) error {
 	m.mu.Lock()

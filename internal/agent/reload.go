@@ -63,6 +63,44 @@ func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Reg
 	})
 }
 
+// ReloadPermissions 切换全局权限模式（confirm / acceptEdits / fullAccess）并热生效：
+//  1. 校验模式值，在串行配置事务中构建独立快照与新 Agent（权限 Checker 随之重建）；
+//  2. 先写回 config.yaml（保留注释），全部成功后发布配置与 Agent；
+//  3. 更新审批队列的编辑免审标记（acceptEdits/fullAccess 下 write/edit/mcp_edit
+//     的内部审批直接放行）。任一步失败保留原运行状态。
+func ReloadPermissions(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue, mode string) error {
+	mode, err := config.NormalizePermissionMode(mode)
+	if err != nil {
+		return err
+	}
+	if cfg.Snapshot().Permissions.EffectiveMode() == mode {
+		return nil // 同模式重复切换：无变化
+	}
+	if err := cfg.Apply(func(next *config.Config) error {
+		next.Permissions.Mode = mode
+		return brain.Reconfigure(func() (*vxagent.Agent, error) {
+			var engine *ctxengine.Engine
+			if mgr := brain.CtxMgr(); mgr != nil {
+				engine = mgr.Current()
+			}
+			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
+			if err != nil {
+				return nil, err
+			}
+			if err := config.UpdatePermissionMode(configPath, mode); err != nil {
+				return nil, err
+			}
+			return newAg, nil
+		})
+	}); err != nil {
+		return err
+	}
+	if approver != nil {
+		approver.SetEditsFree(mode != config.PermModeConfirm)
+	}
+	return nil
+}
+
 // ReloadPersona 切换人设并保存自定义人设预设：
 //  1. 校验 active 必须命中（内置预设 + 自定义 presets 合集），防止切到不存在的人设；
 //  2. 用独立配置快照构建 Agent，先写回 config.yaml（保留注释）；

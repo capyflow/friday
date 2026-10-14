@@ -85,6 +85,44 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	return answer, nil
 }
 
+// Resume 继续被暂停的对话。ctx 取消时框架会回滚本轮（用户消息与已生成的
+// 部分回答都不在会话里），这里把它们重新注入会话历史，再以继续指令发问，
+// 让模型接着上次中断的地方完成任务——继续产生的内容与原问题在同一会话上下文中。
+// partial 为空表示被暂停时还没有任何输出（仅注入原问题）。
+func (b *Brain) Resume(ctx context.Context, key, question, partial string, onDelta func(llm.Delta)) (answer string, err error) {
+	fullKey := CurrentKey(key)
+	keyMu := b.pool.Lock(fullKey)
+	keyMu.Lock()
+	defer keyMu.Unlock()
+
+	b.rw.RLock()
+	defer b.rw.RUnlock()
+	ag := b.agent
+	if onDelta != nil {
+		ag = ag.WithDelta(onDelta)
+	}
+
+	sess := b.pool.Get(ctx, fullKey)
+	defer func() {
+		if saveErr := b.pool.Save(context.WithoutCancel(ctx), sess); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("保存对话失败: %w", saveErr))
+		}
+	}()
+
+	preLen := len(sess.Messages())
+	sess.Add(llm.NewTextMessage(llm.RoleUser, question))
+	if partial != "" {
+		sess.Add(llm.NewTextMessage(llm.RoleAssistant,
+			partial+"\n\n（这个回答被用户暂停，尚未完成）"))
+	}
+	answer, err = ag.Ask(ctx, sess, "请接着上面被暂停的回答继续完成任务，把没做完的部分做完；已经生成过的内容不要重复输出。")
+	if err != nil {
+		sess.Rollback(preLen)
+		return answer, err
+	}
+	return answer, nil
+}
+
 // sanitizeImages 把历史中某条消息的图片内容替换为占位文本。
 func (b *Brain) sanitizeImages(sess *sessionstore.Session, idx, n int) {
 	msgs := sess.Messages()

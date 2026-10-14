@@ -14,9 +14,41 @@ const MCP_TYPE_OPTIONS = [
   { value: 'http', label: '远程 URL' },
 ]
 
+const PERM_MODE_OPTIONS = [
+  { value: 'confirm', label: '确认（默认）' },
+  { value: 'acceptEdits', label: '自动接受编辑' },
+  { value: 'fullAccess', label: '完全信任' },
+]
+const PERM_MODE_DESC = {
+  confirm: '写文件、改 MCP 配置和白名单外的命令都会在网页弹卡片，批准后执行',
+  acceptEdits: '写文件、改 MCP 配置免审批直行；白名单外的命令仍需网页批准',
+  fullAccess: '全部免审批直行，仅毁灭性命令黑名单（rm -rf、shutdown 等）仍强制拦截',
+}
+
 /* ---------- 当前配置 / 模型 ---------- */
 const status = ref(null)
 const who = computed(() => store.username || '—')
+
+/* ---------- 权限模式 ---------- */
+const permMode = ref('confirm')
+const permMsg = reactive({ text: '', cls: '' })
+let permTimer = null
+function showPermMsg(t, ok) {
+  permMsg.text = t; permMsg.cls = ok ? 'ok' : 'err'
+  clearTimeout(permTimer); permTimer = setTimeout(() => { permMsg.text = '' }, 4000)
+}
+async function loadPermissions() {
+  try { permMode.value = (await api('GET', '/api/permissions')).mode || 'confirm' }
+  catch (e) { /* 设置页仍可离线浏览 */ }
+}
+async function savePermissions() {
+  if (permMode.value === 'fullAccess' &&
+    !confirm('完全信任模式下，执行命令、写文件、改配置都不再询问（毁灭性命令仍拦截）。确定切换？')) return
+  try {
+    const r = await api('POST', '/api/permissions', { mode: permMode.value })
+    showPermMsg(r.message || '已切换', true)
+  } catch (e) { showPermMsg(e.message, false) }
+}
 
 const settingsRows = computed(() => {
   const st = status.value
@@ -249,6 +281,7 @@ onMounted(async () => {
   loadHeartbeat()
   loadMCP()
   loadPersona()
+  loadPermissions()
 })
 </script>
 
@@ -260,6 +293,19 @@ onMounted(async () => {
       <div class="panel">
         <div class="panel-title">模型配置</div>
         <ProviderSettings :status="status" @saved="providerSaved" />
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">权限模式</div>
+        <div class="row">
+          <SelectBox v-model="permMode" :options="PERM_MODE_OPTIONS" aria-label="权限模式" style="min-width:150px"></SelectBox>
+          <button class="btn primary" type="button" @click="savePermissions">切换并热生效</button>
+        </div>
+        <div class="meta" style="margin-top:8px">{{ PERM_MODE_DESC[permMode] }}</div>
+        <div class="msg" :class="permMsg.cls">{{ permMsg.text }}</div>
+        <div class="set-note">参照 zcode 的多档权限设计：<b>确认</b>（默认）危险操作逐次网页批准，可"批准并记住"；
+          <b>自动接受编辑</b>日常改文件/改配置不打扰，跑命令仍把关；<b>完全信任</b>全部直行（黑名单仍拦截），
+          适合本机私人使用。切换立即热生效并写回 config.yaml。</div>
       </div>
 
       <div class="panel">
