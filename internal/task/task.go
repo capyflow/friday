@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +51,10 @@ const (
 const (
 	metaKind                 = "kind"
 	metaHeartbeat            = "heartbeat"
+	metaGoal                 = "goal"
+	metaGoalMaxSteps         = "goalMaxSteps"
+	metaGoalMaxTokens        = "goalMaxTokens"
+	metaGoalSkill            = "goalSkill"
 	metaChannel              = "channel"
 	metaTodoID               = "todoId"
 	metaNotificationParentID = "notificationParentId"
@@ -85,6 +90,15 @@ type Task struct {
 	// TodoID 由待办管理器维护，公开编辑任务时保留关联。
 	TodoID               string `json:"todoId,omitempty"`
 	NotificationParentID string `json:"notificationParentId,omitempty"`
+
+	// Goal 把一条智能任务升级为"目标"：到点后不是一次问答，而是在隔离会话里
+	// 多轮自主推进，直到达成、到达步数上限或 token 预算。
+	Goal bool `json:"goal,omitempty"`
+	// MaxSteps / MaxTokens 是单个目标的预算（0 = 用 cost.budget 的默认值）。
+	MaxSteps  int   `json:"maxSteps,omitempty"`
+	MaxTokens int64 `json:"maxTokens,omitempty"`
+	// Skill 把目标钉在某个技能上执行（空 = 不启用技能，也不做自动匹配）。
+	Skill string `json:"skill,omitempty"`
 }
 
 // Callback 在任务到点时被调用，fn 在独立 goroutine 中执行。
@@ -481,6 +495,18 @@ func buildGoal(t Task) (*autonomous.Goal, error) {
 	if t.Channel != "" {
 		g.SetMeta(metaChannel, t.Channel)
 	}
+	if t.Goal {
+		g.SetMeta(metaGoal, "1")
+	}
+	if t.MaxSteps > 0 {
+		g.SetMeta(metaGoalMaxSteps, strconv.Itoa(t.MaxSteps))
+	}
+	if t.MaxTokens > 0 {
+		g.SetMeta(metaGoalMaxTokens, strconv.FormatInt(t.MaxTokens, 10))
+	}
+	if t.Skill != "" {
+		g.SetMeta(metaGoalSkill, t.Skill)
+	}
 	if t.TodoID != "" {
 		g.SetMeta(metaTodoID, t.TodoID)
 	}
@@ -537,7 +563,17 @@ func taskView(g autonomous.Goal) Task {
 		Channel:              g.Meta[metaChannel],
 		TodoID:               g.Meta[metaTodoID],
 		NotificationParentID: g.Meta[metaNotificationParentID],
+		Goal:                 g.Meta[metaGoal] == "1",
+		Skill:                g.Meta[metaGoalSkill],
 		Status:               StatusActive,
+	}
+	// 预算字段解析失败按"未设置"处理（沿用旧数据缺字段的读法），
+	// 执行器会回落到 cost.budget 的默认值，不会因为脏数据直接罢工。
+	if n, err := strconv.Atoi(g.Meta[metaGoalMaxSteps]); err == nil && n > 0 {
+		tk.MaxSteps = n
+	}
+	if n, err := strconv.ParseInt(g.Meta[metaGoalMaxTokens], 10, 64); err == nil && n > 0 {
+		tk.MaxTokens = n
 	}
 	if g.Status == autonomous.GoalStatusPaused {
 		tk.Status = StatusPaused

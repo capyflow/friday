@@ -20,6 +20,7 @@ import (
 	"github.com/capyflow/vortexagent/ctxengine"
 
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/llmx"
 	"github.com/capyflow/friday/internal/memory"
 )
 
@@ -83,7 +84,9 @@ func (m *ContextManager) Rebuild(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("创建摘要器 provider: %w", err)
 	}
-	engine := ctxengine.New(archive, ctxengine.NewLLMSummarizer(provider, cfg.Provider.Model), engineCfg)
+	// 摘要/归档调用绕过 agent Hooks，单独包一层计入 token 账本。
+	counted := &llmx.Counted{Base: provider, Origin: OriginSummarizer, Model: cfg.Provider.Model}
+	engine := ctxengine.New(archive, ctxengine.NewLLMSummarizer(counted, cfg.Provider.Model), engineCfg)
 	m.stopRetentionLocked()
 	m.engine = engine
 	m.archive = archive

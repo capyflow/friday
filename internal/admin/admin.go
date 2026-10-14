@@ -41,6 +41,27 @@
 //	GET    /api/wiki/pages/:id  记忆页详情（含原始 markdown 正文）
 //	PUT    /api/wiki/pages/:id  更新记忆页
 //	DELETE /api/wiki/pages/:id  删除记忆页
+//	GET    /api/usage         token 用量账本（按天明细 + 按模型/来源/会话/运行分桶，需登录）
+//	GET    /api/cost          成本态势与预算（三态 + 主动任务暂停标记，需登录）
+//	POST   /api/cost/pause    暂停主动型工作（心跳/智能任务/目标；不写配置，需登录）
+//	POST   /api/cost/resume   恢复主动型工作（需登录）
+//	GET    /api/cost/pricing  模型价格表 + 有用量但未配价的模型（需登录）
+//	POST   /api/cost/pricing  保存价格表（校验后原子写 pricing.json 并热加载，需登录）
+//	GET    /api/skills        技能列表（含无效文件原因与所在目录，需登录）
+//	POST   /api/skills/reload 重新扫描技能目录（需登录）
+//	GET    /api/skills/:id    单个技能的摘要与 SKILL.md 原文（需登录）
+//	POST   /api/skills        新建技能（校验失败返回原因，不落盘，需登录）
+//	PUT    /api/skills/:id    编辑技能（需登录）
+//	POST   /api/skills/:id/enabled 启用/停用技能（只改 frontmatter 一个键，需登录）
+//	DELETE /api/skills/:id    删除技能（用户目录技能拒绝，需登录）
+//	GET    /api/goals         目标列表（进度与预算，需登录）
+//	GET    /api/goals/:id   单个目标详情与该目标的执行轮次（需登录）
+//	POST   /api/goals/:id/stop 在步边界停止当前目标运行（需登录）
+//	GET    /api/plans         计划列表（?status=active|awaiting 过滤，需登录）
+//	GET    /api/plans/:id     计划详情（含每步状态与 token，需登录）
+//	POST   /api/plans/:id/confirm 确认或否决计划（可带编辑后的步骤，需登录）
+//	POST   /api/plans/:id/pause|resume|cancel 暂停/继续/取消计划（需登录）
+//	POST   /api/plans/:id/steps/:n/retry|skip 重试或跳过某一步（需登录）
 package admin
 
 import (
@@ -67,9 +88,12 @@ import (
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/cost"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/notification"
+	"github.com/capyflow/friday/internal/plan"
+	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/tools"
@@ -115,8 +139,15 @@ type Server struct {
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
 	mcpUpdateMu   sync.Mutex
+	skillUpdateMu sync.Mutex
 	notifications *notification.Center
 	heartbeatFile string // HEARTBEAT.md 路径
+	pricer        *cost.Pricer
+	guard         *cost.Guard
+	skills        *skill.Store
+	plans         *plan.Store
+	planRunner    *plan.Runner
+	goalRunner    *agent.GoalRunner
 	info          Info
 	startedAt     time.Time
 }
@@ -138,6 +169,16 @@ type Options struct {
 	Mcp           *mcp.Manager
 	HeartbeatFile string
 	Notifications *notification.Center
+	// Pricer/Guard 支撑成本面板与软限额接口（可为 nil：不挂载 /api/cost*）。
+	Pricer *cost.Pricer
+	Guard  *cost.Guard
+	// Skills 技能仓库（可为 nil：不挂载 /api/skills*，技能层整体关闭）。
+	Skills *skill.Store
+	// Plans/PlanRunner 支撑计划模式（任一为 nil 则不挂载 /api/plans*）；
+	// GoalRunner 支撑目标模式的查看与软停（nil 则不挂载 /api/goals*）。
+	Plans      *plan.Store
+	PlanRunner *plan.Runner
+	GoalRunner *agent.GoalRunner
 }
 
 // New 创建管理后台。accounts 为账号仓库（默认 admin/admin，可通过启动配置预置）；
@@ -166,6 +207,12 @@ func New(o Options) *Server {
 		info:          o.Info,
 		startedAt:     time.Now(),
 		notifications: o.Notifications,
+		pricer:        o.Pricer,
+		guard:         o.Guard,
+		skills:        o.Skills,
+		plans:         o.Plans,
+		planRunner:    o.PlanRunner,
+		goalRunner:    o.GoalRunner,
 	}
 }
 
@@ -210,6 +257,14 @@ func (s *Server) Handler() http.Handler {
 		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
 	}
+	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
+	s.registerCostRoutes(root)
+	// 技能管理（技能层关闭时跳过）。
+	s.registerSkillRoutes(root)
+	// 计划模式（未启用时跳过）。
+	s.registerPlanRoutes(root)
+	// 目标模式（未启用时跳过）。
+	s.registerGoalRoutes(root)
 	// 旧页面地址兼容：统一回到首页外壳。
 	root.AddStaticRouter("/admin", s.handleRedirectRoot)
 	root.AddStaticRouter("/traces", s.handleRedirectRoot)
@@ -441,7 +496,9 @@ func (s *Server) handleListTraces(ctx *vhttp.Context) error {
 	if n, err := strconv.Atoi(ctx.GinContext().Query("limit")); err == nil && n > 0 {
 		limit = n
 	}
-	events, stats := trace.Events(limit)
+	// ?session=plan-<id> / ?session=goal-<id> 只看一次多步运行的全部轮次。
+	session := strings.TrimSpace(ctx.GinContext().Query("session"))
+	events, stats := trace.Events(limit, session)
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"events": events, "stats": stats})
 }
 
@@ -488,7 +545,30 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 		"todos":            map[string]any{"pending": pending},
 		"memories":         s.memory.Count(),
 		"files":            map[string]string{"tasks": s.info.TaskFile, "todos": s.info.TodoFile, "memories": s.info.MemoryDir},
+		"cost":             s.costStatus(),
 	})
+}
+
+// costStatus 返回成本态势摘要（闸门未装配时为 nil，前端不显示横幅）。
+func (s *Server) costStatus() map[string]any {
+	if s.guard == nil {
+		return nil
+	}
+	v := s.guard.Evaluate()
+	return map[string]any{
+		"state":           v.State,
+		"ratio":           v.Ratio,
+		"tightest":        v.Tightest,
+		"todayTokens":     v.TodayTokens,
+		"todayCost":       v.TodayCost,
+		"monthlyTokens":   v.MonthlyTokens,
+		"monthlyCost":     v.MonthlyCost,
+		"currency":        v.Currency,
+		"manualPaused":    v.ManualPaused,
+		"proactivePaused": v.ProactivePaused,
+		"unknownModels":   v.UnknownModels,
+		"zeroCalls":       v.ZeroCalls,
+	}
 }
 
 // handleListTasks 返回任务列表。
@@ -519,6 +599,7 @@ func (s *Server) handleCreateTask(ctx *vhttp.Context) error {
 // handleCancelTask 取消一条任务。
 func (s *Server) handleCancelTask(ctx *vhttp.Context) error {
 	id := ctx.GinContext().Param("id")
+	target, found := s.engine.Get(id)
 	ok, err := s.engine.CancelErr(id)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
@@ -526,10 +607,28 @@ func (s *Server) handleCancelTask(ctx *vhttp.Context) error {
 	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到任务 #" + id})
 	}
+	if found && target.Goal {
+		s.releaseGoalSession(id)
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"message": "已取消任务 #" + id,
 		"tasks":   s.engine.List(),
 	})
+}
+
+// releaseGoalSession 释放目标占用的内存会话并清理其轨迹。
+// SessionPool 只增不减，不释放会随目标数量线性膨胀；轨迹与对话历史同生命周期
+// （与 /api/context/clear 一致）。目标仍在推进时跳过——清会话要等当前这一步结束，
+// 会把取消请求挂住几分钟，此时留到目标跑完后再删。
+func (s *Server) releaseGoalSession(id string) {
+	if s.chat == nil || (s.goalRunner != nil && s.goalRunner.Running(id)) {
+		return
+	}
+	b := s.chat.Brain()
+	if b == nil || b.ReleaseGoalSession(id) != nil {
+		return
+	}
+	trace.ClearSession(agent.GoalSessionKey(id))
 }
 
 // wikiPageReq 是新建/更新记忆页的请求体。

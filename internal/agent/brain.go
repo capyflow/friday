@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
@@ -15,6 +16,8 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/skill"
+	"github.com/capyflow/friday/internal/trace"
 )
 
 // Brain 持有 Agent 与会话池，按会话 key 串行化提问。
@@ -28,6 +31,10 @@ type Brain struct {
 
 	customMu sync.RWMutex           // 保护 custom（自定义指令表，SetCustom 可运行期替换）
 	custom   []config.CustomCommand // 自定义指令：触发词 → 提示词展开
+
+	skillMu   sync.RWMutex      // 保护技能仓库指针与匹配开关（SetSkills 可运行期替换）
+	skills    *skill.Store      // 技能仓库（可为 nil：不启用技能）
+	skillAuto skill.MatchConfig // 自动匹配开关与阈值
 }
 
 // NewBrain 创建对话大脑。pool 为会话池（含持久化存储），ctx 为上下文引擎
@@ -40,18 +47,122 @@ func NewBrain(ag *vxagent.Agent, pool *SessionPool, ctx *ContextManager) *Brain 
 // CtxMgr 返回上下文引擎管理器（热更新路径重建引擎用，可为 nil）。
 func (b *Brain) CtxMgr() *ContextManager { return b.ctx }
 
-// Ask 提问并等待完整回答。会话由 ctx 中的会话 key 决定（WithSessionKey，
-// 未设置时用网页会话）；onDelta 为本次请求的流式增量回调（可为 nil）；
-// imgs 为随消息发送的图片内容（可为 nil），会作为一条独立的用户消息
-// 紧邻问题文本之前注入会话。
-func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta)) (answer string, err error) {
+// SetSkills 注入技能仓库与自动匹配配置（启动时调用一次）。技能是按次生效的，
+// 后台增删改只需 Store.Reload，不需要重建 Agent。
+func (b *Brain) SetSkills(store *skill.Store, autoTrigger bool) {
+	b.skillMu.Lock()
+	defer b.skillMu.Unlock()
+	b.skills = store
+	b.skillAuto = skill.MatchConfig{Enabled: autoTrigger}
+}
+
+// callCfg 汇总本次提问的可选项。
+type callCfg struct {
+	skillName string // 显式点名的技能
+	inline    *vxagent.Skill
+	noAuto    bool // 关闭自动匹配（心跳/智能任务等机器生成的提示词）
+	jsonMode  bool // 要求模型只输出 JSON（计划模式规划轮用）
+	maxIter   int  // 按次覆盖工具轮数上限（计划/目标用）
+}
+
+// CallOpt 修改本次提问的行为。
+type CallOpt func(*callCfg)
+
+// WithSkillName 指定本轮使用的技能（名字不存在时明确回复，不降级为自动匹配）。
+func WithSkillName(name string) CallOpt {
+	return func(c *callCfg) { c.skillName = strings.TrimSpace(name) }
+}
+
+// WithInlineSkill 直接传入一份内存技能（不进技能仓库）。
+//
+// 用途：计划模式的规划轮需要一份限定工具面的内置指令包——它是实现细节，
+// 不该出现在用户可增删改的技能列表里。
+func WithInlineSkill(sk *vxagent.Skill) CallOpt {
+	return func(c *callCfg) { c.inline = sk }
+}
+
+// WithoutAutoSkill 关闭本轮的技能自动匹配。
+func WithoutAutoSkill() CallOpt {
+	return func(c *callCfg) { c.noAuto = true }
+}
+
+// WithJSONMode 要求本轮回答只输出合法 JSON（计划模式产步骤清单用）。
+func WithJSONMode() CallOpt {
+	return func(c *callCfg) { c.jsonMode = true }
+}
+
+// WithMaxIterations 覆盖本轮的工具调用轮数上限（n<=0 时忽略）。
+func WithMaxIterations(n int) CallOpt {
+	return func(c *callCfg) { c.maxIter = n }
+}
+
+// SkillSink 收集本轮实际启用的技能名。暂停-继续必须复用同一技能（技能限定了
+// 工具面/模型），而自动匹配的结果只有 Brain 知道，因此用出参回传给调用方。
+type SkillSink struct {
+	mu   sync.Mutex
+	name string
+}
+
+// Name 返回本轮启用的技能名（未启用为空）。
+func (s *SkillSink) Name() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
+func (s *SkillSink) set(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.name = name
+	s.mu.Unlock()
+}
+
+type skillSinkKey struct{}
+
+// WithSkillSink 把出参挂到 ctx 上，Ask/AskWith 会在选中技能时写入。
+func WithSkillSink(ctx context.Context, sink *SkillSink) context.Context {
+	return context.WithValue(ctx, skillSinkKey{}, sink)
+}
+
+func skillSinkFrom(ctx context.Context) *SkillSink {
+	s, _ := ctx.Value(skillSinkKey{}).(*SkillSink)
+	return s
+}
+
+// Ask 提问并等待完整回答（等价于 AskWith 不带选项）。
+func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta)) (string, error) {
+	return b.AskWith(ctx, text, imgs, onDelta)
+}
+
+// AskWith 提问并等待完整回答，可带本轮行为选项。会话由 ctx 中的会话 key 决定
+// （WithSessionKey，未设置时用网页会话）；onDelta 为本次请求的流式增量回调
+// （可为 nil）；imgs 为随消息发送的图片内容（可为 nil），会作为一条独立的用户
+// 消息紧邻问题文本之前注入会话。
+func (b *Brain) AskWith(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta), opts ...CallOpt) (answer string, err error) {
 	key := CurrentKey(SessionKeyFrom(ctx))
 	keyMu := b.pool.Lock(key)
 	keyMu.Lock()
 	defer keyMu.Unlock()
 
-	// 自定义指令：命中触发词先展开为提示词（网页/终端/钉钉/飞书全入口生效）。
-	text = b.expandCustom(text)
+	cfg := callCfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	// 技能选择：自定义指令命中优先于自动匹配；显式点名不成立时直接回绝。
+	question, askOpts, shortCircuit, err := b.resolveSkill(ctx, text, cfg)
+	if err != nil {
+		return "", err
+	}
+	if shortCircuit != "" {
+		return shortCircuit, nil
+	}
 
 	b.rw.RLock()
 	defer b.rw.RUnlock()
@@ -68,7 +179,7 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	}()
 
 	if len(imgs) == 0 {
-		return ag.Ask(ctx, sess, text)
+		return ag.Ask(ctx, sess, question, askOpts...)
 	}
 	// 多模态：先注入仅含图片的用户消息，再走文本 Ask。
 	// 框架的 Ask 只收字符串，且它失败时会回滚到自己的起点（不含图片消息），
@@ -76,7 +187,7 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	// 避免大体积 base64 常驻会话（每轮重复上传、内存膨胀）。
 	preLen := len(sess.Messages())
 	sess.Add(llm.Message{Role: llm.RoleUser, Content: imgs})
-	answer, err = ag.Ask(ctx, sess, text)
+	answer, err = ag.Ask(ctx, sess, question, askOpts...)
 	if err != nil {
 		sess.Rollback(preLen)
 		return answer, err
@@ -85,15 +196,132 @@ func (b *Brain) Ask(ctx context.Context, text string, imgs []llm.Content, onDelt
 	return answer, nil
 }
 
+// resolveSkill 决定本轮用哪个技能，返回改写后的提问、传给框架的 AskOption，
+// 以及（点名了一个不存在的技能时）直接回给用户的话。
+//
+// 优先级：显式点名 > 自定义指令（命中则跳过自动匹配）> 自动匹配（opt-in 技能）。
+// 每次决策都写轨迹与"思考过程"事件，让"为什么套了这段提示词"可查。
+func (b *Brain) resolveSkill(ctx context.Context, text string, cfg callCfg) (question string, askOpts []vxagent.AskOption, shortCircuit string, err error) {
+	question = text
+	if cfg.jsonMode {
+		askOpts = append(askOpts, vxagent.WithJSONMode())
+	}
+	if cfg.maxIter > 0 {
+		askOpts = append(askOpts, vxagent.WithMaxIterations(cfg.maxIter))
+	}
+	if cfg.inline != nil {
+		// 内置技能（规划轮等）：直接生效，不参与仓库查找，也不写进 SkillSink
+		// ——它不是用户可选的技能，暂停现场没必要复用一份内部提示词。
+		askOpts = append(askOpts, vxagent.WithSkill(cfg.inline))
+		trace.Record(ctx, "skill", "启用内置技能 %s（系统内部）", cfg.inline.Metadata.Name)
+		return question, askOpts, "", nil
+	}
+
+	b.skillMu.RLock()
+	store, autoCfg := b.skills, b.skillAuto
+	b.skillMu.RUnlock()
+
+	// 1) 显式点名：/skill 名 正文 或 $名 正文；Brain 级 WithSkillName 优先于此语法。
+	name := cfg.skillName
+	invoked := false
+	if name == "" {
+		if parsed, rest, ok := skill.ParseInvocation(text); ok {
+			name, question, invoked = parsed, rest, true
+			if question == "" {
+				question = text // 只打了 "/skill 名"：把原句交给技能，让它按清单办事
+			}
+		}
+	}
+	if name != "" && (invoked || cfg.skillName != "") {
+		e := b.lookupSkill(store, name)
+		if e == nil {
+			note := "没有叫「" + name + "」的可用技能（名字可在「设置 → 技能」里核对）。"
+			if invoked {
+				question = text
+			}
+			trace.Record(ctx, "skill", "显式点名的技能 %q 不存在或已禁用，未调用模型", name)
+			PublishStep(ctx, Step{Kind: "skill", Name: name, Status: "fail", Detail: "技能不存在"})
+			return question, askOpts, note, nil
+		}
+		askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+		skillSinkFrom(ctx).set(e.Name())
+		why := append([]string{"explicit:" + name}, e.MatchedBy...)
+		trace.Record(ctx, "skill", "启用技能 %s（依据：%s）", e.Name(), strings.Join(why, "、"))
+		PublishStep(ctx, Step{Kind: "skill", Name: e.Name(), Status: "ok", Detail: strings.Join(why, "、")})
+		return question, askOpts, "", nil
+	}
+
+	// 2) 自定义指令：命中即展开，并且不再做技能自动匹配。
+	expanded, matchedCustom := b.expandCustom(question)
+	question = expanded
+	if matchedCustom {
+		trace.Record(ctx, "skill", "命中自定义指令，跳过技能自动匹配")
+		return question, askOpts, "", nil
+	}
+
+	// 3) 自动匹配（心跳等机器提示词走 WithoutAutoSkill 跳过）
+	if cfg.noAuto || store == nil || !autoCfg.Enabled {
+		return question, askOpts, "", nil
+	}
+	if e, why, ok := skill.Match(question, store.Candidates(), autoCfg); ok {
+		askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+		skillSinkFrom(ctx).set(e.Name())
+		trace.Record(ctx, "skill", "自动启用技能 %s（依据：%s）", e.Name(), strings.Join(why, "、"))
+		PublishStep(ctx, Step{Kind: "skill", Name: e.Name(), Status: "ok", Detail: strings.Join(why, "、")})
+		return question, askOpts, "", nil
+	}
+	trace.Record(ctx, "skill", "未匹配到技能（可用技能 %d 个，自动匹配需 auto: true）", len(store.Candidates()))
+	return question, askOpts, "", nil
+}
+
+// lookupSkill 按名字取可用技能（禁用/解析失败视为不存在）。
+func (b *Brain) lookupSkill(store *skill.Store, name string) *skill.Entry {
+	if store == nil {
+		return nil
+	}
+	e, ok := store.FindName(name)
+	if !ok || !e.Usable() {
+		return nil
+	}
+	return e
+}
+
 // Resume 继续被暂停的对话。ctx 取消时框架会回滚本轮（用户消息与已生成的
 // 部分回答都不在会话里），这里把它们重新注入会话历史，再以继续指令发问，
 // 让模型接着上次中断的地方完成任务——继续产生的内容与原问题在同一会话上下文中。
 // partial 为空表示被暂停时还没有任何输出（仅注入原问题）。
-func (b *Brain) Resume(ctx context.Context, key, question, partial string, onDelta func(llm.Delta)) (answer string, err error) {
+//
+// 必须复用暂停前那一轮的技能：技能限定了工具面/模型/温度，继续时换一套
+// 语义会静默漂移。opts 里的 WithSkillName 由调用方从暂停现场带上；
+// 自动匹配在这里一律关闭（继续指令是机器文本，拿它猜技能结果不可预测）。
+func (b *Brain) Resume(ctx context.Context, key, question, partial string, onDelta func(llm.Delta), opts ...CallOpt) (answer string, err error) {
 	fullKey := CurrentKey(key)
 	keyMu := b.pool.Lock(fullKey)
 	keyMu.Lock()
 	defer keyMu.Unlock()
+
+	cfg := callCfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	// 只认显式指定的技能：继续指令是机器文本，既不展开自定义指令也不做自动匹配。
+	var askOpts []vxagent.AskOption
+	if cfg.skillName != "" {
+		b.skillMu.RLock()
+		store := b.skills
+		b.skillMu.RUnlock()
+		if e := b.lookupSkill(store, cfg.skillName); e != nil {
+			askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+			trace.Record(ctx, "skill", "继续被暂停的回答，沿用技能 %s", e.Name())
+		} else if cfg.skillName != "" {
+			trace.Record(ctx, "skill", "暂停现场记录的技能 %q 已不可用，继续时不再启用", cfg.skillName)
+		}
+	}
+	if cfg.maxIter > 0 {
+		askOpts = append(askOpts, vxagent.WithMaxIterations(cfg.maxIter))
+	}
 
 	b.rw.RLock()
 	defer b.rw.RUnlock()
@@ -115,7 +343,7 @@ func (b *Brain) Resume(ctx context.Context, key, question, partial string, onDel
 		sess.Add(llm.NewTextMessage(llm.RoleAssistant,
 			partial+"\n\n（这个回答被用户暂停，尚未完成）"))
 	}
-	answer, err = ag.Ask(ctx, sess, "请接着上面被暂停的回答继续完成任务，把没做完的部分做完；已经生成过的内容不要重复输出。")
+	answer, err = ag.Ask(ctx, sess, "请接着上面被暂停的回答继续完成任务，把没做完的部分做完；已经生成过的内容不要重复输出。", askOpts...)
 	if err != nil {
 		sess.Rollback(preLen)
 		return answer, err

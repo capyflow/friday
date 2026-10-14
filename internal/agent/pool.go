@@ -41,6 +41,46 @@ func SessionKeyFrom(ctx context.Context) string {
 	return SessionWeb
 }
 
+// 用量归属：来源渠道与所属运行（计划/目标）。token 账本按这两项分桶，
+// 才能回答"钱花在哪个入口、哪次多步运行上"。入口各设一次，框架钩子透传 ctx。
+type originKey struct{}
+type runKey struct{}
+
+// 已知来源渠道。
+const (
+	OriginWeb        = "web"
+	OriginRepl       = "repl"
+	OriginTask       = "task"       // 心跳与智能任务（含目标运行）
+	OriginPlan       = "plan"       // 计划模式的每一步
+	OriginSummarizer = "summarizer" // 上下文引擎的摘要/归档调用
+)
+
+// WithOrigin 标记本次请求的来源渠道；空值按 unknown 记账。
+func WithOrigin(ctx context.Context, origin string) context.Context {
+	return context.WithValue(ctx, originKey{}, origin)
+}
+
+// OriginFrom 取出来源渠道；未设置返回 "unknown"（老路径与遗漏入口都归到这里）。
+func OriginFrom(ctx context.Context) string {
+	if o, ok := ctx.Value(originKey{}).(string); ok && o != "" {
+		return o
+	}
+	return "unknown"
+}
+
+// WithRun 把本次请求归属到某次多步运行（"plan:<id>" / "goal:<id>"）。
+func WithRun(ctx context.Context, run string) context.Context {
+	return context.WithValue(ctx, runKey{}, run)
+}
+
+// RunFrom 取出所属运行；普通对话为空串（账本不建 run 桶）。
+func RunFrom(ctx context.Context) string {
+	if r, ok := ctx.Value(runKey{}).(string); ok {
+		return r
+	}
+	return ""
+}
+
 // SessionInfo 是一个会话的概要（管理后台会话列表用）。
 type SessionInfo struct {
 	Key       string    `json:"key"`

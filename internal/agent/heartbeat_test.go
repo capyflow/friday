@@ -17,18 +17,30 @@ import (
 
 // fakeDialogue 记录 prompt 并返回脚本化回答。
 type fakeDialogue struct {
-	mu      sync.Mutex
-	prompts []string
-	session []string // 每次提问的会话 key
-	replies []string // 依次返回（越界取最后一个）
-	err     error
+	mu       sync.Mutex
+	prompts  []string
+	session  []string // 每次提问的会话 key
+	replies  []string // 依次返回（越界取最后一个）
+	err      error
+	noAuto   bool // 本轮是否显式关闭技能自动匹配
+	skillReq []string
 }
 
-func (f *fakeDialogue) Ask(ctx context.Context, text string, _ []llm.Content, _ func(llm.Delta)) (string, error) {
+func (f *fakeDialogue) AskWith(ctx context.Context, text string, _ []llm.Content, _ func(llm.Delta), opts ...CallOpt) (string, error) {
+	cfg := callCfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prompts = append(f.prompts, text)
 	f.session = append(f.session, SessionKeyFrom(ctx))
+	f.noAuto = f.noAuto || cfg.noAuto
+	if cfg.skillName != "" {
+		f.skillReq = append(f.skillReq, cfg.skillName)
+	}
 	if f.err != nil {
 		return "", f.err
 	}
@@ -208,5 +220,108 @@ func TestQuietHoursParse(t *testing.T) {
 		if got := r.inQuiet(c.t); got != c.expect {
 			t.Errorf("inQuiet(%q @ %02d:%02d) = %v, 期望 %v", c.spec, c.t.Hour(), c.t.Minute(), got, c.expect)
 		}
+	}
+}
+
+// stubGate 是 BudgetGate 的假实现，记录闸门被问了哪些类别。
+type stubGate struct {
+	allowed bool
+	reason  string
+	calls   []string
+}
+
+func (s *stubGate) ProactiveAllowed(what string) (bool, string) {
+	s.calls = append(s.calls, what)
+	return s.allowed, s.reason
+}
+
+func clockNow() time.Time { return time.Now() }
+
+// TestTaskRunnerBudgetGateSkipsModel 超预算时根本不调模型——省的是真金白银，
+// 但仍留一条可查的静默记录。
+func TestTaskRunnerBudgetGateSkipsModel(t *testing.T) {
+	d := &fakeDialogue{replies: []string{"[推送]\n不该出现"}}
+	gate := &stubGate{allowed: false, reason: "额度用量 105%（dailyTokens）"}
+	r := &TaskRunner{Ask: d, Budget: gate, Now: clockNow}
+
+	body, push, err := r.Prepare(context.Background(), task.Task{ID: "t1", Kind: task.KindAgent, Text: "巡检"})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if push {
+		t.Error("闸门拦截时不应推送")
+	}
+	d.mu.Lock()
+	promptCount := len(d.prompts)
+	d.mu.Unlock()
+	if promptCount != 0 {
+		t.Error("闸门拦截时不应调用模型")
+	}
+	if !strings.Contains(body, "额度用量") {
+		t.Errorf("静默文本应带上原因，实际 %q", body)
+	}
+	if len(gate.calls) != 1 || gate.calls[0] != "智能任务" {
+		t.Errorf("闸门应按任务类别询问，实际 %+v", gate.calls)
+	}
+}
+
+// TestTaskRunnerBudgetGateHeartbeatLabel 心跳任务用可读类别名询问闸门。
+func TestTaskRunnerBudgetGateHeartbeatLabel(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "HEARTBEAT.md")
+	if err := os.WriteFile(file, []byte("- 检查待办"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gate := &stubGate{allowed: false, reason: "已手动暂停"}
+	r := &TaskRunner{Ask: &fakeDialogue{}, HeartbeatFile: file, Budget: gate, Now: clockNow}
+
+	if _, _, err := r.Prepare(context.Background(), task.Task{ID: "heartbeat", Kind: task.KindAgent, Heartbeat: true}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(gate.calls) != 1 || gate.calls[0] != "心跳巡检" {
+		t.Errorf("心跳应标注为「心跳巡检」，实际 %+v", gate.calls)
+	}
+}
+
+// TestTaskRunnerBudgetAllowsThrough 预算充足时照常执行，闸门不得干扰输出协议。
+func TestTaskRunnerBudgetAllowsThrough(t *testing.T) {
+	d := &fakeDialogue{replies: []string{"[推送]\n该喝水了"}}
+	n := &fakeNotifier{name: "console"}
+	gate := &stubGate{allowed: true}
+	r := &TaskRunner{Ask: d, Notifiers: []Notifier{n}, Budget: gate, Now: clockNow}
+
+	r.Run(context.Background(), task.Task{ID: "t1", Kind: task.KindAgent, Text: "提醒喝水"})
+	if n.count() != 1 {
+		t.Fatalf("放行时应正常推送，实际 %d 条", n.count())
+	}
+	if gate.calls == nil || gate.calls[0] != "智能任务" {
+		t.Errorf("放行前也应先问过闸门，实际 %+v", gate.calls)
+	}
+}
+
+// TestTaskRunnerNilBudgetKeepsLegacyBehavior 未接闸门（老装配/测试）时行为不变。
+func TestTaskRunnerNilBudgetKeepsLegacyBehavior(t *testing.T) {
+	d := &fakeDialogue{replies: []string{"[推送]\n一切照常"}}
+	n := &fakeNotifier{name: "console"}
+	r := &TaskRunner{Ask: d, Notifiers: []Notifier{n}, Now: clockNow}
+
+	r.Run(context.Background(), task.Task{ID: "t1", Kind: task.KindAgent, Text: "提醒"})
+	if n.count() != 1 {
+		t.Fatalf("无闸门时应正常推送，实际 %d 条", n.count())
+	}
+}
+
+// TestTaskRunnerDisablesAutoSkillMatching 智能任务的提示词是机器生成的长文本，
+// 拿它去猜用户技能结果不可预测，必须在提问前显式关闭自动匹配。
+func TestTaskRunnerDisablesAutoSkillMatching(t *testing.T) {
+	d := &fakeDialogue{replies: []string{"[静默]"}}
+	r := &TaskRunner{Ask: d, HeartbeatFile: filepath.Join(t.TempDir(), "HEARTBEAT.md"), Now: clockNow}
+
+	if _, _, err := r.Prepare(context.Background(), task.Task{ID: "t1", Kind: task.KindAgent, Text: "巡检"}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.noAuto {
+		t.Error("智能任务应带 WithoutAutoSkill 提问")
 	}
 }

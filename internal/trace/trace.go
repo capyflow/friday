@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +29,7 @@ const (
 // 本轮发给模型的输入 token、模型输出的 token、调用耗时（毫秒）。
 type Entry struct {
 	Time time.Time `json:"time"`
-	Kind string    `json:"kind"` // llm_in / llm_out / tool_req / tool / answer / error / task
+	Kind string    `json:"kind"` // 事件类型，如 llm_in / tool / answer / skill
 	Text string    `json:"text"`
 	In   int64     `json:"in,omitempty"`
 	Out  int64     `json:"out,omitempty"`
@@ -288,15 +289,16 @@ func Get(id string) (Request, bool) {
 
 // Event 是全局事件流中的一条调用事件（已展开请求归属信息）。
 type Event struct {
-	Time   time.Time `json:"time"`
-	Kind   string    `json:"kind"` // llm_in / llm_out / tool_req / tool / answer / error / task
-	Text   string    `json:"text"`
-	In     int64     `json:"in,omitempty"`
-	Out    int64     `json:"out,omitempty"`
-	Ms     int64     `json:"ms,omitempty"`
-	ReqID  string    `json:"reqId"`
-	Source string    `json:"source,omitempty"`
-	Input  string    `json:"input"` // 所属请求的用户输入（展示调用上下文用，已截断）
+	Time    time.Time `json:"time"`
+	Kind    string    `json:"kind"` // 事件类型，如 llm_in / tool / answer / skill
+	Text    string    `json:"text"`
+	In      int64     `json:"in,omitempty"`
+	Out     int64     `json:"out,omitempty"`
+	Ms      int64     `json:"ms,omitempty"`
+	ReqID   string    `json:"reqId"`
+	Source  string    `json:"source,omitempty"`
+	Session string    `json:"session,omitempty"` // 所属会话（plan-<id> / goal-<id> 即一次多步运行）
+	Input   string    `json:"input"`             // 所属请求的用户输入（展示调用上下文用，已截断）
 }
 
 // Stats 是全局统计：请求次数与 token 累计（不受 limit 影响，全量统计）。
@@ -307,15 +309,25 @@ type Stats struct {
 }
 
 // Events 返回全局事件流：所有请求的调用事件按时间倒序平铺成一条流水
-//（最新在前），limit 限制返回条数（<=0 返回全部），统计始终全量。
-func Events(limit int) (events []Event, stats Stats) {
+// （最新在前），limit 限制返回条数（<=0 返回全部），统计始终全量。
+// Events 返回最新在前的事件流与统计。传 session 时只给该会话的请求，
+// 统计也随筛选重算——计划（plan-<id>）与目标（goal-<id>）各自一条会话，
+// 用它就能回看一次多步运行的全部轮次。
+func Events(limit int, session ...string) (events []Event, stats Stats) {
 	mu.Lock()
 	defer mu.Unlock()
+	want := ""
+	if len(session) > 0 {
+		want = strings.TrimSpace(session[0])
+	}
 	stats.Requests = len(order)
 	capEvts := limit > 0
 	for i := len(order) - 1; i >= 0; i-- {
 		r := reqs[order[i]]
 		if r == nil {
+			continue
+		}
+		if want != "" && r.Session != want {
 			continue
 		}
 		stats.In += r.In
@@ -329,7 +341,7 @@ func Events(limit int) (events []Event, stats Stats) {
 			events = append(events, Event{
 				Time: e.Time, Kind: e.Kind, Text: e.Text,
 				In: e.In, Out: e.Out, Ms: e.Ms,
-				ReqID: r.ID, Source: r.Source, Input: input,
+				ReqID: r.ID, Source: r.Source, Session: r.Session, Input: input,
 			})
 		}
 	}

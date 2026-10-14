@@ -52,8 +52,17 @@ func (n *ConsoleNotifier) Notify(ctx context.Context, text string) error {
 }
 
 // dialogue 抽象对话能力（*Brain 实现之；测试可注入假实现）。
+// 用 AskWith 而非 Ask：智能任务的提示词是机器生成的长文本，必须显式关闭
+// 技能自动匹配（否则拿"心跳检查清单"去猜用户技能，结果不可预测）。
 type dialogue interface {
-	Ask(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta)) (string, error)
+	AskWith(ctx context.Context, text string, imgs []llm.Content, onDelta func(llm.Delta), opts ...CallOpt) (string, error)
+}
+
+// BudgetGate 是成本软限额闸门（*cost.Guard 实现）。它只拦**主动型**工作：
+// 心跳巡检与智能任务到点时若已超预算，直接静默跳过，不调用模型。
+// 用户对话与计划步骤不经过此闸门（那是用户主动发起的工作）。
+type BudgetGate interface {
+	ProactiveAllowed(what string) (bool, string)
 }
 
 // TaskRunner 执行智能任务（KindAgent）。会话 key 固定为 task，
@@ -63,6 +72,7 @@ type TaskRunner struct {
 	HeartbeatFile string // HEARTBEAT.md 路径（心跳任务读取）
 	QuietHours    string // "23:00-07:00"（支持跨零点）；空 = 关闭静默
 	Notifiers     []Notifier
+	Budget        BudgetGate       // nil = 不做预算拦截
 	Now           func() time.Time // 可注入时钟（测试用）；nil 用 time.Now
 }
 
@@ -84,8 +94,17 @@ func (r *TaskRunner) Run(ctx context.Context, t task.Task) {
 
 // Prepare 将模型决策和投递分开；结果持久化后重试通知不再重复运行模型/工具。
 func (r *TaskRunner) Prepare(ctx context.Context, t task.Task) (string, bool, error) {
+	if r.Budget != nil {
+		if ok, reason := r.Budget.ProactiveAllowed(r.taskLabel(t)); !ok {
+			// 超预算不再启动模型：省的是真金白银，留一条 silent 通知让用户查得到。
+			logx.Printf(ctx, "[智能任务] 预算闸门：%s", reason)
+			trace.Record(ctx, "budget", "%s——本次跳过模型调用", reason)
+			return "预算闸门：" + reason, false, nil
+		}
+	}
+
 	prompt := r.buildPrompt(t)
-	answer, err := r.Ask.Ask(WithSessionKey(ctx, SessionTask), prompt, nil, nil)
+	answer, err := r.Ask.AskWith(WithSessionKey(ctx, SessionTask), prompt, nil, nil, WithoutAutoSkill())
 	if err != nil {
 		return "", false, err
 	}
@@ -211,4 +230,12 @@ func (r *TaskRunner) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+// taskLabel 给预算闸门一句人能读懂的类别名（原因文本会进轨迹与通知）。
+func (r *TaskRunner) taskLabel(t task.Task) string {
+	if t.Heartbeat {
+		return "心跳巡检"
+	}
+	return "智能任务"
 }

@@ -29,21 +29,27 @@ func (t *ScheduleTaskTool) Description() string {
 		"2) 有限多次——用户说“每10分钟提醒我一次，共3次”填 in 加 times；" +
 		"3) 无限循环——用户说“每天早上8点提醒我喝水”“每周一三五9点播报天气”填 every。" +
 		"agent=true 时为智能任务：到点把 text 作为指令交给 agent 自主决策与行动" +
-		"（如“每天早上8点看看我的备忘录，把今天要做的事告诉我”），适合需要查询/判断/动手的任务。"
+		"（如“每天早上8点看看我的备忘录，把今天要做的事告诉我”），适合需要查询/判断/动手的任务。" +
+		"goal=true（须同时 agent=true）时升级为目标：到点后在独立会话里多轮自主推进，" +
+		"直到达成、受阻或用完步数/token 预算，适合“把这件事办成”这类只给结果诉求的任务。"
 }
 
 func (t *ScheduleTaskTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"text":    map[string]any{"type": "string", "description": "任务内容或智能任务的指令，如：该敷面膜了"},
-			"in":      map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
-			"when":    map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
-			"every":   map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
-			"times":   map[string]any{"type": "integer", "description": "重复次数（≥2），必须配合 in 使用，如 in=10分钟 times=3：每10分钟一次共3次；缺省为单次"},
-			"channel": map[string]any{"type": "string", "enum": []string{"", "web", "dingtalk", "feishu", "console"}, "description": "推送通道，空为全部可用通道"},
-			"status":  map[string]any{"type": "string", "enum": []string{"active", "paused"}, "description": "active立即启用（默认），paused保存后暂不触发"},
-			"agent":   map[string]any{"type": "boolean", "description": "true=智能任务（agent 自主决策），text 为完整指令；默认 false（到点播报 text 原文）"},
+			"text":      map[string]any{"type": "string", "description": "任务内容或智能任务的指令，如：该敷面膜了"},
+			"in":        map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
+			"when":      map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
+			"every":     map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
+			"times":     map[string]any{"type": "integer", "description": "重复次数（≥2），必须配合 in 使用，如 in=10分钟 times=3：每10分钟一次共3次；缺省为单次"},
+			"channel":   map[string]any{"type": "string", "enum": []string{"", "web", "dingtalk", "feishu", "console"}, "description": "推送通道，空为全部可用通道"},
+			"status":    map[string]any{"type": "string", "enum": []string{"active", "paused"}, "description": "active立即启用（默认），paused保存后暂不触发"},
+			"agent":     map[string]any{"type": "boolean", "description": "true=智能任务（agent 自主决策），text 为完整指令；默认 false（到点播报 text 原文）"},
+			"goal":      map[string]any{"type": "boolean", "description": "true=目标模式（须同时 agent=true）：到点后不是一次问答，而是在独立会话里多轮自主推进直到达成/受阻/用完预算，适合「把这件事办成」这类结果导向的诉求"},
+			"maxSteps":  map[string]any{"type": "integer", "description": "目标最多推进几步（默认取配置 cost.budget.perGoalSteps）"},
+			"maxTokens": map[string]any{"type": "integer", "description": "目标的 token 预算（默认取配置 cost.budget.perGoalTokens），超线在步边界停下"},
+			"skill":     map[string]any{"type": "string", "description": "把目标钉在某个技能上执行（技能名，见「设置 → 技能」）；留空则不启用技能"},
 		},
 		"required": []string{"text"},
 	}
@@ -59,6 +65,28 @@ func ParseTaskArgs(args map[string]any) (task.Task, error) {
 	tk := task.Task{Text: text}
 	if v, _ := args["agent"].(bool); v {
 		tk.Kind = task.KindAgent
+	}
+	if v, _ := args["goal"].(bool); v {
+		// 目标必须是智能任务：只有 agent 类型才有"到点后自主推进"的执行器接管。
+		tk.Goal = true
+		tk.Kind = task.KindAgent
+	}
+	if v, ok := args["maxSteps"]; ok && v != nil {
+		n, ok := argInt(v)
+		if !ok || n < 0 {
+			return task.Task{}, fmt.Errorf("无效的 maxSteps %v", v)
+		}
+		tk.MaxSteps = n
+	}
+	if v, ok := args["maxTokens"]; ok && v != nil {
+		n, ok := argInt(v)
+		if !ok || n < 0 {
+			return task.Task{}, fmt.Errorf("无效的 maxTokens %v", v)
+		}
+		tk.MaxTokens = int64(n)
+	}
+	if sk, _ := args["skill"].(string); strings.TrimSpace(sk) != "" {
+		tk.Skill = strings.TrimSpace(sk)
 	}
 	if channel, _ := args["channel"].(string); channel != "" {
 		switch channel {

@@ -20,10 +20,11 @@ func (b *Brain) SetCustom(cmds []config.CustomCommand) {
 // expandCustom 把命中的自定义指令展开为提示词；未命中原样返回。
 // 命中规则：输入去掉首尾空白后与触发词完全相等；或以"触发词+空白"开头，
 // 余下部分作为"用户补充"附在提示词后（如"早安简报 只看天气"）。
-func (b *Brain) expandCustom(text string) string {
+// matched 为真时调用方应跳过技能自动匹配——用户显式声明的触发词优先于启发式。
+func (b *Brain) expandCustom(text string) (expanded string, matched bool) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return text
+		return text, false
 	}
 	b.customMu.RLock()
 	cmds := b.custom
@@ -34,15 +35,15 @@ func (b *Brain) expandCustom(text string) string {
 			continue
 		}
 		if trimmed == name {
-			return strings.TrimSpace(c.Prompt)
+			return strings.TrimSpace(c.Prompt), true
 		}
 		if rest, ok := strings.CutPrefix(trimmed, name+" "); ok {
 			rest = strings.TrimSpace(rest)
 			if rest == "" {
-				return strings.TrimSpace(c.Prompt)
+				return strings.TrimSpace(c.Prompt), true
 			}
-			return strings.TrimSpace(c.Prompt) + "\n\n用户补充：" + rest
+			return strings.TrimSpace(c.Prompt) + "\n\n用户补充：" + rest, true
 		}
 	}
-	return text
+	return text, false
 }

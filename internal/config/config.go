@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +29,7 @@ type Config struct {
 	Hardware     HardwareConfig    `yaml:"hardware"`
 	Weather      WeatherConfig     `yaml:"weather"`
 	Custom       CustomConfig      `yaml:"custom"`
+	Skills       SkillsConfig      `yaml:"skills"`
 	Chan         ChanConfig        `yaml:"chan"`
 	File         FileConfig        `yaml:"file"`
 	Admin        AdminConfig       `yaml:"admin"`
@@ -39,6 +41,7 @@ type Config struct {
 	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
 	Mcp          McpConfig         `yaml:"mcp"`
 	Persona      PersonaConfig     `yaml:"persona"`
+	Cost         CostConfig        `yaml:"cost"`
 	SystemPrompt string            `yaml:"systemPrompt"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
@@ -46,6 +49,15 @@ type Config struct {
 	TodoFile string `yaml:"todoFile"`
 	// SessionFile 对话会话持久化 JSON 文件路径（默认 session.json，重启不失忆）。
 	SessionFile string `yaml:"sessionFile"`
+	// UsageFile token 用量账本持久化 JSON 文件路径（默认 token-usage.json）。
+	UsageFile string `yaml:"usageFile"`
+	// PausedFile 聊天暂停现场落盘路径（默认 paused-turns.json）：刷新页面或重启服务后
+	// 仍可一键继续，并复用当时的技能。
+	PausedFile string `yaml:"pausedFile"`
+	// PlanFile 计划持久化 JSON 文件路径（默认 plans.json）。
+	PlanFile string `yaml:"planFile"`
+	// Plan 计划模式参数。
+	Plan PlanConfig `yaml:"plan"`
 }
 
 // HardwareConfig 控制硬件输出能力。Friday 当前与硬件分离（纯软件形态）：
@@ -340,10 +352,91 @@ type HeartbeatConfig struct {
 	File string `yaml:"file"`
 }
 
+// CostConfig 描述成本观测与软限额。
+//
+// 限额是"软"的：超预算时停止的是**主动型工作**（心跳巡检、智能任务、目标启动），
+// 绝不取消进行中的用户对话轮，也不影响定时提醒投递（提醒不调模型、零成本）。
+// 框架只有事后的 OnLLMCall 钩子，事前拦截需要 ctx 取消，故本轮不做硬停。
+type CostConfig struct {
+	// Currency 金额展示币种（默认 CNY）。价格表自带币种时以价格表为准。
+	Currency string `yaml:"currency"`
+	// PricingFile 模型价格表路径（默认 pricing.json）：后台可编辑、热加载，
+	// 不进 config.yaml 以免占用配置热更新链路。
+	PricingFile string     `yaml:"pricingFile"`
+	Budget      CostBudget `yaml:"budget"`
+	// PauseProactive 超预算时是否暂停主动型工作（默认开启）。关闭即"只警示不停手"。
+	PauseProactive *bool       `yaml:"pauseProactive"`
+	Goals          GoalsConfig `yaml:"goals"`
+}
+
+// CostBudget 是各档预算上限。0 表示该项不限。
+type CostBudget struct {
+	// DailyTokens / MonthlyTokens 计费 token（输入+输出）额度。
+	DailyTokens   int64 `yaml:"dailyTokens"`
+	MonthlyTokens int64 `yaml:"monthlyTokens"`
+	// DailyCost / MonthlyCost 金额额度，需价格表命中；未配价的模型不计入。
+	DailyCost   float64 `yaml:"dailyCost"`
+	MonthlyCost float64 `yaml:"monthlyCost"`
+	// SoftRatio 预警阈值（默认 0.8）：用量占比达到它即 warn，达到 1 即 over。
+	SoftRatio float64 `yaml:"softRatio"`
+	// PerPlanTokens 单次计划（全部步骤合计）的软预算，超限则在步边界暂停。
+	PerPlanTokens int64 `yaml:"perPlanTokens"`
+	// PerGoalTokens / PerGoalSteps 单个目标的默认预算（任务可逐项覆盖）。
+	PerGoalTokens int64 `yaml:"perGoalTokens"`
+	PerGoalSteps  int   `yaml:"perGoalSteps"`
+}
+
+// GoalsConfig 是目标模式（长程自主任务）的运行参数。
+type GoalsConfig struct {
+	// MaxConcurrent 同时运行的目标数（默认 1）：目标轮次长、成本大，串行更安全。
+	MaxConcurrent int `yaml:"maxConcurrent"`
+}
+
+// PauseProactiveEnabled 返回超预算时是否暂停主动型工作（缺省开启）。
+func (c CostConfig) PauseProactiveEnabled() bool {
+	return c.PauseProactive == nil || *c.PauseProactive
+}
+
 // McpConfig 描述 MCP（Model Context Protocol）外部工具服务器。
 type McpConfig struct {
 	// Servers 声明的 MCP 服务器列表（stdio transport：本机子进程）。
 	Servers []McpServerConfig `yaml:"servers" json:"servers"`
+}
+
+// SkillsConfig 是技能层配置。技能本身是磁盘上的 SKILL.md（框架格式），
+// 后台"设置 → 技能"可增删改并即时生效，不进 config.yaml。
+type SkillsConfig struct {
+	// Enabled 总开关：关闭时不加载技能目录，也不提供任何技能注入。
+	Enabled *bool `yaml:"enabled"`
+	// Dir 技能目录（默认 skills，相对数据目录）。
+	Dir string `yaml:"dir"`
+	// AutoTrigger 是否允许按消息内容自动选用技能（默认开启）。
+	// 单个技能仍要写 auto: true 才参与——两层都是 opt-in。
+	AutoTrigger *bool `yaml:"autoTrigger"`
+}
+
+// EnabledOrDefault 返回技能层是否启用（缺省启用：目录里没有文件时等于没有效果）。
+func (c SkillsConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// AutoTriggerEnabled 返回是否允许自动匹配（缺省允许，仍需技能自身 auto: true）。
+func (c SkillsConfig) AutoTriggerEnabled() bool {
+	return c.AutoTrigger == nil || *c.AutoTrigger
+}
+
+// PlanConfig 是计划模式参数。计划本身存在 planFile 里，后台"自动化 → 计划"可管。
+type PlanConfig struct {
+	// Enabled 关闭时聊天里的"计划"入口退化为普通对话（后端直接拒绝并说明）。
+	Enabled *bool `yaml:"enabled"`
+	// MaxIterations 规划轮与每一步各自允许的工具调用轮数（默认 12）。
+	// 框架默认只有 10 轮，多步计划里单步很容易撞上限。
+	MaxIterations int `yaml:"maxIterations"`
+}
+
+// EnabledOrDefault 返回计划模式是否启用（缺省启用）。
+func (c PlanConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // Persona 是一套机器人人设：系统提示词中"性格与语气"段的可切换文案。
@@ -403,6 +496,10 @@ type ProviderConfig struct {
 	Temperature float64 `yaml:"temperature"`
 	// MaxTokens 单次输出最大 token（可选，默认 1024）。
 	MaxTokens int `yaml:"maxTokens"`
+	// StreamUsage 流式请求是否索取 usage 统计（缺省开启）。
+	// 关掉后网页聊天的 token 账本会归零（仅"运行状态"页 ZeroCalls 计数可见），
+	// 只用于个别不接受 stream_options 字段的兼容网关排障。
+	StreamUsage *bool `yaml:"streamUsage"`
 }
 
 // AudioConfig 描述麦克风/喇叭设备。
@@ -849,6 +946,33 @@ func (c *Config) applyDefaults() {
 	if c.SessionFile == "" {
 		c.SessionFile = "session.json"
 	}
+	if c.UsageFile == "" {
+		c.UsageFile = "token-usage.json"
+	}
+	if c.PausedFile == "" {
+		c.PausedFile = "paused-turns.json"
+	}
+	if c.PlanFile == "" {
+		c.PlanFile = "plans.json"
+	}
+	if c.Plan.MaxIterations <= 0 {
+		c.Plan.MaxIterations = 12
+	}
+	if c.Cost.Currency == "" {
+		c.Cost.Currency = "CNY"
+	}
+	if c.Cost.PricingFile == "" {
+		c.Cost.PricingFile = "pricing.json"
+	}
+	if c.Cost.Budget.SoftRatio == 0 {
+		c.Cost.Budget.SoftRatio = 0.8
+	}
+	if c.Cost.Goals.MaxConcurrent <= 0 {
+		c.Cost.Goals.MaxConcurrent = 1
+	}
+	if c.Skills.Dir == "" {
+		c.Skills.Dir = "skills"
+	}
 	if c.Heartbeat.File == "" {
 		c.Heartbeat.File = "HEARTBEAT.md"
 	}
@@ -878,6 +1002,27 @@ func (c *Config) Validate() error {
 	}
 	if _, err := NormalizePermissionMode(c.Permissions.Mode); err != nil {
 		return fmt.Errorf("config: permissions.mode 非法: %v", err)
+	}
+	if r := c.Cost.Budget.SoftRatio; r <= 0 || r > 1 {
+		return fmt.Errorf("config: cost.budget.softRatio 需落在 (0,1] 区间，当前 %g", r)
+	}
+	if c.Cost.Budget.DailyTokens < 0 || c.Cost.Budget.MonthlyTokens < 0 ||
+		c.Cost.Budget.DailyCost < 0 || c.Cost.Budget.MonthlyCost < 0 ||
+		c.Cost.Budget.PerPlanTokens < 0 || c.Cost.Budget.PerGoalTokens < 0 ||
+		c.Cost.Budget.PerGoalSteps < 0 {
+		return fmt.Errorf("config: cost.budget 各项额度不能为负（0 表示该项不限）")
+	}
+	// 心跳每轮都要过一遍模型且无人监督，间隔过短等于失控烧钱（ROADMAP 运维提示
+	// 建议 ≥30m）；这里挡住明显的误配，启动即报错好过半夜账单。
+	if c.Heartbeat.Enabled && c.Heartbeat.Schedule == "" && strings.TrimSpace(c.Heartbeat.Interval) != "" {
+		interval := strings.TrimSpace(c.Heartbeat.Interval)
+		d, err := time.ParseDuration(interval)
+		if err != nil {
+			return fmt.Errorf("config: heartbeat.interval %q 无法解析为时长（如 \"30m\"）: %w", interval, err)
+		}
+		if d < time.Minute {
+			return fmt.Errorf("config: heartbeat.interval 不得短于 1m（当前 %q）——心跳每轮都调用模型，过短会失控烧钱", interval)
+		}
 	}
 	return nil
 }

@@ -57,11 +57,14 @@ import (
 	dingtalk "github.com/capyflow/friday/internal/channel/dingtalk"
 	feishu "github.com/capyflow/friday/internal/channel/feishu"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/cost"
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/notification"
 	"github.com/capyflow/friday/internal/output"
+	"github.com/capyflow/friday/internal/plan"
+	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/trace"
@@ -145,8 +148,11 @@ func main() {
 
 	// 调用轨迹持久化：防抖落盘，重启后管理后台仍可查看历史调用。
 	trace.Init(cfg.Trace.File)
-	// token 用量账本：按天累计，落盘 token-usage.json，重启恢复。
-	usage.Init("token-usage.json")
+	// token 用量账本：按天+维度累计，落盘（默认 token-usage.json），重启恢复。
+	// 文件损坏时保留原文件、本次运行只走内存账本，不覆盖历史数据。
+	if err := usage.Init(cfg.UsageFile); err != nil {
+		log.Printf("[警告] %v", err)
+	}
 
 	// 硬件输出（扬声器/屏幕/音频播放）：Friday 当前与硬件分离（纯软件管家），
 	// 默认关闭（config hardware.enabled）。关闭时 speak_now/display_now 等工具不注册，
@@ -187,6 +193,7 @@ func main() {
 
 	// 先可靠入队再推进任务；工作器在 Brain 就绪后启动。
 	var runner *robotagent.TaskRunner
+	var goalRunner *robotagent.GoalRunner
 	var todoStore *todo.Store
 	acceptReady := make(chan struct{})
 	targets := make([]notification.Target, 0, len(notifiers))
@@ -204,6 +211,7 @@ func main() {
 			}
 		}
 		rctx := logx.WithID(workCtx, logx.NextID())
+		rctx = robotagent.WithOrigin(rctx, robotagent.OriginTask)
 		id := logx.IDFrom(rctx)
 		trace.Begin(id, "task", robotagent.SessionTask, t.Text)
 		defer func() {
@@ -213,6 +221,12 @@ func main() {
 				trace.End(id, "")
 			}
 		}()
+		if t.Goal {
+			if goalRunner == nil {
+				return "", false, fmt.Errorf("目标运行器尚未就绪")
+			}
+			return goalRunner.Prepare(rctx, t)
+		}
 		if t.Kind == task.KindAgent {
 			if runner == nil {
 				return "", false, fmt.Errorf("智能任务运行器尚未就绪")
@@ -375,6 +389,33 @@ func main() {
 	if n := len(cfg.Custom.Commands); n > 0 {
 		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)
 	}
+
+	// 技能层：SKILL.md 目录（沿用 vortexagent 的框架格式，另加 Friday 的启用/触发键）。
+	// 后台"设置 → 技能"增删改即时生效——技能是按次注入的，不需要重建 Agent。
+	var skillStore *skill.Store
+	if cfg.Skills.EnabledOrDefault() {
+		skillStore = skill.NewStore(cfg.Skills.Dir)
+		brain.SetSkills(skillStore, cfg.Skills.AutoTriggerEnabled())
+		list := skillStore.List()
+		broken := 0
+		for _, s := range list {
+			if s.ParseErr != "" {
+				broken++
+			}
+		}
+		auto := "关闭"
+		if cfg.Skills.AutoTriggerEnabled() {
+			auto = "开启"
+		}
+		log.Printf("[技能] 目录 %s：共 %d 个，自动匹配%s（技能需自身 auto: true 才参与）",
+			cfg.Skills.Dir, len(list), auto)
+		if broken > 0 {
+			log.Printf("[技能] 其中 %d 个文件无效，已在后台标出原因（原文件保留，不参与选择）", broken)
+		}
+		if err := skillStore.Err(); err != nil {
+			log.Printf("[技能] %v", err)
+		}
+	}
 	regMu.Lock()
 	currentReg = registry
 	regMu.Unlock()
@@ -396,6 +437,35 @@ func main() {
 	}
 	defer mcpMgr.Close()
 
+	// 成本闸门：价格表（默认 pricing.json，后台可编辑、热加载）+ 软限额判定。
+	// 没有价格表不影响使用——预算按 token 判定，金额留空并在后台提示补价。
+	pricer, pricerErr := cost.NewPricer(cfg.Cost.PricingFile)
+	if pricerErr != nil {
+		log.Printf("[成本] %v（暂只按 token 判预算）", pricerErr)
+	}
+	guard := cost.NewGuard(cfg, pricer)
+	log.Printf("[成本] 预算：%s（软限额，超线只停主动任务）", describeBudget(cfg, pricer))
+	go startCostAlert(ctx, guard, notifiers, notices)
+
+	// 计划模式：规划轮先产出步骤清单 → 网页确认 → 按步执行（一步一次提问、
+	// 一条独立轨迹、一份独立成本）。执行挂应用级 ctx，不挂某次 HTTP 请求。
+	var planStore *plan.Store
+	var planPlanner *plan.Planner
+	var planRunner *plan.Runner
+	if cfg.Plan.EnabledOrDefault() {
+		ps, err := plan.NewStore(cfg.PlanFile)
+		if err != nil {
+			log.Printf("[计划] %v（本次运行不加载历史计划）", err)
+		}
+		planStore = ps
+		planPlanner = &plan.Planner{Ask: brain, Store: planStore, MaxIterations: cfg.Plan.MaxIterations}
+		planRunner = plan.NewRunner(ctx, brain, planStore)
+		planRunner.MaxIterations = cfg.Plan.MaxIterations
+		planRunner.PerPlanTokens = cfg.Cost.Budget.PerPlanTokens
+		log.Printf("[计划] 已启用（清单 %s，单步轮数上限 %d，计划 token 预算 %d）",
+			cfg.PlanFile, cfg.Plan.MaxIterations, cfg.Cost.Budget.PerPlanTokens)
+	}
+
 	// 智能任务运行器：到点把指令（心跳任务附 HEARTBEAT.md 清单）交给 agent 决策，
 	// 输出按 [推送]/[静默] 协议投递到上方通知渠道。
 	runner = &robotagent.TaskRunner{
@@ -403,7 +473,23 @@ func main() {
 		HeartbeatFile: cfg.Heartbeat.File,
 		QuietHours:    cfg.Heartbeat.QuietHours,
 		Notifiers:     notifiers,
+		Budget:        guard,
 	}
+
+	// 目标运行器：goal 任务到点后的多轮自主推进（隔离会话 + 步数/token 预算）。
+	goalRunner = robotagent.NewGoalRunner(brain, notifiers)
+	goalRunner.Budget = guard
+	goalRunner.MaxConcurrent = cfg.Cost.Goals.MaxConcurrent
+	goalRunner.ConfigureSlots(cfg.Cost.Goals.MaxConcurrent)
+	if cfg.Cost.Budget.PerGoalSteps > 0 {
+		goalRunner.DefaultSteps = cfg.Cost.Budget.PerGoalSteps
+	}
+	if cfg.Cost.Budget.PerGoalTokens > 0 {
+		goalRunner.DefaultTokens = cfg.Cost.Budget.PerGoalTokens
+	}
+	goalRunner.StepIterations = cfg.Plan.MaxIterations
+	log.Printf("[目标] 已启用（并发 %d，默认预算 %d 步 / %d token）",
+		cfg.Cost.Goals.MaxConcurrent, goalRunner.DefaultSteps, goalRunner.DefaultTokens)
 
 	// 心跳任务（config heartbeat）：到点读检查清单自主巡检。
 	if cfg.Heartbeat.Enabled {
@@ -451,7 +537,9 @@ func main() {
 			}
 			log.Printf("[管理后台] 已按启动配置设置管理员账号 %s（每次启动以配置/环境变量为准）", user)
 		}
-		chat := web.New(brain, "uploads")
+		chat := web.New(brain, "uploads", cfg.PausedFile)
+		chat.EnablePlans(planPlanner, planRunner)
+		chat.EnableGoals(eng, func() (bool, string) { return guard.ProactiveAllowed("目标运行") })
 		current := cfg.Snapshot()
 		adminServer := admin.New(admin.Options{
 			Host:          cfg.Admin.Host,
@@ -469,6 +557,12 @@ func main() {
 			Mcp:           mcpMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
 			Notifications: notices,
+			Pricer:        pricer,
+			Guard:         guard,
+			Skills:        skillStore,
+			Plans:         planStore,
+			PlanRunner:    planRunner,
+			GoalRunner:    goalRunner,
 		})
 		if err := adminServer.Start(ctx); err != nil {
 			log.Fatalf("启动管理后台失败: %v", err)
@@ -504,6 +598,7 @@ func main() {
 		}
 		ctx = logx.WithID(ctx, logx.NextID())
 		ctx = robotagent.WithSessionKey(ctx, robotagent.SessionWeb)
+		ctx = robotagent.WithOrigin(ctx, robotagent.OriginRepl)
 		logx.Printf(ctx, "%s: %s", source, line)
 		switch {
 		case line == "/quit" || line == "/exit":
@@ -642,6 +737,63 @@ func registerHeartbeat(eng *task.Engine, cfg *config.Config) (task.Task, error) 
 		Cron:      spec,
 		Text:      "按心跳检查清单执行例行巡检，判断是否有需要主动告知用户的事项；没有就 [静默]。",
 	})
+}
+
+// startCostAlert 周期检查成本态势：每天首次超预算时经通知渠道推送一次告警，
+// 并在通知中心留档（同一天不重复，重启后当日已提醒过则不再打扰）。
+func startCostAlert(ctx context.Context, guard *cost.Guard, notifiers []robotagent.Notifier, notices *notification.Center) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !guard.TakeOverAlert() {
+				continue
+			}
+			text := "成本预算已用满：心跳巡检 / 智能任务 / 目标启动暂时停用（对话与定时提醒不受影响）。" +
+				"用量与恢复入口见管理后台「运行状态」页。"
+			var delivered []string
+			alertCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			for _, n := range notifiers {
+				if err := n.Notify(alertCtx, text); err == nil {
+					delivered = append(delivered, n.Name())
+				}
+			}
+			cancel()
+			if _, err := notices.PostManual(text, delivered); err != nil {
+				log.Printf("[成本] 超预算告警落档失败: %v", err)
+			}
+			log.Printf("[成本] 本日预算已用满，主动任务暂停（推送通道: %v）", delivered)
+		}
+	}
+}
+
+// describeBudget 把预算配置写成一行启动日志，方便无人值守时确认闸门到底开没开。
+func describeBudget(cfg *config.Config, pricer *cost.Pricer) string {
+	snapshot := cfg.Snapshot()
+	b := snapshot.Cost.Budget
+	parts := []string{}
+	if b.DailyTokens > 0 {
+		parts = append(parts, fmt.Sprintf("日 token %d", b.DailyTokens))
+	}
+	if b.MonthlyTokens > 0 {
+		parts = append(parts, fmt.Sprintf("月 token %d", b.MonthlyTokens))
+	}
+	if b.DailyCost > 0 {
+		parts = append(parts, fmt.Sprintf("日金额 %.2f %s", b.DailyCost, pricer.Currency()))
+	}
+	if b.MonthlyCost > 0 {
+		parts = append(parts, fmt.Sprintf("月金额 %.2f %s", b.MonthlyCost, pricer.Currency()))
+	}
+	if len(parts) == 0 {
+		return "未设置（只统计不拦截）"
+	}
+	if !snapshot.Cost.PauseProactiveEnabled() {
+		return strings.Join(parts, " / ") + "，仅警示不暂停"
+	}
+	return strings.Join(parts, " / ")
 }
 
 // printTasks 打印当前所有待触发任务（单次/多次/循环/智能，按下次触发时间排序）。

@@ -26,7 +26,7 @@ import (
 type Page struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Body      string    `json:"body"` // markdown 正文
+	Body      string    `json:"body"`             // markdown 正文
 	Source    string    `json:"source,omitempty"` // user=用户要求 / agent=机器人主动 / admin=后台 / migrate=旧记忆迁移
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -53,7 +53,7 @@ type frontMatter struct {
 
 // WikiStore 是长期记忆 wiki 仓库：内存索引 + 每页一个 <id>.md 文件。
 // dir 为空表示不持久化（测试用）；legacyFile 为旧版扁平记忆 JSON 路径
-//（一次性迁移来源，可为空）。
+// （一次性迁移来源，可为空）。
 type WikiStore struct {
 	mu         sync.Mutex
 	dir        string
@@ -155,7 +155,7 @@ func readPageFile(path string) (*Page, error) {
 	if err := yaml.Unmarshal([]byte(rest[:end]), &fm); err != nil {
 		return nil, fmt.Errorf("frontmatter 解析: %w", err)
 	}
-	body := rest[end+4:] // 跳过 "\n---"，剩余 "\n[空行]正文"
+	body := rest[end+4:]                  // 跳过 "\n---"，剩余 "\n[空行]正文"
 	body = strings.TrimPrefix(body, "\n") // "---" 行尾换行
 	body = strings.TrimPrefix(body, "\n") // frontmatter 与正文间的空行（写方约定）
 	return &Page{

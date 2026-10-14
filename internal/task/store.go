@@ -110,6 +110,12 @@ type storedTask struct {
 	Status               string `json:"status,omitempty"`
 	TodoID               string `json:"todoId,omitempty"`
 	NotificationParentID string `json:"notificationParentId,omitempty"`
+	// 目标模式扩展字段（goal 任务在 tasks.json 里与普通 agent 任务同处，
+	// 避免"两处真相"：排程/暂停/编辑/重启补偿仍由同一个引擎负责）。
+	Goal      bool   `json:"goal,omitempty"`
+	MaxSteps  int    `json:"maxSteps,omitempty"`
+	MaxTokens int64  `json:"maxTokens,omitempty"`
+	Skill     string `json:"skill,omitempty"`
 }
 
 func newStoredTask(t Task) storedTask {
@@ -125,6 +131,10 @@ func newStoredTask(t Task) storedTask {
 		Status:               t.Status,
 		TodoID:               t.TodoID,
 		NotificationParentID: t.NotificationParentID,
+		Goal:                 t.Goal,
+		MaxSteps:             t.MaxSteps,
+		MaxTokens:            t.MaxTokens,
+		Skill:                t.Skill,
 	}
 	if !t.When.IsZero() {
 		st.When = t.When.Format(time.RFC3339Nano)
@@ -295,6 +305,10 @@ func (st storedTask) toTask() (Task, bool) {
 		Status:               st.Status,
 		TodoID:               st.TodoID,
 		NotificationParentID: st.NotificationParentID,
+		Goal:                 st.Goal,
+		MaxSteps:             st.MaxSteps,
+		MaxTokens:            st.MaxTokens,
+		Skill:                st.Skill,
 	}
 	if t.Status == "" {
 		t.Status = StatusActive
@@ -319,6 +333,14 @@ func (st storedTask) toTask() (Task, bool) {
 		if t.CreatedAt, err = time.Parse(time.RFC3339Nano, st.CreatedAt); err != nil {
 			return Task{}, false
 		}
+	}
+	// 目标是"长程自主"的智能任务：脱离 agent 类型就没有多轮执行器接管；
+	// 预算为负是配错，宁可拒绝也不要在运行时按 0 处理（那等于一步就停）。
+	if t.Goal && t.Kind != KindAgent {
+		return Task{}, false
+	}
+	if t.MaxSteps < 0 || t.MaxTokens < 0 {
+		return Task{}, false
 	}
 	switch t.Kind {
 	case KindOnce:

@@ -64,6 +64,7 @@ func Dispatch(ctx context.Context, in <-chan Inbound, asker Asker, allowUserIDs 
 			}
 			rctx := logx.WithID(ctx, logx.NextID())
 			rctx = agent.WithSessionKey(rctx, agent.SessionWeb)
+			rctx = agent.WithOrigin(rctx, inb.Channel)
 			id := logx.IDFrom(rctx)
 			logx.Printf(rctx, "[通道:%s] %s(%s): %s", inb.Channel, inb.UserName, inb.UserID, inb.Text)
 			trace.Begin(id, inb.Channel, agent.SessionWeb, inb.Text)

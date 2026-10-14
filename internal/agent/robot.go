@@ -73,6 +73,7 @@ func newProvider(cfg *config.Config) (llm.Provider, error) {
 		Model:       cfg.Provider.Model,
 		MaxTokens:   cfg.Provider.MaxTokens,
 		Temperature: &temp,
+		StreamUsage: cfg.Provider.StreamUsage,
 	})
 }
 
@@ -87,7 +88,16 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 			logx.Printf(ctx, "[llm] round=%d model=%s tokens=%d+%d 耗时=%s err=%v",
 				info.Round, info.Model, info.Usage.InputTokens, info.Usage.OutputTokens,
 				info.Duration, info.Err)
-			usage.Add(int64(info.Usage.InputTokens), int64(info.Usage.OutputTokens))
+			usage.Record(usage.Call{
+				Model:      info.Model,
+				Session:    SessionKeyFrom(ctx),
+				Origin:     OriginFrom(ctx),
+				Run:        RunFrom(ctx),
+				In:         int64(info.Usage.InputTokens),
+				Out:        int64(info.Usage.OutputTokens),
+				CacheRead:  int64(info.Usage.CacheReadTokens),
+				CacheWrite: int64(info.Usage.CacheWriteTokens),
+			})
 			// 思考过程事件：每轮 LLM 调用一条（含耗时与 token，失败也如实发布）。
 			roundDetail := fmt.Sprintf("耗时 %.1fs · %d+%d tokens", info.Duration.Seconds(),
 				info.Usage.InputTokens, info.Usage.OutputTokens)

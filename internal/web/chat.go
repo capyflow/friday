@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,8 @@ import (
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/logx"
+	"github.com/capyflow/friday/internal/plan"
+	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/trace"
 )
 
@@ -40,16 +43,35 @@ var uploadNameRe = regexp.MustCompile(`^[0-9a-f]{32}\.(png|jpg|webp)$`)
 type Chat struct {
 	brain      *agent.Brain
 	uploadsDir string
+	pausedFile string // 暂停现场落盘路径（空 = 仅内存，重启丢）
+
+	planner  *plan.Planner // 计划模式（nil = 未启用）
+	runner   *plan.Runner
+	goalEng  *task.Engine          // 目标模式：聊天里"目标"直接建一条即时目标任务
+	goalGate func() (bool, string) // 超预算时不接新目标（nil = 不做预算拦截）
 
 	mu     sync.Mutex
 	runs   map[string]*chatRun    // 会话 key → 进行中的对话（可暂停）
-	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（内存态，重启丢失）
+	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（落盘，刷新/重启后仍可继续）
 }
 
-// PausedTurn 是一次被暂停的问答：原问题与已生成的部分回答（继续时重新注入会话）。
+// EnablePlans 打开计划模式（规划轮 + 步骤执行器）。
+func (c *Chat) EnablePlans(planner *plan.Planner, runner *plan.Runner) {
+	c.planner, c.runner = planner, runner
+}
+
+// EnableGoals 打开目标模式：聊天里的"目标"变成一条几秒后开跑的目标任务，
+// 进展与结论走通知中心（与定时目标同一条链路），gate 用于超预算时先拒。
+func (c *Chat) EnableGoals(eng *task.Engine, gate func() (bool, string)) {
+	c.goalEng, c.goalGate = eng, gate
+}
+
+// PausedTurn 是一次被暂停的问答：原问题、已生成的部分回答，以及当时启用的技能。
+// 继续时三者一起用：问题与部分回答重新注入会话，技能决定工具面/模型不变。
 type PausedTurn struct {
 	Question string `json:"question"`
 	Partial  string `json:"partial"`
+	Skill    string `json:"skill,omitempty"`
 }
 
 // chatRun 记录一次进行中的对话：cancel 用于暂停；pausing 标记区分"用户暂停"
@@ -59,16 +81,90 @@ type chatRun struct {
 	pausing bool
 }
 
-// New 创建网页聊天服务。uploadsDir 为图片上传目录（随服务启动清理过期文件）。
-func New(brain *agent.Brain, uploadsDir string) *Chat {
+// New 创建网页聊天服务。uploadsDir 为图片上传目录（随服务启动清理过期文件）；
+// pausedFile 为暂停现场落盘路径（空则仅内存）。
+func New(brain *agent.Brain, uploadsDir, pausedFile string) *Chat {
 	c := &Chat{
 		brain:      brain,
 		uploadsDir: uploadsDir,
+		pausedFile: pausedFile,
 		runs:       map[string]*chatRun{},
 		paused:     map[string]*PausedTurn{},
 	}
 	c.sweepUploads()
+	c.loadPaused()
 	return c
+}
+
+// loadPaused 恢复暂停现场。文件缺失按无暂停处理；损坏时保留原文件并放弃加载
+// （不用空状态覆盖用户还能点"继续"的内容）。
+func (c *Chat) loadPaused() {
+	if c.pausedFile == "" {
+		return
+	}
+	data, err := os.ReadFile(c.pausedFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[网页] 读取暂停现场 %q 失败，已保留原文件: %v", c.pausedFile, err)
+		}
+		return
+	}
+	var turns map[string]*PausedTurn
+	if err := json.Unmarshal(data, &turns); err != nil {
+		log.Printf("[网页] 暂停现场 %q 损坏，已保留原文件；修复后重启可恢复", c.pausedFile)
+		return
+	}
+	c.mu.Lock()
+	for k, t := range turns {
+		if t != nil && strings.TrimSpace(t.Question) != "" {
+			c.paused[k] = t
+		}
+	}
+	c.mu.Unlock()
+}
+
+// savePausedLocked 原子落盘暂停现场。调用方须持 c.mu。
+func (c *Chat) savePausedLocked() {
+	if c.pausedFile == "" {
+		return
+	}
+	data, err := json.Marshal(c.paused)
+	if err != nil {
+		log.Printf("[网页] 序列化暂停现场失败: %v", err)
+		return
+	}
+	dir := filepath.Dir(c.pausedFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[网页] 创建暂停现场目录失败: %v", err)
+		return
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(c.pausedFile)+".tmp-*")
+	if err != nil {
+		log.Printf("[网页] 创建暂停现场临时文件失败: %v", err)
+		return
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		log.Printf("[网页] 写入暂停现场失败: %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		log.Printf("[网页] 同步暂停现场失败: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("[网页] 关闭暂停现场失败: %v", err)
+		return
+	}
+	if err := os.Chmod(f.Name(), 0o600); err != nil {
+		log.Printf("[网页] 设置暂停现场权限失败: %v", err)
+		return
+	}
+	if err := os.Rename(f.Name(), c.pausedFile); err != nil {
+		log.Printf("[网页] 替换暂停现场文件失败: %v", err)
+	}
 }
 
 // sweepUploads 清理超过保留期的上传文件。
@@ -160,6 +256,8 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 		Message     string   `json:"message"`
 		Attachments []string `json:"attachments"`
 		Session     string   `json:"session"`
+		Skill       string   `json:"skill"`
+		Mode        string   `json:"mode"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil ||
 		(strings.TrimSpace(req.Message) == "" && len(req.Attachments) == 0) {
@@ -190,10 +288,85 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 	c.clearPaused(key)
 
 	question := strings.TrimSpace(req.Message)
-	return c.stream(ctx, key, question, imgs, "", func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+	sink := &agent.SkillSink{}
+	opts := []agent.CallOpt{}
+	if skillName := strings.TrimSpace(req.Skill); skillName != "" {
+		opts = append(opts, agent.WithSkillName(skillName))
+	}
+	result := &resultSink{}
+
+	// 目标模式：把这句话登记成一个即时目标（不占用本次连接做长轮推进，
+	// 结论到了通知页/聊天里由通知中心送达），零模型调用因此也就零成本。
+	if mode := strings.TrimSpace(req.Mode); mode == "goal" {
+		if c.goalEng == nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "目标模式未启用"})
+		}
+		if c.goalGate != nil {
+			if ok, reason := c.goalGate(); !ok {
+				return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": reason + "（目标未登记，可在运行状态页恢复）"})
+			}
+		}
+		return c.stream(ctx, key, question, nil, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+			logx.Printf(rctx, "[网页] 登记目标: %s", logx.Truncate(question, 80))
+			t, err := agent.LaunchGoal(c.goalEng, question)
+			if err != nil {
+				return "", err
+			}
+			trace.Begin(logx.IDFrom(rctx), "web", key, question)
+			trace.Record(rctx, "goal_run", "已登记目标 #%s，将在后台多轮推进，结论送达通知页", t.ID)
+			return fmt.Sprintf("好，把「%s」当作目标开始处理，办完或卡住都会告诉你（也可在「自动化」页看进展）。",
+				logx.Truncate(question, 40)), nil
+		})
+	}
+
+	// 计划模式：先跑规划轮产出可审阅的步骤清单，确认与执行都在服务端计划仓库里推进。
+	if mode := strings.TrimSpace(req.Mode); mode == "plan" {
+		if c.planner == nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "计划模式未启用"})
+		}
+		if len(imgs) > 0 {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "计划模式暂不支持图片，请先普通对话发图再制定计划"})
+		}
+		return c.stream(ctx, key, question, nil, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+			logx.Printf(rctx, "[网页] 制定计划: %s", logx.Truncate(question, 80))
+			p, fallback, err := c.planner.Draft(rctx, question, "web", strings.TrimSpace(req.Skill))
+			if err != nil {
+				return "", err
+			}
+			if p == nil {
+				// 规划没产出清单：模型的话已按普通回答返回，不留下无法执行的空计划。
+				return fallback, nil
+			}
+			result.setPlan(p)
+			return "先把要做的事拆成了 " + fmt.Sprint(len(p.Steps)) + " 步，确认后我按顺序做（也可以先改再确认）。", nil
+		})
+	}
+
+	return c.stream(ctx, key, question, imgs, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
 		logx.Printf(rctx, "[网页] 输入: %s（图片 %d 张，会话 %s）", question, len(imgs), key)
-		return c.brain.Ask(rctx, question, imgs, onDelta)
+		return c.brain.AskWith(rctx, question, imgs, onDelta, opts...)
 	})
+}
+
+// resultSink 让一次 SSE 请求在执行完成后能额外带出结构化结果（目前是计划）。
+type resultSink struct {
+	mu   sync.Mutex
+	plan *plan.Plan
+}
+
+func (r *resultSink) setPlan(p *plan.Plan) {
+	r.mu.Lock()
+	r.plan = p
+	r.mu.Unlock()
+}
+
+func (r *resultSink) Plan() *plan.Plan {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.plan
 }
 
 // HandleResume 继续被暂停的对话（POST /api/chat/resume，SSE 流式，协议同 /api/chat）：
@@ -206,8 +379,11 @@ func (c *Chat) HandleResume(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有可继续的暂停对话"})
 	}
 	logx.Printf(logx.WithID(ctx.Context(), logx.NextID()), "[网页] 继续被暂停的对话: %s", logx.Truncate(turn.Question, 80))
-	return c.stream(ctx, key, turn.Question, nil, turn.Partial, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
-		return c.brain.Resume(rctx, key, turn.Question, turn.Partial, onDelta)
+	sink := &agent.SkillSink{}
+	return c.stream(ctx, key, turn.Question, nil, turn.Partial, sink, &resultSink{}, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
+		// 带上暂停现场记录的技能：技能限定了工具面与模型，继续时换一套会静默改变行为。
+		return c.brain.Resume(rctx, key, turn.Question, turn.Partial, onDelta,
+			agent.WithSkillName(turn.Skill))
 	})
 }
 
@@ -243,7 +419,10 @@ func (c *Chat) PausedTurn(key string) *PausedTurn {
 // clearPaused 丢弃会话的暂停现场（新问题 = 放弃被暂停的对话）。
 func (c *Chat) clearPaused(key string) {
 	c.mu.Lock()
-	delete(c.paused, key)
+	if _, ok := c.paused[key]; ok {
+		delete(c.paused, key)
+		c.savePausedLocked()
+	}
 	c.mu.Unlock()
 }
 
@@ -252,14 +431,21 @@ func (c *Chat) takePaused(key string) *PausedTurn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	pt := c.paused[key]
+	if pt == nil {
+		return nil
+	}
 	delete(c.paused, key)
+	c.savePausedLocked()
 	return pt
 }
 
 // stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、
 // 订阅思考过程事件、桥接暂停，ask 在独立上下文中执行对话并返回完整回答。
-// partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）。
+// partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）；
+// sink 用于记下本轮实际启用的技能，暂停现场要带上它才能在下一次继续时复用；
+// result 用于在执行完成后额外带出结构化结果（计划模式的步骤清单）。
 func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Content, partialBase string,
+	sink *agent.SkillSink, result *resultSink,
 	ask func(rctx context.Context, onDelta func(llm.Delta)) (string, error)) error {
 	gin := ctx.GinContext()
 	gin.Header("Content-Type", "text/event-stream; charset=utf-8")
@@ -290,6 +476,8 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 	rctx, cancel := context.WithCancel(logx.WithID(ctx.Context(), logx.NextID()))
 	defer cancel()
 	rctx = agent.WithSessionKey(rctx, key)
+	rctx = agent.WithOrigin(rctx, agent.OriginWeb)
+	rctx = agent.WithSkillSink(rctx, sink)
 	trace.Begin(logx.IDFrom(rctx), "web", key, question)
 
 	// 登记进行中的对话（暂停接口按会话 key 取消），退出时注销。
@@ -347,7 +535,9 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 			c.mu.Lock()
 			pausing := run.pausing
 			if pausing {
-				c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed}
+				c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed,
+					Skill: sink.Name()}
+				c.savePausedLocked()
 			}
 			c.mu.Unlock()
 			if pausing {
@@ -372,6 +562,13 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 		_ = write(map[string]string{"delta": answer})
 	}
 	trace.End(logx.IDFrom(rctx), "")
+	// 规划轮产出了计划：把清单结构发给前端渲染计划卡（确认/改步骤/取消都在卡片里做）。
+	if p := result.Plan(); p != nil {
+		_ = write(map[string]any{"plan": map[string]any{
+			"id": p.ID, "title": p.Title, "summary": p.Summary, "state": p.State,
+			"goal": p.Goal, "skill": p.Skill, "steps": p.Steps,
+		}})
+	}
 	_ = write(map[string]any{"done": true})
 	return nil
 }

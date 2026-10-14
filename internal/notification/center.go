@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -259,6 +260,39 @@ func (c *Center) RestoreSnoozes(eng *task.Engine) error {
 
 // SetWebEnabled 只有管理后台实际启用时，通知中心才是可见的投递位置。
 func (c *Center) SetWebEnabled(enabled bool) { c.mu.Lock(); c.webEnabled = enabled; c.mu.Unlock() }
+
+// PostManual 记录一条不由任务触发的手动通知（如成本超预算告警）。
+//
+// 它不复用 Enqueue 的"任务 ID + 触发时刻"去重键，也不进投递队列——工作循环
+// 只取 pending/processing，这里直接落终态，因此不会被重试逻辑反复搬运。
+// delivered 是已经推过的通道名；为空时状态记为 silent（只留档、未打扰）。
+func (c *Center) PostManual(text string, delivered []string) (Notice, error) {
+	if strings.TrimSpace(text) == "" {
+		return Notice{}, fmt.Errorf("通知正文为空")
+	}
+	now := time.Now()
+	sum := sha256.Sum256([]byte("manual:" + text + ":" + now.Format(time.RFC3339Nano)))
+	status := "silent"
+	if len(delivered) > 0 {
+		status = "delivered"
+	}
+	n := Notice{
+		ID:          hex.EncodeToString(sum[:16]),
+		Text:        strings.TrimSpace(text),
+		Status:      status,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		DeliveredTo: slices.Clone(delivered),
+		Prepared:    true,
+		Push:        true,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.putLocked(n); err != nil {
+		return Notice{}, err
+	}
+	return n, nil
+}
 
 // SetDesktopDispatch 接入桌面系统提示桥；真实内容始终保存在通知中心。
 func (c *Center) SetDesktopDispatch(dispatch func(Notice) error) {

@@ -11,6 +11,9 @@ provider:
   # apiKey: ""                 # 直填密钥（优先于环境变量；数据目录用户私有）
   temperature: 0.7
   maxTokens: 1024
+  # streamUsage: false        # 流式索取 token 用量统计（缺省开启）。
+                              # 关掉后「运行状态」页的金额与 token 都会归零，只在个别
+                              # 网关因未知字段 stream_options 报 400 时才关，并记为排障手段。
 
 # —— 以下 audio/asr/wake/tts/vad/display 属于硬件相关配置（语音链路已归档至
 #    archive/voice-mode/，字段保留以便恢复）；纯软件形态无需关心。——
@@ -75,6 +78,15 @@ weather:
 #       description: 收尾问候 + 明日提醒
 #       prompt: |
 #         说句晚安，并简要列出明天的定时任务和待办清单，让我安心休息。
+
+# 技能层：技能是磁盘上的 SKILL.md（沿用 vortexagent 的框架格式），比自定义指令多了
+# 模型/温度覆盖与本轮工具面白名单，正文作为技能指令注入命中的那一轮对话。
+# 内容与启用都在文件里，管理后台「设置 → 技能」可增删改并即时生效（不需要重启，
+# 也不需要重建 agent）。同名时项目目录覆盖本机 $HOME/.vortex/skills 里的版本。
+# skills:
+#   enabled: true              # false = 整个技能层关闭（不读目录、不注入）
+#   dir: skills                # 技能目录（相对数据目录，每个技能一个 <id>/SKILL.md）
+#   autoTrigger: true          # 自动匹配总开关；单个技能仍要写 auto: true 才参与
 
 # 人设提示词：多套可切换的"性格与语气"（内置：default 贴心管家 / playful 活泼调皮 /
 # rigorous 严谨可靠 / warm 温柔陪伴 / concise 简洁高效）。人设只改变小五怎么说话，
@@ -145,6 +157,14 @@ admin:
 # 重启自动恢复，不失忆。清除上下文按会话粒度（管理后台"设置 → 会话管理"）。
 sessionFile: session.json
 
+# token 用量账本：按天累计，并按模型/来源/会话/运行分桶，供「运行状态」页
+# 与预算判定使用。文件损坏时保留原文件、本次运行只走内存账本（不用空数据覆盖）。
+usageFile: token-usage.json
+
+# 聊天暂停现场（问题 + 已生成的半句 + 当时启用的技能）：刷新页面或重启服务后
+# 仍可一键「继续」；文件损坏时保留原文件并放弃加载，不用空状态覆盖。
+pausedFile: paused-turns.json
+
 # 执行类工具（write_file / edit_file / exec_command）的审批机制：
 # 经 vortexagent 全局权限层生效（白名单/黑名单/模式翻译成权限规则）。
 # exec.mode 三选一：
@@ -191,6 +211,36 @@ sessionFile: session.json
 #   interval: ""             # 如 "30m"（内部转为 @every 30m）
 #   quietHours: "23:00-07:00" # 静默时段（支持跨零点），留空关闭
 #   file: HEARTBEAT.md       # 清单文件（管理后台"设置"页可编辑）
+
+# 成本观测与软限额：额度是"软"的——超线停的是心跳巡检、智能任务、目标启动这类
+# 主动型工作；你正在进行的对话绝不会被掐断，定时提醒（不调模型）照常送达。
+# 金额需要价格表：在管理后台「设置 → 成本与预算」配 data/pricing.json（热生效）；
+# 未配价的模型只统计 token、不计入金额，并在页面单列提示。
+# budget 各项 0 = 该项不限；softRatio 是预警线（达到即 warn，达到额度即 over）。
+# cost:
+#   currency: CNY
+#   pricingFile: pricing.json  # 价格表文件（后台可编辑，不进 config 避免热更链路）
+#   budget:
+#     dailyTokens: 2000000     # 日 token 额度（输入+输出）
+#     monthlyTokens: 0
+#     dailyCost: 0             # 日金额额度（需价格表命中）
+#     monthlyCost: 0
+#     softRatio: 0.8           # 预警阈值
+#     perPlanTokens: 60000     # 单次计划（全部步骤合计）软预算
+#     perGoalTokens: 120000    # 单个目标默认 token 预算（任务可逐项覆盖）
+#     perGoalSteps: 12         # 单个目标默认步数上限
+#   pauseProactive: true       # false = 只警示不停手
+#   goals:
+#     maxConcurrent: 1         # 同时运行的目标数（目标轮次长，串行更稳）
+
+# 计划模式：聊天里选「计划」→ 小五先产出步骤清单 → 你在网页确认 → 按步执行
+# （一步一次独立提问、一条独立轨迹、一份独立成本，可随时暂停/继续/重试某步）。
+# planFile: plans.json  计划持久化路径（重启自动恢复；恢复时正在执行的计划降为暂停，
+#                       不自动续跑——副作用不可知，需要用户点头）
+planFile: plans.json
+# plan:
+#   enabled: true              # false 时聊天里的「计划」请求直接被拒并说明原因
+#   maxIterations: 12          # 规划轮与每一步各自的工具轮数上限（框架默认仅 10）
 
 # MCP 服务器（Model Context Protocol）：工具以 mcp_<名称>_<工具名> 前缀动态注册进
 # agent。两种接入方式二选一（管理后台"设置 → MCP 服务器"可在线配置，保存即热生效）：

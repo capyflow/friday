@@ -20,7 +20,7 @@ import (
 )
 
 // declareVersion 是本客户端声明并默认使用的 MCP 协议版本
-//（Streamable HTTP 自 2025-03-26 引入；服务器握手时可协商覆盖）。
+// （Streamable HTTP 自 2025-03-26 引入；服务器握手时可协商覆盖）。
 const declareVersion = "2025-03-26"
 
 // HTTPConn 是一台远程 MCP 服务器（Streamable HTTP）的连接。

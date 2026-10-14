@@ -15,7 +15,6 @@ import (
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/trace"
-	"github.com/capyflow/friday/internal/usage"
 )
 
 // chatHistoryMax 是历史回显的最大条数（老会话只展示最近一段，避免页面过长）。
@@ -355,15 +354,6 @@ func (s *Server) handleSetPersona(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
 		"message": "人设已切换并热生效（对话上下文保持连续），已写回 config.yaml",
 	})
-}
-
-// handleUsage 返回 token 用量账本：按天倒序明细 + 总量。
-func (s *Server) handleUsage(ctx *vhttp.Context) error {
-	days, total := usage.Summary()
-	if days == nil {
-		days = []usage.Day{}
-	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"days": days, "total": total})
 }
 
 // handleGetHeartbeat 读取心跳检查清单内容。
