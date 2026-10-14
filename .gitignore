@@ -45,3 +45,8 @@ logs/
 /desktop/src-tauri/resources/
 /desktop/src-tauri/icons/
 /desktop/src-tauri/gen/
+
+# macOS 访达元数据与本地会话工具目录
+.DS_Store
+/.mimosa/
+/.workbuddy/
