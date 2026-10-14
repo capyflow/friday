@@ -206,6 +206,30 @@ func TestStoreSaveAssignsIDAndReloads(t *testing.T) {
 	}
 }
 
+// TestStoreSaveDistinctNamesSurviveIDCollision 中文名的回落 id 是同毫秒时间戳，
+// 连续新建两条不能因目录名相撞而误判重名或覆盖前一条。
+func TestStoreSaveDistinctNamesSurviveIDCollision(t *testing.T) {
+	s := newStoreAt(t, t.TempDir())
+
+	first, err := s.Save("", morningSkill)
+	if err != nil {
+		t.Fatalf("Save 晨会准备: %v", err)
+	}
+	second, err := s.Save("", weatherSkill)
+	if err != nil {
+		t.Fatalf("Save 天气播报: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("两条技能共用了目录 id %q，后者覆盖了前者", first.ID)
+	}
+	if got := len(s.List()); got != 2 {
+		t.Errorf("应保留两条技能，实际 %d", got)
+	}
+	if _, ok := s.FindName("晨会准备"); !ok {
+		t.Error("第二条保存后第一条应仍在（按名查找）")
+	}
+}
+
 // TestStoreSaveRejectsInvalid 非法内容/目录名不落盘。
 func TestStoreSaveRejectsInvalid(t *testing.T) {
 	dir := t.TempDir()

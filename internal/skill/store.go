@@ -218,7 +218,15 @@ func (s *Store) Save(id, raw string) (Summary, error) {
 	name := proposed.Name()
 	newID := strings.TrimSpace(id)
 	if newID == "" {
-		newID = suggestID(name)
+		base := suggestID(name)
+		newID = base
+		// suggestID 的时间戳回落在同一毫秒内会重复，顺延到未被占用的目录名
+		for seq := 2; ; seq++ {
+			if _, taken := s.byID[newID]; !taken {
+				break
+			}
+			newID = fmt.Sprintf("%s-%d", base, seq)
+		}
 	}
 	if !validSkillID(newID) {
 		return Summary{}, fmt.Errorf("技能目录名只能包含字母、数字、下划线和连字符：%q", newID)
@@ -226,10 +234,6 @@ func (s *Store) Save(id, raw string) (Summary, error) {
 	// 重名检查（排除自身 id）
 	if other, ok := s.byName[name]; ok && other.ID != newID {
 		return Summary{}, fmt.Errorf("技能名 %q 已被 %q 使用，请换个名字或先删除那条", name, other.ID)
-	}
-	// 新 id 撞上别人的目录：拒绝覆盖无关技能
-	if existing, ok := s.byID[newID]; ok && existing.Scope == ScopeProject && strings.TrimSpace(id) == "" {
-		return Summary{}, fmt.Errorf("已存在技能 %q，请直接编辑它或改个名字", newID)
 	}
 
 	path := filepath.Join(s.dir, newID, "SKILL.md")
