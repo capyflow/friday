@@ -58,3 +58,6 @@ logs/
 .DS_Store
 /.mimosa/
 /.workbuddy/
+
+# ACP 探测报文（含用户 skill 全表与本机路径，不入库）
+evidence/
