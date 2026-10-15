@@ -251,6 +251,8 @@ func (c *Chat) HandleUpload(ctx *vhttp.Context) error {
 //	{"step": {kind,name,detail,status}}    思考过程事件（轮次/工具调用）
 //	{"paused": true, "partial": "..."}     对话被用户暂停（部分回答已保存可继续）
 //	{"done": true} / {"done": true, "error": "..."}
+//	                                      本轮结束，附 turn={in,out,ms} 本轮 token 汇总
+//	                                      （轨迹里没有这一请求时为 null，前端按缺省处理）
 func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 	var req struct {
 		Message     string   `json:"message"`
@@ -439,6 +441,22 @@ func (c *Chat) takePaused(key string) *PausedTurn {
 	return pt
 }
 
+// turnUsage 汇总本轮问答的 token 与墙钟耗时，随 done 帧发给前端。
+// 数取自 trace（OnLLMCall 逐轮累加，按请求 ID 归并），不另起一套记账；
+// 暂停与出错路径同样带上——已经烧掉的 token 不该因为这一轮没跑完就不显示。
+// 耗时只在 trace.End 已落时刻时给出（被暂停的现场没有结束时刻，前端自己有时钟）。
+func turnUsage(id string) map[string]any {
+	req, ok := trace.Get(id)
+	if !ok {
+		return nil
+	}
+	out := map[string]any{"in": req.In, "out": req.Out}
+	if ms := req.Ended.Sub(req.Started).Milliseconds(); ms > 0 {
+		out["ms"] = ms
+	}
+	return out
+}
+
 // stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、
 // 订阅思考过程事件、桥接暂停，ask 在独立上下文中执行对话并返回完整回答。
 // partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）；
@@ -544,7 +562,7 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 				logx.Printf(rctx, "[网页] 对话被暂停（已生成 %d 字，可继续）", len([]rune(streamed)))
 				trace.Record(rctx, "pause", "对话被用户暂停，已生成 %d 字可继续", len([]rune(streamed)))
 				_ = write(map[string]any{"paused": true, "partial": streamed})
-				_ = write(map[string]any{"done": true})
+				_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
 			}
 			return nil
 		}
@@ -554,7 +572,7 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 		if strings.Contains(err.Error(), "support image input") || strings.Contains(err.Error(), "model_incompatible") {
 			errMsg = "当前配置的模型不支持图片输入，请在 config.yaml 更换支持视觉的模型"
 		}
-		_ = write(map[string]any{"done": true, "error": errMsg})
+		_ = write(map[string]any{"done": true, "error": errMsg, "turn": turnUsage(logx.IDFrom(rctx))})
 		return nil
 	}
 	// 增量为空但拿到了完整回答（非流式路径）：补发一次，保证页面有内容。
@@ -569,6 +587,6 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 			"goal": p.Goal, "skill": p.Skill, "steps": p.Steps,
 		}})
 	}
-	_ = write(map[string]any{"done": true})
+	_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
 	return nil
 }

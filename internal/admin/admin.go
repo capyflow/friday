@@ -22,6 +22,8 @@
 //	GET    /api/permissions   全局权限模式与审批策略（需登录）
 //	POST   /api/permissions   切换权限模式 confirm/acceptEdits/fullAccess（需登录，热生效并写回 config.yaml）
 //	POST   /api/context/clear 清除对话上下文（需登录）
+//	GET    /api/context       会话上下文占用快照（活跃区估算 token/窗口/比例，需登录）
+//	POST   /api/context/compact 手动压缩一次上下文（归档旧块并重写活跃历史，需登录）
 //	GET    /admin /traces     旧地址，重定向回 /
 //	GET    /api/traces        调用轨迹列表（鉴权）
 //	GET    /api/traces/:id    单次调用轨迹详情（鉴权）
@@ -229,6 +231,8 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
+		root.AddRouter([]string{http.MethodGet}, "/api/context", s.wrap(s.handleContextUsage))
+		root.AddRouter([]string{http.MethodPost}, "/api/context/compact", s.wrap(s.handleContextCompact))
 		root.AddRouter([]string{http.MethodGet}, "/api/sessions", s.wrap(s.handleListSessions))
 		root.AddRouter([]string{http.MethodGet}, "/api/chat/history", s.wrap(s.handleChatHistory))
 	}

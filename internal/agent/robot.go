@@ -98,9 +98,10 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 				CacheRead:  int64(info.Usage.CacheReadTokens),
 				CacheWrite: int64(info.Usage.CacheWriteTokens),
 			})
-			// 思考过程事件：每轮 LLM 调用一条（含耗时与 token，失败也如实发布）。
-			roundDetail := fmt.Sprintf("耗时 %.1fs · %d+%d tokens", info.Duration.Seconds(),
-				info.Usage.InputTokens, info.Usage.OutputTokens)
+			// 思考过程事件：每轮 LLM 调用一条，只报耗时。token 不在这里摊——
+			// 它是整轮问答的量，由 SSE 的 done 帧一次性汇总给前端（chat.go 的
+			// turn 字段），挂在每一行思考上既读不出信息量，也把时间线染成一串数字。
+			roundDetail := fmt.Sprintf("耗时 %.1fs", info.Duration.Seconds())
 			if info.Err != nil {
 				roundDetail += " · " + info.Err.Error()
 			}

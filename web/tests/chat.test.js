@@ -270,6 +270,9 @@ describe('聊天发送和失败恢复', () => {
     await push({ thinking: '先看用户想要什么' })
     expect(wrapper.get('.think-title').text()).toBe('先看用户想要什么')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
+    // 前导是灯泡图标（不再是圆点），流式期间带 live 呼吸态
+    expect(wrapper.get('.think .step-ico svg').exists()).toBe(true)
+    expect(wrapper.get('.think .step-ico').classes()).toContain('live')
     // 新一行思考到来后，这一行随之更新
     await push({ thinking: '\n再查天气数据' })
     expect(wrapper.get('.think-title').text()).toBe('再查天气数据')
@@ -283,9 +286,10 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再查天气数据\n长文' + '甲'.repeat(200) + '收尾')
     await wrapper.get('.think-head').trigger('click')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
-    // 轮次结束：标题变为耗时/用量摘要（不再有"N 步"文案）
-    await push({ step: { kind: 'round', detail: '耗时 1.2s · 10+20 tokens' } })
-    expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s · 10+20 tokens')
+    // 轮次结束：标题变为耗时摘要（token 不再摊在每一行思考上，见轮末汇总用例）
+    await push({ step: { kind: 'round', detail: '耗时 1.2s' } })
+    expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
+    expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
     // 工具调用：收起只报"工具调用"，名称与参数不外露；展开才给详情与结果
     await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
     expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
@@ -296,7 +300,11 @@ describe('聊天发送和失败恢复', () => {
     expect(tool.get('.tool-head').text()).not.toContain('上海')
     expect(tool.get('.tool-call').isVisible()).toBe(false)
     expect(tool.get('.tool-out').isVisible()).toBe(false)
+    // 成功不再打勾：前导恒为扳手，状态只靠类名表达（✓/✕ 字符已退出模板）
     expect(tool.find('.step-ico').classes()).toContain('ok')
+    expect(tool.get('.step-ico svg').exists()).toBe(true)
+    expect(tool.get('.step-ico').text()).toBe('')
+    expect(tool.find('.step-ico .spin').exists()).toBe(false)
     await tool.get('.tool-head').trigger('click')
     expect(tool.get('.tool-call .step-name').text()).toBe('weather')
     expect(tool.get('.tool-call .step-detail').text()).toBe('上海')
@@ -325,13 +333,16 @@ describe('聊天发送和失败恢复', () => {
     await mountChat()
     expect(wrapper.get('.think-title').text()).toBe('思考')
     expect(wrapper.get('.think-text').text()).toBe('先查时区')
+    // 历史恢复的块同样走图标槽：思考=灯泡且不带 live，工具=扳手
+    expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
     expect(wrapper.get('.tool .tool-head .step-name').text()).toBe('工具调用')
+    expect(wrapper.get('.tool .step-ico svg').exists()).toBe(true)
     expect(wrapper.get('.tool .tool-call .step-name').text()).toBe('get_time')
     expect(wrapper.get('.tool .tool-call .step-detail').text()).toBe('Asia/Shanghai')
     expect(wrapper.get('.turn-text').text()).toBe('晚上 10 点。')
   })
 
-  it('工具调用失败在折叠行标出 ✕，错误摘要收进展开区', async () => {
+  it('工具调用失败：图标换成告警圈并整行标红，错误摘要收进展开区', async () => {
     fetchMock.mockResolvedValueOnce(stream([
       { step: { kind: 'tool', name: 'exec_command', detail: 'rm -rf /', status: 'run' } },
       { step: { kind: 'tool', name: 'exec_command', detail: '权限被拒绝', status: 'fail' } },
@@ -341,6 +352,10 @@ describe('聊天发送和失败恢复', () => {
     await mountChat()
     await send('删掉文件')
     expect(wrapper.get('.tool .step-ico').classes()).toContain('fail')
+    expect(wrapper.get('.tool').classes()).toContain('is-fail')
+    expect(wrapper.get('.step-ico svg').exists()).toBe(true)
+    expect(wrapper.get('.step-ico').text()).toBe('')       // 不再用 ✕ 字符
+    expect(wrapper.get('.tool-head').attributes('title')).toBe('工具执行出错，展开详情')
     expect(wrapper.findAll('.tool')).toHaveLength(1)
     expect(wrapper.get('.tool-head').text()).not.toContain('权限被拒绝')
     expect(wrapper.get('.tool .tool-out').text()).toBe('权限被拒绝')
@@ -454,5 +469,113 @@ describe('输入框权限模式 chip', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'fullAccess' })
     expect(wrapper.get('[aria-label="权限模式"]').classes()).toContain('pm-fullAccess')
+  })
+})
+
+describe('轮末 token 汇总与上下文占用 chip', () => {
+  const snap = (over = {}) => ({
+    enabled: true, session: 'web', used: 43000, window: 128000, ratio: 0.34,
+    softRatio: 0.7, blocks: 6, keepRecent: 12, messages: 22, canCompact: false, ...over,
+  })
+  const ctxApi = (snapshot, compact = {}) => vi.fn((method, url) => {
+    if (method === 'GET' && url === '/api/context?session=web') return Promise.resolve(snapshot)
+    if (method === 'POST' && url === '/api/context/compact') return Promise.resolve(compact)
+    return Promise.resolve({ messages: [] })
+  })
+  const chip = () => wrapper.get('[aria-label="上下文使用率"]')
+  async function openCtxMenu() {
+    await chip().trigger('click')
+    await flushPromises()
+    return wrapper.findAll('#ctxPopover .pop-item')
+  }
+  const compactItem = items => items.find(i => i.find('.pl').text() === '压缩上下文')
+
+  it('done 帧带 turn 时，时间线末尾落一行本轮汇总', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { delta: '今天晴' },
+      { done: true, turn: { in: 1234, out: 300, ms: 3400 } },
+    ]))
+    await mountChat()
+    await send('查天气')
+    expect(wrapper.get('.turn-total').text()).toBe('本轮 · 1.2k+300 tokens · 耗时 3.4s')
+  })
+
+  it('后端没带 turn（这一请求没有轨迹）时不渲染汇总行', async () => {
+    fetchMock.mockResolvedValueOnce(stream([{ delta: '今天晴' }, { done: true }]))
+    await mountChat()
+    await send('查天气')
+    expect(wrapper.find('.turn-total').exists()).toBe(false)
+  })
+
+  it('被暂停的一轮同样汇总，但没有耗时（暂停现场没有结束时刻）', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { delta: '前半段' },
+      { paused: true, partial: '前半段' },
+      { done: true, turn: { in: 900, out: 120 } },
+    ]))
+    await mountChat()
+    await send('写点东西')
+    expect(wrapper.get('.turn-total').text()).toBe('本轮 · 900+120 tokens')
+  })
+
+  it('chip 常驻显示占比，点开给出 token 数字与归档阈值刻度', async () => {
+    api.mockImplementation(ctxApi(snap()))
+    await mountChat()
+    expect(chip().text()).toContain('34%')
+    expect(chip().classes()).not.toContain('warm')
+    const items = await openCtxMenu()
+    expect(wrapper.get('#ctxPopover').text()).toContain('活跃区约 43k / 窗口 128k tokens')
+    expect(wrapper.get('#ctxPopover').text()).toContain('6 个活跃块 · 22 条消息 · 压缩后保留最近 12 块')
+    expect(wrapper.get('.ctx-mark').attributes('style')).toContain('left: 70%')
+    expect(api).toHaveBeenCalledWith('GET', '/api/context?session=web')
+    expect(compactItem(items).text()).toContain('压缩上下文')
+  })
+
+  it('达软阈值：chip 转 warm、压缩可点，执行后按返回快照刷新占比', async () => {
+    const before = snap({ ratio: 0.78, used: 100000, blocks: 20, canCompact: true })
+    const after = snap({ ratio: 0.21, used: 27000, blocks: 8, canCompact: false })
+    api.mockImplementation(ctxApi(before, {
+      message: '已归档 12 块，占用 100k → 27k tokens', before, after,
+    }))
+    await mountChat()
+    expect(chip().classes()).toContain('warm')
+    const items = await openCtxMenu()
+    const compact = compactItem(items)
+    expect(compact.attributes('disabled')).toBeUndefined()
+    await compact.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/context/compact', { session: 'web' })
+    expect(toast).toHaveBeenCalledWith('已归档 12 块，占用 100k → 27k tokens')
+    expect(chip().text()).toContain('21%')
+    expect(chip().classes()).not.toContain('warm')
+  })
+
+  it('未达阈值：压缩置灰并说明为什么现在不用压', async () => {
+    api.mockImplementation(ctxApi(snap()))
+    await mountChat()
+    const compact = compactItem(await openCtxMenu())
+    expect(compact.attributes('disabled')).toBeDefined()
+    expect(compact.text()).toContain('未达归档阈值（70%）')
+  })
+
+  it('本轮回复进行中：压缩置灰，提示等这一轮结束', async () => {
+    let releaseStream
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({
+      start(c) { releaseStream = c },
+    })))
+    api.mockImplementation(ctxApi(snap({ ratio: 0.78, canCompact: true })))
+    await mountChat()
+    await send('长回复')
+    const items = await openCtxMenu()
+    expect(compactItem(items).attributes('disabled')).toBeDefined()
+    expect(compactItem(items).text()).toContain('本轮回复进行中')
+    releaseStream.close()
+    await flushPromises()
+  })
+
+  it('上下文治理未启用时不出现 chip', async () => {
+    api.mockImplementation(ctxApi({ enabled: false, session: 'web' }))
+    await mountChat()
+    expect(wrapper.find('[aria-label="上下文使用率"]').exists()).toBe(false)
   })
 })

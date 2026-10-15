@@ -16,6 +16,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/capyflow/vortexagent/ctxengine"
 
@@ -128,6 +129,92 @@ func (m *ContextManager) stopRetentionLocked() {
 		m.cancel()
 		m.cancel = nil
 	}
+}
+
+// ContextSnapshot 一次上下文体检：活跃历史的估算占用，以及能否手动压缩。
+//
+// 口径与框架自动归档的闸门完全一致——都只按 session.Messages() 估算，既不含系统
+// 提示词，也不含 Build 时前置的摘要区，因此它是「活跃区占比」而非「这次请求实际
+// 发送的 token 数」。故意不另起一套口径：CanCompact 为真时，本轮结束后框架本来
+// 就会自动归档一次，面板与后台行为对得上，用户才不会被两个数字绕晕。
+type ContextSnapshot struct {
+	Enabled    bool    `json:"enabled"`    // 上下文治理是否启用（关闭时其余字段无意义）
+	Session    string  `json:"session"`    // 归一化后的会话 key
+	Used       int     `json:"used"`       // 活跃历史估算 token
+	Window     int     `json:"window"`     // 模型上下文窗口
+	Ratio      float64 `json:"ratio"`      // Used/Window
+	SoftRatio  float64 `json:"softRatio"`  // 归档触发软阈值
+	Blocks     int     `json:"blocks"`     // 活跃块数（一轮问答通常一块）
+	KeepRecent int     `json:"keepRecent"` // 压缩后保留的最近块数
+	Messages   int     `json:"messages"`   // 活跃历史消息条数
+	CanCompact bool    `json:"canCompact"` // 是否已达压缩闸门
+}
+
+// engine 返回当前生效的上下文引擎；未装配管理器或治理关闭时为 nil。
+func (b *Brain) engine() *ctxengine.Engine {
+	if b.ctx == nil {
+		return nil
+	}
+	return b.ctx.Current()
+}
+
+// ContextSnapshot 返回指定会话的上下文占用快照。只读：走 Pool.History，
+// 不会因为查一次占用就把空会话写进池里。治理未启用时只回 {Enabled:false}
+// ——没有窗口值可显示，也没有可压缩的对象，前端据此隐藏入口。
+func (b *Brain) ContextSnapshot(key string) ContextSnapshot {
+	fullKey := CurrentKey(key)
+	eng := b.engine()
+	if eng == nil {
+		return ContextSnapshot{Session: fullKey}
+	}
+	msgs := b.pool.History(context.Background(), fullKey)
+	cfg := eng.Config()
+	sid := sessionIDPrefix + fullKey
+	return ContextSnapshot{
+		Enabled:    true,
+		Session:    fullKey,
+		Used:       eng.EstimateTokens(sid, msgs),
+		Window:     cfg.WindowTokens,
+		Ratio:      eng.ContextUsage(sid, msgs),
+		SoftRatio:  cfg.SoftRatio,
+		Blocks:     len(ctxengine.SplitBlocks(msgs)),
+		KeepRecent: cfg.KeepRecentBlocks,
+		Messages:   len(msgs),
+		CanCompact: eng.ShouldArchive(sid, msgs),
+	}
+}
+
+// CompactContext 手动触发一次归档压缩：Compact 是框架里同步的那条路径
+// （落盘原始块与交接摘要 → ResetTo 重写活跃历史），轮末自动归档走的是它的
+// 异步版本，两者做的是同一件事。
+//
+// 与 Ask 抢同一把会话锁，抢不到就直接报错而不是排队——压缩会改写历史，
+// 不能跟在途请求交错。Compact 只改内存会话，落盘由这里补：不 Save 的话
+// 重启后又变回未压缩的长历史，等于白压一次。
+func (b *Brain) CompactContext(key string) (ContextSnapshot, error) {
+	fullKey := CurrentKey(key)
+	eng := b.engine()
+	if eng == nil {
+		return ContextSnapshot{}, fmt.Errorf("上下文治理未启用（config.context.enabled），没有可压缩的归档流程")
+	}
+	mu := b.pool.Lock(fullKey)
+	if !mu.TryLock() {
+		return ContextSnapshot{}, fmt.Errorf("会话 %s 正在回复中，等这一轮结束再压缩", fullKey)
+	}
+	defer mu.Unlock()
+	b.rw.RLock()
+	defer b.rw.RUnlock()
+
+	sess := b.pool.Get(context.Background(), fullKey)
+	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := eng.Compact(cctx, sessionIDPrefix+fullKey, sess); err != nil {
+		return ContextSnapshot{}, err
+	}
+	if err := b.pool.Save(context.WithoutCancel(context.Background()), sess); err != nil {
+		return ContextSnapshot{}, fmt.Errorf("压缩已完成，但保存会话失败: %w", err)
+	}
+	return b.ContextSnapshot(fullKey), nil
 }
 
 // WikiFactSink 把归档抽取的候选事实写入记忆 wiki：标题取内容前 24 个 rune，

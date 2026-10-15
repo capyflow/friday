@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/capyflow/vortexagent/ctxengine"
+	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/memory"
@@ -102,5 +104,90 @@ func TestWikiFactSink(t *testing.T) {
 		if rs := []rune(p.Title); len(rs) > 25 {
 			t.Fatalf("标题应截断在 24 rune + 省略号，实际 %d rune: %q", len(rs), p.Title)
 		}
+	}
+}
+
+// seedTurns 往会话池灌 n 轮问答（一轮 = 一块：user + assistant）。
+func seedTurns(b *Brain, key string, turns int) {
+	sess := b.pool.Get(context.Background(), key)
+	for i := 0; i < turns; i++ {
+		sess.Add(llm.Message{Role: llm.RoleUser, Content: []llm.Content{{
+			Type: llm.ContentText,
+			Text: fmt.Sprintf("第 %d 个问题：请介绍一下这个会话上下文压缩的判定口径是怎样的", i),
+		}}})
+		sess.Add(llm.Message{Role: llm.RoleAssistant, Content: []llm.Content{{
+			Type: llm.ContentText, Text: fmt.Sprintf("第 %d 个回答", i),
+		}}})
+	}
+}
+
+func enabledCtxMgr(t *testing.T, window int) *ContextManager {
+	t.Helper()
+	m := NewContextManager(nil)
+	cfg := testContextCfg(t, filepath.Join(t.TempDir(), "archive"))
+	cfg.Context.WindowTokens = window
+	if err := m.Rebuild(cfg); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	return m
+}
+
+// TestBrainContextSnapshotDisabled 未启用上下文治理时快照只表态"不可用"，
+// 压缩直接报错——前端据此隐藏 chip：没有窗口值可显示，也没有可压缩的对象。
+func TestBrainContextSnapshotDisabled(t *testing.T) {
+	b := NewBrain(nil, NewSessionPool(nil), NewContextManager(nil))
+	if got := b.ContextSnapshot("web"); got.Enabled {
+		t.Fatalf("未 Rebuild 时 Enabled 应为 false: %+v", got)
+	}
+	if _, err := b.CompactContext("web"); err == nil {
+		t.Fatal("未启用时压缩应报错而不是静默返回")
+	}
+}
+
+// TestBrainContextSnapshot 快照给出占用/窗口/块数并归一化 key；闸门用「窗口压到
+// 100 token」来翻转，比堆很多消息更稳（不依赖估算系数的绝对值）。
+func TestBrainContextSnapshot(t *testing.T) {
+	mgr := enabledCtxMgr(t, 128000)
+	b := NewBrain(nil, NewSessionPool(nil), mgr)
+	seedTurns(b, "web", 3)
+
+	snap := b.ContextSnapshot("") // 空 key 归到主会话 web
+	if !snap.Enabled || snap.Session != "web" {
+		t.Fatalf("快照应归一化到主会话: %+v", snap)
+	}
+	if snap.Window != 128000 || snap.KeepRecent != 12 {
+		t.Fatalf("窗口/保留块数应取生效配置: %+v", snap)
+	}
+	if snap.Blocks != 3 || snap.Messages != 6 {
+		t.Fatalf("3 轮问答应是 3 块 6 条: %+v", snap)
+	}
+	if snap.Used <= 0 || snap.Ratio <= 0 {
+		t.Fatalf("占用与占比应为正数: %+v", snap)
+	}
+	if snap.CanCompact {
+		t.Fatalf("占比极低且块数未超保留数，不该放行压缩: %+v", snap)
+	}
+
+	tiny := enabledCtxMgr(t, 100)
+	b2 := NewBrain(nil, NewSessionPool(nil), tiny)
+	seedTurns(b2, "web", 3)
+	if got := b2.ContextSnapshot("web"); !got.CanCompact || got.Ratio < got.SoftRatio {
+		t.Fatalf("窗口 100 时应越过软阈值: %+v", got)
+	}
+}
+
+// TestBrainCompactContextNoop 活跃块没超过保留数时，压缩是"无事可做"而不是错误：
+// 框架的 archiveSession 直接返回 nil，快照前后一致（也不该因此去打 LLM）。
+func TestBrainCompactContextNoop(t *testing.T) {
+	b := NewBrain(nil, NewSessionPool(nil), enabledCtxMgr(t, 128000))
+	seedTurns(b, "web", 2)
+	before := b.ContextSnapshot("web")
+
+	after, err := b.CompactContext("web")
+	if err != nil {
+		t.Fatalf("无历史可归档时不应报错: %v", err)
+	}
+	if after.Messages != before.Messages || after.Blocks != before.Blocks {
+		t.Fatalf("无事可做时不该改写活跃历史: %+v → %+v", before, after)
 	}
 }

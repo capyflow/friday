@@ -193,6 +193,55 @@ func (s *Server) handleClearContext(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": msg})
 }
 
+// handleContextUsage GET /api/context?session=key —— 返回会话的上下文占用快照
+// （活跃区估算 token、窗口、比例、是否已达压缩闸门），供对话页的上下文 chip 展示。
+// 只读：不触发 LLM 调用，也不因为查一次占用就创建空会话。
+func (s *Server) handleContextUsage(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.Success, agent.ContextSnapshot{})
+	}
+	key := strings.TrimSpace(ctx.GinContext().Query("session"))
+	return ctx.JsonResponse(vhttp.Codes.Success, s.chat.Brain().ContextSnapshot(key))
+}
+
+// handleContextCompact POST /api/context/compact —— 手动压缩一次上下文：body
+// {"session":"key"} 可选，缺省压缩默认网页会话。压缩是同步的（要等一次摘要生成），
+// 返回压缩前后的快照与一句结论。
+func (s *Server) handleContextCompact(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "聊天服务未启用"})
+	}
+	var req struct {
+		Session string `json:"session"`
+	}
+	_ = ctx.UnmarshalBody(&req)
+	b := s.chat.Brain()
+	before := b.ContextSnapshot(strings.TrimSpace(req.Session))
+	after, err := b.CompactContext(strings.TrimSpace(req.Session))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"message": compactMessage(before, after),
+		"before":  before,
+		"after":   after,
+	})
+}
+
+// compactMessage 组织压缩结果的一句话。闸门（canCompact）放行但活跃块数没超过
+// 保留数时，框架的归档会静默返回——这时确实无事可做，如实说明，别报个"已压缩"。
+func compactMessage(before, after agent.ContextSnapshot) string {
+	archived := before.Blocks - after.Blocks
+	switch {
+	case after.Messages == before.Messages && archived <= 0:
+		return fmt.Sprintf("没有可归档的历史（活跃 %d 块，压缩后仍保留最近 %d 块）", before.Blocks, before.KeepRecent)
+	case archived > 0:
+		return fmt.Sprintf("已归档 %d 块，占用 %d → %d tokens", archived, before.Used, after.Used)
+	default:
+		return "上下文已压缩"
+	}
+}
+
 // handleListApprovals 返回当前待审批操作与审批模式。
 func (s *Server) handleListApprovals(ctx *vhttp.Context) error {
 	out := map[string]any{"approvals": []any{}}

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/capyflow/vortexagent/llm"
+
+	"github.com/capyflow/friday/internal/agent"
 )
 
 // TestHistoryItemsGroupsTurnBlocks 校验历史回显把一轮问答里的思考、工具调用与
@@ -98,5 +100,24 @@ func TestHistoryItemsSkipsEmptyTurns(t *testing.T) {
 	}
 	if items[0].Text != "看看这张图[图片]" {
 		t.Errorf("用户消息 = %q，期望图片降级为占位标记", items[0].Text)
+	}
+}
+
+// TestCompactMessage 压缩结果的三种说法各按实际改动给出：真归档了要报块数与前后
+// 占用；闸门放行但活跃块没超过保留数时框架静默返回，此时不能说"已压缩"。
+func TestCompactMessage(t *testing.T) {
+	before := agent.ContextSnapshot{Enabled: true, Blocks: 20, Messages: 44, Used: 100000, KeepRecent: 12}
+	after := agent.ContextSnapshot{Enabled: true, Blocks: 8, Messages: 16, Used: 27000, KeepRecent: 12}
+	if got := compactMessage(before, after); got != "已归档 12 块，占用 100000 → 27000 tokens" {
+		t.Errorf("归档了 %q", got)
+	}
+
+	noop := agent.ContextSnapshot{Enabled: true, Blocks: 3, Messages: 6, Used: 900, KeepRecent: 12}
+	got := compactMessage(noop, noop)
+	if !strings.Contains(got, "没有可归档") {
+		t.Errorf("无事可做应如实说明，实际 %q", got)
+	}
+	if strings.Contains(got, "已压缩") {
+		t.Errorf("无事可做时不该报成功，实际 %q", got)
 	}
 }

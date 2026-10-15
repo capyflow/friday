@@ -7,14 +7,16 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api } from '../api.js'
+import { fmtTokens } from '../format.js'
 import { renderMD } from '../md.js'
 import { store, toast } from '../store.js'
 
-// 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan? }
+// 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
-//   { kind:'think', text, meta?, open? }        思考（meta 为轮次耗时/token 摘要）
+//   { kind:'think', text, meta?, open? }        思考（meta 为轮次耗时摘要）
 //   { kind:'tool', name, text, out?, status, open? }  工具调用（text=参数摘要，out=结果摘要）
 //   { kind:'text', text }                       回答正文（markdown）
+// bot 的 turn 是本轮问答的 token 汇总 { in, out, ms? }，随 done 帧到达、只活一次刷新。
 const messages = reactive([])
 const input = ref('')
 const phase = ref('idle')          // 对话阶段：idle（空闲）| streaming（回复中）| paused（已暂停可继续）
@@ -274,7 +276,8 @@ function setPop(open) {
   if (open === popOpen.value) return
   popOpen.value = open
   if (open) {
-    permOpen.value = false // 两个弹层互斥
+    permOpen.value = false // 三个弹层互斥：都从 composer 向上长，叠在一起没法读
+    ctxOpen.value = false
     nextTick(() => { const el = document.getElementById('addPopover'); if (el) popIn(el) })
   }
 }
@@ -306,6 +309,7 @@ function togglePerm() {
   permOpen.value = !permOpen.value
   if (permOpen.value) {
     setPop(false)
+    ctxOpen.value = false // 两个弹层互斥：都从 composer 左组向上长，叠在一起没法读
     loadPerm() // 每次展开都取最新值：设置页等其他入口可能刚改过
     nextTick(() => { const el = document.getElementById('permPopover'); if (el) popIn(el) })
   }
@@ -324,6 +328,53 @@ async function setPerm(m) {
 }
 // 设置页「权限模式」保存后广播同步，chip 即时跟上
 function onPermSync(e) { if (e.detail) permMode.value = e.detail }
+
+/* ---------- 上下文占用（chip 常驻 composer，点开看数字、达阈值可手动压缩） ---------- */
+const ctxSnap = ref(null)   // /api/context 快照；null = 上下文治理未启用或没取到（此时不显示 chip）
+const ctxOpen = ref(false)
+const ctxBusy = ref(false)
+const ctxWrap = ref(null)
+const ctxPct = computed(() => (ctxSnap.value ? Math.round(ctxSnap.value.ratio * 100) : 0))
+// 三档配色：未达阈值中性、达软阈值提醒、逼近硬阈值告警（软阈值来自 config.context）
+const ctxLevel = computed(() => {
+  const s = ctxSnap.value
+  if (!s) return ''
+  return s.ratio >= 0.95 ? 'hot' : (s.ratio >= s.softRatio ? 'warm' : '')
+})
+const ctxSoftPct = computed(() => (ctxSnap.value ? Math.round(ctxSnap.value.softRatio * 100) : 70))
+const ctxBarPct = computed(() => Math.min(ctxPct.value, 100)) // 超窗时进度条封顶，数字照实显示
+const ctxCompactHint = computed(() => {
+  const s = ctxSnap.value
+  if (!s) return '上下文信息不可用'
+  if (busy.value) return '本轮回复进行中，等结束再压缩'
+  if (!s.canCompact) return `未达归档阈值（${ctxSoftPct.value}%），现在没有可归档的历史`
+  return '归档旧块并重写活跃历史，旧内容仍可用检索找回'
+})
+async function loadCtx() {
+  try {
+    const s = await api('GET', '/api/context?session=web')
+    ctxSnap.value = s && s.enabled ? s : null
+  } catch (_) { ctxSnap.value = null }
+}
+function toggleCtx() {
+  if (clearing.value) return
+  ctxOpen.value = !ctxOpen.value
+  if (ctxOpen.value) {
+    setPop(false)
+    permOpen.value = false
+    loadCtx() // 占比随每轮问答变化，缓存没有意义：展开即取最新值
+    nextTick(() => { const el = document.getElementById('ctxPopover'); if (el) popIn(el) })
+  }
+}
+async function compactCtx() {
+  if (ctxBusy.value || busy.value) return
+  ctxBusy.value = true
+  try {
+    const r = await api('POST', '/api/context/compact', { session: 'web' })
+    if (r.after && r.after.enabled) ctxSnap.value = r.after
+    toast(r.message || '上下文已压缩')
+  } catch (e) { toast('压缩失败：' + e.message, true) } finally { ctxBusy.value = false }
+}
 
 /* ---------- 发送（SSE 流式）：发送 / 暂停 / 继续 ---------- */
 function autoGrow() {
@@ -354,7 +405,7 @@ async function pauseChat() {
 }
 
 function newBot() {
-  return reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [] })
+  return reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null })
 }
 
 /* ---------- 时间线块（zcode 风）：思考 / 工具调用 / 正文按到达顺序分开 ---------- */
@@ -372,13 +423,28 @@ function thinkPreview(text) {
   return ''
 }
 
-// 正在写的思考块（最后一块且轮次未定稿）：标题实时一行预览、圆点呼吸。
+// 正在写的思考块（最后一块且轮次未定稿）：标题实时一行预览、灯泡呼吸。
 function liveThink(m, bi, b) {
   return m.streaming && !m.paused && bi === m.blocks.length - 1 && !b.meta
 }
 function thinkTitle(m, b, bi) {
   if (liveThink(m, bi, b)) return thinkPreview(b.text) || '思考中…'
   return b.meta ? '思考 · ' + b.meta : '思考'
+}
+// 工具调用折叠行的可访问标题：出错时把状态说在前面，运行中没有可展开的内容故留空。
+function toolTitle(b) {
+  if (b.status === 'fail') {
+    if (!b.out) return '工具执行出错'
+    return b.open ? '收起出错详情' : '工具执行出错，展开详情'
+  }
+  if (!b.out) return ''
+  return b.open ? '收起详情' : '展开详情'
+}
+// 轮末汇总文案：token 走 k/百万缩写；耗时缺失（被暂停的现场没有结束时刻）就不写。
+function turnTotalText(t) {
+  if (!t) return ''
+  const s = `本轮 · ${fmtTokens(t.in || 0)}+${fmtTokens(t.out || 0)} tokens`
+  return t.ms ? `${s} · 耗时 ${(t.ms / 1000).toFixed(1)}s` : s
 }
 function cursorOn(m, bi) {
   return m.streaming && bi === m.blocks.length - 1
@@ -472,6 +538,7 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
     let buf = ''
     let done = false
     let paused = false
+    let turnTotal = null // done 帧带回的本轮 token 汇总，循环结束后才挂到 bot 上
     const ensureBot = () => {
       removeTyping()
       if (!bot) { bot = newBot(); messages.push(bot) }
@@ -511,7 +578,10 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
           partial: data.partial || (bot && bot.text) || '',
         }
       }
-      if (data.done) done = true
+      if (data.done) {
+        done = true
+        if (data.turn) turnTotal = data.turn
+      }
     }
     const consume = () => {
       buf = buf.replace(/\r\n/g, '\n')
@@ -532,7 +602,13 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       if (chunk.done) break
     }
     if (!done && !paused) throw new Error('回复连接已中断')
-    if (!bot && !paused) messages.push({ role: 'bot', text: '……', blocks: [{ kind: 'text', text: '……' }] })
+    if (!bot && !paused) {
+      bot = { role: 'bot', text: '……', blocks: [{ kind: 'text', text: '……' }] }
+      messages.push(bot)
+    }
+    if (bot && turnTotal) bot.turn = turnTotal
+    // 本轮结束（含被暂停）：上下文占比刷新，chip 与弹窗里的数字跟着这一轮走
+    loadCtx()
     if (!paused) {
       // 正常完成：清掉历史暂停标记（任务已续完或已放弃），回到空闲。
       phase.value = 'idle'
@@ -679,9 +755,12 @@ function onDocClick(e) {
   if (menuOpen.value && moreWrap.value && !moreWrap.value.contains(e.target)) menuOpen.value = false
   if (popOpen.value && popWrap.value && !popWrap.value.contains(e.target)) setPop(false)
   if (permOpen.value && permWrap.value && !permWrap.value.contains(e.target)) permOpen.value = false
+  if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
 }
 function onKeydown(e) {
-  if (e.key === 'Escape') { menuOpen.value = false; setPop(false); permOpen.value = false }
+  if (e.key === 'Escape') {
+    menuOpen.value = false; setPop(false); permOpen.value = false; ctxOpen.value = false
+  }
 }
 onMounted(() => {
   document.addEventListener('click', onDocClick)
@@ -689,6 +768,7 @@ onMounted(() => {
   window.addEventListener('friday:perm', onPermSync)
   loadHistory()
   loadPerm()
+  loadCtx()
 })
 onUnmounted(() => {
   disposed = true
@@ -705,6 +785,7 @@ function goTraces() { menuOpen.value = false; store.view = 'trace' }
 async function clearContext() {
   if (busy.value || clearing.value) return
   menuOpen.value = false
+  ctxOpen.value = false
   clearing.value = true
   messagesVersion++
   try {
@@ -712,6 +793,8 @@ async function clearContext() {
     if (disposed) return
     messages.splice(0, messages.length)
     releaseUnusedImages()
+    ctxSnap.value = null
+    loadCtx() // 清空后占比归零，chip 要立刻反映，不能等下一次问答
     toast(r.message || '上下文已清除')
   } catch (e) { if (!disposed) toast(e.message, true) }
   finally { clearing.value = false }
@@ -760,7 +843,9 @@ async function clearContext() {
               <div v-if="b.kind === 'think'" class="think" :class="{ open: b.open }">
                 <button class="think-head" type="button" :title="b.open ? '收起思考' : '展开思考'"
                         @click="b.open = !b.open">
-                  <span class="think-dot" :class="{ live: liveThink(m, bi, b) }"></span>
+                  <span class="step-ico think-ico" :class="{ live: liveThink(m, bi, b) }" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
+                  </span>
                   <span class="think-title">{{ thinkTitle(m, b, bi) }}</span>
                   <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
@@ -769,14 +854,14 @@ async function clearContext() {
                 </div>
               </div>
               <!-- 工具调用块：收起只报"工具调用"，工具名与参数、结果都收进展开区 -->
-              <div v-else-if="b.kind === 'tool'" class="tool" :class="{ open: b.open }">
-                <button class="tool-head" type="button" :disabled="!b.out"
-                        :title="b.out ? (b.open ? '收起详情' : '展开详情') : ''"
+              <div v-else-if="b.kind === 'tool'" class="tool"
+                   :class="{ open: b.open, 'is-fail': b.status === 'fail' }">
+                <button class="tool-head" type="button" :disabled="!b.out" :title="toolTitle(b)"
                         @click="b.open = b.out ? !b.open : false">
-                  <span class="step-ico" :class="b.status">
-                    <template v-if="b.status === 'ok'">✓</template>
-                    <template v-else-if="b.status === 'fail'">✕</template>
-                    <template v-else><i class="spin"></i></template>
+                  <span class="step-ico" :class="b.status" aria-hidden="true">
+                    <i v-if="b.status === 'run'" class="spin step-ring"></i>
+                    <svg v-else-if="b.status === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
                   </span>
                   <span class="step-name">工具调用</span>
                   <svg v-if="b.out" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -831,6 +916,8 @@ async function clearContext() {
                   </template>
                 </div>
               </div>
+            <!-- 轮末一行汇总：本轮 token 与耗时（思考块只报每轮耗时，总量在这里收口） -->
+            <div v-if="m.turn" class="turn-total">{{ turnTotalText(m.turn) }}</div>
           </div>
           <!-- 用户 / 错误消息仍是气泡 -->
           <div v-else class="bubble">
@@ -874,6 +961,15 @@ async function clearContext() {
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
               </button>
             </div>
+            <!-- 上下文占用：点击查看数字与压缩入口。未启用上下文治理时后端不返回快照，chip 不出现 -->
+            <button v-if="ctxSnap" class="ib-btn ctx-btn" :class="[ctxLevel, { active: ctxOpen }]"
+                    aria-label="上下文使用率" aria-haspopup="true"
+                    :title="'上下文占用 ' + ctxPct + '%，点击查看'" :disabled="clearing"
+                    @click.stop="toggleCtx">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
+              <span class="ctx-short">{{ ctxPct }}%</span>
+            </button>
           </div>
           <div class="bar-right">
             <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
@@ -929,6 +1025,38 @@ async function clearContext() {
             <span class="pd">{{ meta.desc }}</span>
           </button>
           <div class="perm-foot pop-anim">毁灭性命令黑名单（rm -rf、shutdown 等）在任何档位都强制拦截</div>
+        </div>
+
+        <!-- 上下文弹层：占用数字 + 手动压缩 / 清除。占比口径与框架自动归档的闸门一致 -->
+        <div v-if="ctxSnap" v-show="ctxOpen" ref="ctxWrap" class="popover ctx-popover" id="ctxPopover">
+          <div class="popover-title pop-anim">上下文</div>
+          <div class="ctx-meter pop-anim" :class="ctxLevel">
+            <div class="ctx-fill" :style="{ width: ctxBarPct + '%' }"></div>
+            <span class="ctx-mark" :style="{ left: ctxSoftPct + '%' }" :title="'归档阈值 ' + ctxSoftPct + '%'"></span>
+          </div>
+          <p class="ctx-line pop-anim">
+            <b>{{ ctxPct }}%</b>
+            <span class="meta">活跃区约 {{ fmtTokens(ctxSnap.used) }} / 窗口 {{ fmtTokens(ctxSnap.window) }} tokens</span>
+          </p>
+          <p class="ctx-line pop-anim meta">
+            {{ ctxSnap.blocks }} 个活跃块 · {{ ctxSnap.messages }} 条消息 · 压缩后保留最近 {{ ctxSnap.keepRecent }} 块
+          </p>
+          <button class="pop-item ctx-item pop-anim" :disabled="!ctxSnap.canCompact || busy || ctxBusy" @click.stop="compactCtx">
+            <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/></svg></span>
+            <span class="ctx-item-text">
+              <span class="pl">{{ ctxBusy ? '压缩中…' : '压缩上下文' }}</span>
+              <span class="ctx-tip">{{ ctxCompactHint }}</span>
+            </span>
+          </button>
+          <div class="pop-sep pop-anim"></div>
+          <button class="pop-item pop-anim" :disabled="busy || clearing" @click.stop="clearContext()">
+            <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-reset"/></svg></span>
+            <span class="pl">清除上下文</span>
+            <span class="pd">整段历史清空，不可找回</span>
+          </button>
+          <div class="perm-foot pop-anim">
+            占比按活跃历史估算，不含系统提示词与摘要区；达 {{ ctxSoftPct }}% 时每轮结束会自动归档一次
+          </div>
         </div>
       </div>
     </div>
