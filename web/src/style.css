@@ -744,7 +744,8 @@ html[data-theme="dark"] .approval-card {
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.err { background: var(--danger); }
 html[data-theme="dark"] #toast {
-  background: rgba(22,22,22,.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  background: rgba(22,22,22,.92); color: var(--fg);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   border: 1px solid rgba(255,255,255,.12); }
 html[data-theme="dark"] #toast.err {
   background: rgba(60,18,18,.92); border-color: rgba(248,113,113,.3); }
