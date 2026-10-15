@@ -124,7 +124,7 @@ Friday    ：turn 空闲时（turnqueue）发唤醒轮
 
 - `inherit`（默认）：继承 `HOME` 与用户 env。子 agent 能用日常登录态与配置，代价是 C13（它带自己的 MCP server、审批配置和 skill 表进来）。
 - `sandbox-home`：给一次性 `HOME` + env 白名单（`PATH` 绝对路径、`LANG`、`XDG_*`）。彻底隔离，但**多半直接失去登录态**（codex 的 `auth.json`、opencode 的 provider 凭据都在 HOME 下），实际可用性需按 agent 逐个验证。
-- 二期默认 `inherit`，但在作业记录与后台状态页显式标注该作业用了哪档，避免"以为隔离了其实没有"。
+- 二期默认 `inherit`，但在作业记录与后台状态页显式标注该作业用了哪档，避免"以为隔离了其实没有"。（**2026-10-15 已拍板**：默认 `inherit` 与"一期不承诺人工拦截"一并认可，见 ROADMAP 决策记录。）
 
 工作区：per-job 一次性目录，`session/new` 的 `cwd` 指向它。注意 agent 会在工作目录自落状态文件（实测 opencode 写 `.omo/run-continuation/<session>.json`），保留策略与清理时机要写进设计而非事后惊觉。
 

@@ -334,6 +334,11 @@ MCP 配置热加载（当前修改 mcp.servers 后需重启服务；连接管理
 
 ## 七、决策记录
 
+- **2026-10-15**：ACP（Agent Client Protocol）接入定为 client 方向 + 长程作业模型；一期不含审批、
+  门面只放只读工具。`homePolicy` 默认 `inherit`（子 agent 继承用户 HOME 及其登录态、MCP server、
+  skill 表），一期**无人工闸门**已由用户认可——安全边界仅为一次性工作目录 + 门面只读 + 任务自包含，
+  不承诺拦截子 agent 在其目录内的 shell 与写操作。依据与 13 条实测硬约束见 docs/ACP-AGENTS.md，
+  一期拆解见 docs/ACP-AGENTS-P1.md；方案在未合并的 explore/acp-agents 分支，尚未开工
 - **2026-09-19（交付日）**：M4 多会话采用"ctx 注入会话 key + SessionPool per-key 锁"取代
   原 SessionRef 单会话；流式增量改用框架 `Agent.WithDelta` 按请求路由，DeltaBus 废除。
   由此 M3 的"心跳与用户对话全局互斥排队"升级为"智能任务独立会话 `task`，与用户会话天然隔离"；
