@@ -5,6 +5,8 @@
 
 ## 〇、一期前置（本方案的输入接口）
 
+一期的完整展开见 [ACP-AGENTS-P1.md](./ACP-AGENTS-P1.md)。本节只列二期依赖的接口。
+
 二期建立在以下一期能力之上。若一期尚未落地，本节即一期的验收清单：
 
 | 一期交付 | 二期使用方式 |
@@ -126,7 +128,7 @@ Friday    ：turn 空闲时（turnqueue）发唤醒轮
 
 工作区：per-job 一次性目录，`session/new` 的 `cwd` 指向它。注意 agent 会在工作目录自落状态文件（实测 opencode 写 `.omo/run-continuation/<session>.json`），保留策略与清理时机要写进设计而非事后惊觉。
 
-门面鉴权：`McpServer.Http.Headers` 带 `Authorization: Bearer <token>`，token 绑定 `jobID` + 工具白名单 + TTL。**这一条尚未实测**（探测用的 mock 无鉴权），列为 S1 的第一个验证项。
+门面鉴权：`McpServer.Http.Headers` 带 `Authorization: Bearer <token>`，token 绑定 `jobID` + 工具白名单 + TTL。**这一条尚未实测**（探测用的 mock 无鉴权），实测点在一期 P1-E，是二期能否挂写类工具的地基。
 
 ## 七、事件与呈现
 
@@ -139,23 +141,23 @@ Friday    ：turn 空闲时（turnqueue）发唤醒轮
 
 | 步 | 内容 | 验收 |
 |---|---|---|
-| S1 | 门面骨架 + 作业级 token（含 `Headers` 实测） | opencode 带 Bearer 连上并调通 `recall`；错 token/越权工具被拒；MCP 版本协商对两家都通（C12） |
+| S1 | 门面写类工具接入（token 实测已前移至一期 P1-E） | 沿用一期已验证的 Bearer token 通路；写类工具一律走 S2 两拍，任何门面调用 <15s 返回（C1） |
 | S2 | 审批两拍 + `approval.Queue` 句柄化 | agent 在 60s 内不因门面超时（C1/C2）；卡片字段全来自 Friday 模板（C10） |
-| S3 | turn 队列 + 唤醒轮 | 用本次 `cmd/acp-probe -followup-during` 回归：并发场景不再出现归属错乱（C3），顺序唤醒能续上句柄（C4） |
+| S3 | 唤醒轮 + pending 队列（串行锁已由一期 D2 建立，本步只加排队语义） | 用本次 `cmd/acp-probe -followup-during` 回归：并发场景不再出现归属错乱（C3），顺序唤醒能续上句柄（C4） |
 | S4 | 写类工具接入 + 权限直通名单 | `acp_*` 四个工具进 `internal/agent/permission.go:38`，`permission_test.go:213` guard 绿 |
 | S5 | 事件聚合 + 用量归账 | 一轮真实作业的 `Step` 条数 <30（当前 raw 153 条）；`acp:<agent>` 维度出现在成本页；金额缺失显示「配额在对面」而非 0 |
 | S6 | 崩溃/重启归位 | 杀掉 agent 进程后作业转 `interrupted` 且不自动假装续上；重启后作业表可见、不残留 `running` |
 
 ## 九、测试策略
 
-1. **fake ACP agent**：`coder/acp-go-sdk` 同时提供 agent 侧 API，用它在测试里起一个 stdio 假 agent（可控地发 `session/update`、`request_permission`、超时、崩溃）。这是本方案的关键工程投入——否则每条回归都要烧别人的配额、耗时 12~209s、结果不可复现。
+1. **fake ACP agent**：`coder/acp-go-sdk` 同时提供 agent 侧 API，用它在测试里起一个 stdio 假 agent（可控地发 `session/update`、`request_permission`、超时、崩溃）。这是关键工程投入——否则每条回归都要烧别人的配额、耗时 12~209s、结果不可复现。**脚手架在一期 P1-A 建立**，二期复用并追加审批相关注入场景。
 2. 报文回放：本地 `evidence/*.jsonl`（含那两条 60s 超时与并发混流的坏案例）作为聚合器与状态机的开发参考；**报文不入版本库**（内含用户 skill 全表与本机路径），入库的固定输入改由 S9 的 fake agent 生成。
 3. 超时纪律测试：门面工具 handler 内任何 `select` 都必须有 <15s 的兜底分支，用 `-race` + 超时断言守住。
 4. 禁止阻塞：`SessionUpdate` handler 的测试断言其只入队（C6）。
 
 ## 十、风险与未决
 
-- **token over `Headers` 未实测**（S1 第一件事）。
+- **token over `Headers` 未实测**（实测点在一期 P1-E，若某家 agent 不带自定义 header，门面鉴权要改方案）。
 - **唤醒轮的语义依赖 agent 记性好**：C4 只在 opencode 上验证过一次；换 agent（尤其 auto_review 类会自说自话的 codex）可能需要在唤醒文本里带上任务重述。缓解：唤醒文本模板化，含「原任务摘要 + 句柄 + 下一步动作」。
 - **session 恢复未验证**：`agentCapabilities.loadSession` 在两家都为 true，但重启后能否真把上下文捞回来没测过；本期按"恢复不了就 `interrupted`"设计，不赌。
 - **配额与成本盲区**：子 agent 花它自己的订阅，Friday 只拿得到 token 数和（可选的）`cost` 字段，两家 `cost.amount` 实测都是 0 USD。预算护栏（`cost.NewGuard`）不能把它算进自家支出。
