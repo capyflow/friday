@@ -11,6 +11,14 @@ config.yaml
 /notifications.json
 /memories.json
 /admin-account.json
+/token-usage.json
+/paused-turns.json
+/plans.json
+/pricing.json
+/traces.json
+
+# 技能目录（用户自己的 SKILL.md，个人内容不入库）
+/skills/
 
 # 语音模型（体积大，不入库）
 /models/
