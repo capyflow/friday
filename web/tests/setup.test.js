@@ -42,7 +42,7 @@ describe('首次设置向导', () => {
     expect(wrapper.get('input[name="password"]').element.value).toBe('secret-password')
   })
 
-  it('账号设置成功清理密码，登录刷新后进入模型步骤；模型保存与稍后分别发事件', async () => {
+  it('账号创建成功只发 account-created，向导里不再有模型配置', async () => {
     show()
     await fill()
     api.mockResolvedValueOnce({ username: 'owner', accountRequired: false, providerRequired: true })
@@ -50,13 +50,12 @@ describe('首次设置向导', () => {
     await flushPromises()
     expect(wrapper.emitted('account-created')).toHaveLength(1)
     expect(wrapper.get('input[name="password"]').element.value).toBe('')
-    api.mockResolvedValueOnce({ provider: { baseURL: 'https://api.example/v1', model: 'model' }, apiKeyConfigured: false })
+    // 模型配置移出向导：providerRequired 仍为 true 时也不该出现模型表单或"稍后设置"
     await wrapper.setProps({ status: { ...first, accountRequired: false } })
     await flushPromises()
-    expect(wrapper.findComponent(ProviderSettings).exists()).toBe(true)
-    wrapper.getComponent(ProviderSettings).vm.$emit('saved')
-    expect(wrapper.emitted('completed')).toHaveLength(1)
-    await wrapper.get('.setup-skip').trigger('click')
-    expect(wrapper.emitted('skip')).toHaveLength(1)
+    expect(wrapper.findComponent(ProviderSettings).exists()).toBe(false)
+    expect(wrapper.find('.setup-skip').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('连接模型')
+    expect(api).not.toHaveBeenCalledWith('GET', '/api/status')
   })
 })

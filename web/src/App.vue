@@ -74,8 +74,6 @@ async function refreshSetup() {
   } catch { /* 服务器暂不可达时保留当前界面 */ }
 }
 
-async function setupComplete() { store.setupSkipped = false; await refreshSetup() }
-
 /* 登录成功：外壳入场 */
 watch(() => store.loggedIn, async ok => {
   if (ok) { await nextTick(); shellIn() }
@@ -123,8 +121,8 @@ async function logout() {
   <!-- 极光背景（深色可见光斑，浅色极淡点阵） -->
   <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 
-  <SetupView v-if="store.setupStatus?.accountRequired || (store.loggedIn && store.setupStatus?.providerRequired && !store.setupSkipped)"
-             :status="store.setupStatus" @account-created="refreshSetup" @completed="setupComplete" @skip="store.setupSkipped = true" />
+  <!-- 首次设置只管建账号；模型配置在「设置 → 模型」，不在引导里追问 -->
+  <SetupView v-if="store.setupStatus?.accountRequired" :status="store.setupStatus" @account-created="refreshSetup" />
   <LoginView v-else-if="!store.loggedIn" />
 
   <div v-else id="app">

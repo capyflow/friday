@@ -1,9 +1,10 @@
 # 复制为 config.yaml 并修改
 provider:
   name: openai                 # 固定 openai（vortexagent OpenAI 兼容层）
-  baseURL: https://api.deepseek.com/v1   # DeepSeek/通义/智谱等兼容地址
+  baseURL: https://api.example.com/v1   # 占位值，换成你的服务商 OpenAI 兼容地址
+  # baseURL: https://api.deepseek.com/v1            # DeepSeek 示例
   # baseURL: https://api.stepfun.com/step_plan/v1   # 阶跃星辰 StepFun 示例
-  model: deepseek-chat         # StepFun 填 step-3.7-flash 等
+  model: 请填模型名          # 占位值，填服务商给的模型名（如 deepseek-chat / step-3.7-flash）
   apiKeyEnv: FRIDAY_API_KEY    # 从该环境变量读密钥（通用命名，任意服务商可用；
                                # 未设置时兼容回退旧名 DEEPSEEK_API_KEY）。
                                # 也可以不配环境变量：打开软件在「设置」页直接填密钥

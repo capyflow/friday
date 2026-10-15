@@ -18,6 +18,11 @@ func TestBootstrapCreatesLoadableConfigurationAndKeepsExisting(t *testing.T) {
 	if cfg.Admin.Host != "127.0.0.1" || cfg.Provider.Model == "" || cfg.Provider.APIKey != "" {
 		t.Fatal("初始配置应为本机无密钥")
 	}
+	// provider 的两个值必须是明显示例占位：Validate() 要求非空所以不能留空，
+	// 但也不能写死某家真实服务商（会被当成"已经配好了"）。
+	if cfg.Provider.BaseURL != "https://api.example.com/v1" || cfg.Provider.Model != "请填模型名" {
+		t.Fatalf("初始配置应为占位值，实际 %q / %q", cfg.Provider.BaseURL, cfg.Provider.Model)
+	}
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0600 {
 		t.Fatal("初始配置必须仅当前用户可读写")
