@@ -21,7 +21,10 @@
 深色为中性炭灰（参考 Cursor）：无色相表面 + 细线边框，不用渐变、光斑与光晕。
 
 1. **双主题** — `html[data-theme="light|dark"]` 令牌覆盖；默认跟随系统，
-   localStorage `friday-theme` 持久化；index.html 头部内联预设防首帧闪烁。
+   localStorage `friday-theme` 持久化（无键 = 跟随系统，`initTheme` 挂 `prefers-color-scheme`
+   监听实时跟随）；index.html 头部内联预设防首帧闪烁。两个入口（侧栏账号菜单的快捷切换、
+   设置 → 外观的三档）共用同一个值，改动一律经 `theme.js` 的 `setTheme`/`clearTheme`
+   发出 `friday:theme` 广播，别在组件里各自持有主题状态。
 2. **背景** — 全站 fixed 点阵纹理层；紫色极光光斑已下线（旧「AI 风」的主要来源）。
 3. **行动色** — 浅色为墨 `#18181B`；深色为亮灰反白 `#E8E8E8`（主按钮/发送键/品牌标，
    与浅色墨色互为反相）；用户气泡深色下为 `#262626` 细边中性面。
@@ -56,18 +59,36 @@
   建议 chips（点击直接发送）；logo 呼吸光晕已移除
 - **Qoder 风 composer** — `.inputbar` 描边卡片（圆角 16px；浅色白卡 + `--shadow-xs`，
   深色半透明面 + 细边；`:focus-within` 起 3px 克制蓝聚焦环）。两行：textarea 独占第一行
-  （autoGrow 到 160px 后内部滚动），第二行 `.composer-bar` 左为圆形加号（旋转 45° 开弹窗）
-  与模式 chip、右为快捷键提示（窄屏隐藏）与圆形发送键（空输入禁用，回复中切暂停/继续）
+  （autoGrow 到 160px 后内部滚动），第二行 `.composer-bar` 左为圆形加号（旋转 45° 开弹窗）、
+  权限 chip、模式 chip 与上下文 chip，右为快捷键提示（窄屏隐藏）与圆形发送键（空输入禁用，
+  回复中切暂停/继续）
+- **上下文 chip + 弹层** — `.ctx-btn` 与权限 chip 同形（药丸 + 15px 描边图标 + `tabular-nums` 数字），
+  三档配色：未达阈值 `--muted-fg`、达软阈值 `.warm` 转 `--warn`、逼近硬阈值 `.hot` 转 `--danger-fg`
+  （深色各配一档亮色）。`.ctx-popover` 复用 `.popover` 玻璃层与 `popIn` 编排：占比条 `.ctx-meter`
+  在软阈值处放一根刻度 `.ctx-mark`（看得见"离自动归档还有多远"），下面两行 `.ctx-line` 给
+  活跃区/窗口 token 与块数，动作项沿用 `.pop-item`；压缩项的说明要讲清为什么置灰，
+  用 `.ctx-item-text` + `.ctx-tip` 单独占一行而不是 `.pd` 的省略号尾巴。三个弹层（加号/权限/上下文）互斥
 - **加号弹窗** — `.popover` 玻璃圆角 18px：添加图片 / 计划模式 / 目标模式（互斥选中，
   切 placeholder + 发送时加 `【计划】/【目标】` 前缀）/ 快捷创建（定时提醒、新建待办 → 预填输入框）
 - **聊天气泡** — 用户=primary（深色下 `#262626` 中性面）、错误=红浅底（bot 不再套气泡）；MD 排版（代码块墨底）
-- **bot 回答时间线**（zcode 风）— `.turn` 内按到达顺序排列：思考块 `.think`（裸行：状态点 +
-  一行实时预览/轮次摘要，点击展开全文，展开区 `.think-body` 才是盒）、工具调用行 `.tool`
-  （✓/✕/旋转环 + 统一文案「工具调用」，点击展开工具名、参数与等宽结果）、正文全宽 `.chat-md`；
-  流式光标 `cursor` 跟最后一块正文
+- **bot 回答时间线**（zcode 风）— `.turn` 内按到达顺序排列，思考与工具调用同为裸行，
+  前导共用 14px 描边 SVG 槽 `.step-ico`（`flex` 居中、跟随 `currentColor`，两行标签左边缘因此对齐，
+  展开区 `.think-body` / `.tool-body` 统一缩进 21px）：思考块 `.think` = 灯泡（流式时 `.live`
+  只淡入淡出呼吸、颜色转 `--primary`，定稿后回落 `--faint-fg`）+ 一行实时预览/轮次摘要，
+  点击展开全文；工具调用行 `.tool` = 扳手 + 统一文案「工具调用」，运行中前导换成旋转环 `.step-ring`，
+  成功不打勾（扳手回落中性），仅失败时前导换成告警圈并整行转红（`.tool.is-fail` 配
+  `--danger-fg`/`--danger`，`title` 把「工具执行出错」说在前面），点击展开工具名、参数与等宽结果；
+  正文全宽 `.chat-md`；流式光标 `cursor` 跟最后一块正文。时间线末尾一行 `.turn-total` 收口本轮
+  用量（11.5px `--faint-fg` + `tabular-nums`，「本轮 · 1.2k+300 tokens · 耗时 3.4s」）——
+  token 不摊在每行思考上，只在轮末说一次
 - **表格** — 无外框、细线行、hover 浅底；徽章/chip 全部浅底深字
 - **状态卡** — 数字 GSAP 滚动（`data-count` + runCountUp），非数值 15px
 - **弹层三件套** — toast（墨色/深色炭灰玻璃）、modal、审批卡（左橙线玻璃卡）
+- **空状态插画** — `components/art/EmptyState.vue`：单色细线，与 24 网格线性图标同族（viewBox 120 /
+  stroke 1.5），按 `kind` 取帧（trace / todo / wiki / wikiPick / notif / mcp / usage / session /
+  skill / schedule / error）+ 插槽文案。约束：一帧一个主体名词、accent 只落在引导元素上、
+  虚线恒表示「尚未发生」、断开处用留白而非 fill 挖洞（深色 `--card` 半透明，挖洞会漏线）。
+  `tests/empty-art.test.js` 校验 kind 与各页调用点对齐
 - **快捷面板 palette** — 深色炭灰同源令牌（亮灰 logo / 蓝光标）
 
 ---
@@ -78,6 +99,9 @@
 - ❌ 深色下用纯白卡片（必须半透明面 + 细边令牌）
 - ❌ 紫色渐变 / 发光 / 扫光 / 光斑（「AI 紫」风味，2026-10-14 全部移除；深色保持无色相）
 - ❌ 语义标签用整块饱和大色底
+- ❌ 用 ✓/✕ 文本字符当**块身份图标**（时间线折叠行的前导必须用 14px 描边 SVG + `currentColor`，
+  字符的字号与基线随平台字体度量漂移，且无法与描边图标同槽对齐）；纯状态枚举列可以留字符
+  ——计划卡 `.pc-state` 的 `·…✓✕−`、下拉选中项的 `::after` 勾，但颜色一律走 `--ok`/`--danger` 令牌
 - ❌ 忽略 `prefers-reduced-motion`（GSAP 编排必须可降级）
 - ❌ 引入 CDN 字体/脚本（保持单文件离线；GSAP 走 npm 打包）
 
