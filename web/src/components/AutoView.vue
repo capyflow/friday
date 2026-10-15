@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { fmtDT, fmtNum, kindName } from '../format.js'
 import { store, toast } from '../store.js'
 import SelectBox from './SelectBox.vue'
+import EmptyState from './art/EmptyState.vue'
 
 const MODE_OPTIONS = [{ value: 'once', label: '单次' }, { value: 'repeat', label: '有限多次' }, { value: 'cron', label: '循环' }]
 const CHANNEL_OPTIONS = [{ value: '', label: '全部可用通道' }, { value: 'web', label: '通知中心' },
@@ -227,7 +228,7 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
             </template>
           </div>
         </article>
-        <div v-if="!tasks.length" class="panel empty">当前没有未来安排，已触发任务的执行结果可在通知中心查看。</div>
+        <EmptyState v-if="!tasks.length" class="panel" kind="schedule" :size="96">当前没有未来安排，已触发任务的执行结果可在通知中心查看。</EmptyState>
       </div>
     </div>
   </section>

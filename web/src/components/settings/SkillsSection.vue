@@ -2,6 +2,7 @@
 // 技能：直接编辑 SKILL.md（框架格式 + Friday 的启用/触发键），保存即生效。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../../api.js'
+import EmptyState from '../art/EmptyState.vue'
 
 const TEMPLATE = `---
 name: 技能名
@@ -139,7 +140,7 @@ onMounted(load)
       <div v-else-if="s.note" class="sr-note">{{ s.note }}</div>
     </div>
   </div>
-  <div v-else class="empty">还没有技能——点"新建技能"写一份 SKILL.md，或小五的对话里用 /skill 技能名 直接点名</div>
+  <EmptyState v-else kind="skill" :size="92">还没有技能——点"新建技能"写一份 SKILL.md，或小五的对话里用 /skill 技能名 直接点名</EmptyState>
 
   <div v-if="broken.length || shadowed.length" class="msg err">
     <template v-if="broken.length">{{ broken.length }} 个技能文件无效，已按原因标出（原文件保留）。</template>

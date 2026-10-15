@@ -5,6 +5,7 @@ import { api } from '../api.js'
 import { fmtNum, fmtTokens, upStr } from '../format.js'
 import { toast } from '../store.js'
 import { runCountUp } from '../anim.js'
+import EmptyState from './art/EmptyState.vue'
 
 const status = ref(null)
 const usage = reactive({
@@ -161,8 +162,8 @@ onMounted(async () => {
           </tbody>
         </table>
       </div>
-      <div v-else-if="!usage.days.length && usage.err" class="empty">用量加载失败：{{ usage.err }}</div>
-      <div v-else-if="!hasDimRows" class="empty">还没有这个维度的用量记录，和小五聊一句就有了</div>
+      <EmptyState v-else-if="!usage.days.length && usage.err" kind="error" :size="96">用量加载失败：{{ usage.err }}</EmptyState>
+      <EmptyState v-else-if="!hasDimRows" kind="usage">还没有这个维度的用量记录，和小五聊一句就有了</EmptyState>
     </div>
   </section>
 </template>

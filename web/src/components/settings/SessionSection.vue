@@ -4,6 +4,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../../api.js'
 import { fmtDT } from '../../format.js'
 import { toast } from '../../store.js'
+import EmptyState from '../art/EmptyState.vue'
 
 const sessions = ref([])
 
@@ -35,7 +36,7 @@ onMounted(load)
       </tr>
     </tbody>
   </table>
-  <div v-else class="empty">还没有任何会话</div>
+  <EmptyState v-else kind="session" :size="88">还没有任何会话</EmptyState>
   <div class="set-note">每个入口（网页/终端/钉钉/飞书聊天）拥有独立会话，历史落盘重启不丢；
     清除只影响对应会话。</div>
 </template>

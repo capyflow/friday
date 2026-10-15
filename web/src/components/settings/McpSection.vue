@@ -4,6 +4,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { api } from '../../api.js'
 import { toast } from '../../store.js'
 import SelectBox from '../SelectBox.vue'
+import EmptyState from '../art/EmptyState.vue'
 
 const TYPE_OPTIONS = [
   { value: 'stdio', label: '本地命令' },
@@ -117,7 +118,7 @@ onMounted(load)
       <div v-if="x.name && !state(x).running && state(x).lastError" class="mr-error meta">{{ state(x).lastError }}</div>
     </div>
   </div>
-  <div v-else class="empty">未配置 MCP 服务器——点击"添加服务器"开始</div>
+  <EmptyState v-else kind="mcp" :size="92">未配置 MCP 服务器——点击"添加服务器"开始</EmptyState>
   <div class="row" style="margin-top:10px">
     <button class="btn" type="button" @click="addRow">＋ 添加服务器</button>
     <button class="btn primary" type="button" @click="save">保存并生效</button>

@@ -23,4 +23,9 @@ export default [
       'vue/multi-word-component-names': 'off',
     },
   },
+  {
+    // 仅测试可读文件系统（校验插画 kind 与调用点对齐）；src 仍只允许浏览器全局。
+    files: ['tests/**/*.js'],
+    languageOptions: { globals: { process: 'readonly' } },
+  },
 ]

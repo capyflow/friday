@@ -6,6 +6,7 @@ import { fmtDT } from '../format.js'
 import { toast } from '../store.js'
 import { store } from '../store.js'
 import { notificationSettings, enableSystemNotifications } from '../notifications.js'
+import EmptyState from './art/EmptyState.vue'
 
 const notifications = ref([])
 const retrying = reactive(new Set())
@@ -103,7 +104,8 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
           </tbody>
         </table>
         </div>
-        <div v-else class="empty">{{ loading ? '正在加载通知…' : '当前没有通知，提醒触发后会在这里保留记录' }}</div>
+        <div v-else-if="loading" class="empty">正在加载通知…</div>
+        <EmptyState v-else kind="notif">当前没有通知，提醒触发后会在这里保留记录</EmptyState>
       </div>
     </div>
   </section>

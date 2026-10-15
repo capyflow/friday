@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
 import { fmtDT } from '../format.js'
 import { toast } from '../store.js'
+import EmptyState from './art/EmptyState.vue'
 
 const text = ref('')
 const dueAt = ref('')
@@ -170,7 +171,7 @@ onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clock
           </tbody>
         </table>
         </div>
-        <div v-else class="empty">待办清单是空的，对小五说"记个待办：买牛奶"，或直接在上方添加</div>
+        <EmptyState v-else kind="todo" :size="100">待办清单是空的，对小五说"记个待办：买牛奶"，或直接在上方添加</EmptyState>
       </div>
     </div>
   </section>

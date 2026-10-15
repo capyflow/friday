@@ -5,6 +5,7 @@ import { api } from '../api.js'
 import { renderMD } from '../md.js'
 import { fmtDT, srcName } from '../format.js'
 import { toast } from '../store.js'
+import EmptyState from './art/EmptyState.vue'
 
 const query = ref('')
 const pages = ref([])
@@ -120,10 +121,10 @@ onMounted(loadWiki)
               <span class="meta">{{ p.snippet ? p.snippet : (srcName[p.source] || p.source || '') + ' · ' + fmtDT(p.updatedAt) + ' 更新' }}</span>
             </button>
           </div>
-          <div v-if="!pages.length" class="empty">还没有记忆页<br>对小五说"记住…"即可创建</div>
+          <EmptyState v-if="!pages.length" kind="wiki" :size="92">还没有记忆页<br>对小五说"记住…"即可创建</EmptyState>
         </aside>
         <div class="wiki-main">
-          <div v-if="mode === 'hint'" class="empty">从左侧选择一页查看</div>
+          <EmptyState v-if="mode === 'hint'" kind="wikiPick" :size="96">从左侧选择一页查看</EmptyState>
 
           <div v-if="mode === 'read'" class="panel wiki-reader">
             <div class="wiki-head">

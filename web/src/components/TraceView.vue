@@ -5,6 +5,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api, traceAPI } from '../api.js'
 import { EV_TITLE, fmtClock, fmtNum, prettyJSON } from '../format.js'
 import { store } from '../store.js'
+import EmptyState from './art/EmptyState.vue'
 
 const events = ref([])
 const stats = reactive({ requests: 0, in: 0, out: 0 })
@@ -91,7 +92,7 @@ onUnmounted(() => {
           <div v-show="e._open" class="ev-body">{{ bodyOf(e) }}</div>
         </div>
       </template>
-      <div v-else class="empty">还没有调用记录<br>和小五说句话试试</div>
+      <EmptyState v-else kind="trace">还没有调用记录<br>和小五说句话试试</EmptyState>
     </div>
   </section>
 </template>
