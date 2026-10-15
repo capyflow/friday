@@ -2,13 +2,13 @@
 // 运行状态：服务状态卡片 + 成本态势横幅 + Token 用量账本（按天/模型/来源/会话/运行）。
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
-import { fmtNum, upStr } from '../format.js'
+import { fmtNum, fmtTokens, upStr } from '../format.js'
 import { toast } from '../store.js'
 import { runCountUp } from '../anim.js'
 
 const status = ref(null)
 const usage = reactive({
-  days: [], total: {}, currency: 'CNY', err: '',
+  days: [], total: {}, err: '',
   byModel: [], byOrigin: [], bySession: [], byRun: [],
 })
 
@@ -31,25 +31,24 @@ const todayCards = computed(() => {
   const total = usage.total
   return [
     ['今日调用', todayRow.calls, ''],
-    ['今日 IN', fmtNum(todayRow.in), ''],
-    ['今日 OUT', fmtNum(todayRow.out), ''],
-    ['累计 IN', fmtNum(total.in || 0), ''],
-    ['累计 OUT', fmtNum(total.out || 0), ''],
-    ['累计合计', fmtNum((total.in || 0) + (total.out || 0)), 'is-yellow'],
+    ['今日 IN', fmtTokens(todayRow.in), ''],
+    ['今日 OUT', fmtTokens(todayRow.out), ''],
+    ['累计 IN', fmtTokens(total.in || 0), ''],
+    ['累计 OUT', fmtTokens(total.out || 0), ''],
+    ['累计合计', fmtTokens((total.in || 0) + (total.out || 0)), 'is-yellow'],
   ]
 })
 
 const DIMS = [
-  { key: 'model', label: '按模型', rows: () => usage.byModel, hasCost: true },
-  { key: 'origin', label: '按来源', rows: () => usage.byOrigin, hasCost: false },
-  { key: 'session', label: '按会话', rows: () => usage.bySession, hasCost: false },
-  { key: 'run', label: '按运行', rows: () => usage.byRun, hasCost: false },
+  { key: 'model', label: '按模型', rows: () => usage.byModel },
+  { key: 'origin', label: '按来源', rows: () => usage.byOrigin },
+  { key: 'session', label: '按会话', rows: () => usage.bySession },
+  { key: 'run', label: '按运行', rows: () => usage.byRun },
 ]
 const dim = ref('model')
 const curDim = computed(() => DIMS.find(d => d.key === dim.value) || DIMS[0])
 const dimRows = computed(() => curDim.value.rows() || [])
 const hasDimRows = computed(() => dimRows.value.length > 0)
-const unpricedCount = computed(() => usage.byModel.filter(r => !r.priced).length)
 
 const cost = computed(() => (status.value && status.value.cost) || null)
 const costClass = computed(() => {
@@ -69,7 +68,6 @@ onMounted(async () => {
     const u = await api('GET', '/api/usage')
     usage.days = u.days || []
     usage.total = u.total || {}
-    usage.currency = u.currency || 'CNY'
     usage.byModel = u.byModel || []
     usage.byOrigin = u.byOrigin || []
     usage.bySession = u.bySession || []
@@ -88,11 +86,7 @@ onMounted(async () => {
         <span class="dot" :class="cost.state === 'over' ? 'bad' : cost.state === 'warn' ? 'run' : 'ok'"></span>
         <b>{{ costLabel }}</b>
         <span class="cb-sep">·</span>
-        <span>今日 {{ fmtNum(cost.todayTokens) }} tokens</span>
-        <template v-if="cost.todayCost">
-          <span class="cb-sep">·</span>
-          <span>{{ cost.currency }} {{ cost.todayCost.toFixed(4) }}</span>
-        </template>
+        <span>今日 {{ fmtTokens(cost.todayTokens) }} tokens</span>
         <template v-if="cost.ratio">
           <span class="cb-sep">·</span>
           <span class="meta">最紧一档 {{ Math.round(cost.ratio * 100) }}%（{{ cost.tightest }}）</span>
@@ -100,10 +94,6 @@ onMounted(async () => {
         <template v-if="cost.proactivePaused">
           <span class="cb-sep">·</span>
           <span class="meta">主动任务已暂停（对话与提醒不受影响）</span>
-        </template>
-        <template v-if="cost.unknownModels && cost.unknownModels.length">
-          <span class="cb-sep">·</span>
-          <span class="meta">{{ cost.unknownModels.length }} 个模型未配价，金额未计入</span>
         </template>
         <template v-if="cost.zeroCalls">
           <span class="cb-sep">·</span>
@@ -155,7 +145,6 @@ onMounted(async () => {
             <tr>
               <th>{{ curDim.label.replace('按', '') }}</th>
               <th>调用次数</th><th>IN</th><th>OUT</th><th>合计</th>
-              <th v-if="curDim.hasCost">金额（{{ usage.currency }}）</th>
             </tr>
           </thead>
           <tbody>
@@ -168,16 +157,9 @@ onMounted(async () => {
                 {{ fmtNum(r.in + r.out) }}
                 <span v-if="r.zeroCalls" class="meta">（{{ r.zeroCalls }} 次未回传）</span>
               </td>
-              <td v-if="curDim.hasCost" class="mono">
-                <template v-if="r.priced">{{ r.cost.toFixed(4) }}</template>
-                <span v-else class="meta">价格未配置</span>
-              </td>
             </tr>
           </tbody>
         </table>
-        <div v-if="dim === 'model' && unpricedCount" class="meta" style="padding:8px 12px">
-          {{ unpricedCount }} 个模型未配价：到「设置 → 成本与预算」补单价后才会算出金额
-        </div>
       </div>
       <div v-else-if="!usage.days.length && usage.err" class="empty">用量加载失败：{{ usage.err }}</div>
       <div v-else-if="!hasDimRows" class="empty">还没有这个维度的用量记录，和小五聊一句就有了</div>

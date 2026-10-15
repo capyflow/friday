@@ -9,20 +9,19 @@
   html, body { height: 100%; }
   body {
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
-    background: #17171c; color: #ececf1;
+    background: #171717; color: #e8e8e8;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
   }
   #logo { width: 72px; height: 72px; border-radius: 20px; position: relative;
-    background: linear-gradient(160deg, #6366f1, #8b5cf6);
-    box-shadow: 0 10px 40px rgba(99, 102, 241, .35); }
+    background: #e8e8e8; }
   #logo::after { content: ""; position: absolute; inset: 20px; border-radius: 50%;
-    background: rgba(255, 255, 255, .92); }
+    background: rgba(20, 20, 20, .92); }
   h1 { font-size: 18px; font-weight: 500; }
-  #status { font-size: 13px; color: rgba(236, 236, 241, .55); }
+  #status { font-size: 13px; color: rgba(232, 232, 232, .55); }
   #bar { width: 180px; height: 4px; border-radius: 2px; overflow: hidden;
     background: rgba(255, 255, 255, .1); }
   #bar i { display: block; width: 40%; height: 100%; border-radius: 2px;
-    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    background: #e8e8e8;
     animation: slide 1.2s ease-in-out infinite; }
   @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(450%); } }
   .err { color: #f87171; }

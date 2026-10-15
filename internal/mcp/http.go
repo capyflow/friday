@@ -137,7 +137,10 @@ func (c *HTTPConn) post(ctx context.Context, method string, params any, timeout 
 
 	ct := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "text/event-stream") {
-		return sseResponse(resp.Body, id)
+		res, err := sseResponse(resp.Body, id)
+		// SSE 形态的响应同样要回传响应头：initialize 下发的 Mcp-Session-Id
+		// 只在响应头里，丢弃它后续请求会被服务器以"须先 initialize"拒绝。
+		return res, resp.Header, err
 	}
 	var envelope struct {
 		Result json.RawMessage `json:"result"`
@@ -188,8 +191,9 @@ func (c *HTTPConn) notify(ctx context.Context, method string) error {
 	return nil
 }
 
-// sseResponse 从 SSE 流中取回 id 匹配的那条响应。
-func sseResponse(r io.Reader, wantID int64) (json.RawMessage, http.Header, error) {
+// sseResponse 从 SSE 流中取回 id 匹配的那条响应（不含响应头；
+// 调用方直接从 http.Response 取）。
+func sseResponse(r io.Reader, wantID int64) (json.RawMessage, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for sc.Scan() {
@@ -213,11 +217,11 @@ func sseResponse(r io.Reader, wantID int64) (json.RawMessage, http.Header, error
 			continue
 		}
 		if msg.Err != nil {
-			return nil, nil, msg.Err
+			return nil, msg.Err
 		}
-		return msg.Result, nil, nil
+		return msg.Result, nil
 	}
-	return nil, nil, errors.New("SSE 流中未收到匹配的响应")
+	return nil, errors.New("SSE 流中未收到匹配的响应")
 }
 
 // RefreshTools 重新拉取 tools/list。

@@ -145,3 +145,60 @@ func TestHTTPRemoteMCP(t *testing.T) {
 	}
 	time.Sleep(20 * time.Millisecond) // 状态落定
 }
+
+// TestHTTPInitializeOverSSE 回归：有些服务器（如官方 TS SDK 的 Streamable HTTP，
+// 实测 blinko）对 initialize 也回 text/event-stream，会话 ID 只在响应头里。
+// SSE 解析分支曾把响应头整个丢掉，导致会话 ID 拿不到，后续 tools/list 被服务器
+// 以 "sessions must start with initialize"（HTTP 400）拒绝，设置页显示不可用。
+func TestHTTPInitializeOverSSE(t *testing.T) {
+	const sid = "sess-sse-1"
+	var missingSession bool
+	var mu sync.Mutex
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg struct {
+			ID     *int64 `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		switch msg.Method {
+		case "initialize":
+			w.Header().Set("MCP-Session-Id", sid)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			fl.Flush()
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"sse\",\"version\":\"0.1\"}}}\n\n", *msg.ID)
+			fl.Flush()
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			mu.Lock()
+			missingSession = r.Header.Get("MCP-Session-Id") != sid
+			mu.Unlock()
+			if missingSession {
+				http.Error(w, "bad session", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"result": map[string]any{"tools": []any{}},
+			})
+		default:
+			http.Error(w, "unknown method", http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	conn, err := StartHTTP("sse", srv.URL, nil)
+	if err != nil {
+		t.Fatalf("StartHTTP（initialize 为 SSE 时应能完成握手）: %v", err)
+	}
+	defer conn.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if missingSession {
+		t.Fatal("tools/list 未回带 initialize 响应头下发的会话 ID")
+	}
+}

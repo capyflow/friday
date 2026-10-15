@@ -25,7 +25,7 @@ const GROUPS = [
     { id: 'mcp', icon: 'i-mcp', label: 'MCP 服务器', desc: '本地命令或远程 URL 接入外部工具，保存后热生效', comp: markRaw(McpSection) },
     { id: 'skills', icon: 'i-skill', label: '技能', desc: 'SKILL.md 定义的做事套路，编辑保存即生效', comp: markRaw(SkillsSection) },
     { id: 'permissions', icon: 'i-shield', label: '权限模式', desc: '危险操作的把关力度，切换后立即生效', comp: markRaw(PermissionSection) },
-    { id: 'cost', icon: 'i-coin', label: '成本与预算', desc: '模型价格表与用量额度，超线只停主动任务', comp: markRaw(CostSection) },
+    { id: 'cost', icon: 'i-coin', label: '成本与预算', desc: 'Token 用量热力图与预算额度，超线只停主动任务', comp: markRaw(CostSection) },
     { id: 'heartbeat', icon: 'i-heart', label: '心跳清单', desc: '定时交给小五自主检查的事项', comp: markRaw(HeartbeatSection) },
   ]},
   { label: '数据与系统', items: [

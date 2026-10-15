@@ -13,6 +13,7 @@ import (
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/trace"
 )
@@ -20,8 +21,122 @@ import (
 // chatHistoryMax 是历史回显的最大条数（老会话只展示最近一段，避免页面过长）。
 const chatHistoryMax = 100
 
+// 历史回显的文本裁剪上限：与 SSE 实时帧的口径对齐（工具摘要 160 字），
+// 思考全文放宽到 4000 字——刷新后展开思考块要能看到大致完整的推理。
+const (
+	histThinkMax = 4000
+	histTextMax  = 8000
+	histToolMax  = 160
+)
+
+// histBlock 是 bot 一轮回答里的一个内容块（前端按到达顺序渲染成时间线）。
+// kind：think（推理全文）| tool（工具调用，text=参数摘要、out=结果摘要）| text（正文片段）。
+type histBlock struct {
+	Kind   string `json:"kind"`
+	Text   string `json:"text,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Status string `json:"status,omitempty"`
+	Out    string `json:"out,omitempty"`
+}
+
+// histItem 是一条回显消息：user 只有 text；bot 带 blocks（text 为正文拼接，
+// 供搜索与旧前端兜底）。
+type histItem struct {
+	Role   string      `json:"role"`
+	Text   string      `json:"text"`
+	Blocks []histBlock `json:"blocks,omitempty"`
+}
+
+// historyItems 把会话消息投影成前端可见的对话流：一次用户提问之后的所有
+// assistant/tool 轮次（含思考块与工具调用）合并成一条 bot 消息，
+// 这样刷新页面后思考过程与工具调用还在。
+func historyItems(msgs []llm.Message) []histItem {
+	var (
+		out    []histItem
+		blocks []histBlock
+		// openTools 保存结果尚未落定的工具调用：toolCallID → blocks 下标。
+		openTools = map[string]int{}
+	)
+
+	flush := func() {
+		if len(blocks) == 0 {
+			return
+		}
+		var text strings.Builder
+		for _, b := range blocks {
+			if b.Kind == "text" {
+				text.WriteString(b.Text)
+			}
+		}
+		cp := make([]histBlock, len(blocks))
+		copy(cp, blocks)
+		out = append(out, histItem{Role: "assistant", Text: text.String(), Blocks: cp})
+		blocks = nil
+		openTools = map[string]int{}
+	}
+
+	for _, m := range msgs {
+		switch m.Role {
+		case llm.RoleUser:
+			flush()
+			out = append(out, histItem{Role: string(m.Role), Text: historyText(m)})
+		case llm.RoleAssistant:
+			for _, c := range m.Content {
+				switch c.Type {
+				case llm.ContentThinking:
+					if strings.TrimSpace(c.Thinking) != "" {
+						blocks = append(blocks, histBlock{
+							Kind: "think", Text: logx.Truncate(c.Thinking, histThinkMax)})
+					}
+				case llm.ContentText:
+					if strings.TrimSpace(c.Text) != "" {
+						blocks = append(blocks, histBlock{
+							Kind: "text", Text: logx.Truncate(c.Text, histTextMax)})
+					}
+				case llm.ContentImage:
+					blocks = append(blocks, histBlock{Kind: "text", Text: "[图片]"})
+				}
+			}
+			for _, tc := range m.ToolCalls {
+				openTools[tc.ID] = len(blocks)
+				blocks = append(blocks, histBlock{Kind: "tool", Name: tc.Name,
+					Text: agent.SummarizeArgs(tc.Arguments), Status: "ok"})
+			}
+		case llm.RoleTool:
+			// 工具结果回填到对应调用上（失败时框架把错误写成 "工具执行出错: ..."）。
+			i, ok := openTools[m.ToolCallID]
+			if !ok {
+				continue
+			}
+			result := historyText(m)
+			blocks[i].Out = logx.Truncate(result, histToolMax)
+			if strings.HasPrefix(result, "工具执行出错") {
+				blocks[i].Status = "fail"
+			}
+		default:
+			// system 与其他角色不进对话流。
+		}
+	}
+	flush()
+	return out
+}
+
+// historyText 拼出一条消息的全部文本内容（图片降级为占位标记）。
+func historyText(m llm.Message) string {
+	var b strings.Builder
+	for _, c := range m.Content {
+		switch c.Type {
+		case llm.ContentText:
+			b.WriteString(c.Text)
+		case llm.ContentImage:
+			b.WriteString("[图片]")
+		}
+	}
+	return b.String()
+}
+
 // handleChatHistory 返回指定会话（?session=key，缺省 web）的可见对话历史：
-// 仅 user/assistant 的文本消息（工具轮次跳过），供打开页面/切换会话时回显。
+// 按轮次聚合的 user/bot 消息，bot 带思考块与工具调用块，供打开页面/刷新后回显。
 // 只读查询——不触发 LLM 调用，也不创建空会话。
 func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	if s.chat == nil {
@@ -29,30 +144,7 @@ func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	}
 	key := strings.TrimSpace(ctx.GinContext().Query("session"))
 	msgs := s.chat.Brain().Pool().History(ctx.Context(), key)
-	type item struct {
-		Role string `json:"role"`
-		Text string `json:"text"`
-	}
-	out := make([]item, 0, len(msgs))
-	for _, m := range msgs {
-		role := string(m.Role)
-		if role != "user" && role != "assistant" {
-			continue // 工具结果/系统轮次不进对话流
-		}
-		var text string
-		for _, c := range m.Content {
-			switch c.Type {
-			case llm.ContentText:
-				text += c.Text
-			case llm.ContentImage:
-				text += "[图片]"
-			}
-		}
-		if strings.TrimSpace(text) == "" {
-			continue // 纯工具调用意图的 assistant 消息不展示
-		}
-		out = append(out, item{Role: role, Text: text})
-	}
+	out := historyItems(msgs)
 	if len(out) > chatHistoryMax {
 		out = out[len(out)-chatHistoryMax:]
 	}

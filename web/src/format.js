@@ -9,6 +9,23 @@ export function fmtClock(s) {
 
 export function fmtNum(n) { return Number(n || 0).toLocaleString('en-US') }
 
+// fmtTokens 用 k / 百万 / 亿 三档缩写 token 数，保留有效位并去掉尾零：
+// 1234 → "1.2k"，1234567 → "1.23百万"，123456789 → "1.23亿"。
+export function fmtTokens(n) {
+  const v = Number(n) || 0
+  let d = 1e3, suf = 'k', p = 1
+  if (v >= 1e8) { d = 1e8; suf = '亿'; p = 2 }
+  else if (v >= 1e6) { d = 1e6; suf = '百万'; p = 2 }
+  if (v < 1e3) return fmtNum(v)
+  let q = (v / d).toFixed(p)
+  if (Number(q) >= 1000 && d < 1e8) { // 99.999百万 之类的进位溢出，升一档
+    d *= (d === 1e3 ? 1e3 : 1e2)
+    q = (v / d).toFixed(2)
+    suf = d === 1e6 ? '百万' : '亿'
+  }
+  return parseFloat(q) + suf
+}
+
 export function prettyJSON(s) {
   try { return JSON.stringify(JSON.parse(s), null, 2) } catch (_) { return s }
 }

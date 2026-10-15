@@ -3,13 +3,16 @@ import { flushPromises, mount } from '@vue/test-utils'
 import StatusView from '../src/components/StatusView.vue'
 import SettingsModal from '../src/components/SettingsModal.vue'
 import { api } from '../src/api.js'
+import { fmtTokens } from '../src/format.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 // StatusView 经 anim.js 做数字滚动，模块加载即调 window.matchMedia（jsdom 未实现）。
 vi.mock('../src/anim.js', () => ({ runCountUp: vi.fn() }))
 
+const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+
 const USAGE = {
-  days: [{ date: '2026-10-14', calls: 3, in: 1200, out: 300 }],
+  days: [{ date: localToday, calls: 3, in: 1200, out: 300 }],
   total: { date: 'total', calls: 3, in: 1200, out: 300 },
   currency: 'CNY',
   byModel: [
@@ -27,11 +30,6 @@ const COST_OK = {
   budget: { softRatio: 0.8, dailyTokens: 2000000 },
   unknownModels: [], zeroCalls: 0, manualPaused: false, proactivePaused: false,
 }
-const PRICING_OK = {
-  currency: 'CNY',
-  prices: [{ model: 'deepseek-chat', inputPerMTok: 2, outputPerMTok: 8, cacheReadPerMTok: 0.5 }],
-  unknownModels: ['mystery-llm'],
-}
 
 function statusWith(cost) {
   return {
@@ -48,13 +46,12 @@ function statusWith(cost) {
 
 let wrapper
 let cost = COST_OK
-let pricing = PRICING_OK
+let usagePayload = USAGE
 
 function routeApi() {
   return vi.fn((method, url) => {
-    if (url === '/api/usage') return Promise.resolve(USAGE)
+    if (url === '/api/usage') return Promise.resolve(usagePayload)
     if (url === '/api/cost') return Promise.resolve({ cost })
-    if (url === '/api/cost/pricing') return Promise.resolve(pricing)
     if (url === '/api/status') return Promise.resolve(statusWith(cost))
     if (url.startsWith('/api/cost/')) return Promise.resolve({ message: '已处理' })
     return Promise.resolve({})
@@ -63,14 +60,13 @@ function routeApi() {
 
 beforeEach(() => {
   cost = { ...COST_OK }
-  pricing = { ...PRICING_OK }
+  usagePayload = { ...USAGE }
   api.mockReset().mockImplementation(routeApi())
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null; document.body.innerHTML = '' })
 
 const textOf = el => (el ? el.textContent.trim() : '')
 const byText = (sel, label) => Array.from(document.querySelectorAll(sel)).find(el => textOf(el) === label)
-const btnWith = label => Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes(label))
 
 async function mountStatus() {
   // StatusView 不用 Teleport，需挂到 body 才能用 document 查询（与弹窗节一致的查法）。
@@ -85,13 +81,24 @@ async function openCostSection() {
   await flushPromises()
 }
 
+describe('fmtTokens 单位缩写', () => {
+  it.each([
+    [0, '0'], [999, '999'],
+    [1234, '1.2k'], [1500, '1.5k'], [999950, '1百万'],
+    [1234567, '1.23百万'], [25000000, '25百万'],
+    [123456789, '1.23亿'], [1500000000, '15亿'],
+  ])('%i → %s', (n, s) => expect(fmtTokens(n)).toBe(s))
+})
+
 describe('运行状态的成本面板', () => {
-  it('预算正常时显示今日用量与最紧一档占比', async () => {
+  it('预算正常时显示今日用量（token 缩写）与最紧一档占比，不出现金额', async () => {
     await mountStatus()
     const banner = document.querySelector('.cost-banner')
     expect(banner.className).not.toContain('over')
     expect(banner.textContent).toContain('预算正常')
     expect(banner.textContent).toContain('最紧一档 35%')
+    expect(banner.textContent).toContain('今日 1.5k tokens')
+    expect(banner.textContent).not.toContain('0.0042')
   })
 
   it('warn 与 over 分别是不同边框，over 说明主动任务已停', async () => {
@@ -108,25 +115,23 @@ describe('运行状态的成本面板', () => {
     expect(b.textContent).toContain('对话与提醒不受影响')
   })
 
-  it('未配价与未回传用量都必须在页面说清楚，不得装作准确', async () => {
+  it('未回传用量必须说清楚，且不再有配价相关的文案', async () => {
     cost = { ...COST_OK, unknownModels: ['mystery-llm'], zeroCalls: 1 }
     await mountStatus()
     const banner = document.querySelector('.cost-banner')
-    expect(banner.textContent).toContain('1 个模型未配价')
     expect(banner.textContent).toContain('1 次调用未回传用量')
-    expect(document.querySelector('.dim-panel').textContent).toContain('价格未配置')
-    expect(document.querySelector('.dim-panel').textContent).toContain('补单价后才会算出金额')
+    expect(banner.textContent).not.toContain('未配价')
+    expect(document.querySelector('.dim-panel').textContent).not.toContain('补单价')
   })
 
-  it('默认按模型（含金额列），切到按来源后金额列消失', async () => {
+  it('默认按模型；任何维度都没有金额列', async () => {
     await mountStatus()
     expect(byText('.dim-tab', '按模型').className).toContain('active')
-    expect(document.querySelector('.dim-panel thead').textContent).toContain('金额')
+    expect(document.querySelector('.dim-panel thead').textContent).not.toContain('金额')
     expect(document.querySelectorAll('.dim-panel tbody tr')).toHaveLength(2)
 
     byText('.dim-tab', '按来源').click()
     await flushPromises()
-    expect(document.querySelector('.dim-panel thead').textContent).not.toContain('金额')
     const rows = Array.from(document.querySelectorAll('.dim-panel tbody tr')).map(r => r.textContent)
     expect(rows.join(' ')).toContain('web')
     expect(rows.join(' ')).toContain('task')
@@ -140,57 +145,35 @@ describe('运行状态的成本面板', () => {
   })
 })
 
-describe('设置 · 成本与预算', () => {
-  it('进入该节才拉成本与价格表，并渲染预算与价格行', async () => {
+describe('设置 · 成本与预算（token-only）', () => {
+  it('进入该节拉成本态势与用量账本，不再请求价格表', async () => {
     await openCostSection()
     expect(api).toHaveBeenCalledWith('GET', '/api/cost')
-    expect(api).toHaveBeenCalledWith('GET', '/api/cost/pricing')
+    expect(api).toHaveBeenCalledWith('GET', '/api/usage')
+    expect(api).not.toHaveBeenCalledWith('GET', '/api/cost/pricing')
     expect(document.querySelector('.cost-state').textContent).toContain('预算正常')
-    const rows = document.querySelectorAll('.pr-row')
-    expect(rows).toHaveLength(1)
-    expect(document.querySelector('.pr-model').value).toBe('deepseek-chat')
-    expect(document.body.textContent).toContain('有用量但未配价')
-    expect(document.querySelector('.budget-list').textContent).toContain('2000000')
+    expect(document.querySelector('.cs-grid').textContent).toContain('1.5k')
+    expect(document.body.textContent).not.toContain('今日金额')
+    expect(document.querySelector('.budget-list')).toBeNull() // 预算额度暂时隐藏
   })
 
-  it('添加未配价模型后保存，提交完整价格表（空单价按 0）', async () => {
+  it('热力图渲染 12 周网格，有用量的一天带缩写 token 提示', async () => {
     await openCostSection()
-    byText('.unknown-box button', '＋ mystery-llm').click()
-    await flushPromises()
-    expect(document.querySelectorAll('.pr-row')).toHaveLength(2)
-
-    btnWith('保存并热生效').click()
-    await flushPromises()
-    const call = api.mock.calls.find(([m, u]) => m === 'POST' && u === '/api/cost/pricing')
-    expect(call).toBeTruthy()
-    expect(call[2].prices.map(p => p.model).sort()).toEqual(['deepseek-chat', 'mystery-llm'])
-    expect(call[2].prices.find(p => p.model === 'mystery-llm').inputPerMTok).toBe(0)
-    expect(call[2].currency).toBe('CNY')
+    const cells = document.querySelectorAll('.heat-col .hc')
+    expect(cells).toHaveLength(84) // jsdom 量不到宽度，回落最小窗口 12 周
+    const day = Array.from(cells).find(c => (c.getAttribute('title') || '').includes(localToday))
+    expect(day).toBeTruthy()
+    expect(day.getAttribute('title')).toContain('1.5k tokens')
+    expect(day.className).toContain('l4')
   })
 
-  it('暂停与恢复分别打对应接口', async () => {
-    await openCostSection()
-    btnWith('暂停主动任务').click()
-    await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/cost/pause', {})
-
-    cost = { ...COST_OK, manualPaused: true, proactivePaused: true }
-    wrapper.unmount(); wrapper = null; document.body.innerHTML = ''
-    await openCostSection()
-    const resume = btnWith('恢复主动任务')
-    expect(resume).toBeTruthy()
-    resume.click()
-    await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/cost/resume', {})
-  })
-
-  it('价格表加载失败给出可读错误而不是静默空表', async () => {
+  it('用量账本加载失败给出可读提示而不是空白热力图', async () => {
     api.mockImplementation((method, url) => {
       if (url === '/api/cost') return Promise.resolve({ cost })
-      if (url === '/api/cost/pricing') return Promise.reject(new Error('价格表损坏'))
+      if (url === '/api/usage') return Promise.reject(new Error('账本损坏'))
       return Promise.resolve({})
     })
     await openCostSection()
-    expect(document.querySelector('.msg.err').textContent).toContain('价格表加载失败')
+    expect(document.body.textContent).toContain('用量账本加载失败：账本损坏')
   })
 })

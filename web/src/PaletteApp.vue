@@ -107,18 +107,18 @@ function scrollAnswer() {
     padding: 10px;
     -webkit-user-select: none; user-select: none;
   }
-  /* 深色极光玻璃面板，浮于桌面 */
+  /* 深色炭灰面板（参考 Cursor：无色相表面 + 细线边框），浮于桌面 */
   #panel {
     display: flex; flex-direction: column;
     height: 100%;
     border-radius: 18px;
-    background: rgba(16, 16, 24, .88);
+    background: rgba(20, 20, 20, .92);
     border: 1px solid rgba(255, 255, 255, .10);
     box-shadow: 0 24px 64px -14px rgba(0, 0, 0, .7);
     backdrop-filter: blur(28px) saturate(1.4);
     -webkit-backdrop-filter: blur(28px) saturate(1.4);
     overflow: hidden;
-    color: #ECECF2;
+    color: #E8E8E8;
   }
   #inputRow {
     display: flex; align-items: center; gap: 10px;
@@ -126,17 +126,15 @@ function scrollAnswer() {
     border-bottom: 1px solid rgba(255, 255, 255, .08);
   }
   #logo { width: 30px; height: 30px; border-radius: 9px; flex: none;
-    background: linear-gradient(145deg, #6366F1, #7C3AED);
-    border: 1px solid rgba(165,160,255,.42);
-    box-shadow: 0 6px 18px -4px rgba(99,102,241,.6), inset 0 1px 0 rgba(255,255,255,.25);
+    background: #E8E8E8; border: 1px solid rgba(255,255,255,.16);
     display: flex; align-items: center; justify-content: center;
-    color: #fff; font-size: 14px; font-weight: 600; }
+    color: #141414; font-size: 14px; font-weight: 600; }
   #q {
     flex: 1; background: transparent; border: 0; outline: 0;
-    color: #ECECF2; font-size: 16px; caret-color: #A5A2FF;
+    color: #E8E8E8; font-size: 16px; caret-color: #6EA8F2;
   }
-  #q::placeholder { color: #606270; }
-  #hint { font-size: 11px; color: #606270; border: 1px solid rgba(255,255,255,.14);
+  #q::placeholder { color: #616161; }
+  #hint { font-size: 11px; color: #616161; border: 1px solid rgba(255,255,255,.14);
     border-radius: 999px; padding: 2px 10px; flex: none; }
   #answer {
     flex: 1; overflow-y: auto; padding: 14px 18px;
@@ -145,10 +143,10 @@ function scrollAnswer() {
   }
   #answer:empty::before {
     content: "直接输入问题，Enter 发送；Esc 关闭。";
-    color: #606270;
+    color: #616161;
   }
   #answer.err { color: #FCA5A5; }
-  #status { padding: 6px 18px 12px; font-size: 12px; color: #8E90A0; }
+  #status { padding: 6px 18px 12px; font-size: 12px; color: #949494; }
   #status:empty { display: none; }
   ::-webkit-scrollbar { width: 8px; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 8px;

@@ -33,6 +33,8 @@ async function save() {
   try {
     const r = await api('POST', '/api/permissions', { mode: mode.value })
     show(r.message || '已切换', true)
+    // 通知聊天输入框的权限 chip 即时同步（ChatView 监听 friday:perm）
+    window.dispatchEvent(new CustomEvent('friday:perm', { detail: mode.value }))
   } catch (e) { show(e.message, false) }
 }
 

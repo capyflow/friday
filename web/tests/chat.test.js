@@ -254,7 +254,7 @@ describe('聊天发送和失败恢复', () => {
     expect(api).toHaveBeenCalledWith('POST', '/api/plans/p2/steps/1/skip', {})
   })
 
-  it('思考过程默认一行实时更新，点击展开查看全部', async () => {
+  it('时间线：思考一行实时预览、工具调用一行成块，各自点击展开', async () => {
     let controller
     fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
     const enc = new TextEncoder()
@@ -266,7 +266,7 @@ describe('聊天发送和失败恢复', () => {
       controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
       await flushPromises()
     }
-    // 思考中默认收起：标题实时展示最新一行，正文不可见
+    // 思考块默认收起：标题实时展示最新一行，正文不可见
     await push({ thinking: '先看用户想要什么' })
     expect(wrapper.get('.think-title').text()).toBe('先看用户想要什么')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
@@ -283,12 +283,67 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再查天气数据\n长文' + '甲'.repeat(200) + '收尾')
     await wrapper.get('.think-head').trigger('click')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
-    // 回复完成：折叠为步骤摘要
-    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'ok' } })
+    // 轮次结束：标题变为耗时/用量摘要（不再有"N 步"文案）
+    await push({ step: { kind: 'round', detail: '耗时 1.2s · 10+20 tokens' } })
+    expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s · 10+20 tokens')
+    // 工具调用：收起只报"工具调用"，名称与参数不外露；展开才给详情与结果
+    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
+    expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
+    await push({ step: { kind: 'tool', name: 'weather', detail: '晴 22℃', status: 'ok' } })
+    const tool = wrapper.get('.tool')
+    expect(tool.get('.tool-head .step-name').text()).toBe('工具调用')
+    expect(tool.get('.tool-head').text()).not.toContain('weather')
+    expect(tool.get('.tool-head').text()).not.toContain('上海')
+    expect(tool.get('.tool-call').isVisible()).toBe(false)
+    expect(tool.get('.tool-out').isVisible()).toBe(false)
+    expect(tool.find('.step-ico').classes()).toContain('ok')
+    await tool.get('.tool-head').trigger('click')
+    expect(tool.get('.tool-call .step-name').text()).toBe('weather')
+    expect(tool.get('.tool-call .step-detail').text()).toBe('上海')
+    expect(wrapper.get('.tool-out').text()).toBe('晴 22℃')
+    // 正文另起一块，流式结束后光标消失
     await push({ delta: '今天晴' })
     await push({ done: true })
-    expect(wrapper.get('.think-title').text()).toBe('思考过程 · 1 步')
-    expect(wrapper.get('.think-body').isVisible()).toBe(false)
+    expect(wrapper.get('.turn-text').text()).toBe('今天晴')
+    expect(wrapper.find('.cursor').exists()).toBe(false)
+  })
+
+  it('刷新后从历史接口恢复思考块与工具调用块', async () => {
+    api.mockResolvedValueOnce({
+      messages: [
+        { role: 'user', text: '现在几点' },
+        {
+          role: 'bot', text: '晚上 10 点。',
+          blocks: [
+            { kind: 'think', text: '先查时区' },
+            { kind: 'tool', name: 'get_time', text: 'Asia/Shanghai', out: '22:00', status: 'ok' },
+            { kind: 'text', text: '晚上 10 点。' },
+          ],
+        },
+      ],
+    })
+    await mountChat()
+    expect(wrapper.get('.think-title').text()).toBe('思考')
+    expect(wrapper.get('.think-text').text()).toBe('先查时区')
+    expect(wrapper.get('.tool .tool-head .step-name').text()).toBe('工具调用')
+    expect(wrapper.get('.tool .tool-call .step-name').text()).toBe('get_time')
+    expect(wrapper.get('.tool .tool-call .step-detail').text()).toBe('Asia/Shanghai')
+    expect(wrapper.get('.turn-text').text()).toBe('晚上 10 点。')
+  })
+
+  it('工具调用失败在折叠行标出 ✕，错误摘要收进展开区', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'tool', name: 'exec_command', detail: 'rm -rf /', status: 'run' } },
+      { step: { kind: 'tool', name: 'exec_command', detail: '权限被拒绝', status: 'fail' } },
+      { delta: '这个操作被拦下了。' },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('删掉文件')
+    expect(wrapper.get('.tool .step-ico').classes()).toContain('fail')
+    expect(wrapper.findAll('.tool')).toHaveLength(1)
+    expect(wrapper.get('.tool-head').text()).not.toContain('权限被拒绝')
+    expect(wrapper.get('.tool .tool-out').text()).toBe('权限被拒绝')
   })
 
   it('晚到的历史响应不能覆盖刚发送的消息', async () => {
@@ -300,5 +355,104 @@ describe('聊天发送和失败恢复', () => {
     await flushPromises()
     expect(wrapper.find('.mrow.user').text()).toBe('新消息')
     expect(wrapper.text()).not.toContain('旧消息')
+  })
+})
+
+describe('composer 两行布局', () => {
+  it('输入区独占第一行，第二行左为附件与模式 chip、右为快捷键提示与主键', async () => {
+    await mountChat()
+    expect(wrapper.get('.inputbar').element.firstElementChild).toBe(wrapper.get('textarea').element)
+    const bar = wrapper.get('.composer-bar')
+    expect(bar.find('.bar-left .plus-btn').exists()).toBe(true)
+    expect(bar.find('.bar-right .send-btn').exists()).toBe(true)
+    expect(bar.find('.bar-right .kbd-hint').text()).toContain('⇧⏎')
+    expect(wrapper.get('.mode-chip').element.parentElement).toBe(bar.get('.bar-left').element)
+  })
+
+  it('选定模式后 chip 显示在工具条左组，退出后收起', async () => {
+    await mountChat()
+    await wrapper.get('.plus-btn').trigger('click')
+    await modeButton('计划').trigger('click')
+    expect(wrapper.get('.mode-chip').classes()).toContain('show')
+    expect(wrapper.get('.bar-left .mode-chip').text()).toContain('计划')
+    await wrapper.get('.mode-chip button').trigger('click')
+    expect(wrapper.get('.mode-chip').classes()).not.toContain('show')
+  })
+})
+
+describe('粘贴附件', () => {
+  async function pasteFiles(files) {
+    const ev = new window.Event('paste', { cancelable: true, bubbles: true })
+    ev.clipboardData = { files }
+    wrapper.get('textarea').element.dispatchEvent(ev)
+    await flushPromises()
+    return ev
+  }
+
+  it('剪贴板里的图片直接进附件预览', async () => {
+    await mountChat()
+    await pasteFiles([new File(['photo'], 'photo.png', { type: 'image/png' })])
+    expect(wrapper.get('#attachPreviews img').attributes('src')).toBe('blob:photo')
+  })
+
+  it('非图片文件给出可读提示且不落附件', async () => {
+    await mountChat()
+    await pasteFiles([new File(['doc'], 'a.pdf', { type: 'application/pdf' })])
+    expect(toast).toHaveBeenCalledWith('仅支持图片文件', true)
+    expect(wrapper.find('#attachPreviews img').exists()).toBe(false)
+  })
+
+  it('剪贴板没有文件时不拦截默认粘贴', async () => {
+    await mountChat()
+    const ev = await pasteFiles([])
+    expect(ev.defaultPrevented).toBe(false)
+  })
+})
+
+describe('输入框权限模式 chip', () => {
+  const permApi = mode => vi.fn((method, url) => {
+    if (method === 'GET' && url === '/api/permissions') return Promise.resolve({ mode, execMode: 'confirm', mcp: 'allow' })
+    if (method === 'POST' && url === '/api/permissions') return Promise.resolve({ message: '已切换并热生效' })
+    return Promise.resolve({ messages: [] })
+  })
+
+  async function openPermMenu() {
+    await wrapper.get('[aria-label="权限模式"]').trigger('click')
+    await flushPromises()
+    return wrapper.findAll('#permPopover .pop-item')
+  }
+
+  it('chip 常驻显示当前档位，弹层选择后 POST 热切换', async () => {
+    api.mockImplementation(permApi('acceptEdits'))
+    await mountChat()
+    const chip = wrapper.get('[aria-label="权限模式"]')
+    expect(chip.classes()).toContain('pm-acceptEdits')
+    expect(chip.text()).toContain('自动编辑')
+    expect(wrapper.find('#permPopover').isVisible()).toBe(false)
+
+    const items = await openPermMenu()
+    expect(items).toHaveLength(3)
+    await items.find(i => i.find('.pl').text() === '确认（默认）').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'confirm' })
+    expect(wrapper.get('[aria-label="权限模式"]').text()).toContain('确认')
+    expect(wrapper.find('#permPopover').isVisible()).toBe(false)
+  })
+
+  it('完全信任需二次确认：取消不发请求，确认才切换', async () => {
+    api.mockImplementation(permApi('confirm'))
+    await mountChat()
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    let items = await openPermMenu()
+    await items.find(i => i.find('.pl').text() === '完全信任').trigger('click')
+    await flushPromises()
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'fullAccess' })
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    items = await openPermMenu()
+    await items.find(i => i.find('.pl').text() === '完全信任').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'fullAccess' })
+    expect(wrapper.get('[aria-label="权限模式"]').classes()).toContain('pm-fullAccess')
   })
 })

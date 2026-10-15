@@ -132,7 +132,7 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 		OnBeforeToolCall: func(ctx context.Context, name string, args map[string]any) error {
 			logx.Printf(ctx, "[tool] -> %s %v", name, args)
 			PublishStep(ctx, Step{Kind: "tool", Name: name, Status: "run",
-				Detail: summarizeArgs(args)})
+				Detail: SummarizeArgs(args)})
 			return nil
 		},
 		OnAfterToolCall: func(ctx context.Context, name string, _ map[string]any, result string, err error) {
@@ -159,13 +159,16 @@ func buildHooks(pool *SessionPool, sysPrompt string) *vxagent.Hooks {
 	}
 }
 
-// summarizeArgs 把工具参数压成一行摘要（思考过程展示用）。
-func summarizeArgs(args map[string]any) string {
+// SummarizeArgs 把工具参数压成一行摘要（思考过程展示用：SSE 步骤与历史回显共用同一口径）。
+func SummarizeArgs(args map[string]any) string {
 	if cmd, ok := args["command"].(string); ok && cmd != "" {
 		return logx.Truncate(cmd, 160)
 	}
 	if path, ok := args["path"].(string); ok && path != "" {
 		return logx.Truncate(path, 160)
+	}
+	if len(args) == 0 {
+		return ""
 	}
 	b, err := json.Marshal(args)
 	if err != nil {
