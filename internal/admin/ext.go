@@ -522,3 +522,105 @@ func (s *Server) handleSetHeartbeat(ctx *vhttp.Context) error {
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "心跳清单已保存"})
 }
+
+// ---------- 模型库 ----------
+
+// modelView 是模型库条目的对外视图：密钥不回传，只回 keySet（是否已配置）。
+type modelView struct {
+	Name          string   `json:"name"`
+	BaseURL       string   `json:"baseURL"`
+	Model         string   `json:"model"`
+	KeySet        bool     `json:"keySet"`
+	ContextWindow int      `json:"contextWindow"`
+	Inputs        []string `json:"inputs"`
+}
+
+// newModelView 组装条目视图。激活条目的密钥可来自全局扁平字段（库内条目省写、
+// 沿用现状的形态），故并上 globalKeySet。
+func newModelView(m config.ModelProfile, active, globalKeySet bool) modelView {
+	inputs := m.EffectiveInputs()
+	keySet := m.APIKey != "" || m.APIKeyEnv != ""
+	if active && globalKeySet {
+		keySet = true
+	}
+	return modelView{
+		Name: m.Name, BaseURL: m.BaseURL, Model: m.Model,
+		KeySet: keySet, ContextWindow: m.ContextWindow, Inputs: inputs,
+	}
+}
+
+// handleProviderModelsGet 返回模型库与当前激活条目。未配置库时用扁平字段合成
+// 一条（name = model 名），前端无需区分两种形态；密钥不回传，只回 keySet。
+func (s *Server) handleProviderModelsGet(ctx *vhttp.Context) error {
+	cfg := s.cfg.Snapshot()
+	active := cfg.Provider.Active
+	models := cfg.Provider.Models
+	if len(models) == 0 {
+		active = cfg.Provider.Model
+		models = []config.ModelProfile{{
+			Name:          cfg.Provider.Model,
+			BaseURL:       cfg.Provider.BaseURL,
+			Model:         cfg.Provider.Model,
+			ContextWindow: cfg.Provider.ContextWindow,
+		}}
+	}
+	globalKeySet := cfg.ProviderAPIKey() != ""
+	views := make([]modelView, 0, len(models))
+	for _, m := range models {
+		views = append(views, newModelView(m, m.Name == active, globalKeySet))
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"active": active, "models": views,
+		// 全局显式覆盖（context.windowTokens，0 = 未设置，UI 提示其优先级最高）。
+		"globalWindowTokens": cfg.Context.WindowTokens,
+	})
+}
+
+// handleProviderModelsSet 保存模型库并激活指定条目（全量式保存，同 MCP 配置）：
+// 校验与密钥继承在 ReloadProviderModels 内做，按变化范围决定是否热重建。
+func (s *Server) handleProviderModelsSet(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+	}
+	var req struct {
+		Active string                `json:"active"`
+		Models []config.ModelProfile `json:"models"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if len(req.Models) == 0 {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "模型库不能为空，至少保留一条"})
+	}
+	if err := agent.ReloadProviderModels(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.Active, req.Models); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "模型库已保存并热生效，已写回 config.yaml"})
+}
+
+// handleProviderActivate 切换激活模型（聊天页快捷切换）：复用模型库保存内核，
+// 库保持原样只改 active，密钥按条目自带（或沿用现状）。
+func (s *Server) handleProviderActivate(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	name := strings.TrimSpace(req.Name)
+	cfg := s.cfg.Snapshot()
+	if _, ok := cfg.Provider.ActiveModel(); !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "尚未配置模型库，先在「设置 → 模型服务」添加"})
+	}
+	if cfg.Provider.Active == name {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "当前已在使用 " + name})
+	}
+	if err := agent.ReloadProviderModels(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver,
+		name, append([]config.ModelProfile{}, cfg.Provider.Models...)); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已切换到 " + name})
+}

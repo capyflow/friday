@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
@@ -49,6 +50,132 @@ func ReloadProvider(cfg *config.Config, configPath string, registry *vxagent.Reg
 			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
 			if err == nil {
 				err = config.UpdateProvider(configPath, baseURL, model, apiKey)
+			}
+			if err != nil {
+				if mgr != nil {
+					if restoreErr := mgr.Rebuild(previous); restoreErr != nil {
+						return nil, fmt.Errorf("更新失败: %v；恢复上下文引擎失败: %w", err, restoreErr)
+					}
+				}
+				return nil, err
+			}
+			return newAg, nil
+		})
+	})
+}
+
+// ReloadProviderModels 保存模型库（provider.models）并激活指定条目：
+//  1. 校验条目完备性（name 唯一、baseURL/model 非空、inputs 合法、active 命中），
+//     并做密钥继承：前端传空 + 旧库同名条目有 key → 沿用旧 key（"留空=保留"）；
+//  2. 把激活条目套用到扁平字段，在串行配置事务里按变化范围决定重建量：
+//     地址/模型/生效密钥/窗口任一变了 → 重建上下文引擎与 Agent（窗口固化在
+//     engine Config，一并重建）；只编辑了非激活条目或输入格式声明 → 只写盘；
+//  3. 先写回 config.yaml（保留注释），全部成功后发布；失败保留原运行状态。
+//
+// 与 ReloadProvider 不同，库内切换不强制重填密钥——每条档案自带密钥（或继承）。
+func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue, active string, models []config.ModelProfile) error {
+	active = strings.TrimSpace(active)
+	return cfg.Apply(func(next *config.Config) error {
+		previous := next.Snapshot()
+		oldByName := map[string]config.ModelProfile{}
+		for _, m := range previous.Provider.Models {
+			oldByName[m.Name] = m
+		}
+
+		cleaned := make([]config.ModelProfile, 0, len(models))
+		seen := map[string]bool{}
+		for _, m := range models {
+			m.Name = strings.TrimSpace(m.Name)
+			m.BaseURL = strings.TrimSpace(m.BaseURL)
+			m.Model = strings.TrimSpace(m.Model)
+			m.APIKey = strings.TrimSpace(m.APIKey)
+			m.APIKeyEnv = strings.TrimSpace(m.APIKeyEnv)
+			if m.Name == "" || m.BaseURL == "" || m.Model == "" {
+				return fmt.Errorf("模型条目的名称、API 地址与模型名都不能为空")
+			}
+			if !strings.HasPrefix(m.BaseURL, "http://") && !strings.HasPrefix(m.BaseURL, "https://") {
+				return fmt.Errorf("模型 %s 的 API 地址必须以 http:// 或 https:// 开头", m.Name)
+			}
+			if seen[m.Name] {
+				return fmt.Errorf("模型名称重复: %s", m.Name)
+			}
+			seen[m.Name] = true
+			inputs := make([]string, 0, len(m.Inputs))
+			for _, in := range m.Inputs {
+				in = strings.TrimSpace(in)
+				if in == "" {
+					continue
+				}
+				if in != config.InputText && in != config.InputImage {
+					return fmt.Errorf("模型 %s 的输入格式 %q 不支持（text/image）", m.Name, in)
+				}
+				if !slices.Contains(inputs, in) {
+					inputs = append(inputs, in)
+				}
+			}
+			m.Inputs = inputs
+			if m.ContextWindow < 0 {
+				m.ContextWindow = 0
+			}
+			if m.APIKey == "" { // 留空 = 保留该条目已存密钥
+				if old, ok := oldByName[m.Name]; ok {
+					m.APIKey = old.APIKey
+					if m.APIKeyEnv == "" {
+						m.APIKeyEnv = old.APIKeyEnv
+					}
+				}
+			}
+			cleaned = append(cleaned, m)
+		}
+		if !seen[active] {
+			return fmt.Errorf("激活的模型 %q 不在列表里", active)
+		}
+		var entry config.ModelProfile
+		for _, m := range cleaned {
+			if m.Name == active {
+				entry = m
+				break
+			}
+		}
+
+		// 激活条目套用到扁平字段（投影）：从现值出发，条目未覆盖的维度沿用现状。
+		prev := previous.Provider
+		projected := prev
+		projected.BaseURL = entry.BaseURL
+		projected.Model = entry.Model
+		projected.ContextWindow = entry.ContextWindow
+		projected.Active = active
+		switch { // 密钥套用：条目直填 > 条目环境变量 > 沿用全局现状
+		case entry.APIKey != "":
+			projected.APIKey = entry.APIKey
+		case entry.APIKeyEnv != "":
+			projected.APIKeyEnv = entry.APIKeyEnv
+			projected.APIKey = ""
+		}
+		projected.Models = cleaned
+
+		rebuild := strings.TrimRight(projected.BaseURL, "/") != strings.TrimRight(prev.BaseURL, "/") ||
+			projected.Model != prev.Model ||
+			projected.ResolveAPIKey() != prev.ResolveAPIKey() ||
+			projected.ContextWindow != prev.ContextWindow
+
+		next.Provider = projected
+
+		if !rebuild { // 非激活条目/输入格式声明变化：与运行态无关，落盘即可
+			return config.UpdateProviderModels(configPath, next.Provider)
+		}
+		return brain.Reconfigure(func() (*vxagent.Agent, error) {
+			var engine *ctxengine.Engine
+			mgr := brain.CtxMgr()
+			if mgr != nil {
+				if err := mgr.Rebuild(next); err != nil {
+					return nil, fmt.Errorf("重建上下文引擎失败: %w", err)
+				}
+				engine = mgr.Current()
+			}
+			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
+			if err == nil {
+				err = config.UpdateProviderModels(configPath, next.Provider)
 			}
 			if err != nil {
 				if mgr != nil {

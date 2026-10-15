@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import StatusView from '../src/components/StatusView.vue'
+import StatusSection from '../src/components/settings/StatusSection.vue'
 import SettingsModal from '../src/components/SettingsModal.vue'
 import { api } from '../src/api.js'
 import { fmtTokens } from '../src/format.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
-// StatusView 经 anim.js 做数字滚动，模块加载即调 window.matchMedia（jsdom 未实现）。
+// StatusSection 经 anim.js 做数字滚动，模块加载即调 window.matchMedia（jsdom 未实现）。
 vi.mock('../src/anim.js', () => ({ runCountUp: vi.fn() }))
 
 const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)
@@ -69,8 +69,8 @@ const textOf = el => (el ? el.textContent.trim() : '')
 const byText = (sel, label) => Array.from(document.querySelectorAll(sel)).find(el => textOf(el) === label)
 
 async function mountStatus() {
-  // StatusView 不用 Teleport，需挂到 body 才能用 document 查询（与弹窗节一致的查法）。
-  wrapper = mount(StatusView, { attachTo: document.body })
+  // StatusSection 不用 Teleport，需挂到 body 才能用 document 查询（与弹窗节一致的查法）。
+  wrapper = mount(StatusSection, { attachTo: document.body })
   await flushPromises()
 }
 

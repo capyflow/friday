@@ -579,3 +579,57 @@ describe('轮末 token 汇总与上下文占用 chip', () => {
     expect(wrapper.find('[aria-label="上下文使用率"]').exists()).toBe(false)
   })
 })
+
+describe('模型快捷切换', () => {
+  const modelsApi = (models, active) => (method, url) => {
+    if (method === 'GET' && url === '/api/provider/models') {
+      return Promise.resolve({ active, models })
+    }
+    if (method === 'POST' && url === '/api/provider/activate') return Promise.resolve({ message: '已切换' })
+    return Promise.resolve({})
+  }
+  const two = [
+    { name: 'step-5', model: 'step-5-preview', inputs: ['text', 'image'], contextWindow: 128000, keySet: true },
+    { name: 'ds-chat', model: 'deepseek-chat', inputs: ['text'], contextWindow: 65536, keySet: true },
+  ]
+
+  it('chip 显示当前模型名，弹层列出库内条目与能力标注', async () => {
+    api.mockImplementation(modelsApi(two, 'step-5'))
+    await mountChat()
+    const chip = wrapper.find('[aria-label="当前模型"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain('step-5')
+    await chip.trigger('click')
+    await flushPromises()
+    const items = wrapper.findAll('#modelPopover .pop-item')
+    expect(items.map(b => b.find('.pl').text())).toEqual(['step-5', 'ds-chat', '管理模型库…'])
+    expect(items[1].text()).toContain('仅文本')
+    expect(items[0].classes()).toContain('selected')
+  })
+
+  it('点选另一模型发 activate，切换后刷新库与上下文占比', async () => {
+    api.mockImplementation(modelsApi(two, 'step-5'))
+    await mountChat()
+    await wrapper.find('[aria-label="当前模型"]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('#modelPopover .pop-item')[1].trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/provider/activate', { name: 'ds-chat' })
+  })
+
+  it('激活条目不支持图片时：添加图片置灰并说明，粘贴图片被拒', async () => {
+    api.mockImplementation(modelsApi(two, 'ds-chat'))
+    await mountChat()
+    await wrapper.find('[aria-label="添加"]').trigger('click')
+    await flushPromises()
+    const imageItem = modeButton('添加图片')
+    expect(imageItem.attributes('disabled')).toBeDefined()
+    expect(imageItem.text()).toContain('当前模型不支持图片输入')
+
+    const paste = new window.Event('paste', { bubbles: true, cancelable: true })
+    paste.clipboardData = { files: [new File(['x'], 'x.png', { type: 'image/png' })] }
+    wrapper.get('textarea').element.dispatchEvent(paste)
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith('当前模型不支持图片输入', true)
+  })
+})

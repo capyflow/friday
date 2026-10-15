@@ -89,6 +89,16 @@
   skill / schedule / error）+ 插槽文案。约束：一帧一个主体名词、accent 只落在引导元素上、
   虚线恒表示「尚未发生」、断开处用留白而非 fill 挖洞（深色 `--card` 半透明，挖洞会漏线）。
   `tests/empty-art.test.js` 校验 kind 与各页调用点对齐
+- **设置弹窗** — 左侧分组导航（模型与人格 / 能力与行为 / 运行观测 / 数据与系统）+ 右侧内容；
+  `.set-pane` 默认 640px，运行状态 / 调用轨迹 / 记忆这类数据密集页标 `wide` 放开到内容区宽度。
+  侧栏只留聊天 / 自动化 / 待办 / 通知，观测与记忆页收进设置；`store.settingsSection` 做一次性深链定位
+  （自动化「查看执行轮次」→ 调用轨迹并带会话过滤，过滤 chip 放 `.trace-bar` 行内而非页头）
+- **模型 chip + 弹层** — 与上下文 chip 同形（`.ctx-btn model-btn`，模型名 110px 截断），
+  点开列模型库（当前项 `.selected`、仅文本/支持图片与窗口标注），点选即 `POST /api/provider/activate`
+  热切换；「管理模型库…」经 `store.settingsSection='model'` 深链进设置。设置里的模型库行卡片
+  `.pm-row` 收成一行摘要（radio + 名称 + model·host + `图片`/`密钥` 徽标 + 生效中 + hover 显现的
+  测试/删除 + chevron），点击展开才是两列编辑表单——列表态保持安静，表单细节不摊在大面上。
+  激活条目 `inputs` 不含 image 时，加号弹窗「添加图片」置灰并说明，粘贴图片同样被拒
 - **快捷面板 palette** — 深色炭灰同源令牌（亮灰 logo / 蓝光标）
 
 ---

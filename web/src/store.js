@@ -6,6 +6,7 @@ export const store = reactive({
   username: '',
   view: 'chat',
   settingsOpen: false,
+  settingsSection: '',  // 下次打开设置时定位的 section id，一次性：SettingsModal 读走即清零
   setupStatus: null,
   unread: 0,
   traceFilter: '',   // 调用轨迹的会话过滤（如 goal-<id> / plan-<id>，从自动化页跳转带入）

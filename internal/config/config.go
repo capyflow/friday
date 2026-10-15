@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -477,13 +478,82 @@ type McpServerConfig struct {
 	Headers map[string]string `yaml:"headers" json:"headers"`
 }
 
+// 模型输入格式。text 恒隐含支持；其余值声明在 ModelProfile.Inputs 里。
+const (
+	InputText  = "text"
+	InputImage = "image"
+)
+
+// ModelProfile 是模型库（provider.models）里的一条模型档案：不同服务商各带各的
+// 地址与密钥。激活（切换）时套用到 ProviderConfig 的扁平字段并热重建。
+type ModelProfile struct {
+	// Name 显示名与主键（如 "step-5-preview"），库内唯一。
+	Name string `yaml:"name" json:"name"`
+	// BaseURL OpenAI 兼容服务地址。
+	BaseURL string `yaml:"baseURL" json:"baseURL"`
+	// Model 服务商的模型名。
+	Model string `yaml:"model" json:"model"`
+	// APIKeyEnv 环境变量名（可选），运行时从该变量读密钥（不落盘值）。
+	APIKeyEnv string `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
+	// APIKey 直接配置的密钥（可选，优先于环境变量；数据目录用户私有）。
+	APIKey string `yaml:"apiKey,omitempty" json:"apiKey,omitempty"`
+	// ContextWindow 上下文窗口 token 数（0 = 按模型名查表，未知型号默认 128k）。
+	ContextWindow int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// Inputs 支持的输入格式（text/image；text 恒隐含）。空 = 全支持——兼容
+	// 未声明能力的老配置，不因升级突然禁掉图片入口。
+	Inputs []string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+}
+
+// EffectiveInputs 返回该条目声明支持的输入格式（返回值恒含 text）。
+func (m ModelProfile) EffectiveInputs() []string {
+	if len(m.Inputs) == 0 {
+		return []string{InputText, InputImage}
+	}
+	hasText := false
+	for _, in := range m.Inputs {
+		if in == InputText {
+			hasText = true
+			break
+		}
+	}
+	if hasText {
+		return append([]string{}, m.Inputs...)
+	}
+	return append([]string{InputText}, m.Inputs...)
+}
+
+// SupportsInput 报告该条目是否支持某种输入格式。
+func (m ModelProfile) SupportsInput(kind string) bool {
+	for _, in := range m.EffectiveInputs() {
+		if in == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// ActiveModel 返回模型库中激活的条目。未配置库或 active 未命中返回 false——
+// 此时扁平字段即全部事实（纯旧式单模型配置）。
+func (p ProviderConfig) ActiveModel() (ModelProfile, bool) {
+	if p.Active == "" {
+		return ModelProfile{}, false
+	}
+	for _, m := range p.Models {
+		if m.Name == p.Active {
+			return m, true
+		}
+	}
+	return ModelProfile{}, false
+}
+
 // ProviderConfig 描述 LLM 供应商。
 type ProviderConfig struct {
 	// Name 固定为 "openai"（vortexagent 的 OpenAI 兼容层，DeepSeek/Qwen/智谱等通用）。
 	Name string `yaml:"name"`
 	// BaseURL OpenAI 兼容服务地址，如 https://api.deepseek.com/v1。
+	// 运行事实源：模型库激活条目在切换时投影到这里。
 	BaseURL string `yaml:"baseURL"`
-	// Model 模型名，如 deepseek-chat。
+	// Model 模型名，如 deepseek-chat。同上，激活条目的投影。
 	Model string `yaml:"model"`
 	// APIKeyEnv 环境变量名，运行时从该变量读取 API 密钥（不落盘）。
 	// 通用命名（默认 FRIDAY_API_KEY），任意 OpenAI 兼容服务商通用；
@@ -492,6 +562,9 @@ type ProviderConfig struct {
 	// APIKey 直接配置的 API 密钥（可选）：优先于环境变量；可经管理后台
 	// 「设置」页在线填写并写回 config.yaml（数据目录用户私有）。
 	APIKey string `yaml:"apiKey"`
+	// ContextWindow 激活模型的上下文窗口 token 数（0 = 按模型名查表，未知 128k）。
+	// 由模型库激活条目投影而来；context.windowTokens 是全局显式覆盖、优先级更高。
+	ContextWindow int `yaml:"contextWindow,omitempty"`
 	// Temperature 采样温度（可选，默认 0.7）。
 	Temperature float64 `yaml:"temperature"`
 	// MaxTokens 单次输出最大 token（可选，默认 1024）。
@@ -500,6 +573,12 @@ type ProviderConfig struct {
 	// 关掉后网页聊天的 token 账本会归零（仅"运行状态"页 ZeroCalls 计数可见），
 	// 只用于个别不接受 stream_options 字段的兼容网关排障。
 	StreamUsage *bool `yaml:"streamUsage"`
+	// Active 模型库中当前激活条目的 name；空 = 未使用模型库（纯扁平配置）。
+	Active string `yaml:"active,omitempty"`
+	// Models 模型库：多套模型档案，管理后台可增删改；切换 = 套用条目到上面的
+	// 扁平字段并热重建。空列表 = 旧式单模型配置，行为与引入模型库前完全一致。
+	// omitempty：yaml.v3 会把 nil 切片渲染成 `models: []`，污染 Marshal 出的配置。
+	Models []ModelProfile `yaml:"models,omitempty"`
 }
 
 // AudioConfig 描述麦克风/喇叭设备。
@@ -605,6 +684,85 @@ func UpdateProvider(path, baseURL, model, apiKey string) error {
 	if apiKey != "" {
 		setMappingKey(prov, "apiKey", apiKey)
 	}
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// UpdateProviderModels 热更新 config.yaml 中的模型库：写 provider.models 序列与
+// provider.active，并把激活条目投影到扁平字段（baseURL / model / contextWindow；
+// p.APIKey 为空串表示不动已有密钥）。以 yaml.Node 方式编辑（保留注释与原有结构），
+// 临时文件 + rename 原子写回。p 各字段须已通过 Validate（调用方 Reload 层负责）。
+func UpdateProviderModels(path string, p ProviderConfig) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	prov := mappingValue(doc.Content[0], "provider")
+	if prov == nil {
+		return fmt.Errorf("配置文件中未找到 provider 段")
+	}
+
+	setMappingKey(prov, "baseURL", p.BaseURL)
+	setMappingKey(prov, "model", p.Model)
+	// 整数键不能用 setMappingKey（它打 !!str 标签，回读 int 会失败）。
+	setMappingNode(prov, "contextWindow",
+		&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(p.ContextWindow), Tag: "!!int"})
+	if p.APIKey != "" {
+		setMappingKey(prov, "apiKey", p.APIKey)
+	}
+	setMappingKey(prov, "active", p.Active)
+
+	seq := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, m := range p.Models {
+		item := &yaml.Node{Kind: yaml.MappingNode}
+		strPair := func(k, v string) {
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
+		}
+		strPair("name", m.Name)
+		strPair("baseURL", m.BaseURL)
+		strPair("model", m.Model)
+		if m.APIKey != "" {
+			strPair("apiKey", m.APIKey)
+		}
+		if m.APIKeyEnv != "" {
+			strPair("apiKeyEnv", m.APIKeyEnv)
+		}
+		if m.ContextWindow > 0 {
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "contextWindow"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(m.ContextWindow), Tag: "!!int"})
+		}
+		if len(m.Inputs) > 0 {
+			inSeq := &yaml.Node{Kind: yaml.SequenceNode}
+			for _, in := range m.Inputs {
+				inSeq.Content = append(inSeq.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: in, Tag: "!!str"})
+			}
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "inputs"}, inSeq)
+		}
+		seq.Content = append(seq.Content, item)
+	}
+	setMappingNode(prov, "models", seq)
 
 	out, err := marshalNode(&doc)
 	if err != nil {
@@ -863,7 +1021,11 @@ func marshalNode(doc *yaml.Node) ([]byte, error) {
 // 指定的环境变量，再回退通用名 FRIDAY_API_KEY 与旧名 DEEPSEEK_API_KEY（兼容）。
 // 全部为空表示未配置——允许启动，对话在配置密钥前不可用。
 func (c *Config) ProviderAPIKey() string {
-	p := c.Snapshot().Provider
+	return c.Snapshot().Provider.ResolveAPIKey()
+}
+
+// ResolveAPIKey 按这份 provider 配置解析生效密钥（回退链同 ProviderAPIKey）。
+func (p ProviderConfig) ResolveAPIKey() string {
 	if p.APIKey != "" {
 		return p.APIKey
 	}
@@ -999,6 +1161,34 @@ func (c *Config) Validate() error {
 	}
 	if c.Provider.Name != "openai" {
 		return fmt.Errorf("config: provider.name 仅支持 openai（OpenAI 兼容层），当前为 %q", c.Provider.Name)
+	}
+	// 模型库：条目完备性 + active 命中。空库 = 纯扁平配置，不受这些约束。
+	seen := map[string]bool{}
+	for _, m := range c.Provider.Models {
+		if m.Name == "" {
+			return fmt.Errorf("config: provider.models 存在缺 name 的条目")
+		}
+		if seen[m.Name] {
+			return fmt.Errorf("config: provider.models 条目 name 重复: %q", m.Name)
+		}
+		seen[m.Name] = true
+		if m.BaseURL == "" {
+			return fmt.Errorf("config: provider.models[%s].baseURL 不能为空", m.Name)
+		}
+		if m.Model == "" {
+			return fmt.Errorf("config: provider.models[%s].model 不能为空", m.Name)
+		}
+		if m.ContextWindow < 0 {
+			return fmt.Errorf("config: provider.models[%s].contextWindow 不能为负", m.Name)
+		}
+		for _, in := range m.Inputs {
+			if in != InputText && in != InputImage {
+				return fmt.Errorf("config: provider.models[%s].inputs 含未知格式 %q（支持 text/image）", m.Name, in)
+			}
+		}
+	}
+	if c.Provider.Active != "" && !seen[c.Provider.Active] {
+		return fmt.Errorf("config: provider.active %q 未命中 models 里的任何条目", c.Provider.Active)
 	}
 	if _, err := NormalizePermissionMode(c.Permissions.Mode); err != nil {
 		return fmt.Errorf("config: permissions.mode 非法: %v", err)

@@ -6,25 +6,20 @@ import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
-import StatusView from './components/StatusView.vue'
-import TraceView from './components/TraceView.vue'
 import AutoView from './components/AutoView.vue'
 import TodoView from './components/TodoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
-import WikiView from './components/WikiView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
 import SetupView from './components/SetupView.vue'
 import { startNotifications, stopNotifications } from './notifications.js'
 
+// 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
-  { id: 'status', icon: 'i-status', label: '运行状态' },
-  { id: 'trace', icon: 'i-trace', label: '调用轨迹' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
   { id: 'todo', icon: 'i-todo', label: '待办' },
   { id: 'notifications', icon: 'i-bell', label: '通知' },
-  { id: 'wiki', icon: 'i-mem', label: '记忆' },
 ]
 
 /* ---------- 主题（两个入口：这里的快捷切换 + 设置 → 外观，经 friday:theme 同步） ---------- */
@@ -93,10 +88,7 @@ async function logout() {
   <svg style="display:none" aria-hidden="true">
     <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></symbol>
     <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></symbol>
-    <symbol id="i-status" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
-    <symbol id="i-trace" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
     <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
-    <symbol id="i-mem" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></symbol>
     <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
@@ -109,6 +101,9 @@ async function logout() {
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
     <!-- 设置导航 -->
     <symbol id="i-model" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+    <symbol id="i-status" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="i-trace" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+    <symbol id="i-mem" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></symbol>
     <symbol id="i-persona" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
     <symbol id="i-mcp" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
@@ -179,12 +174,9 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
-      <Transition name="view"><StatusView v-if="store.view === 'status'" /></Transition>
-      <Transition name="view"><TraceView v-if="store.view === 'trace'" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><TodoView v-if="store.view === 'todo'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>
-      <Transition name="view"><WikiView v-if="store.view === 'wiki'" /></Transition>
     </main>
   </div>
 

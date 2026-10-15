@@ -224,6 +224,7 @@ async function normalizeImage(file) {
 async function addImageFiles(files) {
   for (const f of files) {
     if (busy.value || clearing.value || disposed) break
+    if (!imageSupported.value) { toast('当前模型不支持图片输入', true); break }
     if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (!f.type.startsWith('image/')) { toast('仅支持图片文件', true); continue }
     let r
@@ -276,8 +277,9 @@ function setPop(open) {
   if (open === popOpen.value) return
   popOpen.value = open
   if (open) {
-    permOpen.value = false // 三个弹层互斥：都从 composer 向上长，叠在一起没法读
+    permOpen.value = false // 弹层互斥：都从 composer 向上长，叠在一起没法读
     ctxOpen.value = false
+    modelOpen.value = false
     nextTick(() => { const el = document.getElementById('addPopover'); if (el) popIn(el) })
   }
 }
@@ -309,7 +311,8 @@ function togglePerm() {
   permOpen.value = !permOpen.value
   if (permOpen.value) {
     setPop(false)
-    ctxOpen.value = false // 两个弹层互斥：都从 composer 左组向上长，叠在一起没法读
+    ctxOpen.value = false // 弹层互斥：都从 composer 左组向上长，叠在一起没法读
+    modelOpen.value = false
     loadPerm() // 每次展开都取最新值：设置页等其他入口可能刚改过
     nextTick(() => { const el = document.getElementById('permPopover'); if (el) popIn(el) })
   }
@@ -362,9 +365,53 @@ function toggleCtx() {
   if (ctxOpen.value) {
     setPop(false)
     permOpen.value = false
+    modelOpen.value = false
     loadCtx() // 占比随每轮问答变化，缓存没有意义：展开即取最新值
     nextTick(() => { const el = document.getElementById('ctxPopover'); if (el) popIn(el) })
   }
+}
+
+/* ---------- 模型快捷切换（chip 常驻 composer，点开切模型；能力声明管图片入口） ---------- */
+const modelLib = ref(null)   // /api/provider/models；null = 未加载（chip 显示占位、不弹层）
+const modelOpen = ref(false)
+const modelBusy = ref(false)
+const modelWrap = ref(null)
+const activeModel = computed(() => modelLib.value?.models?.find(m => m.name === modelLib.value.active) || null)
+const modelShort = computed(() => activeModel.value?.name || '')
+// 未建库（合成条目无 inputs 声明）时视为全支持，向后兼容老配置
+const imageSupported = computed(() => !activeModel.value || (activeModel.value.inputs || []).includes('image'))
+
+async function loadModels() {
+  try { modelLib.value = await api('GET', '/api/provider/models') } catch (_) { /* 保持旧值，chip 不闪没 */ }
+}
+function toggleModel() {
+  if (clearing.value || !modelLib.value) return
+  modelOpen.value = !modelOpen.value
+  if (modelOpen.value) {
+    setPop(false)
+    permOpen.value = false
+    ctxOpen.value = false
+    loadModels() // 设置页可能刚改过库：展开即取最新
+    nextTick(() => { const el = document.getElementById('modelPopover'); if (el) popIn(el) })
+  }
+}
+async function setModel(name) {
+  if (modelBusy.value) return
+  if (name === modelLib.value?.active) { modelOpen.value = false; return }
+  modelBusy.value = true
+  try {
+    const r = await api('POST', '/api/provider/activate', { name })
+    toast(r.message || '已切换到 ' + name)
+    modelOpen.value = false
+    loadModels()
+    loadCtx() // 不同模型窗口不同，占比口径跟着变
+  } catch (e) { toast('切换失败：' + e.message) }
+  finally { modelBusy.value = false }
+}
+function goModelSettings() {
+  modelOpen.value = false
+  store.settingsSection = 'model'
+  store.settingsOpen = true
 }
 async function compactCtx() {
   if (ctxBusy.value || busy.value) return
@@ -617,7 +664,8 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       for (const m of messages) { if (m.paused) m.paused = false }
     }
     nextTick(() => stick())
-    if (store.view === 'trace') window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
+    // 调用轨迹收进了设置弹窗：节挂载着才会收到，未挂载时无监听者、空抛无害
+    window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
   } catch (e) {
     if (disposed || controller.signal.aborted || !store.loggedIn) return
     if (draft) {
@@ -756,19 +804,22 @@ function onDocClick(e) {
   if (popOpen.value && popWrap.value && !popWrap.value.contains(e.target)) setPop(false)
   if (permOpen.value && permWrap.value && !permWrap.value.contains(e.target)) permOpen.value = false
   if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
+  if (modelOpen.value && modelWrap.value && !modelWrap.value.contains(e.target)) modelOpen.value = false
 }
 function onKeydown(e) {
   if (e.key === 'Escape') {
-    menuOpen.value = false; setPop(false); permOpen.value = false; ctxOpen.value = false
+    menuOpen.value = false; setPop(false); permOpen.value = false; ctxOpen.value = false; modelOpen.value = false
   }
 }
 onMounted(() => {
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onKeydown)
   window.addEventListener('friday:perm', onPermSync)
+  window.addEventListener('friday:setup-refresh', loadModels) // 设置页保存模型库后 chip 跟上
   loadHistory()
   loadPerm()
   loadCtx()
+  loadModels()
 })
 onUnmounted(() => {
   disposed = true
@@ -778,10 +829,11 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onKeydown)
   window.removeEventListener('friday:perm', onPermSync)
+  window.removeEventListener('friday:setup-refresh', loadModels)
   if (rotatorStop) clearTimeout(rotatorStop)
 })
 
-function goTraces() { menuOpen.value = false; store.view = 'trace' }
+function goTraces() { menuOpen.value = false; store.settingsSection = 'trace'; store.settingsOpen = true }
 async function clearContext() {
   if (busy.value || clearing.value) return
   menuOpen.value = false
@@ -970,6 +1022,15 @@ async function clearContext() {
                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
               <span class="ctx-short">{{ ctxPct }}%</span>
             </button>
+            <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
+            <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
+                    aria-label="当前模型" aria-haspopup="true"
+                    :title="'当前模型：' + (modelShort || '未配置')" :disabled="clearing"
+                    @click.stop="toggleModel">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+              <span class="ctx-short model-short">{{ modelShort || '模型' }}</span>
+            </button>
           </div>
           <div class="bar-right">
             <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
@@ -985,9 +1046,12 @@ async function clearContext() {
         <!-- 加号弹窗 -->
         <div v-show="popOpen" ref="popWrap" class="popover" id="addPopover">
           <div class="popover-title pop-anim">添加</div>
-          <button class="pop-item pop-anim" @click="fileInput.click(); setPop(false)">
+          <button class="pop-item pop-anim" :disabled="!imageSupported"
+                  :title="imageSupported ? '' : '当前模型不支持图片输入'"
+                  @click="fileInput.click(); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg></span>
             <span class="pl">添加图片</span>
+            <span v-if="!imageSupported" class="pd">当前模型不支持图片输入</span>
           </button>
           <div class="pop-sep pop-anim"></div>
           <button class="pop-item pop-anim" :class="{ selected: mode === 'plan' }" @click="setMode('plan'); setPop(false)">
@@ -1057,6 +1121,26 @@ async function clearContext() {
           <div class="perm-foot pop-anim">
             占比按活跃历史估算，不含系统提示词与摘要区；达 {{ ctxSoftPct }}% 时每轮结束会自动归档一次
           </div>
+        </div>
+
+        <!-- 模型弹层：点选即热切换（对话上下文保持连续），入口去设置管理模型库 -->
+        <div v-if="modelLib" v-show="modelOpen" ref="modelWrap" class="popover model-popover" id="modelPopover">
+          <div class="popover-title pop-anim">模型</div>
+          <button v-for="m in modelLib.models" :key="m.name" class="pop-item pop-anim"
+                  :class="{ selected: m.name === modelLib.active }" :disabled="modelBusy" @click="setModel(m.name)">
+            <span class="pi">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+            </span>
+            <span class="pl">{{ m.name }}</span>
+            <span class="pd">{{ (m.inputs || []).includes('image') ? '支持图片' : '仅文本' }}<template v-if="m.contextWindow"> · {{ fmtTokens(m.contextWindow) }} tokens</template></span>
+          </button>
+          <div class="pop-sep pop-anim"></div>
+          <button class="pop-item pop-anim" @click="goModelSettings">
+            <span class="pi"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-settings"/></svg></span>
+            <span class="pl">管理模型库…</span>
+            <span class="pd">设置 → 模型服务</span>
+          </button>
         </div>
       </div>
     </div>

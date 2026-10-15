@@ -17,6 +17,9 @@
 //	POST   /api/chat/resume   继续被暂停的对话（需登录，SSE 流式）
 //	POST   /api/upload        图片上传（需登录，multipart 字段 file）
 //	POST   /api/provider      热更新 LLM baseURL/model（需登录，写回 config.yaml）
+//	GET    /api/provider/models 模型库列表与激活条目（未建库时用扁平字段合成一条，需登录）
+//	POST   /api/provider/models 保存模型库并激活指定条目（校验/密钥继承/按变化范围热重建，需登录）
+//	POST   /api/provider/activate 切换激活模型（聊天页快捷切换，库保持原样，需登录）
 //	GET    /api/persona       人设提示词配置（当前生效 ID + 全部预设，需登录）
 //	POST   /api/persona       切换人设/保存自定义人设（需登录，热生效并写回 config.yaml）
 //	GET    /api/permissions   全局权限模式与审批策略（需登录）
@@ -83,6 +86,7 @@ import (
 	"time"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
+	"github.com/capyflow/vortexagent/llm"
 	vortex "github.com/capyflow/vortexv3"
 	vhttp "github.com/capyflow/vortexv3/server/http"
 	"github.com/gin-gonic/gin"
@@ -238,7 +242,10 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.cfg != nil && s.regFn != nil && s.configPath != "" {
 		root.AddRouter([]string{http.MethodPost}, "/api/provider", s.wrap(s.handleUpdateProvider))
+		root.AddRouter([]string{http.MethodGet}, "/api/provider/models", s.wrap(s.handleProviderModelsGet))
 		if s.chat != nil {
+			root.AddRouter([]string{http.MethodPost}, "/api/provider/models", s.wrap(s.handleProviderModelsSet))
+			root.AddRouter([]string{http.MethodPost}, "/api/provider/activate", s.wrap(s.handleProviderActivate))
 			root.AddRouter([]string{http.MethodGet}, "/api/persona", s.wrap(s.handleGetPersona))
 			root.AddRouter([]string{http.MethodPost}, "/api/persona", s.wrap(s.handleSetPersona))
 			root.AddRouter([]string{http.MethodGet}, "/api/permissions", s.wrap(s.handleGetPermissions))
@@ -472,9 +479,29 @@ func (s *Server) handleUpdateProvider(ctx *vhttp.Context) error {
 	if err := agent.ReloadProvider(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.BaseURL, req.Model, req.APIKey); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
+	// 已建模型库时把改动同步回激活条目（库内条目与扁平投影保持一致），失败只追加提示，
+	// 不影响本次已生效的热更新。
 	msg := "模型配置已热生效，并已写回 config.yaml"
 	if req.APIKey != "" {
 		msg = "模型配置与 API 密钥已热生效，并已写回 config.yaml"
+	}
+	if err := s.cfg.Apply(func(next *config.Config) error {
+		if next.Provider.Active == "" {
+			return nil
+		}
+		for i := range next.Provider.Models {
+			if next.Provider.Models[i].Name != next.Provider.Active {
+				continue
+			}
+			next.Provider.Models[i].BaseURL = req.BaseURL
+			next.Provider.Models[i].Model = req.Model
+			if req.APIKey != "" {
+				next.Provider.Models[i].APIKey = req.APIKey
+			}
+		}
+		return config.UpdateProviderModels(s.configPath, next.Provider)
+	}); err != nil {
+		msg += "；同步模型库条目失败：" + err.Error()
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"message":  msg,
@@ -540,10 +567,22 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 		cfg := s.cfg.Snapshot()
 		model, baseURL, keyConfigured = cfg.Provider.Model, cfg.Provider.BaseURL, cfg.ProviderAPIKey() != ""
 	}
+	// 输入格式与窗口取激活条目（未建库时缺省全支持 + 按模型名查表）。
+	inputs := []string{config.InputText, config.InputImage}
+	entryWindow := 0
+	if s.cfg != nil {
+		if entry, ok := s.cfg.Snapshot().Provider.ActiveModel(); ok {
+			inputs = entry.EffectiveInputs()
+			entryWindow = entry.ContextWindow
+		}
+	}
+	if entryWindow <= 0 {
+		entryWindow = llm.GetContextWindow(model)
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"startedAt":        s.startedAt.Format(time.RFC3339),
 		"uptimeSeconds":    int(time.Since(s.startedAt).Seconds()),
-		"provider":         map[string]string{"model": model, "baseURL": baseURL},
+		"provider":         map[string]any{"model": model, "baseURL": baseURL, "inputs": inputs, "contextWindow": entryWindow},
 		"apiKeyConfigured": keyConfigured,
 		"tasks":            map[string]any{"total": len(tasks), "byKind": byKind},
 		"todos":            map[string]any{"pending": pending},

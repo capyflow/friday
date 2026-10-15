@@ -12,9 +12,25 @@ provider:
   # apiKey: ""                 # 直填密钥（优先于环境变量；数据目录用户私有）
   temperature: 0.7
   maxTokens: 1024
+  # contextWindow: 128000      # 激活模型的上下文窗口（一般不用手填，模型库条目会投影到这里）
   # streamUsage: false        # 流式索取 token 用量统计（缺省开启）。
                               # 关掉后「运行状态」页的金额与 token 都会归零，只在个别
                               # 网关因未知字段 stream_options 报 400 时才关，并记为排障手段。
+  # 模型库（可选）：配置多个模型随时切换，激活条目自动投影到上方扁平字段并热生效；
+  # 「设置 → 模型服务」可在线增删改，聊天页 composer 的「模型」标签可快捷切换。
+  # active: step-5-preview     # 当前激活条目的 name（须命中下方列表）
+  # models:
+  #   - name: step-5-preview
+  #     baseURL: https://api.stepfun.com/step_plan/v1
+  #     model: step-5-preview
+  #     apiKey: sk-...           # 或 apiKeyEnv: STEP_API_KEY；后台保存时留空 = 保留已存密钥
+  #     contextWindow: 128000    # 留空 = 按模型名查表（未知型号按 128k）
+  #     inputs: [text, image]    # 留空 = 全支持；只声明 text 则聊天页禁用图片入口
+  #   - name: deepseek-chat
+  #     baseURL: https://api.deepseek.com/v1
+  #     model: deepseek-chat
+  #     apiKeyEnv: DEEPSEEK_API_KEY
+  #     contextWindow: 65536
 
 # —— 以下 audio/asr/wake/tts/vad/display 属于硬件相关配置（语音链路已归档至
 #    archive/voice-mode/，字段保留以便恢复）；纯软件形态无需关心。——
@@ -280,6 +296,7 @@ context:
   archiveDir: archive
   # 归档时抽取的候选事实自动写入记忆 wiki（source=agent，后台可改可删）
   candidateFacts: true
-  # 上下文窗口 token 数：默认按模型名查表（未知型号按 128k，非标准命名时建议显式配）
+  # 上下文窗口 token 数：全局显式覆盖，优先级最高；未设置时用模型库激活条目的
+  # contextWindow，再未设置按模型名查表（未知型号按 128k，非标准命名时建议显式配）
   # windowTokens: 65536
   # retentionDays: 0        # 归档保留天数，0 = 永久

@@ -4,6 +4,8 @@ import SettingsModal from '../src/components/SettingsModal.vue'
 import { api } from '../src/api.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
+// 设置弹窗静态引入运行状态节，后者经 anim.js 模块加载即调 window.matchMedia（jsdom 未实现）。
+vi.mock('../src/anim.js', () => ({ runCountUp: vi.fn() }))
 
 const SKILLS = [
   { id: 'morning', name: '晨会准备', description: '汇总今日待办与天气', scope: 'project',

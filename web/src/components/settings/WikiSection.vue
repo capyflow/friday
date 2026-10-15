@@ -1,11 +1,11 @@
 <script setup>
-// 记忆 Wiki：目录搜索、页面阅读（Markdown 渲染）、新建/编辑/删除。
+// 记忆（设置 → 数据与系统）：Wiki 页面的目录搜索、阅读（Markdown 渲染）、新建/编辑/删除。
 import { onMounted, reactive, ref } from 'vue'
-import { api } from '../api.js'
-import { renderMD } from '../md.js'
-import { fmtDT, srcName } from '../format.js'
-import { toast } from '../store.js'
-import EmptyState from './art/EmptyState.vue'
+import { api } from '../../api.js'
+import { renderMD } from '../../md.js'
+import { fmtDT, srcName } from '../../format.js'
+import { toast } from '../../store.js'
+import EmptyState from '../art/EmptyState.vue'
 
 const query = ref('')
 const pages = ref([])
@@ -107,51 +107,49 @@ onMounted(loadWiki)
 </script>
 
 <template>
-  <section class="view" id="view-wiki">
-    <div class="view-inner">
-      <h2>记忆 <span class="count">{{ countLine }}</span></h2>
-      <div class="wiki-layout">
-        <aside class="panel wiki-toc">
-          <input id="wQuery" v-model="query" placeholder="搜索记忆…" aria-label="搜索记忆页" @input="loadWiki">
-          <button id="btnWikiNew" class="btn primary" type="button" @click="newPage">＋ 新建页面</button>
-          <div>
-            <button v-for="p in pages" :key="p.id" class="toc-item" type="button"
-                    :class="{ active: p.id === current.id }" @click="open(p.id)">
-              {{ p.title }}
-              <span class="meta">{{ p.snippet ? p.snippet : (srcName[p.source] || p.source || '') + ' · ' + fmtDT(p.updatedAt) + ' 更新' }}</span>
-            </button>
-          </div>
-          <EmptyState v-if="!pages.length" kind="wiki" :size="92">还没有记忆页<br>对小五说"记住…"即可创建</EmptyState>
-        </aside>
-        <div class="wiki-main">
-          <EmptyState v-if="mode === 'hint'" kind="wikiPick" :size="96">从左侧选择一页查看</EmptyState>
+  <div id="view-wiki">
+    <div class="wiki-layout">
+      <aside class="panel wiki-toc">
+        <input id="wQuery" v-model="query" placeholder="搜索记忆…" aria-label="搜索记忆页" @input="loadWiki">
+        <button id="btnWikiNew" class="btn primary" type="button" @click="newPage">＋ 新建页面</button>
+        <div v-if="countLine" class="meta wiki-count">{{ countLine }}</div>
+        <div>
+          <button v-for="p in pages" :key="p.id" class="toc-item" type="button"
+                  :class="{ active: p.id === current.id }" @click="open(p.id)">
+            {{ p.title }}
+            <span class="meta">{{ p.snippet ? p.snippet : (srcName[p.source] || p.source || '') + ' · ' + fmtDT(p.updatedAt) + ' 更新' }}</span>
+          </button>
+        </div>
+        <EmptyState v-if="!pages.length" kind="wiki" :size="92">还没有记忆页<br>对小五说"记住…"即可创建</EmptyState>
+      </aside>
+      <div class="wiki-main">
+        <EmptyState v-if="mode === 'hint'" kind="wikiPick" :size="96">从左侧选择一页查看</EmptyState>
 
-          <div v-if="mode === 'read'" class="panel wiki-reader">
-            <div class="wiki-head">
-              <h3>{{ current.title }}</h3>
-              <div class="wiki-acts">
-                <button class="btn sm" type="button" @click="startEdit(current)">编辑</button>
-                <button class="btn sm danger" type="button" @click="remove">删除</button>
-              </div>
+        <div v-if="mode === 'read'" class="panel wiki-reader">
+          <div class="wiki-head">
+            <h3>{{ current.title }}</h3>
+            <div class="wiki-acts">
+              <button class="btn sm" type="button" @click="startEdit(current)">编辑</button>
+              <button class="btn sm danger" type="button" @click="remove">删除</button>
             </div>
-            <div class="meta" id="wikiMeta">{{ current.meta }}</div>
-            <div class="wiki-body" id="wikiBody" v-html="current.bodyHTML"></div>
           </div>
+          <div class="meta" id="wikiMeta">{{ current.meta }}</div>
+          <div class="wiki-body" id="wikiBody" v-html="current.bodyHTML"></div>
+        </div>
 
-          <div v-if="mode === 'edit'" class="panel">
-            <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-            <form class="form-col" @submit.prevent="save">
-              <input ref="titleEl" v-model="form.title" placeholder="页面标题（主题名，如：用户偏好）" required>
-              <textarea id="wBody" v-model="form.body" rows="14" placeholder="markdown 正文…" required></textarea>
-              <div class="row">
-                <button class="btn primary" type="submit">保存</button>
-                <button class="btn" type="button" @click="cancelEdit">取消</button>
-              </div>
-            </form>
-            <div class="set-note">保存会整体替换页面正文；小五把页面内容当作该主题的长期记忆。</div>
-          </div>
+        <div v-if="mode === 'edit'" class="panel">
+          <div class="msg" :class="msg.cls">{{ msg.text }}</div>
+          <form class="form-col" @submit.prevent="save">
+            <input ref="titleEl" v-model="form.title" placeholder="页面标题（主题名，如：用户偏好）" required>
+            <textarea id="wBody" v-model="form.body" rows="14" placeholder="markdown 正文…" required></textarea>
+            <div class="row">
+              <button class="btn primary" type="submit">保存</button>
+              <button class="btn" type="button" @click="cancelEdit">取消</button>
+            </div>
+          </form>
+          <div class="set-note">保存会整体替换页面正文；小五把页面内容当作该主题的长期记忆。</div>
         </div>
       </div>
     </div>
-  </section>
+  </div>
 </template>
