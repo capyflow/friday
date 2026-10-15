@@ -93,4 +93,25 @@ describe('设置弹窗', () => {
     await click(Array.from(document.querySelectorAll('.set-pane .btn.danger')).find(b => b.textContent.includes('退出登录')))
     expect(wrapper.emitted('logout')).toHaveLength(1)
   })
+
+  it('外观一节切主题即时生效：深色落 localStorage，跟随系统清掉显式选择', async () => {
+    localStorage.removeItem('friday-theme')
+    wrapper = mount(SettingsModal)
+    await flushPromises()
+    await click(nav('外观'))
+    // 未选过 = 跟随系统（jsdom 没有 matchMedia，systemTheme 回落 light）
+    expect(byText('button', '跟随系统').getAttribute('aria-pressed')).toBe('true')
+
+    await click(byText('button', '深色'))
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    expect(localStorage.getItem('friday-theme')).toBe('dark')
+    expect(text()).toContain('当前生效：深色')
+
+    await click(byText('button', '跟随系统'))
+    expect(localStorage.getItem('friday-theme')).toBe(null)
+    expect(document.documentElement.dataset.theme).toBe('light')
+    expect(text()).toContain('当前生效：浅色')
+    expect(byText('button', '跟随系统').getAttribute('aria-pressed')).toBe('true')
+    expect(byText('button', '深色').getAttribute('aria-pressed')).toBe('false')
+  })
 })

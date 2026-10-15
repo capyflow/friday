@@ -27,13 +27,10 @@ const NAV = [
   { id: 'wiki', icon: 'i-mem', label: '记忆' },
 ]
 
-/* ---------- 主题 ---------- */
-initTheme()
-const theme = ref(document.documentElement.dataset.theme || 'dark')
-function toggleTheme() {
-  theme.value = theme.value === 'dark' ? 'light' : 'dark'
-  setTheme(theme.value)
-}
+/* ---------- 主题（两个入口：这里的快捷切换 + 设置 → 外观，经 friday:theme 同步） ---------- */
+const theme = ref(initTheme() || 'dark')
+function onThemeChange(e) { if (e.detail) theme.value = e.detail }
+function toggleTheme() { setTheme(theme.value === 'dark' ? 'light' : 'dark') }
 
 /* ---------- 用户悬浮窗 ---------- */
 const userPopOpen = ref(false)
@@ -55,12 +52,14 @@ onMounted(() => {
   document.addEventListener('click', onDocClick)
   auroraDrift(document)
   window.addEventListener('friday:setup-refresh', refreshSetup)
+  window.addEventListener('friday:theme', onThemeChange)
   startNotifications()
 })
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   document.removeEventListener('click', onDocClick)
   window.removeEventListener('friday:setup-refresh', refreshSetup)
+  window.removeEventListener('friday:theme', onThemeChange)
   stopNotifications()
 })
 

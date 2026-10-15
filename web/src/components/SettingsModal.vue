@@ -10,6 +10,7 @@ import PermissionSection from './settings/PermissionSection.vue'
 import CostSection from './settings/CostSection.vue'
 import HeartbeatSection from './settings/HeartbeatSection.vue'
 import SessionSection from './settings/SessionSection.vue'
+import AppearanceSection from './settings/AppearanceSection.vue'
 import AboutSection from './settings/AboutSection.vue'
 
 const emit = defineEmits(['close', 'logout'])
@@ -29,6 +30,7 @@ const GROUPS = [
     { id: 'heartbeat', icon: 'i-heart', label: '心跳清单', desc: '定时交给小五自主检查的事项', comp: markRaw(HeartbeatSection) },
   ]},
   { label: '数据与系统', items: [
+    { id: 'appearance', icon: 'i-sun', label: '外观', desc: '浅色 / 深色 / 跟随系统，只存本机浏览器', comp: markRaw(AppearanceSection) },
     { id: 'sessions', icon: 'i-chat', label: '会话管理', desc: '各入口的会话上下文，可单条清除', comp: markRaw(SessionSection) },
     { id: 'about', icon: 'i-info', label: '关于与配置', desc: '运行时生效的配置快照',
       comp: markRaw(AboutSection), on: { logout: () => emit('logout') } },
