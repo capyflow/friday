@@ -3,10 +3,12 @@ package admin
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/trace"
 )
 
 // TestHistoryItemsGroupsTurnBlocks 校验历史回显把一轮问答里的思考、工具调用与
@@ -100,6 +102,87 @@ func TestHistoryItemsSkipsEmptyTurns(t *testing.T) {
 	}
 	if items[0].Text != "看看这张图[图片]" {
 		t.Errorf("用户消息 = %q，期望图片降级为占位标记", items[0].Text)
+	}
+}
+
+// TestHistoryItemsOrdersThinkingBeforeText 校验思考块恒排在正文前：
+// OpenAI 兼容层流结束时把 text 排在 thinking 之前（llm/openai.go 的 append 顺序），
+// 照原样投影会让刷新后的思考跑到回答下面。
+func TestHistoryItemsOrdersThinkingBeforeText(t *testing.T) {
+	msgs := []llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "你是谁"),
+		{Role: llm.RoleAssistant, Content: []llm.Content{
+			{Type: llm.ContentText, Text: "我是小五。"},
+			{Type: llm.ContentThinking, Thinking: "用户问身份，直接按人设回答"},
+		}},
+	}
+
+	items := historyItems(msgs)
+	bot := items[1]
+	if len(bot.Blocks) != 2 {
+		t.Fatalf("blocks = %+v，期望 think + text 两块", bot.Blocks)
+	}
+	if bot.Blocks[0].Kind != "think" || bot.Blocks[1].Kind != "text" {
+		t.Errorf("块顺序 = [%s, %s]，期望先思考后正文", bot.Blocks[0].Kind, bot.Blocks[1].Kind)
+	}
+	if bot.Text != "我是小五。" {
+		t.Errorf("正文汇总 = %q，期望只含 text 块", bot.Text)
+	}
+}
+
+// TestAttachTurnUsage 校验每轮 token 汇总配回自己那一轮：同一句话问两次时，
+// 两次问答各自拿到自己的轨迹（回显只截尾部，配错就等于数字串轮）；提问文本
+// 被技能改写、只有回答对得上的那一轮走回答兜底；两边都对不上的留空。
+func TestAttachTurnUsage(t *testing.T) {
+	base := time.Now()
+	req := func(input, answer string, in, out int64, secs int) trace.Request {
+		r := trace.Request{Input: input, Answer: answer, In: in, Out: out, Started: base}
+		if secs > 0 {
+			r.Ended = base.Add(time.Duration(secs) * time.Second)
+		}
+		return r
+	}
+	items := []histItem{
+		{Role: "user", Text: "现在几点"},
+		{Role: "assistant", Text: "第一次的回答"},
+		{Role: "user", Text: "现在几点"},
+		{Role: "assistant", Text: "第二次的回答"},
+		{Role: "user", Text: "这段英文"},
+		{Role: "assistant", Text: "翻译结果"},
+		{Role: "user", Text: "[图片]"},
+		{Role: "assistant", Text: "没有轨迹的一轮"},
+	}
+	// 时间升序（sessionTurns 的口径）。第三条的 Input 是用户原话，而会话里存的是
+	// 技能改写后的提问文本，两边对不上，只能靠 Answer 配上。
+	reqs := []trace.Request{
+		req("现在几点", "第一次的回答", 1000, 20, 2),
+		req("现在几点", "第二次的回答", 2000, 40, 4),
+		req("/翻译 这段英文", "翻译结果", 3000, 60, 6),
+	}
+
+	attachTurnUsage(items, reqs)
+
+	cases := []struct {
+		idx     int
+		in, out int64
+		ms      int64
+	}{
+		{1, 1000, 20, 2000},
+		{3, 2000, 40, 4000},
+		{5, 3000, 60, 6000},
+	}
+	for _, c := range cases {
+		u := items[c.idx].Turn
+		if u == nil {
+			t.Errorf("第 %d 条 bot 没配上轨迹", c.idx)
+			continue
+		}
+		if u.In != c.in || u.Out != c.out || u.Ms != c.ms {
+			t.Errorf("第 %d 条 bot = %+v，期望 in=%d out=%d ms=%d", c.idx, u, c.in, c.out, c.ms)
+		}
+	}
+	if items[7].Turn != nil {
+		t.Errorf("没有轨迹的一轮 = %+v，期望留空", items[7].Turn)
 	}
 }
 

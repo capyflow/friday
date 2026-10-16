@@ -40,11 +40,85 @@ type histBlock struct {
 }
 
 // histItem 是一条回显消息：user 只有 text；bot 带 blocks（text 为正文拼接，
-// 供搜索与旧前端兜底）。
+// 供搜索与旧前端兜底）与 turn（本轮 token 汇总，取自调用轨迹，刷新后仍在原位）。
 type histItem struct {
-	Role   string      `json:"role"`
-	Text   string      `json:"text"`
-	Blocks []histBlock `json:"blocks,omitempty"`
+	Role   string           `json:"role"`
+	Text   string           `json:"text"`
+	Blocks []histBlock      `json:"blocks,omitempty"`
+	Turn   *trace.TurnUsage `json:"turn,omitempty"`
+}
+
+// turnKeyLen 是问答配对取的前缀长度（rune）。轨迹两侧都按 maxText 截断、
+// 回显按 histTextMax 截断，只有前缀在两边都一定完整。
+const turnKeyLen = 64
+
+// turnKey 归一化出一次问答的配对键：去首尾空白后取前 turnKeyLen 个 rune。
+func turnKey(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > turnKeyLen {
+		return string(r[:turnKeyLen])
+	}
+	return s
+}
+
+// attachTurnUsage 把调用轨迹里的每轮用量配回对应的 bot 消息，让"本轮 · x+y tokens"
+// 在刷新后仍留在它自己那一轮下面，而不是只有当前这一次对话有数字。
+// 配对口径：一次问答 = 会话里一条 user 消息之后的全部 assistant 消息
+// = 轨迹里同一条 Request。先按提问原文配（Input），配不上再按回答配（Answer）——
+// 技能与自定义指令会改写会话里的提问文本，这时只有回答对得上。
+// 同一句话问多次时从最近的一轮往前配：回显只取最后 chatHistoryMax 条，
+// 页面可见的正是最近的这几轮。
+func attachTurnUsage(items []histItem, reqs []trace.Request) {
+	// reqs 按时间升序（sessionTurns 保证），同一个键可能对应多次问答。
+	byInput, byAnswer := map[string][]int{}, map[string][]int{}
+	for i := range reqs {
+		if k := turnKey(reqs[i].Input); k != "" {
+			byInput[k] = append(byInput[k], i)
+		}
+		if k := turnKey(reqs[i].Answer); k != "" {
+			byAnswer[k] = append(byAnswer[k], i)
+		}
+	}
+	used := make([]bool, len(reqs))
+	pop := func(queues map[string][]int, key string) *trace.TurnUsage {
+		if key == "" {
+			return nil
+		}
+		q := queues[key]
+		for i := len(q) - 1; i >= 0; i-- {
+			if used[q[i]] {
+				continue
+			}
+			used[q[i]] = true
+			queues[key] = q[:i]
+			return reqs[q[i]].Usage()
+		}
+		return nil
+	}
+
+	type turnRef struct {
+		q, a string
+		i    int
+	}
+	var refs []turnRef
+	question := ""
+	for i, it := range items {
+		if it.Role == "user" {
+			question = turnKey(it.Text)
+			continue
+		}
+		refs = append(refs, turnRef{q: question, a: turnKey(it.Text), i: i})
+	}
+	for k := len(refs) - 1; k >= 0; k-- {
+		r := refs[k]
+		if u := pop(byInput, r.q); u != nil {
+			items[r.i].Turn = u
+			continue
+		}
+		if u := pop(byAnswer, r.a); u != nil {
+			items[r.i].Turn = u
+		}
+	}
 }
 
 // historyItems 把会话消息投影成前端可见的对话流：一次用户提问之后的所有
@@ -81,13 +155,17 @@ func historyItems(msgs []llm.Message) []histItem {
 			flush()
 			out = append(out, histItem{Role: string(m.Role), Text: historyText(m)})
 		case llm.RoleAssistant:
+			// 思考先于正文：provider 组装 Content 时把 text 排在 thinking 之前
+			// （openai.go 流结束后的 append 顺序），照原样投影会把思考渲染到
+			// 回答后面。这里固定按"先思考后回答"的时间线顺序输出。
+			for _, c := range m.Content {
+				if c.Type == llm.ContentThinking && strings.TrimSpace(c.Thinking) != "" {
+					blocks = append(blocks, histBlock{
+						Kind: "think", Text: logx.Truncate(c.Thinking, histThinkMax)})
+				}
+			}
 			for _, c := range m.Content {
 				switch c.Type {
-				case llm.ContentThinking:
-					if strings.TrimSpace(c.Thinking) != "" {
-						blocks = append(blocks, histBlock{
-							Kind: "think", Text: logx.Truncate(c.Thinking, histThinkMax)})
-					}
 				case llm.ContentText:
 					if strings.TrimSpace(c.Text) != "" {
 						blocks = append(blocks, histBlock{
@@ -136,8 +214,8 @@ func historyText(m llm.Message) string {
 }
 
 // handleChatHistory 返回指定会话（?session=key，缺省 web）的可见对话历史：
-// 按轮次聚合的 user/bot 消息，bot 带思考块与工具调用块，供打开页面/刷新后回显。
-// 只读查询——不触发 LLM 调用，也不创建空会话。
+// 按轮次聚合的 user/bot 消息，bot 带思考块、工具调用块与本轮 token 汇总，
+// 供打开页面/刷新后回显。只读查询——不触发 LLM 调用，也不创建空会话。
 func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	if s.chat == nil {
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"messages": []any{}})
@@ -151,12 +229,26 @@ func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	if key == "" {
 		key = "web"
 	}
+	attachTurnUsage(out, sessionTurns(key))
 	// 被暂停的问答随历史返回（页面刷新后仍可继续）。
 	body := map[string]any{"session": key, "messages": out}
 	if pt := s.chat.PausedTurn(key); pt != nil {
 		body["paused"] = pt
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, body)
+}
+
+// sessionTurns 取该会话的全部调用轨迹摘要（时间升序），供历史回显配每轮 token。
+// 轨迹与对话历史同生命周期（清上下文时一并清除），所以正常状态下两边是对得上的。
+func sessionTurns(key string) []trace.Request {
+	all := trace.List() // 最新在前
+	out := make([]trace.Request, 0, len(all))
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].Session == key {
+			out = append(out, all[i])
+		}
+	}
+	return out
 }
 
 // handleListSessions 返回全部会话概要（key、消息数、最后活跃）。
@@ -521,4 +613,106 @@ func (s *Server) handleSetHeartbeat(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "保存失败: " + err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "心跳清单已保存"})
+}
+
+// ---------- 模型库 ----------
+
+// modelView 是模型库条目的对外视图：密钥不回传，只回 keySet（是否已配置）。
+type modelView struct {
+	Name          string   `json:"name"`
+	BaseURL       string   `json:"baseURL"`
+	Model         string   `json:"model"`
+	KeySet        bool     `json:"keySet"`
+	ContextWindow int      `json:"contextWindow"`
+	Inputs        []string `json:"inputs"`
+}
+
+// newModelView 组装条目视图。激活条目的密钥可来自全局扁平字段（库内条目省写、
+// 沿用现状的形态），故并上 globalKeySet。
+func newModelView(m config.ModelProfile, active, globalKeySet bool) modelView {
+	inputs := m.EffectiveInputs()
+	keySet := m.APIKey != "" || m.APIKeyEnv != ""
+	if active && globalKeySet {
+		keySet = true
+	}
+	return modelView{
+		Name: m.Name, BaseURL: m.BaseURL, Model: m.Model,
+		KeySet: keySet, ContextWindow: m.ContextWindow, Inputs: inputs,
+	}
+}
+
+// handleProviderModelsGet 返回模型库与当前激活条目。未配置库时用扁平字段合成
+// 一条（name = model 名），前端无需区分两种形态；密钥不回传，只回 keySet。
+func (s *Server) handleProviderModelsGet(ctx *vhttp.Context) error {
+	cfg := s.cfg.Snapshot()
+	active := cfg.Provider.Active
+	models := cfg.Provider.Models
+	if len(models) == 0 {
+		active = cfg.Provider.Model
+		models = []config.ModelProfile{{
+			Name:          cfg.Provider.Model,
+			BaseURL:       cfg.Provider.BaseURL,
+			Model:         cfg.Provider.Model,
+			ContextWindow: cfg.Provider.ContextWindow,
+		}}
+	}
+	globalKeySet := cfg.ProviderAPIKey() != ""
+	views := make([]modelView, 0, len(models))
+	for _, m := range models {
+		views = append(views, newModelView(m, m.Name == active, globalKeySet))
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"active": active, "models": views,
+		// 全局显式覆盖（context.windowTokens，0 = 未设置，UI 提示其优先级最高）。
+		"globalWindowTokens": cfg.Context.WindowTokens,
+	})
+}
+
+// handleProviderModelsSet 保存模型库并激活指定条目（全量式保存，同 MCP 配置）：
+// 校验与密钥继承在 ReloadProviderModels 内做，按变化范围决定是否热重建。
+func (s *Server) handleProviderModelsSet(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+	}
+	var req struct {
+		Active string                `json:"active"`
+		Models []config.ModelProfile `json:"models"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if len(req.Models) == 0 {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "模型库不能为空，至少保留一条"})
+	}
+	if err := agent.ReloadProviderModels(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, req.Active, req.Models); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "模型库已保存并热生效，已写回 config.yaml"})
+}
+
+// handleProviderActivate 切换激活模型（聊天页快捷切换）：复用模型库保存内核，
+// 库保持原样只改 active，密钥按条目自带（或沿用现状）。
+func (s *Server) handleProviderActivate(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	name := strings.TrimSpace(req.Name)
+	cfg := s.cfg.Snapshot()
+	if _, ok := cfg.Provider.ActiveModel(); !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "尚未配置模型库，先在「设置 → 模型服务」添加"})
+	}
+	if cfg.Provider.Active == name {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "当前已在使用 " + name})
+	}
+	if err := agent.ReloadProviderModels(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver,
+		name, append([]config.ModelProfile{}, cfg.Provider.Models...)); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已切换到 " + name})
 }

@@ -30,6 +30,10 @@ func (c *Config) snapshotLocked() *Config {
 	next := *c
 	next.runtimeMu = nil
 	next.Persona.Presets = slices.Clone(c.Persona.Presets)
+	next.Provider.Models = slices.Clone(c.Provider.Models)
+	for i := range next.Provider.Models {
+		next.Provider.Models[i].Inputs = slices.Clone(c.Provider.Models[i].Inputs)
+	}
 	next.Mcp.Servers = slices.Clone(c.Mcp.Servers)
 	for i := range next.Mcp.Servers {
 		next.Mcp.Servers[i].Args = slices.Clone(c.Mcp.Servers[i].Args)

@@ -1,11 +1,11 @@
 <script setup>
-// 全局调用轨迹（一条事件流，跟随对话历史）。5s 轮询，内容无变化不重渲染；
+// 调用轨迹（设置 → 运行观测）：全局一条事件流，跟随对话历史。5s 轮询，内容无变化不重渲染；
 // 监听聊天页发出的 friday:trace-refresh 事件在回复完成时立即刷新。
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { api, traceAPI } from '../api.js'
-import { EV_TITLE, fmtClock, fmtNum, prettyJSON } from '../format.js'
-import { store } from '../store.js'
-import EmptyState from './art/EmptyState.vue'
+import { api, traceAPI } from '../../api.js'
+import { EV_TITLE, fmtClock, fmtNum, prettyJSON } from '../../format.js'
+import { store } from '../../store.js'
+import EmptyState from '../art/EmptyState.vue'
 
 const events = ref([])
 const stats = reactive({ requests: 0, in: 0, out: 0 })
@@ -66,33 +66,28 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="view" id="view-trace">
-    <div class="view-inner">
-      <h2>调用轨迹
-        <span v-if="filtered" class="trace-filter">
-          只看 {{ filtered }}
-          <button type="button" aria-label="清除轨迹过滤" @click="clearFilter">×</button>
-        </span>
-        <span v-else class="count">全局一条调用流 · 跟随对话历史（清除上下文时一并清除）</span>
-      </h2>
-      <div class="trace-bar">
-        <div id="traceStats">{{ statsLine }}</div>
-        <label><input v-model="auto" type="checkbox"> 自动刷新</label>
-        <button class="btn" type="button" @click="refresh">刷新</button>
-      </div>
-      <template v-if="events.length">
-        <div v-for="(e, i) in events" :key="i" class="ev" :class="e.kind">
-          <div class="ev-head" @click="toggle(e)">
-            <span class="chip" :class="'c-' + e.kind">{{ EV_TITLE[e.kind] || e.kind }}</span>
-            <span class="ev-summary">{{ summary(e) }}</span>
-            <span class="grow"></span>
-            <span v-if="usageLine(e)" class="mono">{{ usageLine(e) }}</span>
-            <span class="meta">{{ fmtClock(e.time) }}</span>
-          </div>
-          <div v-show="e._open" class="ev-body">{{ bodyOf(e) }}</div>
-        </div>
-      </template>
-      <EmptyState v-else kind="trace">还没有调用记录<br>和小五说句话试试</EmptyState>
+  <div id="view-trace">
+    <div class="trace-bar">
+      <span v-if="filtered" class="trace-filter">
+        只看 {{ filtered }}
+        <button type="button" aria-label="清除轨迹过滤" @click="clearFilter">×</button>
+      </span>
+      <div id="traceStats">{{ statsLine }}</div>
+      <label><input v-model="auto" type="checkbox"> 自动刷新</label>
+      <button class="btn" type="button" @click="refresh">刷新</button>
     </div>
-  </section>
+    <template v-if="events.length">
+      <div v-for="(e, i) in events" :key="i" class="ev" :class="e.kind">
+        <div class="ev-head" @click="toggle(e)">
+          <span class="chip" :class="'c-' + e.kind">{{ EV_TITLE[e.kind] || e.kind }}</span>
+          <span class="ev-summary">{{ summary(e) }}</span>
+          <span class="grow"></span>
+          <span v-if="usageLine(e)" class="mono">{{ usageLine(e) }}</span>
+          <span class="meta">{{ fmtClock(e.time) }}</span>
+        </div>
+        <div v-show="e._open" class="ev-body">{{ bodyOf(e) }}</div>
+      </div>
+    </template>
+    <EmptyState v-else kind="trace">还没有调用记录<br>和小五说句话试试</EmptyState>
+  </div>
 </template>

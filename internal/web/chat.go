@@ -444,17 +444,13 @@ func (c *Chat) takePaused(key string) *PausedTurn {
 // turnUsage 汇总本轮问答的 token 与墙钟耗时，随 done 帧发给前端。
 // 数取自 trace（OnLLMCall 逐轮累加，按请求 ID 归并），不另起一套记账；
 // 暂停与出错路径同样带上——已经烧掉的 token 不该因为这一轮没跑完就不显示。
-// 耗时只在 trace.End 已落时刻时给出（被暂停的现场没有结束时刻，前端自己有时钟）。
-func turnUsage(id string) map[string]any {
+// 历史回显走同一个 Request.Usage()，所以刷新前后的数字一致。
+func turnUsage(id string) *trace.TurnUsage {
 	req, ok := trace.Get(id)
 	if !ok {
 		return nil
 	}
-	out := map[string]any{"in": req.In, "out": req.Out}
-	if ms := req.Ended.Sub(req.Started).Milliseconds(); ms > 0 {
-		out["ms"] = ms
-	}
-	return out
+	return req.Usage()
 }
 
 // stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、

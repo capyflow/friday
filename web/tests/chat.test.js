@@ -316,6 +316,59 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.find('.cursor').exists()).toBe(false)
   })
 
+  it('思考与正文分片交错到达时各并回一块，回答不碎成两字一行', async () => {
+    // StepFun 这类网关会在正文已经吐了几个字之后补发思考分片：
+    // 按"最后一块类型"分块会把回答切成「我是」「小五，…」这样的碎块。
+    fetchMock.mockResolvedValueOnce(stream([
+      { thinking: '先看用户想要什么' },
+      { delta: '今天' },
+      { thinking: '\n再确认一下' },
+      { delta: '晴' },
+      { step: { kind: 'round', detail: '耗时 1.2s' } },
+      { done: true, turn: { in: 1200, out: 80, ms: 1200 } },
+    ]))
+    await mountChat()
+    await send('查天气')
+    expect(wrapper.findAll('.think')).toHaveLength(1)
+    expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再确认一下')
+    expect(wrapper.findAll('.turn-text')).toHaveLength(1)
+    expect(wrapper.get('.turn-text').text()).toBe('今天晴')
+    // 轮次收尾：耗时挂在思考行上，本轮 token 落在时间线末尾
+    expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
+    expect(wrapper.get('.turn-total').text()).toBe('本轮 · 1.2k+80 tokens · 耗时 1.2s')
+  })
+
+  it('思考分片晚于正文到达时仍排在回答前面', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { delta: '今天' },
+      { thinking: '先想想用户要什么' },
+      { delta: '晴' },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('查天气')
+    const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
+    expect(rows).toEqual(['think', 'turn-text'])
+    expect(wrapper.get('.turn-text').text()).toBe('今天晴')
+  })
+
+  it('工具调用之后的新一轮思考与正文另起一块', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { thinking: '要查天气' },
+      { step: { kind: 'round', detail: '耗时 1.1s' } },
+      { step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } },
+      { step: { kind: 'tool', name: 'weather', detail: '晴', status: 'ok' } },
+      { thinking: '拿到结果了' },
+      { delta: '今天晴' },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('查天气')
+    const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
+    expect(rows).toEqual(['think', 'tool', 'think', 'turn-text'])
+    expect(wrapper.findAll('.think-text').map(b => b.text())).toEqual(['要查天气', '拿到结果了'])
+  })
+
   it('刷新后从历史接口恢复思考块与工具调用块', async () => {
     api.mockResolvedValueOnce({
       messages: [
@@ -518,6 +571,24 @@ describe('轮末 token 汇总与上下文占用 chip', () => {
     expect(wrapper.get('.turn-total').text()).toBe('本轮 · 900+120 tokens')
   })
 
+  it('刷新后每轮各自的汇总留在自己那一轮下面，不只是最新一轮有数字', async () => {
+    api.mockResolvedValueOnce({
+      messages: [
+        { role: 'user', text: '现在几点' },
+        { role: 'bot', text: '晚上 10 点。', blocks: [{ kind: 'text', text: '晚上 10 点。' }],
+          turn: { in: 1200, out: 80, ms: 2100 } },
+        { role: 'user', text: '谢谢' },
+        { role: 'bot', text: '不客气～', blocks: [{ kind: 'text', text: '不客气～' }],
+          turn: { in: 1300, out: 12 } },
+      ],
+    })
+    await mountChat()
+    expect(wrapper.findAll('.turn-total').map(row => row.text())).toEqual([
+      '本轮 · 1.2k+80 tokens · 耗时 2.1s',
+      '本轮 · 1.3k+12 tokens',
+    ])
+  })
+
   it('chip 常驻显示占比，点开给出 token 数字与归档阈值刻度', async () => {
     api.mockImplementation(ctxApi(snap()))
     await mountChat()
@@ -577,5 +648,59 @@ describe('轮末 token 汇总与上下文占用 chip', () => {
     api.mockImplementation(ctxApi({ enabled: false, session: 'web' }))
     await mountChat()
     expect(wrapper.find('[aria-label="上下文使用率"]').exists()).toBe(false)
+  })
+})
+
+describe('模型快捷切换', () => {
+  const modelsApi = (models, active) => (method, url) => {
+    if (method === 'GET' && url === '/api/provider/models') {
+      return Promise.resolve({ active, models })
+    }
+    if (method === 'POST' && url === '/api/provider/activate') return Promise.resolve({ message: '已切换' })
+    return Promise.resolve({})
+  }
+  const two = [
+    { name: 'step-5', model: 'step-5-preview', inputs: ['text', 'image'], contextWindow: 128000, keySet: true },
+    { name: 'ds-chat', model: 'deepseek-chat', inputs: ['text'], contextWindow: 65536, keySet: true },
+  ]
+
+  it('chip 显示当前模型名，弹层列出库内条目与能力标注', async () => {
+    api.mockImplementation(modelsApi(two, 'step-5'))
+    await mountChat()
+    const chip = wrapper.find('[aria-label="当前模型"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain('step-5')
+    await chip.trigger('click')
+    await flushPromises()
+    const items = wrapper.findAll('#modelPopover .pop-item')
+    expect(items.map(b => b.find('.pl').text())).toEqual(['step-5', 'ds-chat', '管理模型库…'])
+    expect(items[1].text()).toContain('仅文本')
+    expect(items[0].classes()).toContain('selected')
+  })
+
+  it('点选另一模型发 activate，切换后刷新库与上下文占比', async () => {
+    api.mockImplementation(modelsApi(two, 'step-5'))
+    await mountChat()
+    await wrapper.find('[aria-label="当前模型"]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('#modelPopover .pop-item')[1].trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/provider/activate', { name: 'ds-chat' })
+  })
+
+  it('激活条目不支持图片时：添加图片置灰并说明，粘贴图片被拒', async () => {
+    api.mockImplementation(modelsApi(two, 'ds-chat'))
+    await mountChat()
+    await wrapper.find('[aria-label="添加"]').trigger('click')
+    await flushPromises()
+    const imageItem = modeButton('添加图片')
+    expect(imageItem.attributes('disabled')).toBeDefined()
+    expect(imageItem.text()).toContain('当前模型不支持图片输入')
+
+    const paste = new window.Event('paste', { bubbles: true, cancelable: true })
+    paste.clipboardData = { files: [new File(['x'], 'x.png', { type: 'image/png' })] }
+    wrapper.get('textarea').element.dispatchEvent(paste)
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith('当前模型不支持图片输入', true)
   })
 })

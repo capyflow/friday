@@ -205,14 +205,15 @@ describe('目标模式（自动化页）', () => {
     expect(call?.[2]?.goal).not.toBe(true)
   })
 
-  it('跳转调用轨迹时带上该目标的会话过滤', async () => {
+  it('查看执行轮次改为打开设置定位调用轨迹，并带上该目标的会话过滤', async () => {
     const { store } = await import('../src/store.js')
     wrapper = mount(AutoView)
     await flushPromises()
     await wrapper.get('[data-task-id="g1"]').findAll('button')
       .find(b => b.text() === '查看执行轮次').trigger('click')
     expect(store.traceFilter).toBe('goal-g1')
-    expect(store.view).toBe('trace')
+    expect(store.settingsSection).toBe('trace')
+    expect(store.settingsOpen).toBe(true)
   })
 
   it('停止这次推进走目标接口', async () => {

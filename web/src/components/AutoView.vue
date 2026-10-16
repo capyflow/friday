@@ -57,7 +57,8 @@ async function loadGoals() {
 
 function viewRuns(session) {
   store.traceFilter = session
-  store.view = 'trace'
+  store.settingsSection = 'trace'
+  store.settingsOpen = true
 }
 
 async function stopGoal(t) {

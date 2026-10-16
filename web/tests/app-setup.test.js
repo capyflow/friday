@@ -15,7 +15,7 @@ const SetupStub = defineComponent({ name: 'SetupView', props: ['status'], emits:
   template: '<section data-setup><button @click="$emit(\'account-created\')">account</button></section>' })
 let wrapper, setupStatus, session
 beforeEach(() => {
-  Object.assign(store, { loggedIn: false, username: '', view: 'chat', settingsOpen: false, setupStatus: null, unread: 0 })
+  Object.assign(store, { loggedIn: false, username: '', view: 'chat', settingsOpen: false, settingsSection: '', setupStatus: null, unread: 0 })
   setupStatus = { accountRequired: false, providerRequired: false }
   session = { authenticated: false }
   api.mockReset().mockImplementation((_method, url) => Promise.resolve(url === '/api/setup/status' ? setupStatus : session))
@@ -25,8 +25,8 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); wrapper = null })
 async function showApp() {
   wrapper = mount(App, { global: { stubs: {
-    SetupView: SetupStub, LoginView: { template: '<div data-login />' }, ChatView: true, StatusView: true,
-    TraceView: true, AutoView: true, TodoView: true, NotificationsView: true, WikiView: true,
+    SetupView: SetupStub, LoginView: { template: '<div data-login />' }, ChatView: true,
+    AutoView: true, TodoView: true, NotificationsView: true,
     SettingsModal: true, ApprovalCards: true,
   } } })
   await flushPromises()

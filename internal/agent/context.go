@@ -68,9 +68,14 @@ func (m *ContextManager) Rebuild(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("创建归档目录: %w", err)
 	}
+	// 窗口解析：全局显式覆盖 > 模型库激活条目 > 框架按模型名查表（engine 内默认）。
+	windowTokens := cfg.Context.WindowTokens
+	if windowTokens <= 0 {
+		windowTokens = cfg.Provider.ContextWindow
+	}
 	engineCfg := ctxengine.Config{
 		Model:            cfg.Provider.Model,
-		WindowTokens:     cfg.Context.WindowTokens,
+		WindowTokens:     windowTokens,
 		SoftRatio:        cfg.Context.SoftRatio,
 		HardRatio:        cfg.Context.HardRatio,
 		SummaryBudget:    cfg.Context.SummaryBudget,
