@@ -52,8 +52,12 @@ npm run build
 构建将主页面与快捷面板分别内联到 `internal/admin/webdist/`；修改前端后须重新编译 Go。
 
 - 聊天支持普通、计划和目标三种模式，模式随请求体的 `mode` 字段传给后端，不再拼进消息文字。
-- token 口径：思考行只报每轮耗时，本轮总用量随 done 帧的 `turn={in,out,ms?}` 落在时间线末尾一行
-  「本轮 · 1.2k+300 tokens · 耗时 3.4s」。这个数只活一次刷新——会话历史里不存它，累计口径看「设置 → 运行状态」。
+- token 口径：思考行只报每轮耗时，本轮总用量落在该轮时间线末尾一行
+  「本轮 · 1.2k+300 tokens · 耗时 3.4s」。实时来自 done 帧的 `turn={in,out,ms?}`，刷新后由
+  `GET /api/chat/history` 的每条 bot 消息带回同名 `turn`（按设置里的调用轨迹配对），所以每一轮的用量
+  都留在自己那一轮下面；累计口径看「设置 → 运行状态」。
+- 时间线按 LLM 轮次分块：一轮里思考与正文各只占一块，网关把 reasoning 与 content 的分片交错
+  发过来也不会把回答切成两字一行；刷新后的块顺序与实时一致（思考在前、正文在后）。
 - composer 左组的上下文 chip 显示活跃区占比（`GET /api/context?session=web`），点开看到 token 数字、
   活跃块数与归档阈值刻度，面板里有「压缩上下文」（`POST /api/context/compact`）与「清除上下文」。
   压缩与轮末自动归档做的是同一件事，未达 `context.softRatio` 时按钮置灰；`context.enabled: false`

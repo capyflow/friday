@@ -259,6 +259,26 @@ func End(id, errMsg string) {
 	mu.Unlock()
 }
 
+// TurnUsage 是一次调用（一整轮问答）的 token 与耗时汇总。SSE 的 done 帧与历史
+// 回显共用它：两条路径上的数字必须同源，否则刷新前后同一轮会报出两个结果。
+type TurnUsage struct {
+	In  int64 `json:"in"`
+	Out int64 `json:"out"`
+	Ms  int64 `json:"ms,omitempty"` // 0 = 还没结束（被暂停的现场没有结束时刻）
+}
+
+// Usage 返回本次请求的轮末汇总。
+func (r *Request) Usage() *TurnUsage {
+	if r == nil {
+		return nil
+	}
+	u := &TurnUsage{In: r.In, Out: r.Out}
+	if ms := r.Ended.Sub(r.Started).Milliseconds(); ms > 0 {
+		u.Ms = ms
+	}
+	return u
+}
+
 // List 返回全部轨迹摘要（不含逐条事件），最新的在前。
 func List() []Request {
 	mu.Lock()
