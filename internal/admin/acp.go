@@ -125,20 +125,45 @@ func (s *Server) handleAcpCatalog(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"catalog": s.acp.Catalog()})
 }
 
-// handleAcpInstall 执行目录中指定 agent 的官方安装命令（同步，最长 5 分钟）：
-// {"id":"opencode"}，返回输出尾部。命令为内置目录固定串，不经任何外部输入拼接。
+// handleAcpInstall 执行目录中指定 agent 的官方安装命令（同步，最长 5 分钟），
+// 成功后自动注册进智能体清单（写回 config.yaml 并热生效）——安装即入列，无需二次操作。
+// 命令为内置目录固定串，不经任何外部输入拼接。
 func (s *Server) handleAcpInstall(ctx *vhttp.Context) error {
+	s.acpUpdateMu.Lock()
+	defer s.acpUpdateMu.Unlock()
 	var req struct {
 		ID string `json:"id"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	out, err := s.acp.Install(ctx.Context(), req.ID)
-	if err != nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error(), "output": out})
+	if s.cfg == nil || s.configPath == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "安装完成", "output": out})
+	res, err := s.acp.Install(ctx.Context(), req.ID)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error(), "output": res.Output})
+	}
+	registered := false
+	if !res.AlreadyRegistered {
+		if err := s.cfg.Apply(func(n *config.Config) error {
+			n.Acp = n.Acp.Normalized()
+			n.Acp.Agents = append(n.Acp.Agents, res.Template)
+			return config.UpdateAcp(s.configPath, n.Acp)
+		}); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "安装成功，但写入清单失败: " + err.Error(), "output": res.Output})
+		}
+		s.acp.Reload(s.cfg.Snapshot().Acp)
+		registered = true
+	}
+	msg := "安装完成，已加入智能体清单并生效"
+	if !registered {
+		msg = "安装完成（清单中已有同名 agent，未重复添加）"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"message": msg, "output": res.Output, "registered": registered, "agent": res.Template,
+	})
 }
 
 // handleAcpTest 对指定 agent 做握手诊断（设置页「测试」按钮）。

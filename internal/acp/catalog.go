@@ -107,32 +107,49 @@ func (m *Manager) Catalog() []CatalogView {
 // installTimeout 是单次安装的上限（npm -g 全局安装通常 30~120s，留足余量）。
 const installTimeout = 5 * time.Minute
 
-// Install 执行目录中指定 agent 的官方安装命令，返回可展示的输出尾部。
-// 命令是内置目录里的固定字符串，经 sh -c 执行（opencode 的官方脚本是管道）；
-// 超时 5 分钟，输出截尾返回。
-func (m *Manager) Install(ctx context.Context, id string) (string, error) {
+// InstallResult 是一次安装的归集结果。
+type InstallResult struct {
+	// Output 安装命令输出的尾部（展示用）。
+	Output string
+	// Path 探测到的可执行文件绝对路径。
+	Path string
+	// Template 回填了绝对路径的启动模板（调用方据此注册进清单）。
+	Template config.AcpAgentConfig
+	// AlreadyRegistered 清单里已有同名 agent（此时调用方不必重复注册）。
+	AlreadyRegistered bool
+}
+
+// Install 执行目录中指定 agent 的官方安装命令。命令是内置目录里的固定字符串，
+// 经 sh -c 执行（opencode 的官方脚本是管道）；超时 5 分钟，输出截尾返回。
+// 是否注册进清单由调用方决定（本方法只报告 AlreadyRegistered）。
+func (m *Manager) Install(ctx context.Context, id string) (InstallResult, error) {
 	for _, e := range catalog {
 		if e.ID != id {
 			continue
+		}
+		res := InstallResult{}
+		if _, ok := m.cfgFn().Normalized().Agent(e.Template.Name); ok {
+			res.AlreadyRegistered = true
 		}
 		ictx, cancel := context.WithTimeout(ctx, installTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ictx, "sh", "-c", e.InstallCmd)
 		out, err := cmd.CombinedOutput()
-		tail := tailRunes(string(out), 2000)
+		res.Output = tailRunes(string(out), 2000)
 		if err != nil {
-			return tail, fmt.Errorf("安装命令失败: %w（输出见下）", err)
+			return res, fmt.Errorf("安装命令失败: %w（输出见下）", err)
 		}
-		// 安装成功后探测一次：新装的二进制通常已入 PATH（脚本写的标准位置），
-		// 但当前进程的 PATH 缓存不受影响——LookPath 每次都查，能找到就回填。
-		if p, err := exec.LookPath(e.Check); err != nil {
-			return tail, fmt.Errorf("安装命令已执行成功，但未在 PATH 中找到 %q——可能需要重启 Friday 或手动检查安装位置", e.Check)
-		} else {
-			tail = fmt.Sprintf("已安装到 %s\n%s", p, tail)
+		// 安装成功后探测一次：新装的二进制通常已入 PATH（脚本写的标准位置）。
+		p, err := exec.LookPath(e.Check)
+		if err != nil {
+			return res, fmt.Errorf("安装命令已执行成功，但未在 PATH 中找到 %q——可能需要重启 Friday 或手动检查安装位置", e.Check)
 		}
-		return tail, nil
+		res.Path = p
+		res.Template = e.Template
+		res.Template.Command = p // 绝对路径回填：不依赖后续会话的 PATH
+		return res, nil
 	}
-	return "", fmt.Errorf("目录中没有叫 %q 的 agent", id)
+	return InstallResult{}, fmt.Errorf("目录中没有叫 %q 的 agent", id)
 }
 
 // tailRunes 取文本末尾 n 个 rune（安装输出可能很长，展示尾部即可）。

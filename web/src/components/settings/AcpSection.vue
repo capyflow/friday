@@ -56,19 +56,22 @@ async function loadCatalog() {
   } catch { /* 目录加载失败不阻塞主配置 */ }
 }
 
-// 安装目录条目：跑官方安装命令（可能要一两分钟），成功后刷新状态并把
-// agent 模板追加到下方清单（command 优先用探测到的绝对路径）。
+// 安装目录条目：后端装完会自动注册进清单（写回配置并热生效），
+// 这里把返回的 agent 模板同步进本地表单，列表即刻可见。
 async function installAgent(entry) {
   installing.value = entry.id
   try {
     const r = await api('POST', '/api/acp/install', { id: entry.id })
     await loadCatalog()
-    const fresh = catalog.value.find(x => x.id === entry.id)
-    appendTemplate(fresh || entry)
-    show('安装完成，已把模板加进下方清单（记得保存）', true)
-    if (r.output) console.log('[acp install]', r.output)
+    if (r.agent && !cfg.agents.some(a => a.name === r.agent.name)) {
+      cfg.agents.push({
+        ...blankAgent(), name: r.agent.name, command: r.agent.command,
+        argsText: (r.agent.args || []).join(', '),
+      })
+    }
+    show(r.message || '安装完成', true)
   } catch (e) {
-    show('安装失败：' + e.message + (e.output ? '\n' + e.output.slice(-400) : ''), false)
+    show('安装失败：' + e.message, false)
   } finally { installing.value = '' }
 }
 
@@ -178,7 +181,7 @@ onMounted(load)
                     :disabled="installing === c.id" @click="installAgent(c)">
               {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}
             </button>
-            <button class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
+            <button v-if="c.installed" class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
           </div>
           <div v-if="c.installed" class="meta mono acp-cat-path">{{ c.path }}</div>
         </div>
