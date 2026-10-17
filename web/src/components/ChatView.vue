@@ -11,6 +11,7 @@ import { fmtTokens } from '../format.js'
 import { pushThinking, finishRound, pushToolStep, pushText, turnTotalText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
+import ChatComposer from './ChatComposer.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -30,7 +31,7 @@ const menuOpen = ref(false)
 const popOpen = ref(false)
 const mode = ref(null)             // null | 'plan' | 'goal'
 const scroller = ref(null)
-const inputEl = ref(null)
+const composerEl = ref(null)
 const fileInput = ref(null)
 const moreWrap = ref(null)
 const popWrap = ref(null)
@@ -295,7 +296,7 @@ function setMode(m) {
 function fill(text) {
   if (busy.value || clearing.value) return
   input.value = text
-  nextTick(() => { inputEl.value && inputEl.value.focus(); autoGrow() })
+  nextTick(() => composerEl.value && composerEl.value.focus())
 }
 
 /* ---------- 权限模式（参照 zcode：chip 常驻输入框，弹层切换，全局热生效） ---------- */
@@ -429,18 +430,6 @@ async function compactCtx() {
 }
 
 /* ---------- 发送（SSE 流式）：发送 / 暂停 / 继续 ---------- */
-function autoGrow() {
-  const el = inputEl.value
-  if (!el) return
-  el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
-}
-function onInputKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault()
-    if (phase.value !== 'streaming') sendChat()
-  }
-}
 // 主按钮一位三态：回复中=暂停；暂停且无输入=继续；其余=发送（暂停时输入新问题
 // 即丢弃上次任务、开启新对话）。
 function onSendClick() {
@@ -600,7 +589,7 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       input.value = draft.text
       mode.value = draft.mode
       pendingImages.push(...draft.images)
-      nextTick(autoGrow)
+      composerEl.value && composerEl.value.focus()
     } else {
       phase.value = 'paused' // 继续失败：回到可继续状态
     }
@@ -622,7 +611,7 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
     if (bot && phase.value !== 'paused') bot.streaming = false
     if (request === controller) request = null
     if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
-    if (!disposed) nextTick(() => inputEl.value && inputEl.value.focus())
+    if (!disposed) nextTick(() => composerEl.value && composerEl.value.focus())
   }
 }
 
@@ -648,7 +637,6 @@ async function sendChat(presetText) {
   input.value = ''
   // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
   pendingImages.splice(0, pendingImages.length)
-  autoGrow()
   const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   await streamTurn({
     url: '/api/chat',
@@ -871,67 +859,58 @@ async function clearContext() {
     </div>
 
     <div id="chatFoot">
-      <div class="inputbar" :aria-busy="busy || clearing">
-        <!-- 图片附件在输入容器内部：有图时撑起整个输入框 -->
-        <div v-if="pendingImages.length" id="attachPreviews">
-          <div v-for="p in pendingImages" :key="p.url" class="thumb">
-            <img :src="p.url" alt="">
-            <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
-          </div>
-        </div>
-        <!-- 第一行：输入区独占整行并自动增高；操作键全部落到第二行 -->
-        <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入" :disabled="busy || clearing"
-                  @keydown="onInputKeydown" @input="autoGrow" @paste="onPaste"></textarea>
-        <!-- 第二行：左=附件与模式 chip，右=快捷键提示与主按钮 -->
-        <div class="composer-bar">
-          <div class="bar-left">
-            <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
-                    :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            </button>
-            <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
-            <button class="ib-btn perm-btn" :class="['pm-' + permMode, { active: permOpen }]"
-                    aria-label="权限模式" :title="'权限模式：' + PERM_META[permMode].label"
-                    :disabled="busy || clearing" @click.stop="togglePerm">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              <span class="perm-short">{{ PERM_META[permMode].short }}</span>
-            </button>
-            <div class="mode-chip" :class="{ show: !!mode }">
-              <span class="mode-name">{{ mode ? MODE_TEXT[mode][0] : '' }}</span>
-              <button aria-label="退出模式" @click="setMode(mode)">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-              </button>
+      <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
+                    :busy="phase === 'streaming'" :disabled="clearing"
+                    :send-label="sendLabel" :send-disabled="sendDisabled"
+                    @primary="onSendClick" @paste="onPaste">
+        <template #previews>
+          <!-- 图片附件在输入容器内部：有图时撑起整个输入框 -->
+          <div v-if="pendingImages.length" id="attachPreviews">
+            <div v-for="p in pendingImages" :key="p.url" class="thumb">
+              <img :src="p.url" alt="">
+              <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
             </div>
-            <!-- 上下文占用：点击查看数字与压缩入口。未启用上下文治理时后端不返回快照，chip 不出现 -->
-            <button v-if="ctxSnap" class="ib-btn ctx-btn" :class="[ctxLevel, { active: ctxOpen }]"
-                    aria-label="上下文使用率" aria-haspopup="true"
-                    :title="'上下文占用 ' + ctxPct + '%，点击查看'" :disabled="clearing"
-                    @click.stop="toggleCtx">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
-              <span class="ctx-short">{{ ctxPct }}%</span>
-            </button>
-            <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
-            <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
-                    aria-label="当前模型" aria-haspopup="true"
-                    :title="'当前模型：' + (modelShort || '未配置')" :disabled="clearing"
-                    @click.stop="toggleModel">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
-              <span class="ctx-short model-short">{{ modelShort || '模型' }}</span>
+          </div>
+        </template>
+        <template #left>
+          <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
+                  :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
+          <button class="ib-btn perm-btn" :class="['pm-' + permMode, { active: permOpen }]"
+                  aria-label="权限模式" :title="'权限模式：' + PERM_META[permMode].label"
+                  :disabled="busy || clearing" @click.stop="togglePerm">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span class="perm-short">{{ PERM_META[permMode].short }}</span>
+          </button>
+          <div class="mode-chip" :class="{ show: !!mode }">
+            <span class="mode-name">{{ mode ? MODE_TEXT[mode][0] : '' }}</span>
+            <button aria-label="退出模式" @click="setMode(mode)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
-          <div class="bar-right">
-            <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
-            <button class="ib-btn send-btn" :class="{ 'halt-btn': phase === 'streaming', 'resume-btn': sendLabel === '继续上次任务' }"
-                    :aria-label="sendLabel" :title="sendLabel" :disabled="sendDisabled" @click="onSendClick">
-              <svg v-if="phase === 'streaming'" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
-              <svg v-else-if="sendLabel === '继续上次任务'" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.6v12.8c0 .9 1 1.5 1.8 1L20 13a1.2 1.2 0 0 0 0-2L9.8 4.6C9 4.1 8 4.7 8 5.6Z"/></svg>
-              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
-            </button>
-          </div>
-        </div>
+          <!-- 上下文占用：点击查看数字与压缩入口。未启用上下文治理时后端不返回快照，chip 不出现 -->
+          <button v-if="ctxSnap" class="ib-btn ctx-btn" :class="[ctxLevel, { active: ctxOpen }]"
+                  aria-label="上下文使用率" aria-haspopup="true"
+                  :title="'上下文占用 ' + ctxPct + '%，点击查看'" :disabled="clearing"
+                  @click.stop="toggleCtx">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
+            <span class="ctx-short">{{ ctxPct }}%</span>
+          </button>
+          <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
+          <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
+                  aria-label="当前模型" aria-haspopup="true"
+                  :title="'当前模型：' + (modelShort || '未配置')" :disabled="clearing"
+                  @click.stop="toggleModel">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+            <span class="ctx-short model-short">{{ modelShort || '模型' }}</span>
+          </button>
+        </template>
+      </ChatComposer>
 
         <!-- 加号弹窗 -->
         <div v-show="popOpen" ref="popWrap" class="popover" id="addPopover">
@@ -1032,7 +1011,6 @@ async function clearContext() {
             <span class="pd">设置 → 模型服务</span>
           </button>
         </div>
-      </div>
     </div>
   </section>
 </template>

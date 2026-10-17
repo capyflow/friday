@@ -112,13 +112,6 @@ function stick() {
   const el = scroller.value
   if (el && nearBottom()) el.scrollTop = el.scrollHeight
 }
-function autoGrow() {
-  const el = inputEl.value
-  if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px' }
-}
-function onInputKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-}
 
 async function uploadImages() {
   const ids = []
@@ -346,36 +339,28 @@ function removePreview(p) {
             </template>
           </div>
         </div>
-        <div class="ag-composer inputbar" :aria-busy="busy">
-          <div v-if="pendingImages.length" id="attachPreviews">
-            <div v-for="p in pendingImages" :key="p.url" class="thumb">
-              <img :src="p.url" alt="">
-              <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
-            </div>
-          </div>
-          <textarea ref="inputEl" v-model="input" rows="1" :disabled="busy"
-                    :placeholder="'给 ' + (current.agent) + ' 派活…'"
-                    aria-label="智能体输入" @keydown="onInputKeydown" @input="autoGrow"></textarea>
-          <div class="composer-bar">
-            <div class="bar-left">
+        <div class="ag-foot">
+          <ChatComposer v-model="input" :placeholder="'给 ' + current.agent + ' 派活…'"
+                        aria-label="智能体输入" :busy="busy"
+                        :send-label="busy ? '停止' : '发送'" :send-disabled="!busy && !canSend"
+                        @primary="send">
+            <template #previews>
+              <div v-if="pendingImages.length" id="attachPreviews">
+                <div v-for="p in pendingImages" :key="p.url" class="thumb">
+                  <img :src="p.url" alt="">
+                  <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
+                </div>
+              </div>
+            </template>
+            <template #left>
               <button class="ib-btn plus-btn" aria-label="添加图片" title="添加图片（≤5MB，最多 4 张）"
                       :disabled="busy" @click="pick">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </button>
               <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
-            </div>
-            <div class="bar-right">
-              <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
-              <button class="ib-btn send-btn" :class="{ 'halt-btn': busy }"
-                      :aria-label="busy ? '停止' : '发送'" :title="busy ? '停止' : '发送'"
-                      :disabled="!busy && !canSend" @click="send">
-                <svg v-if="busy" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
-                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      </template>
+            </template>
+          </ChatComposer>
+        </div>      </template>
     </section>
   </div>
 </template>
