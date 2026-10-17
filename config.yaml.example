@@ -300,3 +300,26 @@ context:
   # contextWindow，再未设置按模型名查表（未知型号按 128k，非标准命名时建议显式配）
   # windowTokens: 65536
   # retentionDays: 0        # 归档保留天数，0 = 永久
+
+# 智能体（ACP agent）对话空间：侧栏「智能体」页——每个对话（thread）绑定一个
+# 外部 agent 与一个真实工作目录（创建后不可切换），agent 用它自己的工具在该目录
+# 里干活。进程空闲自动回收，重开对话经 session/load 重接上下文；恢复不可靠的
+# agent 配 degradeResume: true 走「上下文已重置」降级。敏感操作经网页审批卡
+# 人工放行（30 分钟无人处理自动拒绝）——注意要把它调紧才有卡弹：agent 各自
+# 配置里的审批模式需设为"每次询问"。
+# acp:
+#   enabled: false             # 默认关闭：启用依赖启动命令可解析 + agent 已登录
+#   maxConcurrent: 2           # 同时存活的 agent 进程上限（各带自己的 MCP/skill 表）
+#   idleKillSeconds: 600       # 空闲回收秒数（回收不丢对话记录；0 视为默认，负数不回收）
+#   turnTimeoutSeconds: 300    # 单轮对话超时
+#   handshakeTimeoutSeconds: 10 # 启动握手超时（未登录的故障靠它快速报错）
+#   showThought: true          # 是否显示 agent 思考流
+#   agents:
+#     - name: codex
+#       command: npx           # 无 TTY 环境下 npx 未必可解析，建议绝对路径
+#       args: ["-y", "@zed-industries/codex-acp"]
+#       env: {}                # 额外环境变量（在继承进程环境之上追加）
+#       workspace: ~/projects  # 建 thread 时的预填工作目录
+#       enabled: true
+#       turnTimeoutSeconds: 0  # 0 = 用全局值；也可按 agent 覆盖
+#       degradeResume: false   # session/load 恢复保真度实测不可靠时置 true

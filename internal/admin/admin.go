@@ -31,6 +31,15 @@
 //	GET    /api/traces        调用轨迹列表（鉴权）
 //	GET    /api/traces/:id    单次调用轨迹详情（鉴权）
 //	GET    /api/session       会话状态（公开）
+//	GET    /api/acp/config    智能体配置（全局参数 + agent 清单，需登录）
+//	POST   /api/acp/config    保存智能体配置（写回 config.yaml 并热生效，需登录）
+//	GET    /api/acp/threads   智能体对话 thread 列表（需登录）
+//	POST   /api/acp/threads   新建 thread（绑定 agent 与工作目录，需登录）
+//	GET    /api/acp/threads/:id      thread 详情含投影消息（需登录）
+//	DELETE /api/acp/threads/:id      删除 thread（需登录）
+//	POST   /api/acp/threads/:id/chat 智能体对话（SSE 流式，帧协议同 /api/chat，需登录）
+//	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
+//	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -91,6 +100,7 @@ import (
 	vhttp "github.com/capyflow/vortexv3/server/http"
 	"github.com/gin-gonic/gin"
 
+	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
@@ -144,7 +154,9 @@ type Server struct {
 	configPath    string                   // config.yaml 路径（热更新写回）
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
+	acp           *acp.Manager             // 智能体（ACP）管理器（可为 nil）
 	mcpUpdateMu   sync.Mutex
+	acpUpdateMu   sync.Mutex
 	skillUpdateMu sync.Mutex
 	notifications *notification.Center
 	heartbeatFile string // HEARTBEAT.md 路径
@@ -160,19 +172,21 @@ type Server struct {
 
 // Options 汇总管理后台的构建参数。
 type Options struct {
-	Host          string
-	Port          int
-	Accounts      *AccountStore
-	Engine        *task.Engine
-	Todos         *todo.Store
-	Memory        *memory.WikiStore
-	Info          Info
-	Chat          *web.Chat
-	Cfg           *config.Config
-	ConfigPath    string
-	Registry      func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
-	Approver      *approval.Queue
-	Mcp           *mcp.Manager
+	Host       string
+	Port       int
+	Accounts   *AccountStore
+	Engine     *task.Engine
+	Todos      *todo.Store
+	Memory     *memory.WikiStore
+	Info       Info
+	Chat       *web.Chat
+	Cfg        *config.Config
+	ConfigPath string
+	Registry   func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
+	Approver   *approval.Queue
+	Mcp        *mcp.Manager
+	// Acp 智能体管理器（可为 nil：不挂载 /api/acp*，侧栏入口由前端按配置隐藏）。
+	Acp           *acp.Manager
 	HeartbeatFile string
 	Notifications *notification.Center
 	// Pricer/Guard 支撑成本面板与软限额接口（可为 nil：不挂载 /api/cost*）。
@@ -209,6 +223,7 @@ func New(o Options) *Server {
 		configPath:    o.ConfigPath,
 		approver:      o.Approver,
 		mcp:           o.Mcp,
+		acp:           o.Acp,
 		heartbeatFile: o.HeartbeatFile,
 		info:          o.Info,
 		startedAt:     time.Now(),
@@ -267,6 +282,18 @@ func (s *Server) Handler() http.Handler {
 			root.AddRouter([]string{http.MethodPost}, "/api/mcp/config", s.wrap(s.handleMCPConfigSet))
 		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
+	}
+	// 智能体（ACP）对话空间：thread CRUD、SSE 对话流、停止、配置与握手诊断。
+	if s.acp != nil {
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/config", s.wrap(s.handleAcpConfigGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/config", s.wrap(s.handleAcpConfigSet))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads", s.wrap(s.handleAcpThreads))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads", s.wrap(s.handleAcpThreadCreate))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadGet))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadDelete))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/chat", s.wrap(s.handleAcpChat))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 	}
 	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
 	s.registerCostRoutes(root)

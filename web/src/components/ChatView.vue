@@ -8,8 +8,9 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api } from '../api.js'
 import { fmtTokens } from '../format.js'
-import { renderMD } from '../md.js'
+import { pushThinking, finishRound, pushToolStep, pushText, turnTotalText } from '../blocks.js'
 import { store, toast } from '../store.js'
+import TimelineBlocks from './TimelineBlocks.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -459,106 +460,9 @@ function newBot() {
   return reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
 }
 
-/* ---------- 时间线块（zcode 风）：思考 / 工具调用 / 正文按轮次分开 ---------- */
-// 一轮 LLM 调用里，思考与正文各只占一块。分片是可能交错的（StepFun 这类网关会在
-// 正文已经吐了几个字之后补发思考分片），若按"最后一块是什么类型"决定并入还是新起，
-// 回答会被切成一串只有一两个字的碎块。轮次由 round 事件与工具调用推进。
-function blockIndex(m, kind) {
-  for (let i = m.blocks.length - 1; i >= 0; i--) {
-    const b = m.blocks[i]
-    if (b.round !== m.round) break
-    if (b.kind === kind) return i
-  }
-  return -1
-}
-
-// 思考预览行：收起时只显示一行，取思考文本最新非空行的尾部，随增量不断更新。
-const THINK_LINE_MAX = 120
-function thinkPreview(text) {
-  const lines = (text || '').split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const s = lines[i].trim()
-    if (!s) continue
-    return s.length > THINK_LINE_MAX ? '…' + s.slice(-THINK_LINE_MAX) : s
-  }
-  return ''
-}
-
-// 正在写的思考块（本轮那一块且轮次未定稿）：标题实时一行预览、灯泡呼吸。
-function liveThink(m, bi, b) {
-  return m.streaming && !m.paused && !b.meta && bi === blockIndex(m, 'think')
-}
-function thinkTitle(m, b, bi) {
-  if (liveThink(m, bi, b)) return thinkPreview(b.text) || '思考中…'
-  return b.meta ? '思考 · ' + b.meta : '思考'
-}
-// 工具调用折叠行的可访问标题：出错时把状态说在前面，运行中没有可展开的内容故留空。
-function toolTitle(b) {
-  if (b.status === 'fail') {
-    if (!b.out) return '工具执行出错'
-    return b.open ? '收起出错详情' : '工具执行出错，展开详情'
-  }
-  if (!b.out) return ''
-  return b.open ? '收起详情' : '展开详情'
-}
-// 轮末汇总文案：token 走 k/百万缩写；耗时缺失（被暂停的现场没有结束时刻）就不写。
-function turnTotalText(t) {
-  if (!t) return ''
-  const s = `本轮 · ${fmtTokens(t.in || 0)}+${fmtTokens(t.out || 0)} tokens`
-  return t.ms ? `${s} · 耗时 ${(t.ms / 1000).toFixed(1)}s` : s
-}
-// 光标跟着本轮正在写的正文走（思考分片插进来时不该跑到思考行下面）。
-function cursorOn(m, bi) {
-  return m.streaming && bi === blockIndex(m, 'text')
-}
-
-// 思考增量并入本轮的思考块；本轮还没有就新起一块，并插在正文块前面
-// （网关把思考分片发在正文之后，时间线上仍按"先思考后回答"读）。
-function pushThinking(m, delta) {
-  const ti = blockIndex(m, 'think')
-  if (ti >= 0) { m.blocks[ti].text += delta; return }
-  const block = { kind: 'think', text: delta, meta: '', open: false, round: m.round }
-  const xi = blockIndex(m, 'text')
-  if (xi >= 0) m.blocks.splice(xi, 0, block)
-  else m.blocks.push(block)
-}
-
-// 轮次结束事件（耗时）：挂到本轮的思考块上，收起时即"思考 · 耗时…"，
-// 然后推进轮次——之后的思考与正文另起一块。
-function finishRound(m, detail) {
-  const ti = blockIndex(m, 'think')
-  if (ti >= 0 && !m.blocks[ti].meta) m.blocks[ti].meta = detail || ''
-  m.round++
-}
-
-// 工具调用事件：run 新起一行并推进轮次（工具调用是轮次边界）；
-// ok/fail 回填最近的同名运行中块。
-function pushToolStep(m, s) {
-  const name = s.name || ''
-  if (s.status === 'run') {
-    m.blocks.push({ kind: 'tool', name, text: s.detail || '', out: '',
-      status: 'run', open: false, round: m.round })
-    m.round++
-    return
-  }
-  for (let i = m.blocks.length - 1; i >= 0; i--) {
-    const b = m.blocks[i]
-    if (b.kind === 'tool' && b.status === 'run' && b.name === name) {
-      b.out = s.detail || ''
-      b.status = s.status === 'fail' ? 'fail' : 'ok'
-      return
-    }
-  }
-}
-
-// 回答增量并入本轮的正文块；工具调用之后的新一轮回答另起一块。
-function pushText(m, delta) {
-  m.text += delta
-  const xi = blockIndex(m, 'text')
-  if (xi >= 0) m.blocks[xi].text += delta
-  else m.blocks.push({ kind: 'text', text: delta, round: m.round })
-}
-
+/* ---------- 时间线块（zcode 风） ---------- */
+// 块的构造/推进与渲染已抽到 ../blocks.js 与 TimelineBlocks.vue（与智能体页共用）；
+// 这里只保留 SSE 帧到块的搬运。
 // streamTurn 跑一次 SSE 对话（发送与继续共用）：userMsg 为乐观插入的用户气泡
 //（继续时为 null）；prepare 在建立连接前上传图片返回附件 ID；出错时按 draft
 // 恢复输入现场（继续失败则回到"已暂停"状态）。
@@ -914,45 +818,7 @@ async function clearContext() {
           </div>
           <!-- bot：zcode 风时间线——思考 / 工具调用 / 正文按到达顺序分开成块 -->
           <div v-else-if="m.role === 'bot'" class="turn">
-            <template v-for="(b, bi) in m.blocks" :key="bi">
-              <!-- 思考块：收起时一行实时预览（流式）或轮次摘要，点击展开全文 -->
-              <div v-if="b.kind === 'think'" class="think" :class="{ open: b.open }">
-                <button class="think-head" type="button" :title="b.open ? '收起思考' : '展开思考'"
-                        @click="b.open = !b.open">
-                  <span class="step-ico think-ico" :class="{ live: liveThink(m, bi, b) }" aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
-                  </span>
-                  <span class="think-title">{{ thinkTitle(m, b, bi) }}</span>
-                  <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div v-show="b.open" class="think-body">
-                  <div class="think-text">{{ b.text }}</div>
-                </div>
-              </div>
-              <!-- 工具调用块：收起只报"工具调用"，工具名与参数、结果都收进展开区 -->
-              <div v-else-if="b.kind === 'tool'" class="tool"
-                   :class="{ open: b.open, 'is-fail': b.status === 'fail' }">
-                <button class="tool-head" type="button" :disabled="!b.out" :title="toolTitle(b)"
-                        @click="b.open = b.out ? !b.open : false">
-                  <span class="step-ico" :class="b.status" aria-hidden="true">
-                    <i v-if="b.status === 'run'" class="spin step-ring"></i>
-                    <svg v-else-if="b.status === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                  </span>
-                  <span class="step-name">工具调用</span>
-                  <svg v-if="b.out" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div v-show="b.open" class="tool-body">
-                  <div class="tool-call">
-                    <span class="step-name">{{ b.name }}</span>
-                    <span class="step-detail">{{ b.text }}</span>
-                  </div>
-                  <div class="tool-out">{{ b.out }}</div>
-                </div>
-              </div>
-              <!-- 正文块 -->
-              <div v-else class="turn-text chat-md"><span v-html="renderMD(b.text)"></span><span v-if="cursorOn(m, bi)" class="cursor"></span></div>
-            </template>
+            <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round" />
             <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
                 <div class="pc-head">

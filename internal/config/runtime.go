@@ -40,6 +40,11 @@ func (c *Config) snapshotLocked() *Config {
 		next.Mcp.Servers[i].Env = maps.Clone(c.Mcp.Servers[i].Env)
 		next.Mcp.Servers[i].Headers = maps.Clone(c.Mcp.Servers[i].Headers)
 	}
+	next.Acp.Agents = slices.Clone(c.Acp.Agents)
+	for i := range next.Acp.Agents {
+		next.Acp.Agents[i].Args = slices.Clone(c.Acp.Agents[i].Args)
+		next.Acp.Agents[i].Env = maps.Clone(c.Acp.Agents[i].Env)
+	}
 	return &next
 }
 
@@ -57,5 +62,6 @@ func (c *Config) Apply(fn func(next *Config) error) error {
 	c.Persona = next.Persona
 	c.Permissions = next.Permissions
 	c.Mcp = next.Mcp
+	c.Acp = next.Acp
 	return nil
 }

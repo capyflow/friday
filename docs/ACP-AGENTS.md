@@ -1,21 +1,22 @@
-# M6：ACP agent 接入 —— 二期实施方案（门面写类工具 + 审批 + 唤醒 + 记账）
+# M6：ACP agent 接入 —— 作业模型路线（门面写类工具 + 审批 + 唤醒 + 记账）
 
-状态：待评审 ｜ 分支：`explore/acp-agents`（worktree `/Users/aaron/com.capyflow/friday-acp-explore`）
+状态：后续可选（一期方向已转向「智能体对话空间」，见 [ACP-AGENTS-P1.md](./ACP-AGENTS-P1.md)；本文的
+门面/两拍审批/唤醒对应**作业模型**路线——Friday 的模型把自包含任务派给外部 agent、后台跑完收结果，
+开工顺位在对话空间验证价值之后）｜ 分支：`explore/acp-agents`
 依据：本文每条设计约束都对应 2026-10-15 的实测报文，报文归档在 worktree 的 `evidence/`，探测程序 `cmd/acp-probe/`。
 
 ## 〇、一期前置（本方案的输入接口）
 
-一期的完整展开见 [ACP-AGENTS-P1.md](./ACP-AGENTS-P1.md)。本节只列二期依赖的接口。
+一期的完整展开见 [ACP-AGENTS-P1.md](./ACP-AGENTS-P1.md)（2026-10-17 起为「智能体对话空间」）。
+本文（作业模型）建立在一期地基与下列既有件之上；作业模型开工时以本文为实施方案、按需回补：
 
-二期建立在以下一期能力之上。若一期尚未落地，本节即一期的验收清单：
-
-| 一期交付 | 二期使用方式 |
+| 既有件 | 本文使用方式 |
 |---|---|
-| `internal/acp`：SDK 封装 + 进程管理 + 会话 | 直接复用其连接与 session 句柄 |
-| 作业模型 `acp_dispatch` / `acp_status` / `acp_cancel` | 审批与唤醒都挂在同一个 Job 记录上 |
-| 每 session 的 turn 串行队列 | 唤醒轮通过它排队，不并发发 prompt |
-| MCP 门面骨架（只读工具：`recall` / `get_time` / `list_tasks`） | 二期在其上加工具与鉴权档位 |
-| `SessionUpdate` 聚合器 | 二期新增 `tool_call`（来自门面的调用）事件类型 |
+| `internal/acp`：SDK 封装 + 进程管理（一期已按 thread 形状落地） | 连接与 session 句柄直接复用；作业维度在其上加 Job 记录 |
+| `internal/acp/aggregate.go` 聚合器 | 新增 `tool_call`（来自门面的调用）事件类型 |
+| 审批接入：`request_permission` → `approval.Queue`（一期 P1-D） | 门面写类工具的两拍审批复用同一 Queue，句柄语义一致 |
+| thread 的 turn 串行（一 thread 一进程一连接，C3 结构性满足） | 作业与唤醒轮的排队语义建立在同一纪律上 |
+| MCP 门面（`facade.go` + `token.go`） | **随作业模型自建**（一期无门面），token over Headers 实测（原 P1-E）在本文开工时首要验证 |
 
 ## 一、实测硬约束（设计必须满足，不可协商）
 
@@ -104,6 +105,10 @@ Friday    ：turn 空闲时（turnqueue）发唤醒轮
 ```
 
 关键：唤醒轮**不立即发出**，而是排进该 session 的 turn 队列；若第一轮仍在跑就等它结束（C3）。`DecideWith` 本身不发 prompt，只置状态 + 通知队列。
+
+与一期的审批卡（`request_permission` → 审批 UI，见 ACP-AGENTS-P1.md §5.2）分工：一期走的是 ACP
+原生异步请求通道，agent 会等答复，可慢条斯理弹卡；本节两拍形状只服务于**门面 `tools/call`**——
+MCP 调用被 C1 的 15s 超时逼着立即返回，才需要 submit/check 轮询。两条通道共用 `approval.Queue`。
 
 ### 5.2 门面被调用时
 

@@ -50,6 +50,7 @@ import (
 	"github.com/capyflow/vortexagent/agent/sessionstore"
 	"github.com/capyflow/vortexagent/llm"
 
+	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/admin"
 	robotagent "github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
@@ -437,6 +438,16 @@ func main() {
 	}
 	defer mcpMgr.Close()
 
+	// 智能体（ACP）对话空间：独立于 Brain 的平行入口，thread 投影落盘
+	// （重启不失历史），进程空闲回收、session/load 重接。默认关闭
+	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
+	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
+	defer acpMgr.Close()
+	if cfg.Acp.Enabled {
+		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",
+			len(cfg.Acp.Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+	}
+
 	// 成本闸门：价格表（默认 pricing.json，后台可编辑、热加载）+ 软限额判定。
 	// 没有价格表不影响使用——预算按 token 判定，金额留空并在后台提示补价。
 	pricer, pricerErr := cost.NewPricer(cfg.Cost.PricingFile)
@@ -555,6 +566,7 @@ func main() {
 			Registry:      regFn,
 			Approver:      approver,
 			Mcp:           mcpMgr,
+			Acp:           acpMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
 			Notifications: notices,
 			Pricer:        pricer,

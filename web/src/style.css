@@ -1039,3 +1039,54 @@ html[data-theme="dark"] .selbox-pop {
   .set-head { padding: 14px 16px 12px; }
   .set-scroll { padding: 14px 16px 20px; }
 }
+
+/* ---------- 智能体（ACP）对话空间 ---------- */
+#agentView { display: flex; flex-direction: row; padding: 0; overflow: hidden; }
+.ag-rail { width: 250px; flex: none; display: flex; flex-direction: column;
+           border-right: 1px solid var(--border); background: var(--card); }
+.ag-rail-head { display: flex; align-items: center; justify-content: space-between;
+                padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.ag-rail-head b { font-size: 14px; }
+.ag-form { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px;
+           border-bottom: 1px solid var(--border); }
+.ag-form input, .ag-form select { width: 100%; font-size: 13px; padding: 7px 9px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--fg); }
+.ag-form-acts { display: flex; gap: 8px; margin-top: 4px; }
+.ag-list { flex: 1; overflow-y: auto; padding: 8px; display: flex;
+           flex-direction: column; gap: 4px; }
+.ag-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+           padding: 8px 10px; border-radius: 10px; border: none; background: transparent;
+           cursor: pointer; color: var(--fg); font: inherit; }
+.ag-item:hover { background: rgba(127, 127, 127, .08); }
+.ag-item.active { background: rgba(127, 127, 127, .13); }
+.ag-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ag-title { font-size: 13px; font-weight: 550; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+.ag-item .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--faint-fg); }
+.ag-dot.st-running { background: #16A34A; box-shadow: 0 0 0 3px rgba(22, 163, 74, .12); }
+.ag-dot.st-interrupted { background: #F59E0B; }
+.ag-dot.st-orphaned { background: #EF4444; }
+.ag-del { color: var(--faint-fg); font-size: 12px; padding: 2px 6px; border-radius: 6px; }
+.ag-del:hover { color: #EF4444; background: rgba(239, 68, 68, .08); }
+.ag-empty { padding: 14px; line-height: 1.7; }
+.ag-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ag-head { display: flex; align-items: center; padding: 12px 22px;
+           border-bottom: 1px solid var(--border); background: var(--card); }
+.ag-head-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ag-head-txt b { font-size: 14px; }
+.ag-head-txt .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-hint { margin: 10px 22px 0; padding: 8px 12px; border-radius: 10px;
+           background: rgba(245, 158, 11, .1); font-size: 12px; }
+.ag-scroller { flex: 1; overflow-y: auto; padding: 20px 18px 8px; }
+.ag-note { text-align: center; color: var(--faint-fg); font-size: 12px; margin: 6px 0; }
+.ag-typing-label { display: block; font-size: 12px; color: var(--faint-fg);
+                   margin-bottom: 4px; text-align: left; }
+.ag-composer { margin: 0 auto 16px; }
+.ag-blank { flex: 1; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 12px; text-align: center; padding: 24px; }
+.ag-blank-logo { width: 56px; height: 56px; border-radius: 16px; display: flex;
+  align-items: center; justify-content: center; font-size: 24px; font-weight: 650;
+  color: #fff; background: linear-gradient(135deg, #6366F1, #8B5CF6); }
+@media (max-width: 760px) { .ag-rail { width: 200px; } }

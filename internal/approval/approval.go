@@ -151,13 +151,32 @@ func (q *Queue) Request(tool, summary, detail string) error {
 // 批准返回 remember（用户选择了"批准并记住"），拒绝/超时返回 ErrDenied；
 // auto 模式直接放行；off 模式返回 ErrDisabled。
 func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, err error) {
+	_, remember, err = q.request(tool, summary, detail, 0, true)
+	return remember, err
+}
+
+// RequestAlways 无视队列模式强制入队一次审批，使用自定义超时（<=0 用默认）。
+// 智能体权限请求专用：无论全局权限模式如何，子 agent 的敏感操作一律人工把关
+// ——这是对话空间的独立闸门，不随 exec 审批模式联动；超时也远长于 exec
+// 审批（人可能不在屏幕前）。批准返回 true；拒绝/超时返回 ErrDenied。
+func (q *Queue) RequestAlways(tool, summary, detail string, timeout time.Duration) (bool, error) {
+	allow, _, err := q.request(tool, summary, detail, timeout, false)
+	return allow, err
+}
+
+// request 是审批入队的内部实现：respectMode=false 时无视模式强制入队。
+// 返回 (是否批准, 是否"批准并记住", 错误)。
+func (q *Queue) request(tool, summary, detail string, timeout time.Duration, respectMode bool) (allow bool, remember bool, err error) {
 	q.mu.Lock()
-	if q.mode != ModeConfirm {
+	if respectMode && q.mode != ModeConfirm {
 		q.mu.Unlock()
 		if q.mode == ModeOff {
-			return false, ErrDisabled
+			return false, false, ErrDisabled
 		}
-		return false, nil // auto：直接放行
+		return true, false, nil // auto：直接放行
+	}
+	if timeout <= 0 {
+		timeout = q.timeout
 	}
 	q.seq++
 	req := &request{
@@ -171,12 +190,12 @@ func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, er
 	case d := <-req.ch:
 		q.remove(req.item.ID)
 		if !d.allow {
-			return false, ErrDenied
+			return false, false, ErrDenied
 		}
-		return d.remember, nil
-	case <-time.After(q.timeout):
+		return true, d.remember, nil
+	case <-time.After(timeout):
 		q.remove(req.item.ID)
-		return false, ErrDenied
+		return false, false, ErrDenied
 	}
 }
 

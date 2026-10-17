@@ -1,0 +1,381 @@
+<script setup>
+// 智能体对话空间（ACP）：左侧 thread 列表（新建时绑定 agent 与真实工作目录，
+// 之后不可切换），右侧对话时间线。SSE 帧协议与聊天页一致，时间线块复用
+// TimelineBlocks/blocks.js；status 帧显示在"输入中"气泡里（启动 agent /
+// 重接会话等生命周期占位）。note 行是服务端投影的系统标注（上下文已重置、
+// 中断原因），灰字居中展示。
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { api } from '../api.js'
+import { pushThinking, pushToolStep, pushText, turnTotalText } from '../blocks.js'
+import { store, toast } from '../store.js'
+import TimelineBlocks from './TimelineBlocks.vue'
+
+const threads = ref([])
+const acp = ref(null)          // /api/acp/threads 回带的配置（enabled/agents…）
+const currentId = ref('')
+const messages = reactive([])
+const input = ref('')
+const phase = ref('idle')      // idle | streaming
+const busy = computed(() => phase.value === 'streaming')
+const scroller = ref(null)
+const inputEl = ref(null)
+const creating = ref(false)    // 新建表单展开
+const form = reactive({ agent: '', workspace: '', title: '' })
+const confirmId = ref('')      // 二次确认删除的 thread id
+const pendingImages = reactive([]) // { id, url }
+const fileInput = ref(null)
+let controller = null
+
+const current = computed(() => threads.value.find(t => t.id === currentId.value) || null)
+const enabled = computed(() => !!(acp.value && acp.value.enabled))
+const canSend = computed(() => !!input.value.trim() || pendingImages.length > 0)
+const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中断', orphaned: 'agent 已删除' }
+
+const STATE_HINT = {
+  interrupted: '上次会话被中断（服务重启或进程退出）。继续发消息会重新拉起 agent 并尝试重接上下文。',
+  orphaned: '该对话绑定的智能体已被删除；历史仍可查看，但不能继续对话。',
+}
+
+onMounted(load)
+
+async function load() {
+  try {
+    const r = await api('GET', '/api/acp/threads')
+    threads.value = r.threads || []
+    acp.value = r.acp || { enabled: false, agents: [] }
+    if (!currentId.value && threads.value.length) select(threads.value[0].id)
+  } catch (e) { toast('加载智能体对话失败：' + e.message, true) }
+}
+
+async function select(id) {
+  if (busy.value) { toast('当前有进行中的对话，等它结束再切换', true); return }
+  try {
+    const r = await api('GET', '/api/acp/threads/' + id)
+    currentId.value = id
+    messages.length = 0
+    for (const e of (r.thread.messages || [])) {
+      if (e.role === 'user') {
+        messages.push({ role: 'user', text: e.text, images: e.images || 0 })
+      } else if (e.role === 'note') {
+        messages.push({ role: 'note', text: e.text })
+      } else {
+        messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
+          blocks: [{ kind: 'text', text: e.text, round: 0 }],
+          turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
+      }
+    }
+    nextTick(stick)
+  } catch (e) { toast('加载对话失败：' + e.message, true) }
+}
+
+function openCreate() {
+  creating.value = !creating.value
+  if (creating.value && !form.agent) {
+    const first = (acp.value.agents || []).find(a => a.enabled !== false)
+    form.agent = first ? first.name : ''
+    syncWorkspace()
+  }
+}
+function syncWorkspace() {
+  const a = (acp.value.agents || []).find(x => x.name === form.agent)
+  form.workspace = a && a.workspace ? a.workspace : (form.workspace || '')
+}
+async function createThread() {
+  if (!form.agent) { toast('请选择智能体', true); return }
+  try {
+    const r = await api('POST', '/api/acp/threads', form)
+    creating.value = false
+    form.title = ''
+    await load()
+    select(r.thread.id)
+    toast('已创建对话，发第一条消息即会启动 agent')
+  } catch (e) { toast('创建失败：' + e.message, true) }
+}
+
+async function removeThread(id) {
+  if (confirmId.value !== id) { confirmId.value = id; setTimeout(() => { if (confirmId.value === id) confirmId.value = '' }, 3000); return }
+  confirmId.value = ''
+  try {
+    await api('DELETE', '/api/acp/threads/' + id)
+    if (currentId.value === id) { currentId.value = ''; messages.length = 0 }
+    load()
+    toast('已删除该对话')
+  } catch (e) { toast('删除失败：' + e.message, true) }
+}
+
+/* ---------- 发送（SSE 流式，帧协议同聊天页，另有 status 帧） ---------- */
+function nearBottom() {
+  const el = scroller.value
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+function stick() {
+  const el = scroller.value
+  if (el && nearBottom()) el.scrollTop = el.scrollHeight
+}
+function autoGrow() {
+  const el = inputEl.value
+  if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px' }
+}
+function onInputKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+}
+
+async function uploadImages() {
+  const ids = []
+  for (const p of pendingImages) ids.push(p.id)
+  return ids
+}
+
+async function send() {
+  if (busy.value) { await stop(); return }
+  if (!enabled.value) { toast('智能体功能未开启（设置 → 智能体）', true); return }
+  const text = input.value.trim()
+  if (!text && !pendingImages.length) return
+  if (!currentId.value) { toast('先选择或新建一个对话', true); return }
+
+  input.value = ''
+  if (inputEl.value) inputEl.value.style.height = 'auto'
+  const attachments = await uploadImages()
+  const userMsg = reactive({ role: 'user', text: text || `（发送了 ${attachments.length} 张图片）`, images: attachments.length })
+  const typing = reactive({ role: 'typing', label: '' })
+  messages.push(userMsg)
+  messages.push(typing)
+  phase.value = 'streaming'
+  nextTick(stick)
+
+  controller = new AbortController()
+  const removeTyping = () => { const i = messages.indexOf(typing); if (i >= 0) messages.splice(i, 1) }
+  let bot = null
+  const ensureBot = () => {
+    removeTyping()
+    if (!bot) {
+      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
+      messages.push(bot)
+    }
+    return bot
+  }
+  let done = false
+  let turnTotal = null
+  let errMsg = ''
+  try {
+    const res = await fetch(`/api/acp/threads/${currentId.value}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, attachments }),
+      signal: controller.signal,
+    })
+    if (res.status === 401) { store.loggedIn = false; toast('登录已过期，请重新登录', true); return }
+    if (!res.ok || !res.body) {
+      let msg = 'HTTP ' + res.status
+      try { const d = await res.json(); if (d.body && d.body.error) msg = d.body.error } catch {}
+      throw new Error(msg)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buf = ''
+    const handle = ev => {
+      let data
+      try { data = JSON.parse(ev) } catch { throw new Error('响应格式异常') }
+      if (data.error) throw new Error(data.error)
+      if (data.status) typing.label = data.status
+      if (data.thinking) { pushThinking(ensureBot(), data.thinking); nextTick(stick) }
+      if (data.step) { pushToolStep(ensureBot(), data.step); nextTick(stick) }
+      if (data.delta) {
+        if (typing.label) typing.label = ''
+        pushText(ensureBot(), data.delta)
+        nextTick(stick)
+      }
+      if (data.done) { done = true; if (data.turn) turnTotal = data.turn; if (data.error) errMsg = data.error }
+    }
+    const consume = () => {
+      buf = buf.replace(/\r\n/g, '\n')
+      let idx
+      while (!done && (idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        const data = chunk.split('\n').filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart()).join('\n')
+        if (data) handle(data)
+      }
+    }
+    while (!done) {
+      const chunk = await reader.read()
+      if (controller.signal.aborted) return
+      buf += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+      consume()
+      if (chunk.done) break
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') errMsg = e.message
+  } finally {
+    controller = null
+    phase.value = 'idle'
+    removeTyping()
+    if (bot) {
+      bot.streaming = false
+      bot.turn = turnTotal
+      if (errMsg) {
+        bot.blocks.push({ kind: 'text', text: '⚠️ ' + errMsg })
+        bot.text += errMsg
+      } else if (!bot.blocks.length) {
+        bot.blocks.push({ kind: 'text', text: '（本轮没有产出文本）' })
+      }
+    } else if (errMsg) {
+      messages.push({ role: 'note', text: errMsg })
+    }
+    for (const p of pendingImages.splice(0)) URL.revokeObjectURL(p.url)
+    load() // 刷新列表状态（标题/状态/更新时间）
+  }
+}
+
+async function stop() {
+  if (!currentId.value) return
+  try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, {}) } catch (e) { toast('停止失败：' + e.message, true) }
+}
+
+/* ---------- 图片附件（复用聊天页上传链路，单张 ≤5MB） ---------- */
+function pick() { fileInput.value && fileInput.value.click() }
+async function onFilesPicked(ev) {
+  const files = Array.from(ev.target.files || [])
+  ev.target.value = ''
+  for (const file of files) {
+    if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
+    if (file.size > 5 * 1024 * 1024) { toast(`图片 ${file.name} 超过 5MB 上限`, true); continue }
+    const fd = new FormData()
+    fd.append('file', file)
+    try {
+      const r = await api('POST', '/api/upload', fd)
+      pendingImages.push({ id: r.id, url: URL.createObjectURL(file) })
+    } catch (e) { toast('上传失败：' + e.message, true) }
+  }
+}
+function removePreview(p) {
+  const i = pendingImages.indexOf(p)
+  if (i >= 0) pendingImages.splice(i, 1)
+  URL.revokeObjectURL(p.url)
+}
+</script>
+
+<template>
+  <div id="agentView" class="view">
+    <!-- 左：thread 列表 -->
+    <aside class="ag-rail">
+      <div class="ag-rail-head">
+        <b>智能体</b>
+        <button class="ib-btn" :class="{ active: creating }" aria-label="新建对话" title="新建对话" @click="openCreate">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <!-- 新建表单：agent 与工作目录在此刻绑定，之后不可切换 -->
+      <div v-if="creating" class="ag-form">
+        <label class="meta">智能体</label>
+        <select v-model="form.agent" @change="syncWorkspace">
+          <option v-for="a in (acp ? acp.agents : [])" :key="a.name" :value="a.name"
+                  :disabled="a.enabled === false">{{ a.name }}{{ a.enabled === false ? '（已停用）' : '' }}</option>
+        </select>
+        <label class="meta">工作目录（agent 在这里干活，会写入文件）</label>
+        <input v-model="form.workspace" placeholder="如 ~/projects/demo" @keydown.enter="createThread">
+        <div class="ag-form-acts">
+          <button class="btn sm primary" :disabled="!form.agent || !form.workspace" @click="createThread">创建</button>
+          <button class="btn sm" @click="creating = false">取消</button>
+        </div>
+      </div>
+      <div class="ag-list">
+        <button v-for="t in threads" :key="t.id" class="ag-item" :class="{ active: t.id === currentId }"
+                @click="select(t.id)">
+          <span class="ag-dot" :class="'st-' + t.state" :title="stateLabel[t.state] || t.state"></span>
+          <span class="ag-item-main">
+            <span class="ag-title">{{ t.title || '（未命名）' }}</span>
+            <span class="meta">{{ t.agent }} · {{ t.workspace }}</span>
+          </span>
+          <span class="ag-del" role="button" :aria-label="'删除 ' + (t.title || '对话')"
+                @click.stop="removeThread(t.id)">{{ confirmId === t.id ? '确认删除?' : '×' }}</span>
+        </button>
+        <div v-if="!threads.length" class="ag-empty meta">还没有对话。右上角 + 新建一个，把 agent 绑到一个工作目录上。</div>
+      </div>
+    </aside>
+
+    <!-- 右：对话 -->
+    <section class="ag-main">
+      <template v-if="!enabled">
+        <div class="ag-blank">
+          <div class="ag-blank-logo">智</div>
+          <h3>智能体功能未开启</h3>
+          <p class="meta">在「设置 → 智能体」里添加 agent（如 codex、opencode）并打开总开关，<br>然后回到这里新建对话，把活交给它。</p>
+          <button class="btn primary" @click="store.settingsSection = 'agent'; store.settingsOpen = true">去设置</button>
+        </div>
+      </template>
+      <template v-else-if="!current">
+        <div class="ag-blank">
+          <div class="ag-blank-logo">智</div>
+          <h3>选择一个对话</h3>
+          <p class="meta">左侧选择已有对话，或新建一个：选 agent、定工作目录，第一条消息发出时 agent 进程才会启动。</p>
+        </div>
+      </template>
+      <template v-else>
+        <header class="ag-head">
+          <div class="ag-head-txt">
+            <b>{{ current.title || '（未命名）' }}</b>
+            <span class="meta" :title="current.workspace">
+              {{ current.agent }} · {{ current.workspace }} · {{ stateLabel[current.state] || current.state }}
+              <template v-if="current.degraded"> · 会话恢复不可靠</template>
+            </span>
+          </div>
+        </header>
+        <p v-if="STATE_HINT[current.state]" class="ag-hint">{{ STATE_HINT[current.state] }}</p>
+        <div ref="scroller" class="ag-scroller">
+          <div id="msgList">
+            <template v-for="(m, i) in messages" :key="i">
+              <div v-if="m.role === 'note'" class="ag-note">{{ m.text }}</div>
+              <div v-else class="mrow" :class="m.role === 'typing' ? 'bot' : m.role">
+                <div v-if="m.role === 'typing'" class="bubble">
+                  <span v-if="m.label" class="ag-typing-label">{{ m.label }}</span>
+                  <span class="typing"><i></i><i></i><i></i></span>
+                </div>
+                <div v-else-if="m.role === 'bot'" class="turn">
+                  <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round" />
+                  <div v-if="m.turn" class="turn-total">
+                    {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
+                  </div>
+                </div>
+                <div v-else class="bubble">
+                  {{ m.text }}
+                  <span v-if="m.images" class="meta"> 📷 ×{{ m.images }}</span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div class="ag-composer inputbar" :aria-busy="busy">
+          <div v-if="pendingImages.length" id="attachPreviews">
+            <div v-for="p in pendingImages" :key="p.url" class="thumb">
+              <img :src="p.url" alt="">
+              <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
+            </div>
+          </div>
+          <textarea ref="inputEl" v-model="input" rows="1" :disabled="busy"
+                    :placeholder="'给 ' + (current.agent) + ' 派活…'"
+                    aria-label="智能体输入" @keydown="onInputKeydown" @input="autoGrow"></textarea>
+          <div class="composer-bar">
+            <div class="bar-left">
+              <button class="ib-btn plus-btn" aria-label="添加图片" title="添加图片（≤5MB，最多 4 张）"
+                      :disabled="busy" @click="pick">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
+            </div>
+            <div class="bar-right">
+              <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
+              <button class="ib-btn send-btn" :class="{ 'halt-btn': busy }"
+                      :aria-label="busy ? '停止' : '发送'" :title="busy ? '停止' : '发送'"
+                      :disabled="!busy && !canSend" @click="send">
+                <svg v-if="busy" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </section>
+  </div>
+</template>

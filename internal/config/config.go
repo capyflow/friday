@@ -41,6 +41,7 @@ type Config struct {
 	Trace        TraceConfig       `yaml:"trace"`
 	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
 	Mcp          McpConfig         `yaml:"mcp"`
+	Acp          AcpConfig         `yaml:"acp"`
 	Persona      PersonaConfig     `yaml:"persona"`
 	Cost         CostConfig        `yaml:"cost"`
 	SystemPrompt string            `yaml:"systemPrompt"`
@@ -1147,6 +1148,7 @@ func (c *Config) applyDefaults() {
 	if c.Trace.File == "" {
 		c.Trace.File = "traces.json"
 	}
+	c.Acp = c.Acp.Normalized()
 }
 
 // Validate 校验必填项。
@@ -1213,6 +1215,9 @@ func (c *Config) Validate() error {
 		if d < time.Minute {
 			return fmt.Errorf("config: heartbeat.interval 不得短于 1m（当前 %q）——心跳每轮都调用模型，过短会失控烧钱", interval)
 		}
+	}
+	if err := c.Acp.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

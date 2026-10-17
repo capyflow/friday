@@ -334,6 +334,13 @@ MCP 配置热加载（当前修改 mcp.servers 后需重启服务；连接管理
 
 ## 七、决策记录
 
+- **2026-10-17**：ACP 一期方向由「派活作业模型」改写为「智能体独立对话空间」（侧栏新页，形状对齐
+  Zed agent panel），7 项边界逐条经用户确认：thread 创建时绑定 agent 与**真实工作目录**、不可切换；
+  进程空闲 10 分钟回收，重开经 `session/load` 重接上下文（协议全量重放语义），resume 保真度实测不过
+  的 agent 走「上下文已重置」降级；`request_permission` 接入审批 UI（30 分钟无人处理自动拒绝，
+  有效性依赖调紧 agent 自身审批模式）；时间线自 ChatView 抽共享组件；thought 默认显示；
+  图片 v1 纳入（前置 probe 实测）；侧栏与设置节命名「智能体」。作业模型（acp_dispatch/门面/token）
+  挪「后续可选」。`homePolicy=inherit` 边界对对话空间同样适用。见 docs/ACP-AGENTS-P1.md §二
 - **2026-10-15**：ACP（Agent Client Protocol）接入定为 client 方向 + 长程作业模型；一期不含审批、
   门面只放只读工具。`homePolicy` 默认 `inherit`（子 agent 继承用户 HOME 及其登录态、MCP server、
   skill 表），一期**无人工闸门**已由用户认可——安全边界仅为一次性工作目录 + 门面只读 + 任务自包含，

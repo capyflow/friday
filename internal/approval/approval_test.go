@@ -186,3 +186,43 @@ func TestConfirmTimeoutDenies(t *testing.T) {
 		t.Fatal("应等待超时窗口再拒绝")
 	}
 }
+
+// RequestAlways 无视模式强制入队（智能体权限专用）：off 模式也弹卡，批准返回
+// true；拒绝/超时返回 ErrDenied。超时用自定义值，不随队列默认。
+func TestRequestAlwaysBypassesMode(t *testing.T) {
+	q := New("off", nil, 3*time.Second)
+	done := make(chan error, 1)
+	go func() {
+		approved, err := q.RequestAlways("智能体权限", "执行命令", "whoami", 2*time.Second)
+		if err == nil && !approved {
+			t.Error("批准应返回 approved=true")
+		}
+		done <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(q.Pending()) != 1 {
+		t.Fatal("off 模式下 RequestAlways 也应入队")
+	}
+	q.Decide(q.Pending()[0].ID, true)
+	if err := <-done; err != nil {
+		t.Fatalf("批准应放行: %v", err)
+	}
+
+	// 拒绝路径。
+	done2 := make(chan error, 1)
+	go func() {
+		_, err := q.RequestAlways("智能体权限", "执行命令", "rm -rf /", 2*time.Second)
+		done2 <- err
+	}()
+	deadline = time.Now().Add(2 * time.Second)
+	for len(q.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	q.Decide(q.Pending()[0].ID, false)
+	if err := <-done2; err != ErrDenied {
+		t.Fatalf("拒绝应返回 ErrDenied，实际 %v", err)
+	}
+}

@@ -184,6 +184,15 @@ func (c *Chat) sweepUploads() {
 // ResetContext 清除指定会话的对话上下文（key 为空时清除默认网页会话）。
 func (c *Chat) ResetContext(key string) error { return c.brain.Reset(key) }
 
+// ResolveUpload 校验上传附件 ID 并返回其在磁盘上的路径（智能体对话复用同一
+// 上传链路；非法 ID 一律拒绝，防止路径拼接逃逸）。
+func (c *Chat) ResolveUpload(id string) (string, bool) {
+	if !uploadNameRe.MatchString(id) {
+		return "", false
+	}
+	return filepath.Join(c.uploadsDir, id), true
+}
+
 // Brain 返回对话大脑（热更新时替换其内部 Agent；会话池经其获取）。
 func (c *Chat) Brain() *agent.Brain { return c.brain }
 

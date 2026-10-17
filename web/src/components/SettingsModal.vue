@@ -6,6 +6,7 @@ import { store } from '../store.js'
 import ModelSection from './settings/ModelSection.vue'
 import PersonaSection from './settings/PersonaSection.vue'
 import McpSection from './settings/McpSection.vue'
+import AcpSection from './settings/AcpSection.vue'
 import SkillsSection from './settings/SkillsSection.vue'
 import PermissionSection from './settings/PermissionSection.vue'
 import CostSection from './settings/CostSection.vue'
@@ -28,6 +29,7 @@ const GROUPS = [
   ]},
   { label: '能力与行为', items: [
     { id: 'mcp', icon: 'i-mcp', label: 'MCP 服务器', desc: '本地命令或远程 URL 接入外部工具，保存后热生效', comp: markRaw(McpSection) },
+    { id: 'agent', icon: 'i-acp', label: '智能体', desc: 'ACP agent 清单与运行参数：独立对话空间，绑定工作目录干活', comp: markRaw(AcpSection) },
     { id: 'skills', icon: 'i-skill', label: '技能', desc: 'SKILL.md 定义的做事套路，编辑保存即生效', comp: markRaw(SkillsSection) },
     { id: 'permissions', icon: 'i-shield', label: '权限模式', desc: '危险操作的把关力度，切换后立即生效', comp: markRaw(PermissionSection) },
     { id: 'cost', icon: 'i-coin', label: '成本与预算', desc: 'Token 用量热力图与预算额度，超线只停主动任务', comp: markRaw(CostSection) },

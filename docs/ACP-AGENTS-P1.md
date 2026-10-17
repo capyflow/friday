@@ -1,142 +1,151 @@
-# M6 一期：ACP agent 调用链路实施方案
+# M6 一期：智能体（ACP agent）独立对话空间实施方案
 
-状态：待评审 ｜ 前置文档：[ACP-AGENTS.md](./ACP-AGENTS.md)（二期，含 13 条实测硬约束 C1–C13）
-本文拆 `ACP-AGENTS.md` §〇 的一期前置，落到具体文件与接缝。约束编号 C* 一律引用二期文档，不重复论证。
+状态：已评审（2026-10-17 用户逐条确认 §二 全部决策）｜ 前置文档：[ACP-AGENTS.md](./ACP-AGENTS.md)（作业模型路线，二期/后续可选，含 13 条实测硬约束 C1–C13）
+依据：约束编号 C* 一律引用前置文档，不重复论证；本文新增约束以 N* 编号。
+
+> **2026-10-17 方向改写**：本文由「派活作业模型」（acp_dispatch/status/cancel 三工具 + 门面 + token）
+> 原地改写为「智能体独立对话空间」。作业模型整体挪至「后续可选」，仍由 ACP-AGENTS.md 承载；
+> C1–C13 约束两条路线通用（C9 随门面搁置）。旧版全文见 git 历史。
 
 ## 一、一期目标
 
-用最小代价回答一个问题：**"Friday 把一件自包含的活甩给外部 agent，几分钟后拿回结果并投递给用户"这件事，值不值得继续投入。**
+侧栏新增「智能体」页，形状对齐 Zed 的 agent panel：**thread 列表 + 对话时间线**。
+thread 创建时绑定一个外部 agent 与一个真实工作目录，用户与 agent 直接对话——agent 用它自己的
+工具（shell/文件）在自己的目录里干活，Friday 提供宿主：进程生命周期、时间线、审批卡、用量记账。
 
-一期不做审批、不做写类工具。理由不是省事，而是实测决定：审批在二期才有承载它的东西（写类工具），而一期最大的不确定性——进程模型、事件量级、作业生命周期、门面能否鉴权——全都可以在没有审批的情况下验证完。
+一期不做作业模型、不做门面。判定标准：真实使用若干次后回答——
+**"在 Friday 里直接和外部 agent 对话干活，比另开一个终端值不值。"**
 
-**判定标准（一期结束时回答）**：真实用过 3 次以上派活后，结果是"有用但不够"（进二期）还是"我自己用 exec_command + 一轮总结就够了"（停在这里，只留 probe）。
+## 二、已拍板决策（2026-10-17 逐条经用户确认）
 
-## 二、设计决策
-
-### D1 进程模型：每作业一个子进程 + 一条连接，跑完即杀
-
-- 全局并发上限 `maxConcurrent`（默认 2），形状照 `internal/agent/goal.go:325` 的信号量槽位。
-- 超上限的作业排队（`queued`），排队期间可取消。
-- **不做崩溃自动重启**——`internal/mcp/manager.go:194` 的 2s 自动重启在 ACP 上是错语义：进程重拉即会话丢失，重启后静默续跑比直接失败更坏。崩溃一律判 `failed` 并保留 stderr 尾部。
-- 代价与理由：冷启实测 7.3s（opencode）~18.5s（codex-acp），相对 turn 12~209s 可接受；换来的是一作业一故障域，直接规避 C6（SDK 通知是单 goroutine 串行队列，一条连接上多会话会被彼此拖死）。
-
-### D2 同一 session 同一时刻只允许一个 in-flight prompt
-
-一期"一作业一会话"，天然不会并发两轮，因此**只需要锁，不需要 pending 队列**：用 `SessionPool.Lock(key)`（`internal/agent/pool.go:113`，现成的按 key 惰性互斥锁）包住 `Prompt` 调用。
-
-这是对二期文档 S3 的下界修正：二期的唤醒轮才需要真正的 pending 队列（把"立刻发"改成"排队发"）。一期把锁建好，二期只在其上加一层队列语义。
-
-### D3 作业落盘只记历史，不恢复执行
-
-`acp-jobs.json`，持久化形状照 `internal/task/reliable.go:18` 的 `fileStore`（load/save、写失败不消费次数）。Friday 重启后：
-
-- 已完成的作业仍可在后台/`acp_status` 里查到；
-- 重启前处于 `running` 的一律转 `interrupted`，**不尝试 `session/load` 恢复**（`loadSession=true` 实测存在但从未验证过恢复保真度，不赌）。
-
-### D4 事件聚合器一期就建
-
-不做聚合的代价是实测数字：一轮 54.6s 的作业 = 153 条 `session/update`，其中 80 条 thought + 52 条 message 碎片，另有单条 25003 B 的 `available_commands_update`。直接喂 `PublishStep`（`internal/agent/events.go:53`）会把网页时间线刷爆。
-
-规则（全部落在 `internal/acp/aggregate.go`）：
-
-| 输入 | 处理 |
+| # | 决策 |
 |---|---|
-| `available_commands_update`、`config_option_update`、`session_info_update` | 丢弃，只记字节数 |
-| `agent_message_chunk` | 按 `messageId` 累积，flush 条件「≥1200 字 或 ≥3s 或 turn 结束」，投为一条 `Step{Kind:"acp"}` |
-| `agent_thought_chunk` | 默认不投，`showThought` 可配 |
-| `tool_call` / `tool_call_update` | 只取 `kind` + `title`，附后缀标记「文案来自子 agent」；**不取 `locations`**（C11 实测上报假路径） |
-| `usage_update` | 不投时间线，进账本 |
+| D1 | thread 创建时绑定 agent + 工作目录，**之后不可切换**；换 agent 或换目录 = 新开 thread。绕开一切"中途换脑子"的上下文续接问题 |
+| D2 | 工作目录用**真实目录**（用户选择，按 agent 记住上次选择），不用一次性沙箱——外部 agent 的价值就是在真实项目里干活。thread 头部常驻显示当前路径 |
+| D3 | 进程空闲 **10 分钟**自动回收；回收**不再等于上下文丢失**——重开 thread 时经 `session/load` 重接（协议要求 agent 全量重放对话，见 N2）；不支持或恢复失败的 agent 走降级：新开 session，thread 标注「上下文已重置」，记录仍可见 |
+| D4 | 时间线**抽共享组件**：消息块渲染器从 ChatView 抽出复用，一次小型重构（带现有 16 个测试文件做），换取单份维护 |
+| D5 | thought 流（`agent_thought_chunk`）**默认显示**——独立 agent 页的心智是"看着 agent 干活"；设置留全局开关 |
+| D6 | **图片 v1 纳入**：gate 在 P1-B2（probe 先实测两家经 ACP 的图片 prompt），通过才做，上传链路复用聊天页 |
+| D7 | `request_permission` **接入 Friday 审批 UI**（复用 `internal/approval` 队列与审批卡）：审批卡 30 分钟无人处理自动答复拒绝；审批等待期间 turn 超时暂停计时（N3）。**有效性依赖用户调紧各家 agent 自身的审批模式**（N6），写进使用文档 |
+| D8 | 侧栏与设置节命名统一**「智能体」**，不暴露 ACP 协议词 |
+| D9 | （继承 2026-10-15 拍板）`homePolicy=inherit`：子 agent 继承 HOME、登录态、MCP server 与 skill 表；作业/对话记录显式标注隔离档位 |
 
-聚合器出口**只允许入队**，任何阻塞都会经 C6 冻住整条连接的事件流。
+## 三、约束
 
-### D5 门面只放三个只读工具，但 token 机制一期就做
+C1–C13 照用（见 ACP-AGENTS.md §一），其中 C9（门面返回值指令化）随门面搁置。
+本文新增：
 
-一期门面工具：`recall`、`get_time`、`list_tasks`。写类（`remember`/`schedule_task`/`display_now`）全部留二期——一期门面被外部 agent 调用时**没有任何人在中间把关**（C1/C2 实测审批通道没人用），只读是唯一诚实的边界。
-
-但作业级 token 一期就实现：二期文档把"token over `Headers` 实测"列为 S1 第一件事，它其实是一期能不能挂门面的地基，挪到一期（见 P1-E）。
-
-### D6 三级超时，各自独立
-
-| 档 | 值 | 依据 |
+| # | 约束 | 依据 |
 |---|---|---|
-| 握手（`initialize` + `session/new`） | 10s | C7：`gemini --acp` 静默挂起 3 分钟零字节 |
-| 单轮 turn | 5min，按 agent 可配 | 实测 12~209s，同 prompt 方差极大 |
-| 门面单次工具调用 | 15s 硬上限 | C1：对方 MCP 客户端 60.1s 放弃 |
+| N1 | 杀进程必须杀**进程组**（`Setpgid` + kill `-pgid`），并显式关闭 stdio 管道。`npx`→node→agent 自 spawn 的工具子进程是一棵树，只杀直接子进程会留孤儿占着工作目录 | 设计评审确定，P1-B 加杀树断言测试 |
+| N2 | `session/load` 恢复时协议**强制 agent 全量重放对话**（逐条 `session/update` 流回，放完才回空结果）；重接时长与历史长度成正比，重开长对话必须有占位与进度反馈 | ACP session-setup 协议语义 |
+| N3 | 审批卡等待期间 **turn 超时暂停计时**，否则人还没点卡、turn 先被判死 | D7 连带 |
+| N4 | agent 会在工作目录自落状态文件（实测 opencode 写 `.omo/run-continuation/<session>.json`）；D2 改用真实目录后，这件事从"沙箱内小事"变成"弄脏用户项目"，须在文档中写明哪些文件是 agent 落的 | C-系列探测记录 |
+| N5 | stderr 与 `available_commands_update` 含用户 skill 全表与本机路径（单条实测 25003 B），落日志前必须过脱敏；脱敏口径与 `evidence/` 不入库同一理由 | C13 / P1 风险 3 |
+| N6 | `request_permission` 实测触发 0 次——agent 按各自配置自审批（如 codex `approval_mode="approve"`）。**审批闸门只在 agent 肯问时有效**，要真起作用需用户调紧 agent 自身配置 | 探测记录 + C13 |
 
-三档不共用一个 ctx 预算。握手超时必须能产出可诊断的错误（附 stderr 尾部 + agent 名），否则"没登录"这类故障在 Friday 侧表现为莫名超时。
-
-### D7 默认关闭
-
-`agents.enabled: false`。理由：默认开启会让 Friday 启动路径依赖 `npx`/`HOME` 下有登录态（C13），而这两件事在 launchd/无 TTY 环境里最容易碎。配置里未启用时，三个模型可见工具不注册。
-
-### D8 `homePolicy` 一期只实现 `inherit`（2026-10-15 已拍板）
-
-`docs/ACP-AGENTS.md` §六 的三档里，一期只做 `inherit`（默认，继承 `HOME` 与用户 env），但**作业记录与后台状态页必须显示这一档**，避免"以为隔离了其实没有"。`sandbox-home` 留二期，因为一期就切过去会顺手失去所有 agent 的登录态，把"能不能用"和"能不能隔离"两个问题混在一起测。
-
-**已认可的两处边界**（用户 2026-10-15 确认）：一是 `homePolicy` 默认 `inherit`；二是一期**没有人工闸门**——外部 agent 照样能在其工作目录里跑 shell 与写文件（C1/C2 实测审批通道没人用），一期只靠"一次性工作目录 + 门面只读 + 活是自包含的"三条约束，不承诺拦截。
-
-## 三、组件与落点
+## 四、组件与落点
 
 | 位置 | 内容 | 复用的既有形状 | 预估 |
 |---|---|---|---|
-| `internal/acp/config.go` | `AcpConfig{Enabled, MaxConcurrent, HandshakeTimeout, TurnTimeout, HomePolicy, WorkspaceRoot, Agents []AcpAgentConfig}` | `McpServerConfig`（`internal/config/config.go:465`）逐字段对齐 | ~90 行 |
-| `internal/acp/proc.go` | 子进程生命周期：`LookPath`→`exec.CommandContext`→pipes→握手→`Done()` 监视→kill | `internal/mcp/client.go:75` 的 Start/Close，但**不含自动重启** | ~180 行 |
-| `internal/acp/client.go` | 实现 `acp.Client` 9 个稳定方法：fs×2 与 terminal×5 返回 not-supported 桩；`SessionUpdate` 只入队；`RequestPermission` 一期一律 `cancelled` 并记日志 | `internal/mcp/client.go` 的连接形状 + SDK `NewClientSideConnection(client, peerInput io.Writer, peerOutput io.Reader)` | ~160 行 |
-| `internal/acp/aggregate.go` | D4 聚合器 | `internal/agent/events.go` 的 `Step`/`PublishStep` | ~140 行 |
-| `internal/acp/jobs.go` | Job 状态机 + `acp-jobs.json` 落盘 + 信号量 | `internal/task/reliable.go` 的 fileStore、`goal.go:325` 的 sem | ~200 行 |
-| `internal/acp/facade.go` | mcp-go streamable-HTTP 门面，挂 `/mcp/agents`，只读三工具 | 框架已依赖 `github.com/mark3labs/mcp-go@v0.44.1`（含 server 包） | ~150 行 |
-| `internal/acp/token.go` | 作业级 token：`{jobID, agent, allowedTools, TTL}` + HMAC；经 `McpServer.Http.Headers` 下发 | 无现成件，新写 | ~90 行 |
-| `internal/tools/acp_agent.go` | 模型可见工具 `acp_dispatch` / `acp_status` / `acp_cancel` | `vxagent.Tool` 接口 + `internal/tools/mcp_edit.go` 的工具形状 | ~170 行 |
-| `internal/admin/acp.go` | `GET /api/acp`（agent+作业状态）、`GET/POST /api/acp/config`、`POST /api/acp/jobs/:id/cancel` | `internal/admin/admin.go:257-262` 的 `root.AddRouter` + `s.wrap`；handler 形状照 `ext.go:288` | ~140 行 |
-| `cmd/robot/main.go` | 管理器构造 + `rebuild` 注册 + 首次 Apply | 直接插在 `:310` 的 `mcp.NewManager` 与 `:334` 的 `rebuild` 闭包旁 | ~40 行 |
+| `internal/acp/config.go` | `AcpConfig{Enabled, MaxConcurrent, IdleKill, TurnTimeout, Agents []AcpAgentConfig}`；`AcpAgentConfig{name, command, args, env, enabled, handshakeTimeout, turnTimeout, workspace}` | `McpServerConfig`（`internal/config/config.go:465`）逐字段对齐 | ~90 行 |
+| `internal/acp/proc.go` | 子进程生命周期：`LookPath` 预检→`exec.CommandContext`（`Setpgid`）→握手→`Done()` 监视→**进程组击杀**（N1）；空闲回收 timer；stderr 脱敏落盘 | `internal/mcp/client.go:75` 的 Start/Close，**不含自动重启**（进程重拉即会话丢失） | ~200 行 |
+| `internal/acp/client.go` | 实现 `acp.Client` 9 个稳定方法：fs×2 与 terminal×5 返回 not-supported 桩；`SessionUpdate` 只入队（C6）；**`RequestPermission` → `approval.Queue`（D7，不再是一律 cancelled）** | SDK `NewClientSideConnection` + `internal/approval/approval.go:145` 的 `Queue.Request` | ~180 行 |
+| `internal/acp/aggregate.go` | 事件聚合器：`available_commands_update` 等丢弃只记字节；`agent_message_chunk` 按 messageId 累积（≥1200 字或 ≥3s 或 turn 结束 flush）；`agent_thought_chunk` 默认投（D5，开关可配）；`tool_call` 只取 kind+title 带子 agent 文案后缀，不取 locations（C11）；`usage_update` 进账本 | `internal/agent/events.go:53` 的 `Step`/`PublishStep` | ~140 行 |
+| `internal/acp/threads.go` | thread 元数据 `{id, agent, workspace, title, state, sessionId}` + 对话投影落盘（`acp-threads.json`，写失败不消费次数）+ sessionId 记账 + **session/load 重接编排**（重放流入聚合器补投影；失败降级）+ 每 thread 串行锁（一 thread 一进程一连接，C3 结构性满足） | `internal/task/reliable.go:18` 的 fileStore | ~220 行 |
+| `internal/admin/acp.go` | `GET/POST /api/acp/threads`（CRUD）、`GET /api/acp/threads/:id/stream`（SSE）、`POST /api/acp/threads/:id/stop`；审批列表复用现有通道（`internal/admin/ext.go:338`） | SSE 骨架照 `internal/web/chat.go:461` 的 `stream`，摘掉 Brain | ~200 行 |
+| `web/src/components/agent/` | `AgentView`（thread 列表 + 时间线 + 输入区）+ **时间线共享组件**（自 ChatView 抽出，D4） | ChatView 的时间线渲染（261016 版） | 重构 + ~600 行 |
+| `cmd/robot/main.go` | 管理器构造 + rebuild 注册 + 首次 Apply | 插在 `main.go:310` 的 `mcp.NewManager` 与 rebuild 闭包旁；**必须进 rebuild 路径**，否则热更新后丢注册 | ~40 行 |
 
-装配注意：`rebuild` 会在配置热更新时整体重建注册表（`main.go:332-347`），ACP 管理器的 `RegisterTools` 必须一并进这条路径，否则改配置后 `acp_*` 工具消失。
+不再有：`internal/tools/acp_*.go`（三个作业工具）、`facade.go`、`token.go`——随作业模型挪「后续可选」。
 
-## 四、模型可见工具面
+## 五、关键流程
 
-| 工具 | 参数 | 返回 |
-|---|---|---|
-| `acp_dispatch` | `agent`（配置名）、`prompt`、`workspace?`（默认一次性目录）、`timeout?` | 立即返回 `job_id`，不阻塞 |
-| `acp_status` | `job_id?`（省略则列近期） | 状态、耗时、stopReason、token 用量、结果文本前 N 字 |
-| `acp_cancel` | `job_id` | 显式 `session/cancel` 结果 |
+### 5.1 thread 生命周期
 
-三条必须同时进 `internal/agent/permission.go:38` 的 `passThroughTools`，否则 `permission_test.go:213` 的 guard 直接红。
+```
+创建（绑定 agent+workspace，D1）
+  → 首条消息拉起进程 → initialize（10s 超时，C7）→ session/new
+  → turn 循环（每 thread 串行；发消息时进程不在场则先拉起）
+  → 空闲 10min 回收（D3）
+重开 thread：
+  进程不在 → 拉起 → agent 声明 loadSession?
+    ├─ 是 → session/load(sessionId)（N2：全量重放流入聚合器补投影）→ 续聊无缝
+    └─ 否/失败 → session/new 新会话，thread 标「上下文已重置」，投影保留
+Friday 重启：thread 状态一律转 interrupted（不赌自动恢复），重开走同一条重接路径
+```
 
-`acp_dispatch` 的描述里要写**什么时候别用它**（C10/能力重叠）：Friday 已有 `exec_command` 与文件工具，"看一眼这个目录""跑条命令"不该派给外部 agent。这是描述问题不是机制问题，但实测模型确实会选错。
+### 5.2 request_permission → 审批卡（D7）
 
-## 五、任务拆分
+```
+agent ──request_permission{kind,title,options}──▶ client（只入队，C6）
+client ：approval.Queue 入队 → 网页现有审批卡出卡（字段模板化，附「来自子 agent」标注）
+用户点同意/拒绝 ──▶ 答复对应 option，agent 继续
+30min 无处理 ──▶ 自动答复拒绝选项（N3：等待期间 turn 超时暂停计时）
+```
+
+与 ACP-AGENTS.md §5.1 两拍审批的区别：`request_permission` 是正经异步协议请求、agent 会等；
+两拍（C1/C2）是门面 `tools/call` 被 15s 超时逼出的形状，只在作业模型路线需要。
+
+### 5.3 取消
+
+`POST /api/acp/threads/:id/stop` → 显式 `session/cancel` → 读 `stopReason`（C8，"cancelled" 不判失败）。
+**没有 PausedTurn 机制**：部分回答已在 agent 自己的 session 里，cancel 后用户直接发下一句即可续聊——
+比主聊天（internal/web/chat.go 的暂停/继续）少一整套现场保存，这是独立会话的简化红利。
+
+### 5.4 图片（D6，gate P1-B2）
+
+复用聊天页上传链路（`internal/web/chat.go:192` 的 HandleUpload）；发送时图片经 prompt 的
+ContentBlock image 下发。实测不过则整体挪后续，前端不出现入口。
+
+## 六、模型可见工具面
+
+**无。** 一期不注册任何 `acp_*` 工具，主聊天的 Brain 与工具注册表零改动；智能体页是平行入口，
+不碰 provider、不碰摘要器/心跳/计划/目标模式（原边界③问题结构性消失）。
+
+## 七、任务拆分（每步可独立验证）
 
 | 步 | 内容 | 验收 |
 |---|---|---|
-| P1-A | SDK 封装 + **fake ACP agent 测试脚手架**（用 `coder/acp-go-sdk` 的 agent 侧起 stdio 假 agent） | 假 agent 能完成 initialize/session/new/prompt，能按需注入：token 级碎片流、25KB `available_commands_update`、崩溃、静默挂起、慢 turn。此步不写业务，纯建地基——后面每步都靠它验收，否则每条回归都要烧别人配额、耗时 12~209s 且不可复现 |
-| P1-B | 配置 + 进程管理 + 握手超时 + stderr 落盘 | 真 agent（opencode）冷启到 `session/new` 成功；未登录 agent 在 10s 内给出带 stderr 尾部的错误，而不是莫名 3 分钟 |
-| P1-C | 作业模型 + 落盘 + 三个工具 + 直通名单 | `acp_dispatch` 后 `acp_status` 能查到；Friday 重启后 `running` 作业变 `interrupted` 且历史可查；guard 测试绿 |
-| P1-D | 聚合器 + 结果投递（通知中心）+ 取消 | 用 P1-A 的注入回放：153 条 raw → `Step` 条数 <30；`session/cancel` 后读 `stopReason="cancelled"` 且不误判为失败（C8）；投递文本来自 `agent_message_chunk` 聚合，不含内部错误串 |
-| P1-E | 门面三工具 + token 实测 | **一期最关键的一步**：真 agent 带 `Authorization: Bearer <token>` 连上门面并调通 `recall`；错 token / 越权工具名被拒；MCP 协议版本协商对 opencode（`2025-11-25`）与 codex（`2025-06-18`）都通（C12） |
-| P1-F | 后台状态页 + 设置页 + `docs/` 与 ROADMAP 收口 | 后台能看到 agent 清单/状态/作业列表并可取消；设置页可增删 agent 并热更新生效 |
+| P1-A | SDK 封装 + **fake ACP agent 测试脚手架**（注入场景：碎片流、25KB update、崩溃、静默挂起、慢 turn、request_permission、session/load 全量重放、图片块）；**并做真机 resume 保真度实测**：opencode 与 codex-acp 各做「杀进程→load→对照」 | 假 agent 可完成全部注入场景；两家真机 resume 保真度有结论，不可靠者配置标 `degradeResume` 走降级 |
+| P1-B | 配置 + 进程管理（进程组击杀 N1、空闲回收 10min、LookPath 预检与绝对路径支持）+ 握手超时 + stderr 脱敏落盘 | 未登录 agent 10s 内给出带 stderr 尾部的可诊断错误；杀进程后无孤儿（杀树断言测试） |
+| P1-C | thread 模型 + 投影落盘 + session/load 重接与降级 | 重启后 thread 历史可查、状态 interrupted；重开重接成功续聊；降级路径出现「上下文已重置」标注 |
+| P1-D | 审批接入（D7）：RequestPermission → 审批卡 → 答复；deadline 30min；turn 计时暂停 | fake agent 发 request_permission 出卡、点同意后 agent 拿到放行；30min 超时自动答复拒绝 |
+| P1-E | SSE 端点 + 聚合器接时间线 + 用量记账（`acp:<agent>` 维度，金额缺显「配额在对面」）+ 轨迹 kind=acp | fake agent 注入 153 条 raw → Step 条数 <30；turn 结束帧带 {in,out,ms} |
+| P1-F | 前端：时间线共享组件抽取（D4，带现有 16 个测试文件）+ AgentView + 设置节「智能体」（总开关默认关 D7/D9、agent 行卡片含「测试」按钮做握手诊断、删除 agent 的 thread 转只读）+ 侧栏入口 + 文档收口 | web 全量测试绿、eslint 干净；设置改动经 rebuild 路径热生效 |
 
-建议顺序 A→B→C→E→D→F：把 P1-E 提到 D 之前，因为"门面挂得上"是整条二期路线的存亡条件，越早证伪越省。
+顺序：**A → B → C → D → E → F**，B2（图片实测）可与 C/D 并行，通过则并入 F 的前端范围。
 
-## 六、明确不做（一期）
+## 八、测试策略
 
-审批子系统与审批卡；写类门面工具；`fs/*`、`terminal/*` 真实实现（桩返回 not-supported）；ACP server 方向；`session/load` 恢复；model/mode 切换等 Unstable 方法；`sandbox-home` 隔离档；把子 agent 成本并入 `cost.NewGuard` 的自家预算（实测 `cost.amount` 恒为 0，配额在对面）。
+1. fake ACP agent 为唯一回归载体（不烧真实配额、结果可复现），场景清单见 P1-A；
+2. 杀树断言：拉起带子进程的 fake agent，杀进程组后断言无存活后代；
+3. 重放回归：fake agent 按录制序列重放，断言投影补齐与顺序；
+4. 审批 deadline：时钟注入测 30min 自动拒绝；
+5. 脱敏：断言 stderr/`available_commands_update` 落盘前已滤除 skill 表与绝对路径（N5）。
 
-## 七、风险
+## 九、明确不做（一期）
 
-1. **token over `Headers` 未验证**（P1-E）——若某家 agent 的 MCP 客户端不带自定义 header，一期门面就只能裸奔在 127.0.0.1 上，鉴权要改方案（每作业独立端口或 stdio 门面进程）。
-2. **PATH/无 TTY**：`npx` 在常驻服务环境里未必可解析（C13 的运维面），P1-B 要顺手把 `LookPath` 失败做成显式错误并支持绝对路径配置。
-3. **`homePolicy=inherit` 的副作用是双向的**：子 agent 会读用户 MCP server 与 skill 表，`available_commands_update` 里那些内容会进入 Friday 的日志与报文——日志脱敏口径要先定（`evidence/` 不入库的同一理由）。
-4. **同 prompt 方差 12~209s**：turn 超时既不能太短也拦不住 codex 那种 5 分钟不返的；一期接受"超时判 failed、对方可能仍在跑"这一不一致，并在作业记录里标注。
-5. **一期的价值可能是负的**：外部 agent 花它自己的订阅、烧它自己的配额，Friday 只拿到文本与耗时，能力面又与自带工具重叠。这是 P1 结束时要诚实回答的，不是技术风险。
+作业模型三工具、门面与作业级 token（→ ACP-AGENTS.md 路线，后续可选）；`fs/*`、`terminal/*`
+真实实现（桩返回 not-supported）；ACP server 方向；`session/resume`（免重放的新能力，等生态
+成熟，一期只用 `session/load`）；`sandbox-home` 隔离档；把子 agent 成本并入 `cost.NewGuard`
+（实测 `cost.amount` 恒为 0，配额在对面）；智能体页接入多 channel（仅网页端）。
 
-## 八、Definition of Done
+## 十、风险
 
-- `go build ./... && go vet ./... && go test ./... -count=1` 全绿，`-race` 过（聚合器与作业表都有并发访问）。
-- 三条 fake-agent 回归固化：60s 门面超时坏案例、并发混流坏案例、握手静默挂起案例。
-- 真机跑通至少两个 agent（opencode + codex-acp）各一次完整派活，结果经通知中心投递。
-- 文档同步：`docs/ACP-AGENTS.md` §〇 指向本文、ROADMAP 增 M6 一节、`changelog/` 按提交日期补条目。
+1. **resume 保真度未验证**（P1-A 实测 gate）——不可靠的 agent 走「上下文已重置」降级，体验明确降档但不诈；
+2. **重放耗时**（N2）——长对话重接需数秒到更久，占位与进度反馈必须在 F 落地；
+3. **agent 自更新行为漂**——opencode 更新积极，SDK pin `protocolVersion=1` + fake agent 回归先行；
+4. **审批闸门的真实覆盖率**（N6）——只在 agent 肯问时有效，文档必须教用户调紧 agent 自身审批模式；
+5. **真实目录写风险**（D2 的代价）——一期有人工审批卡（D7），但仅覆盖 agent 经 `request_permission`
+   问询的部分；agent 自审批的部分照旧无闸门，thread 头部路径常驻是唯一的显性提醒；
+6. **环境依赖**——`npx` 解析、无 TTY 环境、登录态都在 HOME（D9 inherit 的既有代价），LookPath
+   预检 + 绝对路径支持 + 「测试」按钮诊断兜底。
 
-## 九、与二期的衔接（对 `ACP-AGENTS.md` 的两处修订）
+## 十一、Definition of Done
 
-1. 二期 **S1 的 token 实测已前移到本文 P1-E**；二期 S1 收窄为"门面写类工具接入"。
-2. 二期 **S3 的 turn 队列建立在本文 D2 的锁之上**，新增的是 pending 语义（把"立刻发"改成"排队发"），不是从零建串行。
+- `go build ./... && go vet ./... && go test ./... -count=1` 全绿，`-race` 过（聚合器、thread 表、审批桥接均有并发访问）。
+- fake agent 回归固化：request_permission 出卡与答复、session/load 重放补投影、崩溃转 failed、静默挂起 10s 握手报错、进程组击杀无孤儿。
+- 真机至少两家（opencode + codex-acp）各完成一次完整对话：含一次审批卡放行、一次回收后重接；图片链路按 B2 结论收口。
+- 时间线重构后 web 全量测试绿、eslint 干净；智能体页窄屏可用（沿用现有媒体查询惯例）。
+- 文档同步：本文与 ACP-AGENTS.md 的衔接更新、ROADMAP 决策记录、USAGE.md 智能体一节（含"调紧 agent 审批模式"说明）、config.yaml.example 增 agents 示例段。

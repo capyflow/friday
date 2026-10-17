@@ -6,6 +6,7 @@ import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
+import AgentView from './components/AgentView.vue'
 import AutoView from './components/AutoView.vue'
 import TodoView from './components/TodoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
@@ -17,6 +18,7 @@ import { startNotifications, stopNotifications } from './notifications.js'
 // 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
+  { id: 'agent', icon: 'i-acp', label: '智能体' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
   { id: 'todo', icon: 'i-todo', label: '待办' },
   { id: 'notifications', icon: 'i-bell', label: '通知' },
@@ -110,6 +112,7 @@ async function logout() {
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6.3a5 5 0 1 1 7.5 6.3z"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
     <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4a1.75 1.75 0 0 1 0 3.5h-3a1.75 1.75 0 0 0 0 3.5h4"/></symbol>
+    <symbol id="i-acp" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9 17h6"/></symbol>
     <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
   </svg>
 
@@ -174,6 +177,7 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
+      <Transition name="view"><AgentView v-if="store.view === 'agent'" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><TodoView v-if="store.view === 'todo'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>
