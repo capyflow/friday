@@ -12,6 +12,8 @@ const cfg = reactive({
   agents: [],
 })
 const busy = ref(false)
+const catalog = ref([])
+const installing = ref('') // 正在安装的目录条目 id
 const msg = reactive({ text: '', cls: '' })
 let timer = null
 function show(t, ok) {
@@ -47,7 +49,46 @@ function envText(env) {
   return Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n')
 }
 
+async function loadCatalog() {
+  try {
+    const r = await api('GET', '/api/acp/catalog')
+    catalog.value = r.catalog || []
+  } catch { /* 目录加载失败不阻塞主配置 */ }
+}
+
+// 安装目录条目：跑官方安装命令（可能要一两分钟），成功后刷新状态并把
+// agent 模板追加到下方清单（command 优先用探测到的绝对路径）。
+async function installAgent(entry) {
+  installing.value = entry.id
+  try {
+    const r = await api('POST', '/api/acp/install', { id: entry.id })
+    await loadCatalog()
+    const fresh = catalog.value.find(x => x.id === entry.id)
+    appendTemplate(fresh || entry)
+    show('安装完成，已把模板加进下方清单（记得保存）', true)
+    if (r.output) console.log('[acp install]', r.output)
+  } catch (e) {
+    show('安装失败：' + e.message + (e.output ? '\n' + e.output.slice(-400) : ''), false)
+  } finally { installing.value = '' }
+}
+
+// 把目录模板追加进 agent 清单；同名已存在则只提示。
+function appendTemplate(entry) {
+  if (!entry.template) return
+  if (cfg.agents.some(a => a.name === entry.template.name)) {
+    show(`清单里已有名为「${entry.template.name}」的 agent，未重复添加`, true)
+    return
+  }
+  const t = entry.template
+  cfg.agents.push({
+    ...blankAgent(), name: t.name,
+    command: entry.path || t.command,
+    argsText: (t.args || []).join(', '),
+  })
+}
+
 async function load() {
+  loadCatalog()
   try {
     const r = await api('GET', '/api/acp/config')
     const a = r.acp || {}
@@ -121,6 +162,31 @@ onMounted(load)
       </label>
     </div>
 
+    <div class="acp-catalog">
+      <div class="acp-catalog-head">安装新 agent</div>
+      <div class="acp-catalog-grid">
+        <div v-for="c in catalog" :key="c.id" class="acp-cat-card">
+          <div class="acp-cat-top">
+            <b>{{ c.name }}</b>
+            <span class="acp-cat-badge" :class="c.installed ? 'ok' : 'no'">
+              {{ c.installed ? '已安装' : '未安装' }}
+            </span>
+          </div>
+          <div class="meta">{{ c.description }}</div>
+          <div class="acp-cat-acts">
+            <button v-if="!c.installed" class="btn sm primary" type="button"
+                    :disabled="installing === c.id" @click="installAgent(c)">
+              {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}
+            </button>
+            <button class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
+          </div>
+          <div v-if="c.installed" class="meta mono acp-cat-path">{{ c.path }}</div>
+        </div>
+      </div>
+      <div class="set-note">安装走各 agent 的官方命令（固定内置，可在执行前自行核对）；
+      安装 ≠ 登录——装完用行内「测试」做握手诊断，未登录会在报错里说明。</div>
+    </div>
+
     <div class="acp-agents">
       <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent">
         <div class="acp-agent-head">
@@ -160,6 +226,18 @@ onMounted(load)
 </template>
 
 <style scoped>
+.acp-catalog { margin-bottom: 18px; }
+.acp-catalog-head { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+.acp-catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.acp-cat-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+                display: flex; flex-direction: column; gap: 6px; }
+.acp-cat-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.acp-cat-top b { font-size: 13px; }
+.acp-cat-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.acp-cat-badge.ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
+.acp-cat-badge.no { background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+.acp-cat-acts { display: flex; gap: 8px; margin-top: 2px; }
+.acp-cat-path { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-global { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .acp-check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .acp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }

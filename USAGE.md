@@ -62,8 +62,10 @@ npm run build
 ## 智能体（ACP agent）对话空间
 
 侧栏「智能体」页：把自包含的活交给外部 agent（codex、opencode 等）在指定工作目录里干活。
-启用路径：`config.yaml` 的 `acp.enabled: true` + agent 清单（或「设置 → 智能体」在线配置），
-保存前先点行内「测试」做握手诊断——最常见的"没登录"会在这里变成一句话报错。
+启用路径：`config.yaml` 的 `acp.enabled: true` + agent 清单（或「设置 → 智能体」在线配置）。
+没装 agent？设置顶部的「安装新 agent」目录一键执行官方安装命令（opencode / Codex / Gemini CLI /
+Claude Code，命令内置固定、安装后自动把模板加进清单）；保存前先点行内「测试」做握手诊断——
+最常见的"没登录"会在这里变成一句话报错。
 
 - 每个"对话"（thread）创建时绑定一个 agent 与一个真实工作目录，**之后不可切换**（换 = 新开）；
   agent 用它自己的工具在该目录里读写文件、跑命令，thread 头部常驻显示路径。

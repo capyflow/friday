@@ -294,6 +294,8 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/chat", s.wrap(s.handleAcpChat))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
 	}
 	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
 	s.registerCostRoutes(root)

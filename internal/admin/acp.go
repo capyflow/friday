@@ -120,6 +120,27 @@ func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已发送停止指令"})
 }
 
+// handleAcpCatalog 返回可安装 agent 目录与本机安装状态（设置页「安装 agent」用）。
+func (s *Server) handleAcpCatalog(ctx *vhttp.Context) error {
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"catalog": s.acp.Catalog()})
+}
+
+// handleAcpInstall 执行目录中指定 agent 的官方安装命令（同步，最长 5 分钟）：
+// {"id":"opencode"}，返回输出尾部。命令为内置目录固定串，不经任何外部输入拼接。
+func (s *Server) handleAcpInstall(ctx *vhttp.Context) error {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	out, err := s.acp.Install(ctx.Context(), req.ID)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error(), "output": out})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "安装完成", "output": out})
+}
+
 // handleAcpTest 对指定 agent 做握手诊断（设置页「测试」按钮）。
 func (s *Server) handleAcpTest(ctx *vhttp.Context) error {
 	var req struct {
