@@ -120,6 +120,8 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 		sf.Close()
 		return nil, fmt.Errorf("启动 agent %q: %w", cfg.Name, err)
 	}
+	// 收尸 goroutine：kill 之后不留 zombie（与 Done() 的断开通知各自独立）。
+	go func() { _ = cmd.Wait() }()
 
 	p := &agentProc{
 		agent:      cfg.Name,

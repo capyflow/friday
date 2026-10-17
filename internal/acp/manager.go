@@ -634,6 +634,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		result.Out = int64(res.Usage.OutputTokens)
 	}
 	var runErr error
+	var errText string
 	switch {
 	case promptErr == nil:
 		result.Answer = sink.allText()
@@ -644,11 +645,12 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	default:
 		runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, firstLine(lv.proc.stderrTail(4)))
 		result.StopReason = "error"
+		errText = runErr.Error()
 	}
 
 	if keep {
 		m.mu.Lock()
-		m.appendTurnLocked(current, text, len(imgs), result, degraded, aborted, promptErr != nil && !aborted)
+		m.appendTurnLocked(current, text, len(imgs), result, degraded, aborted, promptErr != nil && !aborted, errText)
 		if serr := m.saveLocked(); serr != nil {
 			log.Printf("[智能体] 投影落盘失败: %v", serr)
 		}
@@ -668,7 +670,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 // appendTurnLocked 把本轮问答追加进投影（调用方须持 m.mu）。
 // degraded 为真说明本轮跑在新会话里（旧上下文丢失），插入显式标注。
-func (m *Manager) appendTurnLocked(th *Thread, question string, imgs int, r TurnResult, degraded, aborted, crashed bool) {
+func (m *Manager) appendTurnLocked(th *Thread, question string, imgs int, r TurnResult, degraded, aborted, crashed bool, errText string) {
 	if degraded && len(th.Messages) > 0 {
 		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
 			Text: "agent 进程已重建，旧会话无法恢复，上下文已重置（历史记录仍可见）"})
@@ -691,8 +693,9 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, imgs int, r Turn
 			Text: "本轮对话在完成前中断：" + reason})
 	}
 	if crashed {
-		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
-			Text: "agent 连接中断（进程退出或崩溃）。下次发消息将重新拉起进程并尝试重接会话。"})
+		text := "本轮失败：" + truncateRunes(errText, 160)
+		text += "。下次发消息将重新拉起进程并尝试重接会话。"
+		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(), Text: text})
 	}
 }
 
