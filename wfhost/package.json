@@ -1,0 +1,13 @@
+{
+  "name": "friday-wfhost",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Friday 动态工作流的脚本沙箱宿主：对 .wf.ts 编排脚本做 TypeScript 类型检查与 lint 预检，并在 vm 沙箱里执行，跨界调用（子代理、命令、世界读取）由 Go 侧履约。",
+  "scripts": {
+    "check": "node wf-host.mjs --selftest"
+  },
+  "dependencies": {
+    "typescript": "^5.9.2"
+  }
+}
