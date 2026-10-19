@@ -1,6 +1,7 @@
 // Package admin 提供Friday 管理后台：基于 vortexv3（Gin）的 REST API 与
 // 内嵌单页 Dashboard（go:embed，无外部静态文件依赖）。页面源码在仓库 web/ 目录
-// （Vue 3 + Vite），npm run build 产物内联为自包含 HTML 落在 internal/admin/webdist/，
+// （Vue 3 + Vite），npm run build 产物内联为自包含 HTML 落在 internal/admin/webdist/
+// ——产物不入库（.gitignore），新克隆先构建前端再编译（Docker 构建自动包含该步）；
 // 未构建时以占位页兜底，go build 始终可过。
 //
 // 鉴权：账号密码登录换取会话 Cookie（7 天有效）。
@@ -84,7 +85,7 @@ package admin
 import (
 	"context"
 	"crypto/rand"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -120,11 +121,35 @@ import (
 	"github.com/capyflow/friday/internal/web"
 )
 
-//go:embed webdist/index.html
-var indexHTML []byte
+// 前端构建产物不入库（.gitignore），这里嵌入整个目录（.gitkeep 保证空目录可编译）；
+// 未构建时（新克隆直接 go build / go test）回退到下方占位页。
+//
+//go:embed all:webdist
+var webdistFS embed.FS
 
-//go:embed webdist/palette.html
-var paletteHTML []byte
+// placeholderHTML 是产物缺失时的占位页：fresh clone 不跑 npm run build 也能
+// 编译、启动，页面明确告知构建方法。
+var placeholderHTML = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday</title><body style="font-family:system-ui;max-width:560px;margin:12vh auto;padding:0 24px">
+<h2>前端尚未构建</h2>
+<p>当前二进制内没有网页产物（构建产物不入库）。在仓库根目录执行：</p>
+<pre><code>cd web && npm ci && npm run build && cd .. && go build -o friday ./cmd/robot</code></pre>
+<p>重新编译后刷新本页即可。或直接使用 Docker：<code>docker compose up -d --build</code>（自动构建前端）。</p>
+</body></html>`)
+
+var placeholderPalette = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday 快捷面板</title><body style="font-family:system-ui;margin:8vh auto;max-width:480px;padding:0 24px">
+<p>前端尚未构建，快捷面板不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
+</body></html>`)
+
+// webdistFile 读取内嵌产物，缺失（未构建）返回 false。
+func webdistFile(name string) ([]byte, bool) {
+	b, err := webdistFS.ReadFile("webdist/" + name)
+	if err != nil || len(b) == 0 {
+		return nil, false
+	}
+	return b, true
+}
 
 const (
 	sessionCookie = "friday_admin_session"
@@ -486,7 +511,11 @@ func (s *Server) handleLogout(ctx *vhttp.Context) error {
 // handleIndex 返回应用外壳（登录 + 聊天/运行状态/自动化/记忆/设置）。
 func (s *Server) handleIndex(ctx *vhttp.Context) error {
 	noCache(ctx)
-	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	if b, ok := webdistFile("index.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderHTML)
+	}
 	return nil
 }
 
@@ -494,7 +523,11 @@ func (s *Server) handleIndex(ctx *vhttp.Context) error {
 // 与主窗口同源共享登录会话，浏览器直接访问 :port/palette 亦可用）。
 func (s *Server) handlePalette(ctx *vhttp.Context) error {
 	noCache(ctx)
-	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", paletteHTML)
+	if b, ok := webdistFile("palette.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderPalette)
+	}
 	return nil
 }
 

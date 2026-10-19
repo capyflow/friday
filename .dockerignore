@@ -39,3 +39,7 @@ archive/
 
 # Docker 自身（entrypoint.sh 在 docker/ 下，必须保留在上下文中）
 Dockerfile
+
+# 前端构建产物：由 Dockerfile 的 node 阶段生成，宿主机本地副本不进上下文
+internal/admin/webdist/index.html
+internal/admin/webdist/palette.html

@@ -57,7 +57,9 @@ npm run build
 
 开发服务默认在 `http://localhost:5173/`，将 `/api` 代理到本机 45678 的 Go 服务
 （即「本地服务」一节的开发实例端口；后端跑在别的端口时改 `web/vite.config.js` 的 proxy 目标）。
-构建将主页面与快捷面板分别内联到 `internal/admin/webdist/`；修改前端后须重新编译 Go。
+构建将主页面与快捷面板分别内联到 `internal/admin/webdist/`——**产物不入库**（.gitignore）：
+新克隆后先 `npm ci && npm run build` 再编译 Go（未构建时二进制可编译可启动，页面显示占位说明）；
+修改前端后须重新构建并重编 Go。Docker 构建自动包含前端阶段，无需手动步骤。
 
 - 聊天支持普通、计划和目标三种模式，模式随请求体的 `mode` 字段传给后端，不再拼进消息文字。
 - token 口径：思考行只报每轮耗时，本轮总用量落在该轮时间线末尾一行
@@ -131,6 +133,9 @@ Claude Code，命令内置固定、安装后自动把模板加进清单）；保
   与这一节是同一个值，两边经 `friday:theme` 广播同步。
 
 ## Docker 部署
+
+镜像为两阶段构建：node 阶段 `npm ci && npm run build` 生成前端产物 → Go 阶段 embed 后编译；
+产物不入库，镜像自包含，`docker compose up -d --build` 即完整可用。
 
 ```bash
 docker compose up -d --build

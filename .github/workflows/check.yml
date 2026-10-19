@@ -43,8 +43,6 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - name: Verify committed web assets match source
-        run: git diff --exit-code -- internal/admin/webdist/
       - name: Build Linux service
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/friday ./cmd/robot
       - name: Exercise first run and persistent P0 flows with a local mock model
