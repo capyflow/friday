@@ -152,7 +152,7 @@
 │  /          管理后台 Dashboard（go:embed，鉴权）      │
 │  /traces    调用轨迹页（go:embed；数据接口鉴权）        │
 │  /api/sessions /api/approvals /api/mcp /api/heartbeat│
-│  /api/status /api/tasks /api/todos /api/memories /api/traces│
+│  /api/status /api/tasks /api/entries /api/memories /api/traces│
 │  与管家共用 tasks.json / todos.json / memories.json / session.json│
 └─────────────────────────────────────────────────┘
 ```
