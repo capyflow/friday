@@ -22,6 +22,10 @@ async function showBlinko(data = fixture) {
   wrapper = mount(BlinkoView)
   await flushPromises()
 }
+async function openDialog() {
+  await wrapper.get('[aria-label="新建闪念"]').trigger('click')
+  await flushPromises()
+}
 beforeEach(() => {
   vi.useFakeTimers()
   vi.setSystemTime(new Date('2026-10-10T12:00:00+08:00'))
@@ -45,23 +49,77 @@ describe('闪念：笔记与待办统一时间线', () => {
     expect(wrapper.find('.entry-md').exists()).toBe(true)
   })
 
-  it('composer 默认记笔记，切到待办展开时间字段并分开发送', async () => {
+  it('悬浮 + 打开编辑弹窗，默认笔记；切到待办后时间字段按需展开', async () => {
     await showBlinko()
-    expect(wrapper.find('[aria-label="笔记内容"]').exists()).toBe(true)
-    await wrapper.get('[aria-label="笔记内容"]').setValue('新想法')
-    await button('.composer-tabs', '待办').trigger('click')
     expect(wrapper.find('[aria-label="笔记内容"]').exists()).toBe(false)
+    await openDialog()
+    expect(wrapper.find('[aria-label="笔记内容"]').exists()).toBe(true)
+    await button('.composer-tabs', '待办').trigger('click')
     expect(wrapper.find('[aria-label="待办内容"]').exists()).toBe(true)
+    // 时间字段默认收起，保持编辑区干净
+    expect(wrapper.find('[aria-label="截止时间"]').exists()).toBe(false)
+    await button('.dialog-foot', '截止 / 提醒').trigger('click')
+    expect(wrapper.find('[aria-label="截止时间"]').exists()).toBe(true)
     await wrapper.get('[aria-label="待办内容"]').setValue('还书')
-    await wrapper.get('.composer-foot .btn').trigger('click')
+    await button('.dialog-foot', '记下').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/entries', { kind: 'todo', text: '还书', dueAt: null, remindAt: null })
+    expect(wrapper.find('[aria-label="待办内容"]').exists()).toBe(false)
+    // 再开一次，填截止时间保存
+    await openDialog()
+    await button('.composer-tabs', '待办').trigger('click')
+    await button('.dialog-foot', '截止 / 提醒').trigger('click')
     await wrapper.get('[aria-label="截止时间"]').setValue('2026-10-12T18:00')
     await wrapper.get('[aria-label="待办内容"]').setValue('带截止')
-    await wrapper.get('.composer-foot .btn').trigger('click')
+    await button('.dialog-foot', '记下').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/entries', expect.objectContaining({
       kind: 'todo', text: '带截止', dueAt: new Date('2026-10-12T18:00').toISOString(), remindAt: null }))
+  })
+
+  it('# 按钮打开标签选择：点选已有标签、回车新建，保存时规整进正文', async () => {
+    await showBlinko()
+    await openDialog()
+    await wrapper.get('[aria-label="标签"]').trigger('click')
+    await wrapper.get('[aria-label="新建标签"]').setValue('工作')
+    await wrapper.get('[aria-label="新建标签"]').trigger('keydown', { key: 'Enter' })
+    await wrapper.find('.tag-list').findAll('button').find(b => b.text() === '#灵感').trigger('click')
+    await wrapper.get('[aria-label="笔记内容"]').setValue('新想法')
+    await button('.dialog-foot', '记下').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/entries', { kind: 'note', text: '新想法 #工作 #灵感' })
+  })
+
+  it('Markdown 工具栏在选区上增删语法并保持选区，待办不提供格式条', async () => {
+    await showBlinko()
+    await openDialog()
+    const editor = () => wrapper.get('[aria-label="笔记内容"]')
+    expect(wrapper.find('.md-toolbar').exists()).toBe(true)
+    await editor().setValue('闪念')
+    editor().element.setSelectionRange(0, 2)
+    await button('.md-toolbar', 'B').trigger('click')
+    await flushPromises()
+    expect(editor().element.value).toBe('**闪念**')
+    expect([editor().element.selectionStart, editor().element.selectionEnd]).toEqual([2, 4])
+    // 原地再点一次取消包裹
+    await button('.md-toolbar', 'B').trigger('click')
+    await flushPromises()
+    expect(editor().element.value).toBe('闪念')
+    // 行首标记按整行切换，链接把选区交给 URL
+    await editor().setValue('第一行')
+    editor().element.setSelectionRange(0, 3)
+    await button('.md-toolbar', 'H').trigger('click')
+    await flushPromises()
+    expect(editor().element.value).toBe('## 第一行')
+    await editor().setValue('百度')
+    editor().element.setSelectionRange(0, 2)
+    await button('.md-toolbar', '链接').trigger('click')
+    await flushPromises()
+    expect(editor().element.value).toBe('[百度](https://)')
+    expect([editor().element.selectionStart, editor().element.selectionEnd]).toEqual([5, 13])
+    // 待办正文按纯文本展示，格式标记会露出来，所以不挂工具栏
+    await button('.composer-tabs', '待办').trigger('click')
+    expect(wrapper.find('.md-toolbar').exists()).toBe(false)
   })
 
   it('tabs 过滤：待办页只看未完成，已完成页按完成时间展示', async () => {
@@ -105,14 +163,15 @@ describe('闪念：笔记与待办统一时间线', () => {
     expect(confirm).toHaveBeenCalled()
   })
 
-  it('内联编辑待办完整替换内容与时间', async () => {
+  it('编辑复用弹窗：预填内容与时间，保存完整替换并同步标签', async () => {
     await showBlinko()
     await button('.entry-actions', '编辑').trigger('click')
-    const editor = wrapper.get('.entry-editor')
-    expect(editor.get('textarea').element.value).toBe('交房租')
-    await editor.get('textarea').setValue('交水费')
-    await editor.get('[aria-label="提醒时间"]').setValue('')
-    await button('.editor-actions', '保存').trigger('click')
+    const dialog = wrapper.get('.blinko-dialog')
+    expect(dialog.get('textarea').element.value).toBe('交房租')
+    expect(dialog.find('[aria-label="截止时间"]').exists()).toBe(true) // 已有时间默认展开
+    await dialog.get('textarea').setValue('交水费')
+    await dialog.get('[aria-label="提醒时间"]').setValue('')
+    await button('.dialog-foot', '保存').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('PUT', '/api/entries/t1', expect.objectContaining({ text: '交水费', remindAt: null }))
   })

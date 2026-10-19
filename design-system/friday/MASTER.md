@@ -50,6 +50,14 @@
 
 阴影四档 `--shadow-xs/sm/md/overlay`（深色加重）；圆角 `12/8/6px`。
 
+**深色浮层两条硬规则**（`--card` 是半透明面，浮层直接拿来用会透出下层内容）：
+
+- 弹窗 / 抽屉 / 悬浮卡深色下统一 `background: rgba(24,24,24,.94)` +
+  `backdrop-filter: blur(28px) saturate(1.4)` + 边框 `rgba(255,255,255,.1)`
+  （`.modal` / `.set-dialog` / `.approval-card` / `.user-pop` 都是这一套，遮罩浅色 `rgba(24,24,27,.45)`、深色 `rgba(0,0,0,.6)`）。
+- 实心 `--primary` 上的前景一律用 `--on-primary`；**没有 `--primary-fg` 这个令牌**，
+  写 `var(--primary-fg, #fff)` 会在深色下变成亮灰底白字（看不见）。
+
 ---
 
 ## Component Specs（均已在 web/src/components 对应实现）
