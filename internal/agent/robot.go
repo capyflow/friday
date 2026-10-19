@@ -268,6 +268,11 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.ListTodosTool{Store: d.Todos},
 		&tools_pkg.CompleteTodoTool{Store: d.Todos},
 		&tools_pkg.DeleteTodoTool{Store: d.Todos},
+		&tools_pkg.AddNoteTool{Store: d.Todos},
+		&tools_pkg.ListNotesTool{Store: d.Todos},
+		&tools_pkg.UpdateNoteTool{Store: d.Todos},
+		&tools_pkg.DeleteNoteTool{Store: d.Todos},
+		&tools_pkg.PinEntryTool{Store: d.Todos},
 		&tools_pkg.WeatherTool{DefaultCity: d.Config.Weather.DefaultCity},
 		&tools_pkg.RememberTool{Memory: d.Memory},
 		&tools_pkg.RecallTool{Memory: d.Memory},
@@ -328,12 +333,11 @@ func systemPrompt(cfg *config.Config) string {
 	b.WriteString(personaCare)
 	b.WriteString("\n")
 	b.WriteString(`
-【待办清单】
-1. 用户交代要做的事（"记得买牛奶""周三前交房租"）：调用 add_todo 记入待办。有截止时间时先 get_time，再用 dueAt 填带时区 RFC3339；截止时间本身不会自动提醒。
-2. 用户问"我有什么待办/今天要干什么"：调用 list_todos，按清单汇报。
-3. 用户做完某事（"房租交了"）：调用 complete_todo 标记完成（先用 list_todos 拿 ID）；说"这条不用了"调用 delete_todo；说"其实还没做完"调用 complete_todo 并 done=false。
-4. 用户明确要求待办提醒时，在 add_todo/update_todo 同时设置 remindAt（带时区RFC3339）或 in（相对时长），由系统建立关联。完成、删除或修改待办会取消/调整关联的未来提醒，禁止另建一份独立 schedule_task 造成重复。
-5. 修改待办用 update_todo，先列出拿ID和现有时间；完整替换时保留未修改字段，null移除时间。
+	【闪念：笔记与待办】（网页"闪念"页 = 笔记和待办的统一清单）
+1. 随手想法、灵感、资料片段，用户说"记一下/记个笔记/存起来"：调用 add_note，文本里可用 #标签 归类（如 "#工作 周报思路"）。明确要做的事（有完成动作、可能有截止时间）用 add_todo，不要记成笔记。
+2. 用户问"我之前记过什么/那条笔记写了啥"：调用 list_notes（q 关键词 / tag 标签过滤）检索；修改用 update_note，删除用 delete_note；重要的内容可 pin_entry 置顶。
+3. 待办规则：交代要做的事 add_todo（相对日期先 get_time，截止用 dueAt，提醒用 remindAt/in；截止时间本身不自动提醒）；问待办 list_todos；完成 complete_todo、不用了 delete_todo、修改 update_todo（先列出拿 ID，完整替换保留未修改字段）。完成/删除/修改待办会自动取消或调整关联的未来提醒，禁止另建独立 schedule_task 造成重复。
+4. 引用清单条目时带上 ID（如 #t3f…、#n8a…），方便用户在网页闪念页对上；pin_entry 对笔记和待办通用。
 
 【定时任务】
 1. 单次提醒（"10分钟后提醒我敷面膜"）：调用 schedule_task，in 填相对时长（如 10分钟/2小时/1天/90s），text 填内容。
