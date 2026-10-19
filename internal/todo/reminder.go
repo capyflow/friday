@@ -117,36 +117,9 @@ func (s *Store) validate(text string, dueAt, remindAt *time.Time) error {
 	return nil
 }
 
-// AddWithDeadline 截止时间只是待办属性；仅显式 remindAt 创建关联提醒。
+// AddWithDeadline 新增一条待办；截止时间只是待办属性，仅显式 remindAt 创建关联提醒。
 func (s *Store) AddWithDeadline(text string, dueAt, remindAt *time.Time) (Todo, error) {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
-	if err := s.validate(text, dueAt, remindAt); err != nil {
-		return Todo{}, err
-	}
-	if err := s.ready(); err != nil {
-		return Todo{}, err
-	}
-	id, err := newReminderID()
-	if err != nil {
-		return Todo{}, err
-	}
-	td := Todo{ID: strings.Replace(id, "todo-reminder-", "t", 1), Text: strings.TrimSpace(text),
-		CreatedAt: time.Now(), DueAt: cloneTime(dueAt), RemindAt: cloneTime(remindAt)}
-	if remindAt != nil {
-		td.ReminderTaskID = id
-	}
-	s.mu.Lock()
-	candidate := slices.Clone(s.todos)
-	s.mu.Unlock()
-	candidate = append(candidate, td)
-	if err := s.commit(candidate); err != nil {
-		return Todo{}, err
-	}
-	if err := s.reconcile(); err != nil {
-		return cloneTodo(td), committedSyncError(err)
-	}
-	return cloneTodo(td), nil
+	return s.AddEntry(KindTodo, text, dueAt, remindAt)
 }
 
 // Update 是完整替换：nil 时间清除该时间字段；已有 ID、创建时间和完成状态保留。
@@ -168,6 +141,7 @@ func (s *Store) Update(id, text string, dueAt, remindAt *time.Time) (Todo, bool,
 		}
 		changed := td.Text != strings.TrimSpace(text) || !sameTime(td.DueAt, dueAt) || !sameTime(td.RemindAt, remindAt)
 		td.Text, td.DueAt, td.RemindAt = strings.TrimSpace(text), cloneTime(dueAt), cloneTime(remindAt)
+		td.Tags = parseTags(td.Text)
 		if remindAt == nil {
 			td.ReminderTaskID = ""
 		} else if changed {
@@ -201,6 +175,9 @@ func (s *Store) complete(id string, done bool) (Todo, bool, error) {
 	for i, td := range candidate {
 		if td.ID != normalizeID(id) {
 			continue
+		}
+		if td.Kind == KindNote {
+			return Todo{}, false, fmt.Errorf("笔记没有完成状态，请直接编辑或删除")
 		}
 		if td.Done != done {
 			td.Done = done
@@ -278,6 +255,9 @@ func (s *Store) ready() error {
 func (s *Store) commit(candidate []Todo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for i := range candidate {
+		candidate[i].Tags = parseTags(candidate[i].Text)
+	}
 	if err := s.saveLocked(candidate); err != nil {
 		return err
 	}

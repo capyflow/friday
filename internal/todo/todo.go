@@ -1,7 +1,7 @@
-// Package todo 实现待办清单：agent 通过 add_todo / list_todos / complete_todo /
-// delete_todo 工具帮用户记录与处理生活琐事，管理后台"待办"页可直接增删改。
-// 待办持久化为 JSON 文件（临时文件 + rename 原子替换，与任务/记忆同一容错策略），
-// 重启不丢。
+// Package todo 实现闪念清单：统一存放待办（kind=todo）与随手笔记（kind=note），
+// agent 通过 add_todo / add_note 等工具帮用户记录与处理，管理后台"闪念"页可直接增删改。
+// 条目持久化为 JSON 文件（临时文件 + rename 原子替换，与任务/记忆同一容错策略），
+// 重启不丢；旧版 todos.json（无 kind 字段）加载时自动视为待办。
 package todo
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -17,16 +18,44 @@ import (
 	"github.com/capyflow/friday/internal/task"
 )
 
-// Todo 是一条待办事项。
+// 条目类型：todo 是待办（可带截止/提醒），note 是随手笔记。
+const (
+	KindTodo = "todo"
+	KindNote = "note"
+)
+
+// Todo 是闪念清单里的一条条目（待办或笔记）。
 type Todo struct {
 	ID             string     `json:"id"`
+	Kind           string     `json:"kind"` // note / todo；旧文件空值在加载时迁移为 todo
 	Text           string     `json:"text"`
-	Done           bool       `json:"done"`
+	Pinned         bool       `json:"pinned,omitempty"`
+	Tags           []string   `json:"tags,omitempty"` // 从文本 #标签 派生，保存时刷新
+	Done           bool       `json:"done"`           // 仅 todo 有意义，note 恒为 false
 	CreatedAt      time.Time  `json:"createdAt"`
 	DoneAt         *time.Time `json:"doneAt,omitempty"`
-	DueAt          *time.Time `json:"dueAt,omitempty"`
-	RemindAt       *time.Time `json:"remindAt,omitempty"`
-	ReminderTaskID string     `json:"reminderTaskId,omitempty"`
+	DueAt          *time.Time `json:"dueAt,omitempty"`          // 仅 todo
+	RemindAt       *time.Time `json:"remindAt,omitempty"`       // 仅 todo
+	ReminderTaskID string     `json:"reminderTaskId,omitempty"` // 仅 todo
+}
+
+var tagPattern = regexp.MustCompile(`#([\p{L}\p{N}_/-]+)`)
+
+// parseTags 从文本提取 #标签（按出现顺序去重；无标签返回 nil）。
+func parseTags(text string) []string {
+	matches := tagPattern.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool, len(matches))
+	tags := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if tag := m[1]; !seen[tag] {
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	return tags
 }
 
 // Store 是待办仓库。
@@ -74,6 +103,14 @@ func (s *Store) load() {
 	for i, td := range ts {
 		if td.ID == "" || strings.TrimSpace(td.Text) == "" || ids[td.ID] {
 			s.loadErr = fmt.Errorf("待办文件 %q 第 %d 条内容无效或 ID 重复，已保留原文件；修复文件后重启", s.path, i+1)
+			return
+		}
+		// 旧版文件没有 kind 字段：全部视为待办（迁移随下次写盘落盘）。
+		if td.Kind == "" {
+			ts[i].Kind = KindTodo
+		}
+		if ts[i].Kind != KindNote && ts[i].Kind != KindTodo {
+			s.loadErr = fmt.Errorf("待办文件 %q 第 %d 条类型 %q 无效，已保留原文件；修复文件后重启", s.path, i+1, ts[i].Kind)
 			return
 		}
 		if (td.DueAt != nil && td.DueAt.IsZero()) || (td.RemindAt != nil && td.RemindAt.IsZero()) ||
@@ -135,13 +172,14 @@ func (s *Store) Add(text string) (Todo, error) {
 	return s.AddWithDeadline(text, nil, nil)
 }
 
-// List 返回全部待办：未完成在前（按创建时间正序），已完成在后（按完成时间倒序）。
+// List 返回全部待办（不含笔记）：未完成在前（按创建时间正序），已完成在后（按完成时间倒序）。
 func (s *Store) List() []Todo {
 	s.mu.Lock()
-	out := make([]Todo, len(s.todos))
-	copy(out, s.todos)
-	for i := range out {
-		out[i] = cloneTodo(out[i])
+	out := make([]Todo, 0, len(s.todos))
+	for _, td := range s.todos {
+		if td.Kind == KindTodo {
+			out = append(out, cloneTodo(td))
+		}
 	}
 	s.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool {
@@ -167,13 +205,13 @@ func (s *Store) Delete(id string) (bool, error) {
 	return s.delete(id)
 }
 
-// CountPending 返回未完成待办条数（管理后台状态页展示用）。
+// CountPending 返回未完成待办条数（不含笔记；管理后台状态页与工具提示用）。
 func (s *Store) CountPending() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
 	for _, t := range s.todos {
-		if !t.Done {
+		if t.Kind == KindTodo && !t.Done {
 			n++
 		}
 	}

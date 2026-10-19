@@ -142,6 +142,9 @@ func (t *UpdateTodoTool) Call(_ context.Context, args map[string]any) (string, e
 	if id == "" || strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("缺少参数 id 或 text")
 	}
+	if entry, ok := t.Store.Get(id); ok && entry.Kind == todo.KindNote {
+		return "", fmt.Errorf("#%s 是笔记，请用 update_note", entry.ID)
+	}
 	dueAt, remindAt, err := parseTodoTimes(args)
 	if err != nil {
 		return "", err
@@ -260,6 +263,9 @@ func (t *DeleteTodoTool) Call(_ context.Context, args map[string]any) (string, e
 	id, _ := args["id"].(string)
 	if id == "" {
 		return "", fmt.Errorf("缺少参数 id")
+	}
+	if entry, ok := t.Store.Get(id); ok && entry.Kind == todo.KindNote {
+		return "", fmt.Errorf("#%s 是笔记，请用 delete_note", entry.ID)
 	}
 	deleted, err := t.Store.Delete(id)
 	if err != nil {

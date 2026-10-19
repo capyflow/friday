@@ -295,12 +295,12 @@ def run(binary: str, output_dir: str | None) -> dict:
         now = time.time()
         due = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 90))
         remind = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 60))
-        todo = api.json("POST", "/api/todos", {"text": "smoke deadline", "dueAt": due, "remindAt": remind})
-        todo_id = todo.get("todo", {}).get("id")
+        todo = api.json("POST", "/api/entries", {"text": "smoke deadline", "dueAt": due, "remindAt": remind})
+        todo_id = todo.get("entry", {}).get("id")
         expect(todo_id, "todo creation failed")
-        linked_id = todo.get("todo", {}).get("reminderTaskId")
+        linked_id = todo.get("entry", {}).get("reminderTaskId")
         expect(any(item.get("id") == linked_id and item.get("todoId") == todo_id for item in api.json("GET", "/api/tasks").get("tasks", [])), "todo did not create linked future reminder")
-        api.json("POST", f"/api/todos/{todo_id}", {"done": True})
+        api.json("POST", f"/api/entries/{todo_id}", {"done": True})
         expect(not any(item.get("id") == linked_id for item in api.json("GET", "/api/tasks").get("tasks", [])), "completion did not cancel future reminder")
         # A normal web reminder is snoozable; linked Todo reminders are
         # intentionally controlled from the Todo page and reject snooze.
@@ -323,7 +323,7 @@ def run(binary: str, output_dir: str | None) -> dict:
         # A fresh login is required after restart; persisted files are checked
         # through the real authenticated API rather than by reading secrets.
         api2.json("POST", "/api/login", {"username": "smoke", "password": "smoke-password"})
-        restored = api2.json("GET", "/api/todos").get("todos", [])
+        restored = api2.json("GET", "/api/entries").get("entries", [])
         expect(any(item.get("id") == todo_id and item.get("done") for item in restored), "completed todo was not restored")
         restored_tasks = api2.json("GET", "/api/tasks").get("tasks", [])
         expect(any(item.get("id") == paused_task_id and item.get("status") == "paused" for item in restored_tasks), "paused task was not restored")
@@ -347,7 +347,7 @@ def run(binary: str, output_dir: str | None) -> dict:
         process, old_api = wait_ready(binary, legacy, root / "server-legacy.log")
         expect(old_api.json("GET", "/api/setup/status").get("accountRequired") is False, "old account format forced setup")
         old_api.json("POST", "/api/login", {"username": "smoke", "password": "smoke-password"})
-        expect(any(item.get("id") == "legacy-todo" for item in old_api.json("GET", "/api/todos").get("todos", [])), "old todo JSON was not compatible")
+        expect(any(item.get("id") == "legacy-todo" for item in old_api.json("GET", "/api/entries").get("entries", [])), "old todo JSON was not compatible")
         result["checks"].append("legacy-profile")
         return result
     finally:

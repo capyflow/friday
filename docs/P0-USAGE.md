@@ -53,8 +53,8 @@
 | `POST /api/provider/test` | 文本与可选图片输入诊断，不保存配置 |
 | `PUT /api/tasks/:id` | 完整替换未来任务定义，参数同创建任务 |
 | `POST /api/tasks/:id/pause`、`resume` | 暂停/恢复未来触发 |
-| `PUT /api/todos/:id` | 替换文本、`dueAt`、`remindAt`；时间使用带时区RFC3339，null移除 |
-| `POST /api/todos/reconcile` | 恢复待办与任务文件同步 |
+| `PUT /api/entries/:id` | 替换文本、`dueAt`、`remindAt`；时间使用带时区RFC3339，null移除；笔记条目忽略并清空时间 |
+| `POST /api/entries/reconcile` | 恢复待办与任务文件同步 |
 | `GET /api/notifications?taskId=...` | 按任务过滤后返回最新100条；未读统计仍是全局 |
 | `POST /api/notifications/:id/read` | 持久化已读 |
 | `POST /api/notifications/:id/snooze` | `minutes` 为1分钟至7天；普通通知幂等延后 |

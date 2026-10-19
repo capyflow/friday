@@ -37,9 +37,9 @@ func (s *Server) handleResumeTask(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"task": tk, "message": "任务已恢复"})
 }
 
-func (s *Server) handleUpdateTodo(ctx *vhttp.Context) error {
+func (s *Server) handleUpdateEntry(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
 	}
 	var req struct {
 		Text     string     `json:"text"`
@@ -49,19 +49,19 @@ func (s *Server) handleUpdateTodo(ctx *vhttp.Context) error {
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为JSON对象，时间须为带时区RFC3339"})
 	}
-	td, ok, err := s.todos.Update(ctx.GinContext().Param("id"), req.Text, req.DueAt, req.RemindAt)
+	entry, ok, err := s.todos.UpdateEntry(ctx.GinContext().Param("id"), req.Text, req.DueAt, req.RemindAt)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	if !ok {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到条目"})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todo": td, "message": "待办已更新"})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"entry": entry, "message": "条目已更新"})
 }
 
-func (s *Server) handleReconcileTodos(ctx *vhttp.Context) error {
+func (s *Server) handleReconcileEntries(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
 	}
 	if err := s.todos.Reconcile(); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})

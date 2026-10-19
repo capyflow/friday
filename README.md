@@ -11,14 +11,16 @@
 - **Web 界面**：浏览器打开 `http://localhost:8080/`，登录后进入统一界面，
   左侧导航：**聊天**（SSE 流式对话，打字机效果，可切换会话/清除上下文）、**运行状态**（含 token 用量多维视图与成本预算）、
   **自动化**（定时/智能任务/目标、计划与执行历史）、
-  **待办**（清单增删改/勾选完成）、**记忆**、**设置**（模型热更新 / 权限模式 / 成本与预算 / 人设提示词 / 会话管理 / 心跳清单编辑 / MCP 服务器 / 技能）；
+  **闪念**（笔记+待办统一时间线：悬浮 + 弹窗编辑、Markdown 格式条、#标签、搜索、置顶、勾选完成、已完成视图）、**记忆**、**设置**（模型热更新 / 权限模式 / 成本与预算 / 人设提示词 / 会话管理 / 心跳清单编辑 / MCP 服务器 / 技能）；
   聊天页点"调用轨迹"在右侧弹出抽屉查看每次调用的 LLM/工具/回答链路；
   回复中展示**思考过程**（推理内容 + 工具调用步骤，按 LLM 轮次分块、可折叠，刷新后原样回显），
   每轮末尾一行本轮 token 与耗时；发送键在回复中变**暂停**——
   点击即止损，已生成部分可一键**继续**接着完成；暂停期间输入新问题则开启新对话
-- **待办清单**："记个待办：周三前交房租""我有什么待办""房租交了""这条不用了"——
-  `add_todo` / `list_todos` / `complete_todo` / `delete_todo` 四个工具，
-  清单落盘 `todos.json` 重启不丢，管理后台"待办"页可直接增删勾选
+- **闪念（笔记与待办）**：简易 Blinko——随手想法记成笔记（支持 Markdown 与 #标签），
+  要做的事记成待办（截止/提醒/勾选完成）；`add_note` / `list_notes` / `update_note` / `delete_note`
+  与 `add_todo` / `list_todos` / `complete_todo` / `update_todo` / `delete_todo` / `pin_entry`（置顶，两类通用），
+  统一落盘 `todos.json` 重启不丢；网页"闪念"页右下角悬浮 + 打开编辑弹窗（Markdown 格式条 + `#` 标签按钮），
+  时间线按天分组，置顶固定顶部，已完成待办有专门视图，可按标签/关键词筛选
 - **天气查询**："上海天气怎么样""明天要带伞吗"——`get_weather` 工具
   （Open-Meteo 免密钥接口，全球城市中文地理编码，当前实况 + 未来三天预报）；
   配 `weather.defaultCity` 后不报城市名也能查，没配则管家会先问一次并记住
@@ -71,7 +73,7 @@
   预算是**软限额**：超线停的是心跳巡检、智能任务与目标启动这类主动工作——
   **你正在进行的对话与定时提醒绝不受影响**（框架只有事后 `OnLLMCall` 钩子，
   事前拦截需 ctx 取消，与"不打断用户"的取向冲突，故不做硬取消）
-- **管理后台**：查看运行状态、管理待办/任务/记忆、审批执行类操作、在线配 MCP。
+- **管理后台**：查看运行状态、管理闪念/任务/记忆、审批执行类操作、在线配 MCP。
   账号密码登录：新部署通过本机首次设置向导创建账号，已有账号继续有效；
   远程部署在**启动时预置账号**——配置文件
   `admin.username`/`admin.password`，或环境变量 `FRIDAY_ADMIN_USERNAME`/`FRIDAY_ADMIN_PASSWORD`
@@ -117,6 +119,7 @@
 │  ├─ LLM Provider：OpenAI 兼容（DeepSeek/Qwen）     │
 │  ├─ 工具注册表（内部/tools）：                     │
 │  │   add_todo / list_todos / complete_todo / delete_todo（待办）│
+│  │   add_note / list_notes / update_note / delete_note / pin_entry（闪念）│
 │  │   schedule_task（单次/多次/循环/智能任务）        │
 │  │   get_weather（Open-Meteo 天气查询）             │
 │  │   remember / recall / forget（长期记忆）        │
@@ -149,7 +152,7 @@
 │  /          管理后台 Dashboard（go:embed，鉴权）      │
 │  /traces    调用轨迹页（go:embed；数据接口鉴权）        │
 │  /api/sessions /api/approvals /api/mcp /api/heartbeat│
-│  /api/status /api/tasks /api/todos /api/memories /api/traces│
+│  /api/status /api/tasks /api/entries /api/memories /api/traces│
 │  与管家共用 tasks.json / todos.json / memories.json / session.json│
 └─────────────────────────────────────────────────┘
 ```

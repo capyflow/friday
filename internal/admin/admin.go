@@ -37,10 +37,13 @@
 //	GET    /api/tasks         任务列表（含下次触发时间）
 //	POST   /api/tasks         手工建任务（参数同 schedule_task 工具：in/when/every/times）
 //	DELETE /api/tasks/:id     取消任务
-//	GET    /api/todos         待办清单（未完成在前）
-//	POST   /api/todos         新增待办
-//	POST   /api/todos/:id     完成/重开待办（{"done":true|false}，缺省 true）
-//	DELETE /api/todos/:id     删除待办
+//	GET    /api/entries          闪念列表（笔记+待办，?kind=&q=&tag=&done= 过滤）
+//	POST   /api/entries          记入闪念（{"kind":"note"|"todo","text",dueAt?,remindAt?}）
+//	PUT    /api/entries/:id      编辑条目（完整替换文本与时间）
+//	POST   /api/entries/reconcile 重建待办关联提醒
+//	POST   /api/entries/:id      完成/重开待办（{"done":true|false}，缺省 true；笔记拒绝）
+//	POST   /api/entries/:id/pin  置顶/取消置顶（{"pinned":true|false}，缺省 true）
+//	DELETE /api/entries/:id      删除条目
 //	GET    /api/wiki/pages      记忆页列表/搜索（?q= 关键词，命中附片段）
 //	POST   /api/wiki/pages      新建记忆页（标题已存在则更新该页）
 //	GET    /api/wiki/pages/:id  记忆页详情（含原始 markdown 正文）
@@ -295,12 +298,13 @@ func (s *Server) Handler() http.Handler {
 	root.AddRouter([]string{http.MethodPost}, "/api/tasks/:id/pause", s.wrap(s.handlePauseTask))
 	root.AddRouter([]string{http.MethodPost}, "/api/tasks/:id/resume", s.wrap(s.handleResumeTask))
 	root.AddRouter([]string{http.MethodDelete}, "/api/tasks/:id", s.wrap(s.handleCancelTask))
-	root.AddRouter([]string{http.MethodGet}, "/api/todos", s.wrap(s.handleListTodos))
-	root.AddRouter([]string{http.MethodPost}, "/api/todos", s.wrap(s.handleAddTodo))
-	root.AddRouter([]string{http.MethodPut}, "/api/todos/:id", s.wrap(s.handleUpdateTodo))
-	root.AddRouter([]string{http.MethodPost}, "/api/todos/reconcile", s.wrap(s.handleReconcileTodos))
-	root.AddRouter([]string{http.MethodPost}, "/api/todos/:id", s.wrap(s.handleCompleteTodo))
-	root.AddRouter([]string{http.MethodDelete}, "/api/todos/:id", s.wrap(s.handleDeleteTodo))
+	root.AddRouter([]string{http.MethodGet}, "/api/entries", s.wrap(s.handleListEntries))
+	root.AddRouter([]string{http.MethodPost}, "/api/entries", s.wrap(s.handleAddEntry))
+	root.AddRouter([]string{http.MethodPut}, "/api/entries/:id", s.wrap(s.handleUpdateEntry))
+	root.AddRouter([]string{http.MethodPost}, "/api/entries/reconcile", s.wrap(s.handleReconcileEntries))
+	root.AddRouter([]string{http.MethodPost}, "/api/entries/:id", s.wrap(s.handleCompleteEntry))
+	root.AddRouter([]string{http.MethodPost}, "/api/entries/:id/pin", s.wrap(s.handlePinEntry))
+	root.AddRouter([]string{http.MethodDelete}, "/api/entries/:id", s.wrap(s.handleDeleteEntry))
 	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages", s.wrap(s.handleListWikiPages))
 	root.AddRouter([]string{http.MethodPost}, "/api/wiki/pages", s.wrap(s.handleCreateWikiPage))
 	root.AddRouter([]string{http.MethodGet}, "/api/wiki/pages/:id", s.wrap(s.handleGetWikiPage))
@@ -739,27 +743,34 @@ func (s *Server) handleDeleteWikiPage(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除记忆页 #" + id})
 }
 
-// handleListTodos 待办清单（未完成在前）。
-func (s *Server) handleListTodos(ctx *vhttp.Context) error {
+// handleListEntries 闪念列表（置顶在前，其余按创建时间倒序；?kind=&q=&tag=&done= 过滤）。
+func (s *Server) handleListEntries(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": []todo.Todo{}})
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"entries": []todo.Todo{}, "tags": []string{}})
 	}
 	if err := s.todos.LoadError(); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
+	f := todo.EntryFilter{Kind: ctx.GinContext().Query("kind"), Q: ctx.GinContext().Query("q"), Tag: ctx.GinContext().Query("tag")}
+	if done := ctx.GinContext().Query("done"); done != "" {
+		value := done == "true" || done == "1"
+		f.Done = &value
 	}
 	syncError := ""
 	if err := s.todos.SyncError(); err != nil {
 		syncError = err.Error()
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todos": s.todos.List(), "syncError": syncError})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"entries": s.todos.ListEntries(f), "tags": s.todos.Tags(), "syncError": syncError})
 }
 
-// handleAddTodo 新增一条待办。
-func (s *Server) handleAddTodo(ctx *vhttp.Context) error {
+// handleAddEntry 记入一条闪念（kind 缺省 todo；笔记忽略时间字段）。
+func (s *Server) handleAddEntry(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
 	}
 	var req struct {
+		Kind     string     `json:"kind"`
 		Text     string     `json:"text"`
 		DueAt    *time.Time `json:"dueAt"`
 		RemindAt *time.Time `json:"remindAt"`
@@ -767,17 +778,17 @@ func (s *Server) handleAddTodo(ctx *vhttp.Context) error {
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	td, err := s.todos.AddWithDeadline(req.Text, req.DueAt, req.RemindAt)
+	entry, err := s.todos.AddEntry(req.Kind, req.Text, req.DueAt, req.RemindAt)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todo": td})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"entry": entry})
 }
 
-// handleCompleteTodo 完成/重开一条待办（body {"done":false} 表示重开，缺省完成）。
-func (s *Server) handleCompleteTodo(ctx *vhttp.Context) error {
+// handleCompleteEntry 完成/重开一条待办（body {"done":false} 表示重开，缺省完成）；笔记拒绝。
+func (s *Server) handleCompleteEntry(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
 	}
 	done := true
 	var req struct {
@@ -789,20 +800,48 @@ func (s *Server) handleCompleteTodo(ctx *vhttp.Context) error {
 		done = *req.Done
 	}
 	id := ctx.GinContext().Param("id")
-	td, ok, err := s.todos.Complete(id, done)
+	if entry, ok := s.todos.Get(id); ok && entry.Kind == todo.KindNote {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "笔记没有完成状态"})
+	}
+	entry, ok, err := s.todos.Complete(id, done)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
 	}
 	if !ok {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到条目 #" + id})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"todo": td})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"entry": entry})
 }
 
-// handleDeleteTodo 删除一条待办。
-func (s *Server) handleDeleteTodo(ctx *vhttp.Context) error {
+// handlePinEntry 置顶/取消置顶一条闪念（body {"pinned":false} 取消，缺省置顶）。
+func (s *Server) handlePinEntry(ctx *vhttp.Context) error {
 	if s.todos == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "待办功能未启用"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
+	}
+	pinned := true
+	var req struct {
+		Pinned *bool `json:"pinned"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil && !errors.Is(err, io.EOF) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象，pinned须为布尔值"})
+	} else if req.Pinned != nil {
+		pinned = *req.Pinned
+	}
+	id := ctx.GinContext().Param("id")
+	entry, ok, err := s.todos.SetPinned(id, pinned)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
+	}
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到条目 #" + id})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"entry": entry})
+}
+
+// handleDeleteEntry 删除一条闪念（笔记与待办通用）。
+func (s *Server) handleDeleteEntry(ctx *vhttp.Context) error {
+	if s.todos == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "闪念功能未启用"})
 	}
 	id := ctx.GinContext().Param("id")
 	ok, err := s.todos.Delete(id)
@@ -810,7 +849,7 @@ func (s *Server) handleDeleteTodo(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
 	}
 	if !ok {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待办 #" + id})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到条目 #" + id})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除待办 #" + id})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除条目 #" + id})
 }

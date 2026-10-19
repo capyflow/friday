@@ -7,7 +7,7 @@ import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
 import AutoView from './components/AutoView.vue'
-import TodoView from './components/TodoView.vue'
+import BlinkoView from './components/BlinkoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
@@ -18,7 +18,7 @@ import { startNotifications, stopNotifications } from './notifications.js'
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
-  { id: 'todo', icon: 'i-todo', label: '待办' },
+  { id: 'blinko', icon: 'i-blinko', label: '闪念' },
   { id: 'notifications', icon: 'i-bell', label: '通知' },
 ]
 
@@ -97,6 +97,7 @@ async function logout() {
     <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></symbol>
     <symbol id="i-todo" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
+    <symbol id="i-blinko" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
     <!-- 设置导航 -->
@@ -175,7 +176,7 @@ async function logout() {
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
-      <Transition name="view"><TodoView v-if="store.view === 'todo'" /></Transition>
+      <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>
     </main>
   </div>

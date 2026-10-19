@@ -176,3 +176,67 @@ func TestListTodosReportsLoadFailure(t *testing.T) {
 		t.Fatalf("恢复失败不得显示空列表: result=%q err=%v", res, err)
 	}
 }
+
+func TestNoteToolsFlow(t *testing.T) {
+	store := todo.NewStore("")
+	add := &AddNoteTool{Store: store}
+	list := &ListNotesTool{Store: store}
+	update := &UpdateNoteTool{Store: store}
+	del := &DeleteNoteTool{Store: store}
+	pin := &PinEntryTool{Store: store}
+
+	if _, err := add.Call(context.Background(), nil); err == nil {
+		t.Fatal("add_note 缺 text 应报错")
+	}
+	res, err := add.Call(context.Background(), map[string]any{"text": "#灵感 闪念想法"})
+	if err != nil || !strings.Contains(res, "已记入笔记 #n") {
+		t.Fatalf("add_note: %v %q", err, res)
+	}
+	noteID := store.ListEntries(todo.EntryFilter{Kind: todo.KindNote})[0].ID
+	res, err = list.Call(context.Background(), map[string]any{"tag": "#灵感"})
+	if err != nil || !strings.Contains(res, "闪念想法") || !strings.Contains(res, "标签：灵感") {
+		t.Fatalf("list_notes: %v %q", err, res)
+	}
+	// 更新与类型守卫。
+	if _, err := update.Call(context.Background(), map[string]any{"id": noteID, "text": "新内容"}); err != nil {
+		t.Fatalf("update_note: %v", err)
+	}
+	res, _ = list.Call(context.Background(), map[string]any{"q": "新内容"})
+	if !strings.Contains(res, "新内容") {
+		t.Fatalf("更新后检索不到: %q", res)
+	}
+	td, _ := store.Add("待办事项")
+	if _, err := update.Call(context.Background(), map[string]any{"id": td.ID, "text": "x"}); err == nil || !strings.Contains(err.Error(), "update_todo") {
+		t.Fatalf("update_todo 的 ID 用在 update_note 应指路: %v", err)
+	}
+	if _, err := del.Call(context.Background(), map[string]any{"id": td.ID}); err == nil || !strings.Contains(err.Error(), "delete_todo") {
+		t.Fatalf("待办 ID 用在 delete_note 应指路: %v", err)
+	}
+	// 置顶（笔记与待办通用）与取消。
+	if res, err := pin.Call(context.Background(), map[string]any{"id": noteID}); err != nil || !strings.Contains(res, "已置顶") {
+		t.Fatalf("pin_entry: %v %q", err, res)
+	}
+	if res, _ := pin.Call(context.Background(), map[string]any{"id": td.ID, "pinned": false}); !strings.Contains(res, "已取消置顶") {
+		t.Fatalf("取消置顶: %q", res)
+	}
+	if res, _ := pin.Call(context.Background(), map[string]any{"id": "n404"}); !strings.Contains(res, "未找到") {
+		t.Fatalf("pin_entry 错误 ID: %q", res)
+	}
+	// 删除笔记。
+	if res, _ := del.Call(context.Background(), map[string]any{"id": noteID}); !strings.Contains(res, "已删除") {
+		t.Fatalf("delete_note: %q", res)
+	}
+	// 待办工具对笔记 ID 指路。
+	note2, _ := store.AddEntry(todo.KindNote, "另一条", nil, nil)
+	if _, err := (&UpdateTodoTool{Store: store}).Call(context.Background(), map[string]any{"id": note2.ID, "text": "x"}); err == nil || !strings.Contains(err.Error(), "update_note") {
+		t.Fatalf("笔记 ID 用在 update_todo 应指路: %v", err)
+	}
+	if _, err := (&DeleteTodoTool{Store: store}).Call(context.Background(), map[string]any{"id": note2.ID}); err == nil || !strings.Contains(err.Error(), "delete_note") {
+		t.Fatalf("笔记 ID 用在 delete_todo 应指路: %v", err)
+	}
+	// list_todos 不混入笔记。
+	res, _ = (&ListTodosTool{Store: store}).Call(context.Background(), nil)
+	if strings.Contains(res, "另一条") {
+		t.Fatalf("list_todos 不应包含笔记: %q", res)
+	}
+}
