@@ -38,6 +38,7 @@ const execToolName = vxexec.ToolName
 var passThroughTools = []string{
 	"schedule_task", "list_tasks", "cancel_task", "update_task", "pause_task", "resume_task",
 	"add_todo", "list_todos", "complete_todo", "delete_todo", "update_todo",
+	"add_note", "list_notes", "update_note", "delete_note", "pin_entry",
 	"get_weather",
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",

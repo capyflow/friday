@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,23 @@ func (t *ScheduleTaskTool) Schema() map[string]any {
 			"in":        map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
 			"when":      map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
 			"every":     map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
+			// delayMinutes / scheduleRule 是管理后台表单用的形态（界面把语义算成确定值再提交）；
+			// 你按自然语言安排时继续用 in / when / every。
+			"delayMinutes": map[string]any{"type": "integer", "description": "多少分钟后触发一次（1-525600），与 in/when/every/scheduleRule 互斥；管理后台表单用，你优先用 in"},
+			"scheduleRule": map[string]any{
+				"type":        "object",
+				"description": "结构化循环规则（管理后台表单用，你优先用 every）：{unit: minute|hourly|daily|weekly|monthly|yearly, interval, hour, minute, weekdays[0-6], monthDays[1-31], months[1-12]}",
+				"properties": map[string]any{
+					"unit":      map[string]any{"type": "string", "enum": []string{"minute", "hourly", "daily", "weekly", "monthly", "yearly"}},
+					"interval":  map[string]any{"type": "integer", "description": "每 N 个单位；仅 minute/hourly 支持 N>1"},
+					"hour":      map[string]any{"type": "integer", "minimum": 0, "maximum": 23},
+					"minute":    map[string]any{"type": "integer", "minimum": 0, "maximum": 59},
+					"weekdays":  map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 0, "maximum": 6}},
+					"monthDays": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1, "maximum": 31}},
+					"months":    map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1, "maximum": 12}},
+				},
+				"required": []string{"unit"},
+			},
 			"times":     map[string]any{"type": "integer", "description": "重复次数（≥2），必须配合 in 使用，如 in=10分钟 times=3：每10分钟一次共3次；缺省为单次"},
 			"channel":   map[string]any{"type": "string", "enum": []string{"", "web", "dingtalk", "feishu", "console"}, "description": "推送通道，空为全部可用通道"},
 			"status":    map[string]any{"type": "string", "enum": []string{"active", "paused"}, "description": "active立即启用（默认），paused保存后暂不触发"},
@@ -105,15 +123,33 @@ func ParseTaskArgs(args map[string]any) (task.Task, error) {
 	ev, _ := args["every"].(string)
 	in, _ := args["in"].(string)
 	ws, _ := args["when"].(string)
-	count := 0
-	for _, value := range []string{ev, in, ws} {
-		if strings.TrimSpace(value) != "" {
-			count++
+
+	// delayMinutes 是界面用的"多少分钟后"：整数分钟、确定性换算，
+	// 不要求前端猜时区，也不走自然语言解析（in 那条留给小五说"10分钟/1天"）。
+	delayMinutes := 0
+	if v, ok := args["delayMinutes"]; ok && v != nil {
+		n, ok := argInt(v)
+		if !ok || n < 1 || n > maxDelayMinutes {
+			return task.Task{}, fmt.Errorf("delayMinutes 须是 1-%d 之间的整数分钟（最长一年），当前 %v", maxDelayMinutes, v)
 		}
+		delayMinutes = n
 	}
-	if count != 1 {
-		return task.Task{}, fmt.Errorf("必须且只能提供 in（相对时长）、when（绝对时间）或 every（循环规则）之一")
+
+	// scheduleRule 是界面用的结构化循环规则，编译成 cron 落盘并原样带着回填编辑。
+	var rule *task.ScheduleRule
+	if v, ok := args["scheduleRule"]; ok && v != nil {
+		r, err := decodeScheduleRule(v)
+		if err != nil {
+			return task.Task{}, err
+		}
+		rule = r
 	}
+
+	carrier, err := triggerCarrier(in, ws, ev, delayMinutes, rule)
+	if err != nil {
+		return task.Task{}, err
+	}
+
 	times := 1
 	if v, ok := args["times"]; ok && v != nil {
 		n, ok := argInt(v)
@@ -125,19 +161,18 @@ func ParseTaskArgs(args map[string]any) (task.Task, error) {
 	if times < 1 {
 		return task.Task{}, fmt.Errorf("times 至少为 1")
 	}
-	if times >= 2 && strings.TrimSpace(in) == "" {
-		return task.Task{}, fmt.Errorf("times 必须配合 in（相对时长）使用")
+	if times >= 2 && carrier != "in" {
+		return task.Task{}, fmt.Errorf("times（重复次数）只能配合 in（相对时长）使用；当前给的是 %s。"+
+			"要按日历循环请用 every 或 scheduleRule，要固定时刻请用 when", carrier)
 	}
-	if ev != "" {
-		spec, err := ParseHumanCron(ev)
-		if err != nil {
-			return task.Task{}, err
-		}
-		tk.Kind, tk.Cron = orKind(tk.Kind, task.KindCron), spec
-	} else if in != "" {
+
+	switch carrier {
+	case "delayMinutes":
+		tk.Kind, tk.When = orKind(tk.Kind, task.KindOnce), time.Now().Add(time.Duration(delayMinutes)*time.Minute)
+	case "in":
 		d, err := task.ParseHumanDuration(in)
 		if err != nil {
-			return task.Task{}, fmt.Errorf("无法解析时长 %q：%w", in, err)
+			return task.Task{}, fmt.Errorf("无法解析时长 %q：%w（要按分钟数请用 delayMinutes）", in, err)
 		}
 		if d <= 0 {
 			return task.Task{}, fmt.Errorf("时长必须大于零")
@@ -147,14 +182,99 @@ func ParseTaskArgs(args map[string]any) (task.Task, error) {
 		} else {
 			tk.Kind, tk.When = orKind(tk.Kind, task.KindOnce), time.Now().Add(d)
 		}
-	} else {
+	case "when":
 		tm, err := time.Parse(time.RFC3339Nano, ws)
 		if err != nil {
-			return task.Task{}, fmt.Errorf("无法解析时间 %q：%w", ws, err)
+			return task.Task{}, fmt.Errorf("无法解析时间 %q：when 须是含时区的 RFC3339，如 2026-10-20T08:00:00+08:00（%v）", ws, err)
 		}
 		tk.Kind, tk.When = orKind(tk.Kind, task.KindOnce), tm
+	case "scheduleRule":
+		spec, err := rule.ToCron()
+		if err != nil {
+			return task.Task{}, err
+		}
+		tk.Kind, tk.Cron, tk.ScheduleRule = orKind(tk.Kind, task.KindCron), spec, rule
+	default: // every
+		spec, err := ParseHumanCron(ev)
+		if err != nil {
+			return task.Task{}, err
+		}
+		tk.Kind, tk.Cron = orKind(tk.Kind, task.KindCron), spec
 	}
 	return tk, nil
+}
+
+// maxDelayMinutes 是一次性延迟的上限：一年（365×24×60）。
+const maxDelayMinutes = 525600
+
+// triggerCarrier 校验触发方式的互斥并返回唯一那个。
+//
+// 原来只报"必须且只能提供之一"，多填时看不出是哪两个在打架。这里逐条给结论：
+// 先拒"一次性 × 循环"的跨类组合（语义上根本冲突），再拒同类内的重复写法。
+func triggerCarrier(in, ws, ev string, delayMinutes int, rule *task.ScheduleRule) (string, error) {
+	var present []string
+	if delayMinutes > 0 {
+		present = append(present, "delayMinutes")
+	}
+	if strings.TrimSpace(in) != "" {
+		present = append(present, "in")
+	}
+	if strings.TrimSpace(ws) != "" {
+		present = append(present, "when")
+	}
+	if rule != nil {
+		present = append(present, "scheduleRule")
+	}
+	if strings.TrimSpace(ev) != "" {
+		present = append(present, "every")
+	}
+	switch len(present) {
+	case 0:
+		return "", fmt.Errorf("缺少触发方式：in（多久之后）、when（绝对时间）、delayMinutes（N 分钟后）、" +
+			"every（cron 表达式）或 scheduleRule（结构化循环规则）必须给一个")
+	case 1:
+		return present[0], nil
+	}
+	isOnce := map[string]bool{"delayMinutes": true, "in": true, "when": true}
+	var onceSide, cronSide []string
+	for _, c := range present {
+		if isOnce[c] {
+			onceSide = append(onceSide, c)
+		} else {
+			cronSide = append(cronSide, c)
+		}
+	}
+	if len(onceSide) > 0 && len(cronSide) > 0 {
+		return "", fmt.Errorf("触发方式冲突：%s 是「只响一次」，%s 是「循环触发」，不能同时给。"+
+			"要循环就用 every 或 scheduleRule，要响一次就用 in / when / delayMinutes",
+			strings.Join(onceSide, "+"), strings.Join(cronSide, "+"))
+	}
+	switch strings.Join(present, "+") {
+	case "delayMinutes+in":
+		return "", fmt.Errorf("delayMinutes（N 分钟后）和 in（多久之后）是同一件事的两种写法，保留一个即可："+
+			"界面用 delayMinutes，让小五说“10分钟后”时它用 in")
+	case "delayMinutes+when", "in+when":
+		return "", fmt.Errorf("一次性任务的时间点只能给一个：相对延迟（delayMinutes / in）与绝对时刻（when）同时给了无法判断以哪个为准")
+	case "scheduleRule+every":
+		return "", fmt.Errorf("循环方式只能选一种：结构化规则 scheduleRule 或直接写 cron 表达式 every")
+	}
+	return "", fmt.Errorf("触发方式只能给一个，当前同时给了 %s", strings.Join(present, "、"))
+}
+
+// decodeScheduleRule 按 JSON 标签严格解码界面上报的循环规则：
+// 字段名写错要当场报错，不能被静默忽略成"每天 0 点"。
+func decodeScheduleRule(v any) (*task.ScheduleRule, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("scheduleRule 格式不对：%w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var r task.ScheduleRule
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("scheduleRule 格式不对：%w", err)
+	}
+	return &r, nil
 }
 
 func (t *ScheduleTaskTool) Call(_ context.Context, args map[string]any) (string, error) {

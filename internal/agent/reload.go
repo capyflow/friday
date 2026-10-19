@@ -117,6 +117,9 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 			if m.ContextWindow < 0 {
 				m.ContextWindow = 0
 			}
+			if m.MaxTokens < 0 {
+				m.MaxTokens = 0
+			}
 			if m.APIKey == "" { // 留空 = 保留该条目已存密钥
 				if old, ok := oldByName[m.Name]; ok {
 					m.APIKey = old.APIKey
@@ -144,6 +147,11 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 		projected.BaseURL = entry.BaseURL
 		projected.Model = entry.Model
 		projected.ContextWindow = entry.ContextWindow
+		// 输出预算：条目填了才覆盖扁平值——条目留空时沿用现状（现状缺省即
+		// config.DefaultMaxTokens），避免保存模型库把用户手写的 provider.maxTokens 打回默认。
+		if entry.MaxTokens > 0 {
+			projected.MaxTokens = entry.MaxTokens
+		}
 		projected.Active = active
 		switch { // 密钥套用：条目直填 > 条目环境变量 > 沿用全局现状
 		case entry.APIKey != "":
@@ -157,7 +165,8 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 		rebuild := strings.TrimRight(projected.BaseURL, "/") != strings.TrimRight(prev.BaseURL, "/") ||
 			projected.Model != prev.Model ||
 			projected.ResolveAPIKey() != prev.ResolveAPIKey() ||
-			projected.ContextWindow != prev.ContextWindow
+			projected.ContextWindow != prev.ContextWindow ||
+			projected.MaxTokens != prev.MaxTokens
 
 		next.Provider = projected
 

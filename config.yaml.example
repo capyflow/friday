@@ -11,7 +11,8 @@ provider:
                                # （写回下方 apiKey 字段），或在此直接粘贴明文。
   # apiKey: ""                 # 直填密钥（优先于环境变量；数据目录用户私有）
   temperature: 0.7
-  maxTokens: 1024
+  maxTokens: 4096             # 单次输出最大 token（思考型模型的「思考」也计入这份预算；
+                              # 给小了会出现只有思考、没有正文，表现为回复中断）
   # contextWindow: 128000      # 激活模型的上下文窗口（一般不用手填，模型库条目会投影到这里）
   # streamUsage: false        # 流式索取 token 用量统计（缺省开启）。
                               # 关掉后「运行状态」页的金额与 token 都会归零，只在个别
@@ -25,6 +26,7 @@ provider:
   #     model: step-5-preview
   #     apiKey: sk-...           # 或 apiKeyEnv: STEP_API_KEY；后台保存时留空 = 保留已存密钥
   #     contextWindow: 128000    # 留空 = 按模型名查表（未知型号按 128k）
+  #     maxTokens: 8192          # 该模型的输出预算；留空 = 按 4096（推理模型建议给大些）
   #     inputs: [text, image]    # 留空 = 全支持；只声明 text 则聊天页禁用图片入口
   #   - name: deepseek-chat
   #     baseURL: https://api.deepseek.com/v1
@@ -125,12 +127,14 @@ weather:
 # 停机期间过期的单次任务会在启动时立即补触发一次。
 taskFile: tasks.json
 
-# 待办清单持久化：add_todo / list_todos 等工具与管理后台"待办"页共用，
-# 增删改即写回，重启不丢。
+# 闪念清单持久化：add_todo / list_todos / add_note / list_notes 等工具与管理后台"闪念"页共用，
+# 笔记与待办同存一份文件（kind 区分），增删改即写回，重启不丢。
 todoFile: todos.json
 
 # HTTP 服务（vortexv3）：默认开启，打开 http://localhost:8080/ 进入统一界面
-#（聊天 / 待办 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
+#（聊天 / 闪念 / 运行状态 / 自动化 / 记忆 / 设置，聊天页可弹出调用轨迹抽屉）。
+# 本机开发建议保留 8080 之外的端口：用 `--port 45678` 启动（8080 常被容器占用，
+# 浏览器 localhost:8080 会解析到 IPv6 上的容器；约定见 USAGE.md「本地服务」）。
 # 新部署首次启动会在本机页面创建管理员账号；远程/Docker 部署应通过下面字段或环境变量预置。
 admin:
   enabled: true               # 写 false 关闭后台

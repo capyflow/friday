@@ -14,9 +14,12 @@
 
 ## 任务管理
 
-在「自动化」页创建或编辑单次、多次、循环及智能任务，选择投递通道，暂停或恢复未来触发，并按任务查看通知执行记录。
+在「自动化」页点「添加任务」打开弹窗创建任务，或点任务卡「编辑」在同一弹窗里改单次、多次、循环及智能任务，选择投递通道，暂停或恢复未来触发，并按任务查看通知执行记录。弹窗底部「确认」提交、「取消」清空草稿并关闭；提交失败时弹窗保持打开并保留已填内容。
 
 - 修改内容/通道保留原下一触发时间和剩余次数；修改定时规则重算计划。
+- 触发时间由界面换算成确定值提交：单次走 `delayMinutes`（快捷项）或 `when`（日期时间选择器，含时区），
+  循环走 `scheduleRule`（结构化规则，后端编译成 cron 并保留该规则用于回填），只有切到
+  「直接写 cron」才提交 `every`。`in` 保留给小五的自然语言入口。
 - 暂停持久化且不触发；恢复过去的单次立即补触发，多次跳到下一未来锚点，循环计算下一未来时刻。
 - 编辑、暂停或取消只影响未来安排；已入队/正在处理的执行保留原记录。
 - 待办关联任务的内容/时间由待办页管理，任务页不能直接修改其定义，暂停/恢复仍可使用。
@@ -51,10 +54,10 @@
 | `GET /api/setup/status` | 首次账号/模型要求、本机初始化是否允许；不返回凭据 |
 | `POST /api/setup` | 受控本机一次性初始化，成功建立登录 Cookie |
 | `POST /api/provider/test` | 文本与可选图片输入诊断，不保存配置 |
-| `PUT /api/tasks/:id` | 完整替换未来任务定义，参数同创建任务 |
+| `PUT /api/tasks/:id` | 完整替换未来任务定义，参数同创建任务：触发方式 `in`/`when`/`delayMinutes`/`every`/`scheduleRule` 五选一（互斥，冲突时返回点名双方的错误） |
 | `POST /api/tasks/:id/pause`、`resume` | 暂停/恢复未来触发 |
-| `PUT /api/todos/:id` | 替换文本、`dueAt`、`remindAt`；时间使用带时区RFC3339，null移除 |
-| `POST /api/todos/reconcile` | 恢复待办与任务文件同步 |
+| `PUT /api/entries/:id` | 替换文本、`dueAt`、`remindAt`；时间使用带时区RFC3339，null移除；笔记条目忽略并清空时间 |
+| `POST /api/entries/reconcile` | 恢复待办与任务文件同步 |
 | `GET /api/notifications?taskId=...` | 按任务过滤后返回最新100条；未读统计仍是全局 |
 | `POST /api/notifications/:id/read` | 持久化已读 |
 | `POST /api/notifications/:id/snooze` | `minutes` 为1分钟至7天；普通通知幂等延后 |

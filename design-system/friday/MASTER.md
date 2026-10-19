@@ -50,6 +50,14 @@
 
 阴影四档 `--shadow-xs/sm/md/overlay`（深色加重）；圆角 `12/8/6px`。
 
+**深色浮层两条硬规则**（`--card` 是半透明面，浮层直接拿来用会透出下层内容）：
+
+- 弹窗 / 抽屉 / 悬浮卡深色下统一 `background: rgba(24,24,24,.94)` +
+  `backdrop-filter: blur(28px) saturate(1.4)` + 边框 `rgba(255,255,255,.1)`
+  （`.modal` / `.set-dialog` / `.approval-card` / `.user-pop` 都是这一套，遮罩浅色 `rgba(24,24,27,.45)`、深色 `rgba(0,0,0,.6)`）。
+- 实心 `--primary` 上的前景一律用 `--on-primary`；**没有 `--primary-fg` 这个令牌**，
+  写 `var(--primary-fg, #fff)` 会在深色下变成亮灰底白字（看不见）。
+
 ---
 
 ## Component Specs（均已在 web/src/components 对应实现）
@@ -92,8 +100,12 @@
   `tests/empty-art.test.js` 校验 kind 与各页调用点对齐
 - **设置弹窗** — 左侧分组导航（模型与人格 / 能力与行为 / 运行观测 / 数据与系统）+ 右侧内容；
   `.set-pane` 默认 640px，运行状态 / 调用轨迹 / 记忆这类数据密集页标 `wide` 放开到内容区宽度。
-  侧栏只留聊天 / 自动化 / 待办 / 通知，观测与记忆页收进设置；`store.settingsSection` 做一次性深链定位
+  侧栏只留聊天 / 自动化 / 闪念 / 通知，观测与记忆页收进设置；`store.settingsSection` 做一次性深链定位
   （自动化「查看执行轮次」→ 调用轨迹并带会话过滤，过滤 chip 放 `.trace-bar` 行内而非页头）
+- **表单弹窗** — `.dlg-mask / .dlg / .dlg-head / .dlg-body / .dlg-foot`（自动化页新建与编辑任务）：
+  头部标题 + ✕，正文为可滚动的表单栅格，底部一行放错误文案与右对齐的「取消 / 确认」。
+  遮罩、✕、Esc 与「取消」同义（清空草稿后收起），只有确认成功才带着数据关闭；提交失败留在弹窗内。
+  z-index 206，低于 `.selbox-pop`（220）以免弹窗里的下拉被压住
 - **模型 chip + 弹层** — 与上下文 chip 同形（`.ctx-btn model-btn`，模型名 110px 截断），
   点开列模型库（当前项 `.selected`、仅文本/支持图片与窗口标注），点选即 `POST /api/provider/activate`
   热切换；「管理模型库…」经 `store.settingsSection='model'` 深链进设置。设置里的模型库行卡片

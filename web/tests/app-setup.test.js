@@ -26,7 +26,7 @@ afterEach(() => { wrapper?.unmount(); wrapper = null })
 async function showApp() {
   wrapper = mount(App, { global: { stubs: {
     SetupView: SetupStub, LoginView: { template: '<div data-login />' }, ChatView: true,
-    AutoView: true, TodoView: true, NotificationsView: true,
+    AutoView: true, BlinkoView: true, NotificationsView: true,
     SettingsModal: true, ApprovalCards: true,
   } } })
   await flushPromises()

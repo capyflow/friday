@@ -22,7 +22,7 @@ func TestSystemPromptPersona(t *testing.T) {
 	if !strings.Contains(p, "亲切干练") || !strings.Contains(p, "小五") {
 		t.Fatalf("默认人设应为贴心管家且含身份定位:\n%s", p[:200])
 	}
-	if !strings.Contains(p, "【人文关怀】") || !strings.Contains(p, "【待办清单】") {
+	if !strings.Contains(p, "【人文关怀】") || !strings.Contains(p, "【闪念：笔记与待办】") {
 		t.Fatal("系统提示词应包含人文关怀与工具规则共用段")
 	}
 
@@ -32,7 +32,7 @@ func TestSystemPromptPersona(t *testing.T) {
 	if !strings.Contains(playful, "元气满满") || strings.Contains(playful, "亲切干练") {
 		t.Fatalf("切换人设后性格段未生效:\n%s", playful[:200])
 	}
-	for _, shared := range []string{"【人文关怀】", "【待办清单】", "【长期记忆】", "schedule_task"} {
+	for _, shared := range []string{"【人文关怀】", "【闪念：笔记与待办】", "【长期记忆】", "schedule_task"} {
 		if !strings.Contains(playful, shared) {
 			t.Fatalf("切换人设后共用段 %s 不应丢失", shared)
 		}

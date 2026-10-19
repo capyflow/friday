@@ -138,7 +138,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 	s, handler, cookie, _, todosPath := manageTestServer(t)
 	due, remind := time.Now().Add(2*time.Hour), time.Now().Add(time.Hour)
 	body, _ := json.Marshal(map[string]any{"text": "交房租", "dueAt": due, "remindAt": remind})
-	r := setupTestRequest(handler, "POST", "/api/todos", body, "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", cookie)
 	if r.Code != http.StatusOK {
 		t.Fatalf("创建待办失败: %d %s", r.Code, r.Body)
 	}
@@ -154,7 +154,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 		t.Fatalf("已同步提醒门卫异常: %v %v", allowed, err)
 	}
 	body, _ = json.Marshal(map[string]any{"text": "已修改", "dueAt": due, "remindAt": remind.Add(time.Minute)})
-	r = setupTestRequest(handler, "PUT", "/api/todos/"+td.ID, body, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "PUT", "/api/entries/"+td.ID, body, "127.0.0.1:1234", "localhost", "", cookie)
 	if r.Code != http.StatusOK {
 		t.Fatalf("编辑待办失败: %d %s", r.Code, r.Body)
 	}
@@ -168,7 +168,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 	if err := os.Mkdir(todosPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	r = setupTestRequest(handler, "POST", "/api/todos/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
 	if r.Code == http.StatusOK || s.todos.List()[0].Done {
 		t.Fatal("待办完成写盘失败不能成功或污染内存")
 	}
@@ -178,7 +178,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 	if err := os.Rename(backup, todosPath); err != nil {
 		t.Fatal(err)
 	}
-	r = setupTestRequest(handler, "POST", "/api/todos/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
 	if r.Code != http.StatusOK || s.engine.Len() != 0 {
 		t.Fatalf("完成待办未取消未来提醒: %d %s", r.Code, r.Body)
 	}
@@ -220,26 +220,87 @@ func TestTodoCompleteRejectsMalformedPayloadWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := setupTestRequest(handler, "POST", "/api/todos/"+td.ID, []byte(`{"done":`), "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":`), "127.0.0.1:1234", "localhost", "", cookie)
 	got, _ := s.todos.Get(td.ID)
 	if r.Code == http.StatusOK || got.Done {
 		t.Fatalf("畸形请求不能完成待办: http=%d todo=%+v body=%s", r.Code, got, r.Body)
 	}
 }
 
-func TestDisabledTodoManagementReturnsExplicitError(t *testing.T) {
+func TestDisabledEntryManagementReturnsExplicitError(t *testing.T) {
 	s, handler, cookie, _, _ := manageTestServer(t)
 	s.todos = nil
 	for _, request := range []struct {
 		method, path string
 		body         []byte
 	}{
-		{"PUT", "/api/todos/missing", []byte(`{"text":"待办"}`)},
-		{"POST", "/api/todos/reconcile", []byte(`{}`)},
+		{"PUT", "/api/entries/missing", []byte(`{"text":"待办"}`)},
+		{"POST", "/api/entries/reconcile", []byte(`{}`)},
 	} {
 		r := setupTestRequest(handler, request.method, request.path, request.body, "127.0.0.1:1234", "localhost", "", cookie)
-		if r.Code != http.StatusBadRequest || !bytes.Contains(r.Body.Bytes(), []byte("待办功能未启用")) {
+		if r.Code != http.StatusBadRequest || !bytes.Contains(r.Body.Bytes(), []byte("闪念功能未启用")) {
 			t.Fatalf("未启用时不能panic或假报成功: %d %s", r.Code, r.Body)
 		}
 	}
+}
+
+func TestEntryHandlersNotePinAndFilters(t *testing.T) {
+	_, handler, cookie, _, _ := manageTestServer(t)
+	// 记一条笔记：kind 缺省才是 todo，笔记显式声明并自动派生标签。
+	body, _ := json.Marshal(map[string]any{"kind": "note", "text": "#工作 周报思路"})
+	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte(`"kind":"note"`)) {
+		t.Fatalf("创建笔记失败: %d %s", r.Code, r.Body)
+	}
+	// 笔记不能完成。
+	noteID := jsonGet(t, r.Body.Bytes(), "body", "entry", "id")
+	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusBadRequest || !bytes.Contains(r.Body.Bytes(), []byte("笔记没有完成状态")) {
+		t.Fatalf("笔记完成应被拒绝: %d %s", r.Code, r.Body)
+	}
+	// 置顶。
+	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID+"/pin", []byte(`{"pinned":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte(`"pinned":true`)) {
+		t.Fatalf("置顶失败: %d %s", r.Code, r.Body)
+	}
+	// 过滤：kind 与 tag。
+	r = setupTestRequest(handler, "GET", "/api/entries?kind=note", nil, "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("周报思路")) {
+		t.Fatalf("kind 过滤失败: %d %s", r.Code, r.Body)
+	}
+	r = setupTestRequest(handler, "GET", "/api/entries?tag=%E5%B7%A5%E4%BD%9C", nil, "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("周报思路")) {
+		t.Fatalf("tag 过滤失败: %d %s", r.Code, r.Body)
+	}
+	// 删除。
+	r = setupTestRequest(handler, "DELETE", "/api/entries/"+noteID, nil, "127.0.0.1:1234", "localhost", "", cookie)
+	if r.Code != http.StatusOK {
+		t.Fatalf("删除笔记失败: %d %s", r.Code, r.Body)
+	}
+}
+
+// jsonGet 从响应 JSON 里按路径取字符串字段（仅测试用，路径必须存在且为字符串）。
+func jsonGet(t *testing.T, data []byte, path ...string) string {
+	t.Helper()
+	var current map[string]any
+	if err := json.Unmarshal(data, &current); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	for i, key := range path {
+		value, ok := current[key]
+		if !ok {
+			t.Fatalf("响应缺少字段 %q: %s", key, data)
+		}
+		if i == len(path)-1 {
+			str, isStr := value.(string)
+			if !isStr {
+				t.Fatalf("字段 %q 不是字符串: %v", key, value)
+			}
+			return str
+		}
+		if current, ok = value.(map[string]any); !ok {
+			t.Fatalf("字段 %q 不是对象: %v", key, value)
+		}
+	}
+	return ""
 }

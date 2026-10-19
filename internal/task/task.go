@@ -78,7 +78,9 @@ type Task struct {
 	Times     int           `json:"times,omitempty"`     // repeat：总次数（≥2）
 	Remaining int           `json:"remaining,omitempty"` // repeat：剩余次数（引擎维护）
 	Cron      string        `json:"cron,omitempty"`      // cron：表达式
-	CreatedAt time.Time     `json:"createdAt"`
+	// ScheduleRule 是 cron 任务的结构化来源，仅用于界面回填编辑；排程读的是 Cron。
+	ScheduleRule *ScheduleRule `json:"scheduleRule,omitempty"`
+	CreatedAt    time.Time     `json:"createdAt"`
 	// Next 是下次触发时刻，由引擎维护：Schedule 返回值中即可读，List 与回调中均已填充。
 	Next time.Time `json:"next,omitempty"`
 	// Heartbeat 标记该任务为心跳任务（到点把 HEARTBEAT.md 清单喂给 agent）。

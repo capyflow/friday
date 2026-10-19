@@ -485,6 +485,13 @@ const (
 	InputImage = "image"
 )
 
+// DefaultMaxTokens 是未填「最大输出 token」时的单次输出预算。
+//
+// 曾经是 1024，但推理模型（如 step-5-preview）的思考与正文共用这份预算，
+// 1024 会被思考整个吃光、返回 finish_reason=length 且正文为空——表现为
+// 「模型未返回任何文本内容」。4096 够多数日常回答，长计划类请求仍可在模型库里调高。
+const DefaultMaxTokens = 4096
+
 // ModelProfile 是模型库（provider.models）里的一条模型档案：不同服务商各带各的
 // 地址与密钥。激活（切换）时套用到 ProviderConfig 的扁平字段并热重建。
 type ModelProfile struct {
@@ -500,9 +507,21 @@ type ModelProfile struct {
 	APIKey string `yaml:"apiKey,omitempty" json:"apiKey,omitempty"`
 	// ContextWindow 上下文窗口 token 数（0 = 按模型名查表，未知型号默认 128k）。
 	ContextWindow int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// MaxTokens 单次输出最大 token（0 = 未填，按 DefaultMaxTokens 处理）。
+	// 推理模型的思考也计入这份预算，故它直接决定"能不能写出正文"。
+	MaxTokens int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// Inputs 支持的输入格式（text/image；text 恒隐含）。空 = 全支持——兼容
 	// 未声明能力的老配置，不因升级突然禁掉图片入口。
 	Inputs []string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+}
+
+// EffectiveMaxTokens 返回该条目的输出预算：未填（0 或负）按 DefaultMaxTokens 处理，
+// 让手改 YAML 与聊天改配置这些不走表单的入口也有可用值。
+func (m ModelProfile) EffectiveMaxTokens() int {
+	if m.MaxTokens <= 0 {
+		return DefaultMaxTokens
+	}
+	return m.MaxTokens
 }
 
 // EffectiveInputs 返回该条目声明支持的输入格式（返回值恒含 text）。
@@ -568,7 +587,8 @@ type ProviderConfig struct {
 	ContextWindow int `yaml:"contextWindow,omitempty"`
 	// Temperature 采样温度（可选，默认 0.7）。
 	Temperature float64 `yaml:"temperature"`
-	// MaxTokens 单次输出最大 token（可选，默认 1024）。
+	// MaxTokens 单次输出最大 token（未填 = DefaultMaxTokens 4096）。
+	// 由模型库激活条目投影而来（条目未填时落回默认），思考计入这份预算。
 	MaxTokens int `yaml:"maxTokens"`
 	// StreamUsage 流式请求是否索取 usage 统计（缺省开启）。
 	// 关掉后网页聊天的 token 账本会归零（仅"运行状态"页 ZeroCalls 计数可见），
@@ -725,6 +745,14 @@ func UpdateProviderModels(path string, p ProviderConfig) error {
 	// 整数键不能用 setMappingKey（它打 !!str 标签，回读 int 会失败）。
 	setMappingNode(prov, "contextWindow",
 		&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(p.ContextWindow), Tag: "!!int"})
+	// 输出预算同样落扁平值：条目可以留空（沿用现状），但重启后读的是这里，
+	// 不写回就会出现"运行态 8192、重启变回旧值"的分裂。
+	flatMaxTokens := p.MaxTokens
+	if flatMaxTokens <= 0 {
+		flatMaxTokens = DefaultMaxTokens
+	}
+	setMappingNode(prov, "maxTokens",
+		&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(flatMaxTokens), Tag: "!!int"})
 	if p.APIKey != "" {
 		setMappingKey(prov, "apiKey", p.APIKey)
 	}
@@ -751,6 +779,11 @@ func UpdateProviderModels(path string, p ProviderConfig) error {
 			item.Content = append(item.Content,
 				&yaml.Node{Kind: yaml.ScalarNode, Value: "contextWindow"},
 				&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(m.ContextWindow), Tag: "!!int"})
+		}
+		if m.MaxTokens > 0 {
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "maxTokens"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(m.MaxTokens), Tag: "!!int"})
 		}
 		if len(m.Inputs) > 0 {
 			inSeq := &yaml.Node{Kind: yaml.SequenceNode}
@@ -1050,7 +1083,7 @@ func (c *Config) applyDefaults() {
 		c.Provider.Temperature = 0.7
 	}
 	if c.Provider.MaxTokens == 0 {
-		c.Provider.MaxTokens = 1024
+		c.Provider.MaxTokens = DefaultMaxTokens
 	}
 	if c.Audio.SampleRate == 0 {
 		c.Audio.SampleRate = 16000
@@ -1182,6 +1215,9 @@ func (c *Config) Validate() error {
 		}
 		if m.ContextWindow < 0 {
 			return fmt.Errorf("config: provider.models[%s].contextWindow 不能为负", m.Name)
+		}
+		if m.MaxTokens < 0 {
+			return fmt.Errorf("config: provider.models[%s].maxTokens 不能为负", m.Name)
 		}
 		for _, in := range m.Inputs {
 			if in != InputText && in != InputImage {
