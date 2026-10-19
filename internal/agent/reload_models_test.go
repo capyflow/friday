@@ -191,3 +191,45 @@ func TestReloadProviderModelsRejects(t *testing.T) {
 		t.Fatalf("拒绝后配置不应变化: %+v → %+v", before, after)
 	}
 }
+
+// TestReloadProviderModelsMaxTokens 输出预算的投影：激活条目填了 maxTokens 就覆盖扁平值
+// 并热重建（改预算必须让 provider 重新构造才生效）；条目留空则沿用现状，
+// 不能把用户手写的 provider.maxTokens 悄悄打回默认。
+func TestReloadProviderModelsMaxTokens(t *testing.T) {
+	cfg, path, registry, brain, approver := reloadModelsHarness(t)
+
+	models := append([]config.ModelProfile{}, cfg.Snapshot().Provider.Models...)
+	models[0].MaxTokens = 8192
+	if err := ReloadProviderModels(cfg, path, registry, brain, approver, "a", models); err != nil {
+		t.Fatalf("ReloadProviderModels: %v", err)
+	}
+	if got := cfg.Snapshot().Provider.MaxTokens; got != 8192 {
+		t.Fatalf("条目 maxTokens 应投影到扁平字段: got %d", got)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "maxTokens: 8192") {
+		t.Fatalf("应写回 config.yaml:\n%s", data)
+	}
+
+	// 条目清空 maxTokens：沿用上一轮的 8192（而不是回落 4096），且扁平值要落盘，
+	// 否则重启后读 YAML 会掉回旧值——运行态与文件不能分裂。
+	models2 := append([]config.ModelProfile{}, cfg.Snapshot().Provider.Models...)
+	models2[0].MaxTokens = 0
+	if err := ReloadProviderModels(cfg, path, registry, brain, approver, "a", models2); err != nil {
+		t.Fatalf("ReloadProviderModels(留空): %v", err)
+	}
+	if got := cfg.Snapshot().Provider.MaxTokens; got != 8192 {
+		t.Fatalf("条目留空应沿用现状: got %d", got)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "maxTokens: 8192") {
+		t.Fatalf("沿用中的预算必须写回扁平字段，否则重启会掉值:\n%s", data)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("重载 config.yaml: %v", err)
+	}
+	if got := reloaded.Provider.MaxTokens; got != 8192 {
+		t.Fatalf("重启后应仍是 8192，实际 %d", got)
+	}
+}

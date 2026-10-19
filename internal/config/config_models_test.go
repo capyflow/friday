@@ -170,3 +170,72 @@ func TestSnapshotClonesModels(t *testing.T) {
 		t.Fatalf("快照修改不应影响原配置: %+v", cfg.Provider.Models)
 	}
 }
+
+// TestModelProfileMaxTokens 输出预算语义：条目未填按 DefaultMaxTokens，填了用填的；
+// 全局缺省同样是 DefaultMaxTokens（曾经的 1024 会让推理模型只出思考、没有正文）。
+func TestModelProfileMaxTokens(t *testing.T) {
+	if got := (ModelProfile{}).EffectiveMaxTokens(); got != DefaultMaxTokens {
+		t.Fatalf("未填应取默认: got %d want %d", got, DefaultMaxTokens)
+	}
+	if got := (ModelProfile{MaxTokens: -1}).EffectiveMaxTokens(); got != DefaultMaxTokens {
+		t.Fatalf("负值应回落默认: got %d", got)
+	}
+	if got := (ModelProfile{MaxTokens: 8192}).EffectiveMaxTokens(); got != 8192 {
+		t.Fatalf("填了就用填的: got %d", got)
+	}
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.Provider.MaxTokens != DefaultMaxTokens {
+		t.Fatalf("provider.maxTokens 缺省应为 %d，实际 %d", DefaultMaxTokens, cfg.Provider.MaxTokens)
+	}
+	bad := &Config{}
+	bad.applyDefaults()
+	bad.Provider.BaseURL, bad.Provider.Model = "https://a.example.com/v1", "m"
+	bad.Provider.Active = "a"
+	bad.Provider.Models = []ModelProfile{{Name: "a", BaseURL: "https://a.example.com/v1",
+		Model: "m", MaxTokens: -5}}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "maxTokens 不能为负") {
+		t.Fatalf("负 maxTokens 应被拒: %v", err)
+	}
+}
+
+// TestUpdateProviderModelsWritesMaxTokens 条目里的 maxTokens 要能落盘并回读；
+// 未填的条目不写这个键（保持 YAML 干净，运行时按默认处理）。
+func TestUpdateProviderModelsWritesMaxTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("provider:\n  name: openai\n  baseURL: https://a.example.com/v1\n  model: m-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := ProviderConfig{
+		Name: "openai", BaseURL: "https://a.example.com/v1", Model: "m-a", MaxTokens: DefaultMaxTokens,
+		Active: "a",
+		Models: []ModelProfile{
+			{Name: "a", BaseURL: "https://a.example.com/v1", Model: "m-a", MaxTokens: 8192},
+			{Name: "b", BaseURL: "https://b.example.com/v1", Model: "m-b"},
+		},
+	}
+	if err := UpdateProviderModels(path, p); err != nil {
+		t.Fatalf("UpdateProviderModels: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := yaml.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Provider.Models[0].MaxTokens != 8192 {
+		t.Fatalf("条目 maxTokens 应落盘回读: %s", data)
+	}
+	if back.Provider.Models[1].MaxTokens != 0 {
+		t.Fatalf("未填的条目不该冒出 maxTokens: %+v", back.Provider.Models[1])
+	}
+	if !strings.Contains(string(data), "maxTokens: 8192") {
+		t.Fatalf("YAML 里应看到显式值:\n%s", data)
+	}
+	// 扁平 provider.maxTokens 同步为投影后的运行值（重启读的是这里）。
+	if back.Provider.MaxTokens != DefaultMaxTokens {
+		t.Fatalf("扁平 maxTokens 应落运行值 %d，实际 %d:\n%s", DefaultMaxTokens, back.Provider.MaxTokens, data)
+	}
+}
