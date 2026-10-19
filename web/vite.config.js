@@ -16,6 +16,7 @@ export default defineConfig({
   },
   server: {
     // 本地前端开发：npm run dev 起在 5173，API 代理到正在运行的 Go 服务。
-    proxy: { '/api': 'http://localhost:8080' },
+    // 45678 是本机开发实例约定端口（见 USAGE.md「本地服务」），避开常被容器占用的 8080。
+    proxy: { '/api': 'http://localhost:45678' },
   },
 })

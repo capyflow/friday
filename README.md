@@ -189,8 +189,12 @@ docker compose down           # 停止（数据都在 ./data，不丢）
 go mod tidy
 export FRIDAY_API_KEY=sk-xxx               # 密钥环境变量（名与 config.yaml apiKeyEnv 一致）
 cp config.yaml.example config.yaml         # 编辑确认 baseURL/model
-go run ./cmd/robot                         # 或 go build -o friday ./cmd/robot && ./friday
+go run ./cmd/robot --port 45678            # 或 go build -o friday ./cmd/robot && ./friday --port 45678
 ```
+
+本机开发实例统一用 `--port 45678`，不占 8080 这类热门端口（Docker Desktop 常以 IPv6
+`*:8080` 暴露容器，浏览器 `localhost:8080` 会命中容器而不是 Friday）；浏览器地址写全
+`http://127.0.0.1:45678/`。规则与原因见 [USAGE.md](USAGE.md)「本地服务」。
 
 ### 前端（web/，Vue 3 + Vite）
 
@@ -201,7 +205,7 @@ go run ./cmd/robot                         # 或 go build -o friday ./cmd/robot 
 ```bash
 cd web
 npm ci           # 首次，使用 lock 文件固定依赖
-npm run dev      # 热更开发（http://localhost:5173，/api 代理到 8080 的 Go 服务）
+npm run dev      # 热更开发（http://localhost:5173，/api 代理到 45678 的 Go 服务）
 npm run check    # ESLint + 安全/聊天/审批/通知组件回归测试
 npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生效
 ```
@@ -215,7 +219,7 @@ npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生
 
 启动后两种入口：
 
-- **网页聊天**：浏览器打开 `http://localhost:8080/`（端口同管理后台）
+- **网页聊天**：浏览器打开 `http://127.0.0.1:45678/`（端口同管理后台，即上面 `--port` 指定的端口）
 - **终端 REPL**：直接在运行终端输入
 
 终端对话示例：

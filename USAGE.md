@@ -8,11 +8,18 @@
 
 ```bash
 export FRIDAY_API_KEY=sk-...
-go run ./cmd/robot --config config.yaml
+go run ./cmd/robot --config config.yaml --port 45678
 ```
 
-默认网页入口为 `http://127.0.0.1:8080/`；端口占用时使用 `--port 18080`。
-`--host` 可覆盖配置中的 `admin.host`，默认仅监听本机；桌面模式始终使用本机地址。
+服务默认监听 8080（`admin.port`，可用 `--port` 覆盖；`--host` 覆盖 `admin.host`，
+默认仅监听本机，桌面模式始终使用本机地址）。
+
+**本机日常开发实例统一使用 `--port 45678`**，不要占 8080 这类热门端口：8080 常被
+Docker Desktop 以 IPv6 `*:8080` 暴露的容器占用，浏览器 `localhost:8080` 会优先解析到
+`::1` 而命中那个容器，看起来像「Friday 页面 404」。要访问本机实例请在地址里写全
+`http://127.0.0.1:45678/`。同一份状态文件（`session.json`/`todos.json` 等，路径相对
+cwd）不能同时跑两台，并行验证请换 cwd 再换端口。
+`npm run dev` 的 `/api` 代理默认已指向 45678，与这台开发实例配套。
 
 管理员凭据由 `FRIDAY_ADMIN_USERNAME` / `FRIDAY_ADMIN_PASSWORD` 或
 `admin.username/password` 预置，两项须一起提供。新部署在本机页面创建管理员账号，不能使用默认密码登录；已有账号保持兼容。
@@ -48,7 +55,8 @@ npm run check
 npm run build
 ```
 
-开发服务默认在 `http://localhost:5173/`，将 `/api` 代理到本机8080的 Go 服务。
+开发服务默认在 `http://localhost:5173/`，将 `/api` 代理到本机 45678 的 Go 服务
+（即「本地服务」一节的开发实例端口；后端跑在别的端口时改 `web/vite.config.js` 的 proxy 目标）。
 构建将主页面与快捷面板分别内联到 `internal/admin/webdist/`；修改前端后须重新编译 Go。
 
 - 聊天支持普通、计划和目标三种模式，模式随请求体的 `mode` 字段传给后端，不再拼进消息文字。
