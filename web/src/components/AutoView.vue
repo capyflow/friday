@@ -23,8 +23,10 @@ const histories = reactive({})
 const expanded = ref(null)
 const historyBusy = ref(false)
 const historyError = ref('')
+const formOpen = ref(false)
 let poll
 let alive = true
+let returnFocus = null
 const title = computed(() => editing.value ? '编辑任务 #' + editing.value.id : '新建任务')
 
 function taskMode(t) { return t.cron ? 'cron' : t.interval ? 'repeat' : 'once' }
@@ -36,13 +38,31 @@ function plan(t) {
 }
 function channelName(channel) { return CHANNEL_OPTIONS.find(o => o.value === channel)?.label || channel || '全部可用通道' }
 function resetForm() { editing.value = null; Object.assign(draft, emptyDraft()); message.value = '' }
-async function edit(t) {
+// 取消/关闭/Escape/保存成功都走这里：清空草稿，下次打开总是干净表单，焦点交回打开它的按钮。
+function closeForm() {
+  formOpen.value = false
+  resetForm()
+  if (returnFocus?.isConnected) returnFocus.focus()
+  returnFocus = null
+}
+function cancel() { if (!saving.value) closeForm() }
+async function openCreate(e) {
+  if (saving.value) return
+  resetForm()
+  returnFocus = e?.currentTarget || null
+  formOpen.value = true
+  await nextTick()
+  textInput.value?.focus()
+}
+async function edit(t, e) {
   if (saving.value || busy.has(t.id)) return
   editing.value = t
   Object.assign(draft, { text: t.text, mode: taskMode(t), arg: t.when || t.next || '', interval: duration(t) || '',
     times: t.times || 3, every: t.cron || '', channel: t.channel || '', agent: t.kind === 'agent',
     goal: !!t.goal, maxSteps: t.maxSteps ?? '', maxTokens: t.maxTokens ?? '', skill: t.skill || '' })
   message.value = ''
+  returnFocus = e?.currentTarget || null
+  formOpen.value = true
   await nextTick()
   textInput.value?.focus()
 }
@@ -127,7 +147,7 @@ async function submit() {
     const r = await api(id ? 'PUT' : 'POST', id ? '/api/tasks/' + encodeURIComponent(id) : '/api/tasks', body)
     if (!alive) return
     toast(r.message || (id ? '未来安排已更新' : '任务已添加'))
-    resetForm()
+    closeForm()
     await refreshAll()
   } catch (e) { if (alive) message.value = e.message } finally { saving.value = false }
 }
@@ -149,7 +169,7 @@ async function remove(t) {
     const r = await api('DELETE', '/api/tasks/' + encodeURIComponent(t.id))
     if (!alive) return
     toast(r.message || '未来安排已取消')
-    if (editing.value?.id === t.id) resetForm()
+    if (editing.value?.id === t.id) closeForm()
     await refreshAll()
   } catch (e) { if (alive) toast('取消失败：' + e.message, true) } finally { busy.delete(t.id) }
 }
@@ -174,31 +194,12 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
   <section class="view" id="view-auto">
     <div class="view-inner">
       <h2>自动化 <span class="count">{{ tasks.length ? tasks.length + ' 条' : '' }}</span></h2>
-      <div class="panel">
-        <div class="panel-title">{{ title }}</div>
-        <p class="meta">编辑、暂停和取消只影响未来安排，已经入队或处理中的执行会保留。</p>
-        <form class="task-form" :aria-busy="saving" @submit.prevent="submit">
-          <label class="task-wide">任务内容<input ref="textInput" v-model="draft.text" aria-label="任务内容" required :disabled="saving" placeholder="如：提醒我喝水"></label>
-          <label>定时方式<SelectBox v-model="draft.mode" :options="MODE_OPTIONS" aria-label="定时方式" :disabled="saving" /></label>
-          <label v-if="draft.mode === 'once'">触发时间<input v-model="draft.arg" aria-label="触发时间" required :disabled="saving" placeholder="10分钟 / 2026-10-11T08:00:00+08:00"></label>
-          <label v-if="draft.mode === 'repeat'">间隔<input v-model="draft.interval" aria-label="间隔" required :disabled="saving" placeholder="如：10分钟"></label>
-          <label v-if="draft.mode === 'repeat'">总次数<input v-model="draft.times" aria-label="总次数" type="number" min="2" step="1" required :disabled="saving"></label>
-          <label v-if="draft.mode === 'cron'">循环规则<input v-model="draft.every" aria-label="循环规则" required :disabled="saving" placeholder="每天早上8点 / 0 8 * * *"></label>
-          <label>通知通道<SelectBox v-model="draft.channel" :options="CHANNEL_OPTIONS" aria-label="通知通道" :disabled="saving" /></label>
-          <label class="task-check"><input v-model="draft.agent" type="checkbox" :disabled="saving" @change="onAgentToggle">智能任务：到点执行指令</label>
-          <label v-if="draft.agent" class="task-check"><input v-model="draft.goal" type="checkbox" :disabled="saving">目标：多轮自主推进直到办成</label>
-          <template v-if="draft.agent && draft.goal">
-            <label>步数上限<input v-model="draft.maxSteps" type="number" min="1" step="1" aria-label="目标步数上限" :disabled="saving" placeholder="默认按配置"></label>
-            <label>Token 预算<input v-model="draft.maxTokens" type="number" min="1" step="1000" aria-label="目标 token 预算" :disabled="saving" placeholder="默认按配置"></label>
-            <label>技能（可留空）<input v-model="draft.skill" aria-label="目标钉住的技能" :disabled="saving" placeholder="见设置 → 技能"></label>
-          </template>
-          <p v-if="editing" class="meta task-wide">当前{{ editing.status === 'paused' ? '已暂停' : '启用' }}，原计划下次 {{ fmtDT(editing.next) }}。修改定时规则后重新计算计划及总次数；正文或通道修改保留剩余次数。</p>
-          <p v-if="message" class="msg err task-wide" role="alert">{{ message }}</p>
-          <div class="task-actions task-wide">
-            <button class="btn primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : editing ? '保存未来安排' : '添加任务' }}</button>
-            <button v-if="editing" class="btn" type="button" :disabled="saving" @click="resetForm">放弃编辑</button>
-          </div>
-        </form>
+      <div class="panel task-new">
+        <div class="tn-txt">
+          <div class="panel-title">新建任务</div>
+          <p class="meta">编辑、暂停和取消只影响未来安排，已经入队或处理中的执行会保留。</p>
+        </div>
+        <button class="btn primary" type="button" :disabled="saving" @click="openCreate($event)">添加任务</button>
       </div>
       <div class="task-list">
         <article v-for="t in tasks" :key="t.id" class="panel task-card" :data-task-id="t.id">
@@ -211,7 +212,7 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
             <button v-if="t.goal" class="btn" type="button" @click="viewRuns('goal-' + t.id)">查看执行轮次</button>
             <button v-if="t.goal && goals[t.id]?.running" class="btn" type="button" @click="stopGoal(t)">停止这次推进</button>
             <template v-if="!t.todoId">
-              <button class="btn" :disabled="busy.has(t.id) || saving" @click="edit(t)">编辑</button>
+              <button class="btn" :disabled="busy.has(t.id) || saving" @click="edit(t, $event)">编辑</button>
               <button class="btn" :disabled="busy.has(t.id) || saving && editing?.id === t.id" @click="changeStatus(t)">{{ t.status === 'paused' ? '恢复' : '暂停' }}</button>
               <button class="btn danger" :disabled="busy.has(t.id) || saving && editing?.id === t.id" @click="remove(t)">取消</button>
             </template>
@@ -232,10 +233,52 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
         <EmptyState v-if="!tasks.length" class="panel" kind="schedule" :size="96">当前没有未来安排，已触发任务的执行结果可在通知中心查看。</EmptyState>
       </div>
     </div>
+    <Teleport to="body">
+      <div v-if="formOpen" class="dlg-mask" @click.self="cancel">
+        <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="taskDialogTitle" @keydown.esc="cancel">
+          <form class="dlg-form" :aria-busy="saving" @submit.prevent="submit">
+            <header class="dlg-head">
+              <h3 id="taskDialogTitle" class="dlg-title">{{ title }}</h3>
+              <button type="button" class="set-close" aria-label="关闭任务表单" @click="cancel">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                     stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </header>
+            <div class="dlg-body task-form">
+              <label class="task-wide">任务内容<input ref="textInput" v-model="draft.text" aria-label="任务内容" required :disabled="saving" placeholder="如：提醒我喝水"></label>
+              <label>定时方式<SelectBox v-model="draft.mode" :options="MODE_OPTIONS" aria-label="定时方式" :disabled="saving" /></label>
+              <label v-if="draft.mode === 'once'">触发时间<input v-model="draft.arg" aria-label="触发时间" required :disabled="saving" placeholder="10分钟 / 2026-10-11T08:00:00+08:00"></label>
+              <label v-if="draft.mode === 'repeat'">间隔<input v-model="draft.interval" aria-label="间隔" required :disabled="saving" placeholder="如：10分钟"></label>
+              <label v-if="draft.mode === 'repeat'">总次数<input v-model="draft.times" aria-label="总次数" type="number" min="2" step="1" required :disabled="saving"></label>
+              <label v-if="draft.mode === 'cron'">循环规则<input v-model="draft.every" aria-label="循环规则" required :disabled="saving" placeholder="每天早上8点 / 0 8 * * *"></label>
+              <label>通知通道<SelectBox v-model="draft.channel" :options="CHANNEL_OPTIONS" aria-label="通知通道" :disabled="saving" /></label>
+              <label class="task-check"><input v-model="draft.agent" type="checkbox" :disabled="saving" @change="onAgentToggle">智能任务：到点执行指令</label>
+              <label v-if="draft.agent" class="task-check"><input v-model="draft.goal" type="checkbox" :disabled="saving">目标：多轮自主推进直到办成</label>
+              <template v-if="draft.agent && draft.goal">
+                <label>步数上限<input v-model="draft.maxSteps" type="number" min="1" step="1" aria-label="目标步数上限" :disabled="saving" placeholder="默认按配置"></label>
+                <label>Token 预算<input v-model="draft.maxTokens" type="number" min="1" step="1000" aria-label="目标 token 预算" :disabled="saving" placeholder="默认按配置"></label>
+                <label>技能（可留空）<input v-model="draft.skill" aria-label="目标钉住的技能" :disabled="saving" placeholder="见设置 → 技能"></label>
+              </template>
+              <p v-if="editing" class="meta task-wide">当前{{ editing.status === 'paused' ? '已暂停' : '启用' }}，原计划下次 {{ fmtDT(editing.next) }}。修改定时规则后重新计算计划及总次数；正文或通道修改保留剩余次数。</p>
+            </div>
+            <footer class="dlg-foot">
+              <p v-if="message" class="msg err" role="alert">{{ message }}</p>
+              <div class="dlg-btns">
+                <button class="btn" type="button" :disabled="saving" @click="cancel">取消</button>
+                <button class="btn primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '确认' }}</button>
+              </div>
+            </footer>
+          </form>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>
 
 <style scoped>
+.task-new { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.task-new .panel-title { margin-bottom: 4px; }
+.task-new .meta { margin: 0; }
 .task-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
 .task-form label { display: flex; flex-direction: column; gap: 8px; font-size: 14px; min-width: 0; }
 .task-form input { width: 100%; box-sizing: border-box; }
@@ -243,7 +286,7 @@ onBeforeUnmount(() => { alive = false; clearInterval(poll) })
 .task-check input { width: auto; }
 .task-wide { grid-column: 1 / -1; }
 .task-actions, .task-header, .task-details { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-.task-actions .btn { min-height: 44px; }
+.task-actions .btn, .dlg-btns .btn { min-height: 44px; }
 .task-list { display: grid; gap: 16px; margin-top: 20px; }
 .task-header strong { overflow-wrap: anywhere; flex: 1; }
 .task-details { margin: 12px 0 16px; }
