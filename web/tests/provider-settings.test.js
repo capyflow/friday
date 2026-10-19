@@ -10,8 +10,8 @@ const LIB = {
   active: 'step-5',
   globalWindowTokens: 0,
   models: [
-    { name: 'step-5', baseURL: 'https://api.stepfun.com/step_plan/v1', model: 'step-5-preview', keySet: true, contextWindow: 128000, inputs: ['text', 'image'] },
-    { name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat', keySet: false, contextWindow: 0, inputs: ['text'] },
+    { name: 'step-5', baseURL: 'https://api.stepfun.com/step_plan/v1', model: 'step-5-preview', keySet: true, contextWindow: 128000, maxTokens: 8192, inputs: ['text', 'image'] },
+    { name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat', keySet: false, contextWindow: 0, maxTokens: 0, inputs: ['text'] },
   ],
 }
 const testOk = { ok: true, text: { status: 'supported', message: '文本连接测试通过' }, vision: { status: 'not_tested', message: '未测试图片理解' } }
@@ -123,5 +123,27 @@ describe('模型库设置', () => {
     await clickIn(rows()[0], '删除')
     expect(rows()).toHaveLength(1)
     expect(inRow(rows()[0], 'input[type="radio"]').element.checked).toBe(true)
+  })
+
+  it('最大输出 token：回填条目值，留空按 4096 提交，填了用填的，新行默认 4096', async () => {
+    await show()
+    const budget = row => row.findAll('input[type="number"]')[1] // [0] 是上下文窗口
+    expect(budget(rows()[0]).element.value).toBe('8192')
+    expect(budget(rows()[1]).element.value).toBe('')
+    expect(budget(rows()[1]).attributes('placeholder')).toContain('4096')
+
+    await clickSave()
+    const posted = () => api.mock.calls
+      .filter(c => c[0] === 'POST' && c[1] === '/api/provider/models').pop()
+    expect(posted()[2].models[0].maxTokens).toBe(8192)
+    expect(posted()[2].models[1].maxTokens).toBe(4096) // 留空 → 按默认提交
+
+    await budget(rows()[1]).setValue('16000')
+    await clickSave()
+    expect(posted()[2].models[1].maxTokens).toBe(16000) // 填了就用填的
+
+    await wrapper.findAll('button').find(b => b.text() === '＋ 添加模型').trigger('click')
+    await flushPromises()
+    expect(budget(rows()[2]).element.value).toBe('4096') // 新行自带默认
   })
 })
