@@ -92,7 +92,7 @@
   `tests/empty-art.test.js` 校验 kind 与各页调用点对齐
 - **设置弹窗** — 左侧分组导航（模型与人格 / 能力与行为 / 运行观测 / 数据与系统）+ 右侧内容；
   `.set-pane` 默认 640px，运行状态 / 调用轨迹 / 记忆这类数据密集页标 `wide` 放开到内容区宽度。
-  侧栏只留聊天 / 自动化 / 待办 / 通知，观测与记忆页收进设置；`store.settingsSection` 做一次性深链定位
+  侧栏只留聊天 / 自动化 / 闪念 / 通知，观测与记忆页收进设置；`store.settingsSection` 做一次性深链定位
   （自动化「查看执行轮次」→ 调用轨迹并带会话过滤，过滤 chip 放 `.trace-bar` 行内而非页头）
 - **模型 chip + 弹层** — 与上下文 chip 同形（`.ctx-btn model-btn`，模型名 110px 截断），
   点开列模型库（当前项 `.selected`、仅文本/支持图片与窗口标注），点选即 `POST /api/provider/activate`
