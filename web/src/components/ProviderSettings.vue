@@ -1,8 +1,12 @@
 <script setup>
-// 模型服务（模型库）：多条模型档案（地址/密钥/上下文窗口/输入格式），radio 选激活，
-// 全量保存即热生效。密钥不回显——留空表示保留该条目已存密钥。
+// 模型服务（模型库）：多条模型档案（地址/密钥/上下文窗口/最大输出/输入格式），
+// radio 选激活，全量保存即热生效。密钥不回显——留空表示保留该条目已存密钥。
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
+
+// 最大输出 token 的兜底值：留空即按它提交（与后端 config.DefaultMaxTokens 同口径）。
+// 推理模型的思考也计入这份预算，给小了会出现「只有思考、没有正文」。
+const DEFAULT_MAX_TOKENS = 4096
 
 const emit = defineEmits(['saved'])
 
@@ -25,6 +29,7 @@ function toRow(x) {
     model: x.model || '',
     apiKey: '',
     window: x.contextWindow ? String(x.contextWindow) : '',
+    maxTokens: x.maxTokens ? String(x.maxTokens) : '',
     image: !x.inputs || x.inputs.includes('image'),
     keySet: !!x.keySet,
     testing: false,
@@ -42,7 +47,10 @@ async function load() {
   models.splice(0, models.length, ...(data.models || []).map(toRow))
 }
 function addRow() {
-  models.push({ name: '', baseURL: '', model: '', apiKey: '', window: '', image: true, keySet: false, testing: false, testMsg: null, _open: true })
+  models.push({
+    name: '', baseURL: '', model: '', apiKey: '', window: '', maxTokens: String(DEFAULT_MAX_TOKENS),
+    image: true, keySet: false, testing: false, testMsg: null, _open: true,
+  })
 }
 function hostOf(x) {
   try { return new URL(x.baseURL).host } catch { return ''
@@ -53,16 +61,19 @@ function removeRow(i) {
   models.splice(i, 1)
   if (name && activeName.value === name) activeName.value = models[0]?.name || ''
 }
+// 收成非负整数：空/NaN/负数 → 0（由调用方决定兜底）。
+function intOf(v) {
+  const n = typeof v === 'number' ? v : Number(String(v).trim())
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+}
 function collect() {
   return models.map(r => ({
     name: r.name.trim(),
     baseURL: r.baseURL.trim(),
     model: r.model.trim(),
     apiKey: r.apiKey.trim(),
-    // type="number" 的 v-model 会给数值型，统一收成非负整数（空/NaN = 0 自动识别）
-    contextWindow: typeof r.window === 'number'
-      ? Math.max(0, Math.floor(r.window))
-      : (r.window.trim() === '' ? 0 : Math.max(0, Math.floor(Number(r.window)) || 0)),
+    contextWindow: intOf(r.window), // 0 = 按模型名自动识别
+    maxTokens: intOf(r.maxTokens) || DEFAULT_MAX_TOKENS, // 留空按默认提交
     inputs: r.image ? ['text', 'image'] : ['text'],
   }))
 }
@@ -165,9 +176,16 @@ onMounted(load)
               <input v-model="x.window" type="number" min="0" step="1" inputmode="numeric" @input="x.testMsg = null" placeholder="留空自动识别">
             </label>
           </div>
-          <label class="pm-check" title="支持图片输入时聊天页才开放图片上传">
-            <input v-model="x.image" type="checkbox" @change="x.testMsg = null"> 支持图片输入
-          </label>
+          <div class="pm-grid">
+            <label class="mr-field"><span>最大输出 token</span>
+              <input v-model="x.maxTokens" type="number" min="0" step="1" inputmode="numeric"
+                     aria-label="最大输出 token" @input="x.testMsg = null"
+                     :placeholder="`留空按 ${DEFAULT_MAX_TOKENS}`">
+            </label>
+            <label class="pm-check self-center" title="支持图片输入时聊天页才开放图片上传">
+              <input v-model="x.image" type="checkbox" @change="x.testMsg = null"> 支持图片输入
+            </label>
+          </div>
           <div v-if="x.testMsg" class="pm-test meta" :class="{ err: !x.testMsg.ok }" role="status">
             {{ x.testMsg.text }}
             <span v-if="x.testMsg.vision" :class="{ err: x.testMsg.visionBad }">；{{ x.testMsg.vision }}</span>
@@ -180,7 +198,8 @@ onMounted(load)
       <button class="btn primary" type="button" :disabled="busy" @click="save">{{ busy ? '正在保存…' : '保存并生效' }}</button>
     </div>
     <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-    <p class="set-note">点选 radio 的模型在保存后立即生效；上下文窗口留空按模型名自动识别<template v-if="globalWindow">（当前设了全局覆盖 context.windowTokens={{ globalWindow }}，优先于此处）</template>。</p>
+    <p class="set-note">点选 radio 的模型在保存后立即生效；上下文窗口留空按模型名自动识别<template v-if="globalWindow">（当前设了全局覆盖 context.windowTokens={{ globalWindow }}，优先于此处）</template>。
+      最大输出 token 留空按 {{ DEFAULT_MAX_TOKENS }} 提交：思考型模型的「思考」也计入这份预算，给小了会出现只有思考、没有正文（回复中断）。</p>
   </div>
 </template>
 
@@ -215,6 +234,7 @@ html[data-theme="dark"] .pm-head:hover { background: rgba(255,255,255,.05); }
 @media (max-width: 640px) { .pm-grid { grid-template-columns: 1fr; } }
 .pm-check { display: flex !important; align-items: center; gap: 8px; font-size: 13px;
   color: var(--muted-fg); cursor: pointer; }
+.pm-check.self-center { align-self: center; }
 .pm-foot { margin-top: 14px; }
 .pm-foot .btn.primary { margin-left: auto; }
 .pm-test { padding: 0; }

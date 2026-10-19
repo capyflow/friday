@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/capyflow/vortexagent/llm"
@@ -453,6 +454,42 @@ func turnUsage(id string) *trace.TurnUsage {
 	return req.Usage()
 }
 
+// chatErrorMessage 把后端/服务商的错误翻成用户能照着做的一句话。
+//
+// 之前所有失败都显示「出了点小问题，稍后再试试吧」，看不出是预算不够、密钥坏了
+// 还是服务商限流，所以按错误特征分派；认不出来的把原始错误一起带出来，
+// 至少能拿去搜。框架错误带 "agent: 第 N 轮调用失败: " 前缀，剥掉只留原因。
+func chatErrorMessage(err error) string {
+	msg := err.Error()
+	cause := msg
+	if i := strings.Index(cause, ": "); i >= 0 && strings.HasPrefix(cause, "agent:") {
+		cause = cause[strings.Index(cause, ": ")+2:]
+	}
+	low := strings.ToLower(cause)
+	switch {
+	case strings.Contains(cause, "模型未返回任何文本内容"):
+		return "模型这一轮只生成了思考、正文是空的。思考与正文共用「最大输出 token」这份预算，" +
+			"当前预算不够写出完整回答——到「设置 → 模型服务」把该模型的「最大输出 token」调大（如 8192）再重试。"
+	case strings.Contains(low, "support image input") || strings.Contains(low, "model_incompatible"):
+		return "当前配置的模型不支持图片输入，请在 config.yaml 更换支持视觉的模型"
+	case strings.Contains(low, "context length") || strings.Contains(low, "context_length_exceeded") ||
+		strings.Contains(cause, "上下文"):
+		return "这轮对话超出了模型的上下文窗口。可以先「清除上下文」，或在「设置 → 模型服务」核对该模型的上下文窗口设置。"
+	case strings.Contains(low, "401") || strings.Contains(low, "invalid api key") ||
+		strings.Contains(low, "authentication"):
+		return "模型服务拒绝了当前密钥。到「设置 → 模型服务」重新填写 API 密钥（或检查该服务商的密钥是否已失效）。"
+	case strings.Contains(low, "429") || strings.Contains(low, "rate limit") ||
+		strings.Contains(low, "quota") || strings.Contains(low, "insufficient"):
+		return "模型服务限流或额度不足。稍等片刻再试，或检查服务商账户余额/配额。"
+	case strings.Contains(low, "timeout") || strings.Contains(low, "dial tcp") ||
+		strings.Contains(low, "connection refused") || strings.Contains(low, "no such host") ||
+		strings.Contains(low, "eof"):
+		return "连不上模型服务（" + logx.Truncate(cause, 120) + "）。检查「设置 → 模型服务」里的 API 地址与本机网络后重试。"
+	default:
+		return "这轮回复失败了：" + logx.Truncate(cause, 200)
+	}
+}
+
 // stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、
 // 订阅思考过程事件、桥接暂停，ask 在独立上下文中执行对话并返回完整回答。
 // partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）；
@@ -473,6 +510,9 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 	}
 
 	var wmu sync.Mutex // delta 回调与事件泵并发写流
+	// 写失败 = 浏览器那侧的连接已经没了。用它（而不是 rctx.Err()）区分
+	// "客户端断开"与"模型出错"：rctx 在对话结束时被我们主动 cancel，判不出来源。
+	var writeFailed atomic.Bool
 	write := func(v any) error {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -481,6 +521,7 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 		wmu.Lock()
 		defer wmu.Unlock()
 		if _, err := fmt.Fprintf(gin.Writer, "data: %s\n\n", b); err != nil {
+			writeFailed.Store(true)
 			return err
 		}
 		flusher.Flush()
@@ -544,31 +585,30 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 	<-pumpDone
 
 	if err != nil {
-		if rctx.Err() != nil {
-			// 被暂停（而非客户端断开）：保存现场并告知前端可继续。
-			c.mu.Lock()
-			pausing := run.pausing
-			if pausing {
-				c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed,
-					Skill: sink.Name()}
-				c.savePausedLocked()
-			}
-			c.mu.Unlock()
-			if pausing {
-				logx.Printf(rctx, "[网页] 对话被暂停（已生成 %d 字，可继续）", len([]rune(streamed)))
-				trace.Record(rctx, "pause", "对话被用户暂停，已生成 %d 字可继续", len([]rune(streamed)))
-				_ = write(map[string]any{"paused": true, "partial": streamed})
-				_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
-			}
+		c.mu.Lock()
+		pausing := run.pausing
+		if pausing {
+			c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed,
+				Skill: sink.Name()}
+			c.savePausedLocked()
+		}
+		c.mu.Unlock()
+		switch {
+		case pausing:
+			logx.Printf(rctx, "[网页] 对话被暂停（已生成 %d 字，可继续）", len([]rune(streamed)))
+			trace.Record(rctx, "pause", "对话被用户暂停，已生成 %d 字可继续", len([]rune(streamed)))
+			_ = write(map[string]any{"paused": true, "partial": streamed})
+			_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
+			return nil
+		case writeFailed.Load():
+			// 浏览器已断开：没有连接可发错误帧，记一条日志收尾即可。
+			logx.Printf(rctx, "[网页] 连接已断开，本轮对话中止: %v", err)
+			trace.End(logx.IDFrom(rctx), err.Error())
 			return nil
 		}
 		logx.Printf(rctx, "agent 出错: %v", err)
 		trace.End(logx.IDFrom(rctx), err.Error())
-		errMsg := "出了点小问题，稍后再试试吧"
-		if strings.Contains(err.Error(), "support image input") || strings.Contains(err.Error(), "model_incompatible") {
-			errMsg = "当前配置的模型不支持图片输入，请在 config.yaml 更换支持视觉的模型"
-		}
-		_ = write(map[string]any{"done": true, "error": errMsg, "turn": turnUsage(logx.IDFrom(rctx))})
+		_ = write(map[string]any{"done": true, "error": chatErrorMessage(err), "turn": turnUsage(logx.IDFrom(rctx))})
 		return nil
 	}
 	// 增量为空但拿到了完整回答（非流式路径）：补发一次，保证页面有内容。

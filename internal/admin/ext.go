@@ -624,20 +624,31 @@ type modelView struct {
 	Model         string   `json:"model"`
 	KeySet        bool     `json:"keySet"`
 	ContextWindow int      `json:"contextWindow"`
+	MaxTokens     int      `json:"maxTokens"`
 	Inputs        []string `json:"inputs"`
 }
 
 // newModelView 组装条目视图。激活条目的密钥可来自全局扁平字段（库内条目省写、
-// 沿用现状的形态），故并上 globalKeySet。
-func newModelView(m config.ModelProfile, active, globalKeySet bool) modelView {
+// 沿用现状的形态），故并上 globalKeySet；输出预算同理——条目未填时激活条目显示
+// 扁平值（那才是真正生效的预算），非激活条目按默认值展示，避免保存时把用户手写的
+// provider.maxTokens 悄悄打成 4096。
+func newModelView(m config.ModelProfile, active, globalKeySet bool, flatMaxTokens int) modelView {
 	inputs := m.EffectiveInputs()
 	keySet := m.APIKey != "" || m.APIKeyEnv != ""
 	if active && globalKeySet {
 		keySet = true
 	}
+	maxTokens := m.MaxTokens
+	if maxTokens <= 0 {
+		if active && flatMaxTokens > 0 {
+			maxTokens = flatMaxTokens
+		} else {
+			maxTokens = config.DefaultMaxTokens
+		}
+	}
 	return modelView{
 		Name: m.Name, BaseURL: m.BaseURL, Model: m.Model,
-		KeySet: keySet, ContextWindow: m.ContextWindow, Inputs: inputs,
+		KeySet: keySet, ContextWindow: m.ContextWindow, MaxTokens: maxTokens, Inputs: inputs,
 	}
 }
 
@@ -654,12 +665,13 @@ func (s *Server) handleProviderModelsGet(ctx *vhttp.Context) error {
 			BaseURL:       cfg.Provider.BaseURL,
 			Model:         cfg.Provider.Model,
 			ContextWindow: cfg.Provider.ContextWindow,
+			MaxTokens:     cfg.Provider.MaxTokens,
 		}}
 	}
 	globalKeySet := cfg.ProviderAPIKey() != ""
 	views := make([]modelView, 0, len(models))
 	for _, m := range models {
-		views = append(views, newModelView(m, m.Name == active, globalKeySet))
+		views = append(views, newModelView(m, m.Name == active, globalKeySet, cfg.Provider.MaxTokens))
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"active": active, "models": views,
