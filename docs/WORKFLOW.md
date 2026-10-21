@@ -206,6 +206,11 @@ workflow:
 
 ## 十二、验收判据
 
+本地 T0 验证：先运行 `cd wfhost && npm ci && npm run check`，对 inventory fixture
+执行 TypeScript、lint 与元数据预检；再从仓库根目录运行
+`go test -race ./internal/workflow` 和 `go vet ./internal/workflow`。
+`wf-host` 目前提供 `check`、`run`、`version` 子命令，没有 `--selftest` 子命令。
+
 1. 故意写错类型 / 用 `fetch` / 把命令名拼进变量 → 只有诊断，**零副作用**。
 2. 确认卡的阶段节点数 = `phase` 数；命令全集逐条去重列出；脚本可展开原文。
 3. 6 路扇出的评审流程：墙钟 ≈ 最慢单路（对齐第二节实测的 12 路 401ms），token 全落 `wf:<id>` 桶。
