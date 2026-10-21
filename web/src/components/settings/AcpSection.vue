@@ -23,7 +23,7 @@ function show(t, ok) {
 
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '',
-           enabled: true, turnTimeoutSeconds: 0, degradeResume: false, testing: false }
+           enabled: true, turnTimeoutSeconds: 0, degradeResume: false, version: '', testing: false }
 }
 function toAgent(a) {
   return {
@@ -35,6 +35,7 @@ function toAgent(a) {
     enabled: a.enabled,
     turnTimeoutSeconds: Math.max(0, Math.floor(Number(a.turnTimeoutSeconds) || 0)),
     degradeResume: a.degradeResume,
+    version: a.version || '',   // 安装时登记的版本戳（M-4），保存时原样带回
   }
 }
 function parseEnv(text) {
@@ -49,11 +50,19 @@ function envText(env) {
   return Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n')
 }
 
-async function loadCatalog() {
+const refreshing = ref(false)
+async function loadCatalog(refresh) {
   try {
-    const r = await api('GET', '/api/acp/catalog')
+    const r = await api('GET', '/api/acp/catalog' + (refresh ? '?refresh=1' : ''))
     catalog.value = r.catalog || []
   } catch { /* 目录加载失败不阻塞主配置 */ }
+}
+async function refreshCatalog() {
+  refreshing.value = true
+  try {
+    await loadCatalog(true)
+    show('官方目录已刷新', true)
+  } finally { refreshing.value = false }
 }
 
 // 安装目录条目：后端装完会自动注册进清单（写回配置并热生效），
@@ -63,11 +72,15 @@ async function installAgent(entry) {
   try {
     const r = await api('POST', '/api/acp/install', { id: entry.id })
     await loadCatalog()
-    if (r.agent && !cfg.agents.some(a => a.name === r.agent.name)) {
-      cfg.agents.push({
-        ...blankAgent(), name: r.agent.name, command: r.agent.command,
-        argsText: (r.agent.args || []).join(', '),
-      })
+    if (r.agent) {
+      const existing = cfg.agents.find(a => a.name === r.agent.name)
+      const installed = {
+        command: r.agent.command,
+        argsText: (r.agent.args || []).join(', '), version: r.agent.version || '',
+      }
+      if (existing) Object.assign(existing, installed)
+      else cfg.agents.push({ ...blankAgent(), ...installed, name: r.agent.name,
+        envText: envText(r.agent.env) })
     }
     show(r.message || '安装完成', true)
   } catch (e) {
@@ -83,9 +96,11 @@ function appendTemplate(entry) {
     return
   }
   const t = entry.template
+  // 只有模板命令就是被探测的 CLI 时才回填绝对路径；npx/uvx 适配器模板要保留启动器。
+  const command = t.command === entry.check ? (entry.path || t.command) : t.command
   cfg.agents.push({
     ...blankAgent(), name: t.name,
-    command: entry.path || t.command,
+    command,
     argsText: (t.args || []).join(', '),
   })
 }
@@ -108,6 +123,7 @@ async function load() {
       argsText: (x.args || []).join(', '), envText: envText(x.env),
       workspace: x.workspace || '', enabled: x.enabled !== false,
       turnTimeoutSeconds: x.turnTimeoutSeconds || 0, degradeResume: !!x.degradeResume,
+      version: x.version || '',
     }))
   } catch (e) { show(e.message, false) }
 }
@@ -166,28 +182,37 @@ onMounted(load)
     </div>
 
     <div class="acp-catalog">
-      <div class="acp-catalog-head">安装新 agent</div>
+      <div class="acp-catalog-head">安装新 agent
+        <button class="btn sm" type="button" style="margin-left:8px"
+                :disabled="refreshing" @click="refreshCatalog">
+          {{ refreshing ? '刷新中…' : '刷新官方目录' }}</button>
+      </div>
       <div class="acp-catalog-grid">
         <div v-for="c in catalog" :key="c.id" class="acp-cat-card">
           <div class="acp-cat-top">
-            <b>{{ c.name }}</b>
-            <span class="acp-cat-badge" :class="c.installed ? 'ok' : 'no'">
-              {{ c.installed ? '已安装' : '未安装' }}
-            </span>
+            <b>{{ c.name }}<span v-if="c.version" class="acp-cat-ver"> v{{ c.version }}</span></b>
+            <span v-if="c.supported === false" class="acp-cat-badge no">本平台无分发包</span>
+            <span v-else-if="c.updateAvailable" class="acp-cat-badge warn">可升级</span>
+            <span v-else-if="c.registered" class="acp-cat-badge ok">已添加</span>
+            <span v-else-if="c.installed" class="acp-cat-badge ok">已安装</span>
+            <span v-else class="acp-cat-badge no">未安装</span>
           </div>
           <div class="meta">{{ c.description }}</div>
           <div class="acp-cat-acts">
-            <button v-if="!c.installed" class="btn sm primary" type="button"
+            <button v-if="c.supported === false" class="btn sm" type="button" disabled>不可安装</button>
+            <button v-else-if="c.updateAvailable" class="btn sm primary" type="button"
                     :disabled="installing === c.id" @click="installAgent(c)">
-              {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}
-            </button>
-            <button v-if="c.installed" class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
+              {{ installing === c.id ? '升级中…' : '一键升级' }}</button>
+            <button v-else-if="!c.installed" class="btn sm primary" type="button"
+                    :disabled="installing === c.id" @click="installAgent(c)">
+              {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}</button>
+            <button v-else-if="!c.registered" class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
           </div>
-          <div v-if="c.installed" class="meta mono acp-cat-path">{{ c.path }}</div>
+          <div v-if="c.installed && c.path" class="meta mono acp-cat-path">{{ c.path }}</div>
         </div>
       </div>
-      <div class="set-note">安装走各 agent 的官方命令（固定内置，可在执行前自行核对）；
-      安装 ≠ 登录——装完用行内「测试」做握手诊断，未登录会在报错里说明。</div>
+      <div class="set-note">目录 = 内置精选 + 官方 ACP 注册表（与 Zed 同源，上游上架新 agent 点「刷新官方目录」即可见）。
+      安装走各 agent 的官方分发；安装 ≠ 登录——装完用清单行的「测试」做握手诊断，未登录会在报错里给指引。</div>
     </div>
 
     <div class="acp-agents">
@@ -239,6 +264,8 @@ onMounted(load)
 .acp-cat-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
 .acp-cat-badge.ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
 .acp-cat-badge.no { background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+.acp-cat-badge.warn { background: rgba(217, 119, 6, .14); color: #D97706; }
+.acp-cat-ver { font-weight: 450; color: var(--muted-fg); font-size: 11px; }
 .acp-cat-acts { display: flex; gap: 8px; margin-top: 2px; }
 .acp-cat-path { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-global { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }

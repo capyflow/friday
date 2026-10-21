@@ -149,3 +149,17 @@ ContentBlock image 下发。实测不过则整体挪后续，前端不出现入�
 - 真机至少两家（opencode + codex-acp）各完成一次完整对话：含一次审批卡放行、一次回收后重接；图片链路按 B2 结论收口。
 - 时间线重构后 web 全量测试绿、eslint 干净；智能体页窄屏可用（沿用现有媒体查询惯例）。
 - 文档同步：本文与 ACP-AGENTS.md 的衔接更新、ROADMAP 决策记录、USAGE.md 智能体一节（含"调紧 agent 审批模式"说明）、config.yaml.example 增 agents 示例段。
+
+## 目录与版本管理（2026-10-21）
+
+设置页合并内置精选与官方 ACP registry.json（同 id 内置优先），支持手动刷新、
+npx 安装与按平台 binary 安装。缓存 `~/.vortex/acp/registry-cache.json` 有效期一小时；
+首次写入自动创建目录，拉取失败回退缓存，无缓存则只展示内置精选。
+binary 安装到 `~/.vortex/acp/agents/<id>/<version>/`，校验上游提供的 SHA-256，
+拒绝链接和路径越界的压缩包，限制下载与解包大小。
+
+注册表条目的版本戳写入 `acp.agents[].version`；目录对比后提示升级。升级同步命令、
+参数与版本戳，保留用户自定义环境、工作目录等配置，回收旧进程；应在任务结束后操作。
+设置表单同步新版本，随后保存不会退回旧启动路径。
+ZCode 使用 `zcode-acp-server` 社区适配器；macOS 如遇内置会话库迁移错误，
+需通过该 agent 的 `ZCODE_BIN` 环境变量指定可用的 ZCode 启动器。

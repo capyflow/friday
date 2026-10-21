@@ -122,9 +122,12 @@ func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已发送停止指令"})
 }
 
-// handleAcpCatalog 返回可安装 agent 目录与本机安装状态（设置页「安装 agent」用）。
+// handleAcpCatalog 返回可安装 agent 目录（内置精选 + 官方注册表合并）与本机
+// 状态（设置页「安装 agent」用）。?refresh=1 强制重拉官方目录（默认缓存 TTL 1h，
+// 拉取失败回退过期缓存；离线时仅内置目录）。
 func (s *Server) handleAcpCatalog(ctx *vhttp.Context) error {
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"catalog": s.acp.Catalog()})
+	views := s.acp.Catalog(ctx.Context(), ctx.GinContext().Query("refresh") == "1")
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"catalog": views})
 }
 
 // handleAcpDirs 列出某目录下的子目录（新建对话「选择目录」用，浏览器与桌面壳共用）。
@@ -192,6 +195,7 @@ func (s *Server) handleAcpInstall(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error(), "output": res.Output})
 	}
 	registered := false
+	upgraded := false
 	if !res.AlreadyRegistered {
 		if err := s.cfg.Apply(func(n *config.Config) error {
 			n.Acp = n.Acp.Normalized()
@@ -203,10 +207,32 @@ func (s *Server) handleAcpInstall(ctx *vhttp.Context) error {
 		}
 		s.acp.Reload(s.cfg.Snapshot().Acp)
 		registered = true
+	} else if res.Version != "" {
+		// 升级时同步启动命令与参数，避免 binary 仍指向旧版本目录、npx
+		// 仍带旧版本包名；用户自定义环境、目录等配置保留。
+		if err := s.cfg.Apply(func(n *config.Config) error {
+			next := n.Acp.Normalized()
+			for i := range next.Agents {
+				if next.Agents[i].Name == res.Template.Name {
+					next.Agents[i].Version = res.Version
+					next.Agents[i].Command = res.Template.Command
+					next.Agents[i].Args = res.Template.Args
+				}
+			}
+			n.Acp = next
+			return config.UpdateAcp(s.configPath, next)
+		}); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "安装成功，但更新版本戳失败: " + err.Error(), "output": res.Output})
+		}
+		s.acp.Reload(s.cfg.Snapshot().Acp)
+		upgraded = true
 	}
 	msg := "安装完成，已加入智能体清单并生效"
-	if !registered {
+	if !registered && !upgraded {
 		msg = "安装完成（清单中已有同名 agent，未重复添加）"
+	} else if upgraded {
+		msg = "安装/升级完成（版本 " + res.Version + " 已登记）"
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"message": msg, "output": res.Output, "registered": registered, "agent": res.Template,

@@ -100,6 +100,14 @@ type Manager struct {
 	cfgFn    func() config.AcpConfig
 	approver *approval.Queue
 
+	// registryBase 官方目录数据的基目录（$HOME/.vortex/acp）：registry-cache.json
+	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
+	// 表示只显示内置目录（基目录不可建或测试隔离）。fetchMu 串行化拉取与缓存写。
+	registryBase string
+	registryPath string
+	registryOff  bool
+	fetchMu      sync.Mutex
+
 	// spawn 可被测试替换（fake agent 注入）。
 	spawn func(cfg config.AcpAgentConfig, workspace string, handshake time.Duration,
 		onPermission permissionHook, onExit func()) (*agentProc, error)
@@ -115,6 +123,12 @@ func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path st
 		path:     path,
 		cfgFn:    cfgFn,
 		approver: approver,
+	}
+	if base, err := acpBaseDirFn(); err == nil {
+		m.registryBase = base
+		m.registryPath = filepath.Join(base, "registry-cache.json")
+	} else {
+		m.registryOff = true // 无 HOME 环境只保留内置目录
 	}
 	m.spawn = spawnAgent
 	m.lastCfg = cfgFn().Normalized()

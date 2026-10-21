@@ -1,13 +1,16 @@
-// catalog.go 是可安装 agent 的内置目录（参考 Zed 的 External Agents 安装方式）：
-// 每个条目带本机安装状态探测、官方安装命令与 ACP 启动模板。目录是编译期固定的
-// 可信清单——安装命令与 MCP 服务器声明同信任级别（管理员显式触发），不经 shell
-// 拼接任何外部输入。
+// catalog.go 是可安装 agent 的目录（M-3）：内置精选条目 + 官方 ACP 注册表
+// （registry.go，与 Zed 同源同 schema，上游上架新 agent 无需发版）。每个条目带
+// 本机安装状态、注册状态与版本对比；安装命令是固定可信清单——安装命令与 MCP
+// 服务器声明同信任级别（管理员显式触发），不经 shell 拼接任何外部输入。
 package acp
 
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/capyflow/friday/internal/config"
@@ -79,33 +82,147 @@ var catalog = []CatalogEntry{
 			Name: "claude", Command: "npx", Args: []string{"-y", "@zed-industries/claude-code-acp"},
 		},
 	},
+	{
+		// zcode 没有原生 ACP 模式（官方还在 feature request 阶段），接入面是
+		// 社区适配器 zcode-acp-server：它桥接 zcode 的 headless app-server
+		// （ZCode 协议）并对外讲标准 ACP，自己负责拉起 zcode（PATH、ZCODE_BIN
+		// 或桌面 App 内置 zcode.cjs 均可），登录态复用 ~/.zcode。所以这里
+		// Check 探测的是适配器本身而不是 zcode CLI，模板命令与 Check 相同，
+		// 安装后回填绝对路径即可直接启动。
+		// 注意 macOS 的坑：适配器兜底用系统 node 跑桌面 App 内置 zcode.cjs，
+		// 而 node:sqlite 在 node 23 上过不了会话库迁移（Migration transaction
+		// ownership mismatch），需自建 Electron 内嵌 Node 的 zcode shim 并在
+		// 该 agent 的 Env 里设 ZCODE_BIN 指向它（2026-10-20 实测通）。
+		ID:          "zcode",
+		Name:        "ZCode（智谱）",
+		Description: "智谱 GLM 编码 agent，经社区 ACP 适配器接入；复用 ZCode 登录态。macOS 常需 ZCODE_BIN 指向 Electron Node shim，见文档",
+		Check:       "zcode-acp-server",
+		InstallCmd:  "npm install -g zcode-acp-server",
+		DocURL:      "https://github.com/william0wang/zcode-acp",
+		Template: config.AcpAgentConfig{
+			Name: "zcode", Command: "zcode-acp-server",
+		},
+	},
 }
 
-// CatalogView 是目录条目 + 本机安装状态。
+// CatalogView 是目录条目 + 本机状态。
 type CatalogView struct {
 	CatalogEntry
-	// Installed 本机是否探测到 Check 二进制。
+	// Installed 本机是否探测到 Check 二进制（仅内置条目有 Check；registry 条目
+	// 以 Registered 为准——注册即视为已安装）。
 	Installed bool `json:"installed"`
-	// Path 探测到的绝对路径（未安装为空）。
+	// Path 探测到的可执行文件绝对路径（未安装为空）。
 	Path string `json:"path,omitempty"`
+	// Source 条目来源：builtin（内置精选）| registry（官方注册表）。
+	Source string `json:"source"`
+	// Version 官方条目的当前版本（内置条目为空）。
+	Version string `json:"version,omitempty"`
+	// Registered 清单（config.acp.agents）里是否已有同名 agent。
+	Registered bool `json:"registered"`
+	// UpdateAvailable 已注册且清单里的版本戳与官方目录不一致（M-4 升级提示）。
+	UpdateAvailable bool `json:"updateAvailable,omitempty"`
+	// Supported binary 分发是否覆盖当前平台（false 时禁用安装）。
+	Supported bool `json:"supported"`
 }
 
-// Catalog 返回目录与本机安装状态。
-func (m *Manager) Catalog() []CatalogView {
-	out := make([]CatalogView, 0, len(catalog))
-	for _, e := range catalog {
-		v := CatalogView{CatalogEntry: e}
-		if p, err := exec.LookPath(e.Check); err == nil {
-			v.Installed = true
-			v.Path = p
+// Catalog 返回合并后的目录（内置精选在前，官方条目按注册表顺序跟随）。
+// refresh=false 时官方目录走缓存（TTL 1h，过期自动重拉，失败回退过期缓存）。
+func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
+	registered := map[string]config.AcpAgentConfig{}
+	for _, a := range m.cfgFn().Normalized().Agents {
+		registered[a.Name] = a
+	}
+
+	out := make([]CatalogView, 0, len(catalog)+8)
+	seen := map[string]bool{}
+	add := func(e CatalogEntry, source string) {
+		if seen[e.ID] {
+			return
+		}
+		seen[e.ID] = true
+		v := CatalogView{
+			CatalogEntry: e,
+			Source:       source,
+			Version:      e.Template.Version,
+			Supported:    true,
+		}
+		if e.Check != "" {
+			if p, err := lookPathFn(e.Check); err == nil {
+				v.Installed = true
+				v.Path = p
+			}
+		}
+		if a, ok := registered[e.Template.Name]; ok {
+			v.Registered = true
+			v.UpdateAvailable = e.Template.Version != "" && a.Version != e.Template.Version
+			if e.Check == "" { // registry 条目：注册即已安装
+				v.Installed = true
+				v.Path = a.Command
+			}
 		}
 		out = append(out, v)
+	}
+
+	// 内置精选（编译期固定，同 id 覆盖官方条目）。
+	for _, e := range catalog {
+		add(e, "builtin")
+	}
+	// 官方注册表（拉取失败静默降级为仅内置）。
+	for _, re := range m.registryIndex(ctx, refresh) {
+		if seen[re.ID] {
+			continue
+		}
+		ce, supported := re.toCatalogEntry(m.registryBase)
+		if !supported && len(re.Distribution.Binary) == 0 {
+			continue // 无任何分发的条目不可安装，不展示
+		}
+		ce.ID = re.ID // 保留官方 id 作为安装主键
+		if ce.Name == "" {
+			ce.Name = re.Name
+		}
+		add(ce, "registry")
+		if !supported {
+			out[len(out)-1].Supported = false
+		}
 	}
 	return out
 }
 
 // installTimeout 是单次安装的上限（npm -g 全局安装通常 30~120s，留足余量）。
 const installTimeout = 5 * time.Minute
+
+// acpBaseDirFn 可被测试替换：registry 缓存与 binary 安装目录的父目录
+// （$HOME/.vortex/acp，与 acp-sessions 同族）。
+var acpBaseDirFn = defaultAcpBaseDir
+
+func defaultAcpBaseDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("解析 HOME 失败: %w", err)
+	}
+	return filepath.Join(home, ".vortex", "acp"), nil
+}
+
+// runInstallCommand 可被测试替换：执行一条官方安装命令（固定字符串经 sh -c）。
+// 超时击杀整个进程组——CommandContext 默认只杀 sh，npm/curl 这类孙进程会残留
+// （与 agent 进程的 N1 同一纪律）。
+var runInstallCommand = func(ctx context.Context, installCmd string) ([]byte, error) {
+	ictx, cancel := context.WithTimeout(ctx, installTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ictx, "sh", "-c", installCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+	return cmd.CombinedOutput()
+}
 
 // InstallResult 是一次安装的归集结果。
 type InstallResult struct {
@@ -115,41 +232,109 @@ type InstallResult struct {
 	Path string
 	// Template 回填了绝对路径的启动模板（调用方据此注册进清单）。
 	Template config.AcpAgentConfig
+	// Version 本次安装对应的版本（registry 条目才有）。
+	Version string `json:"version,omitempty"`
 	// AlreadyRegistered 清单里已有同名 agent（此时调用方不必重复注册）。
 	AlreadyRegistered bool
 }
 
-// Install 执行目录中指定 agent 的官方安装命令。命令是内置目录里的固定字符串，
-// 经 sh -c 执行（opencode 的官方脚本是管道）；超时 5 分钟，输出截尾返回。
-// 是否注册进清单由调用方决定（本方法只报告 AlreadyRegistered）。
+// Install 安装目录中指定 id 的 agent：内置条目走精选安装命令，官方条目按
+// distribution 分发（npx → npm -g；binary → 下载校验解压）。安装成功后返回
+// 回填好的启动模板，是否注册进清单由调用方决定。
 func (m *Manager) Install(ctx context.Context, id string) (InstallResult, error) {
 	for _, e := range catalog {
-		if e.ID != id {
-			continue
+		if e.ID == id {
+			return m.installBuiltin(ctx, e)
 		}
-		res := InstallResult{}
-		if _, ok := m.cfgFn().Normalized().Agent(e.Template.Name); ok {
-			res.AlreadyRegistered = true
+	}
+	for _, re := range m.registryIndex(ctx, false) {
+		if re.ID == id {
+			return m.installRegistryAgent(ctx, re)
 		}
-		ictx, cancel := context.WithTimeout(ctx, installTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ictx, "sh", "-c", e.InstallCmd)
-		out, err := cmd.CombinedOutput()
+	}
+	return InstallResult{}, fmt.Errorf("目录中没有叫 %q 的 agent", id)
+}
+
+// installBuiltin 内置精选条目的安装：命令为内置固定串，超时 5 分钟，输出截尾
+// 返回；随后探测 Check 二进制回填绝对路径。
+func (m *Manager) installBuiltin(ctx context.Context, e CatalogEntry) (InstallResult, error) {
+	res := InstallResult{}
+	if _, ok := m.cfgFn().Normalized().Agent(e.Template.Name); ok {
+		res.AlreadyRegistered = true
+	}
+	out, err := runInstallCommand(ctx, e.InstallCmd)
+	res.Output = tailRunes(string(out), 2000)
+	if err != nil {
+		return res, fmt.Errorf("安装命令失败: %w（输出见下）", err)
+	}
+	// 安装成功后探测一次：新装的二进制通常已入 PATH（脚本写的标准位置）。
+	p, err := lookPathFn(e.Check)
+	if err != nil {
+		return res, fmt.Errorf("安装命令已执行成功，但未在 PATH 中找到 %q——可能需要重启 Friday 或手动检查安装位置", e.Check)
+	}
+	res.Path = p
+	res.Template = templateWithPath(e.Template, e.Check, p)
+	return res, nil
+}
+
+// installRegistryAgent 官方条目的安装：npx → npm -g 安装后锚定 npx 绝对路径；
+// binary → 下载校验解压（registry.go）。版本随模板返回（M-4 版本戳）。
+func (m *Manager) installRegistryAgent(ctx context.Context, re registryEntry) (InstallResult, error) {
+	res := InstallResult{Version: re.Version}
+	if _, ok := m.cfgFn().Normalized().Agent(re.ID); ok {
+		res.AlreadyRegistered = true
+	}
+	ce, supported := re.toCatalogEntry(m.registryBase)
+	switch {
+	case !supported && len(re.Distribution.Binary) == 0:
+		return res, fmt.Errorf("agent %q 没有可安装的分发", re.Name)
+	case ce.Template.Command == "npx":
+		out, err := runInstallCommand(ctx, ce.InstallCmd)
 		res.Output = tailRunes(string(out), 2000)
 		if err != nil {
 			return res, fmt.Errorf("安装命令失败: %w（输出见下）", err)
 		}
-		// 安装成功后探测一次：新装的二进制通常已入 PATH（脚本写的标准位置）。
-		p, err := exec.LookPath(e.Check)
+		p, err := lookPathFn("npx")
 		if err != nil {
-			return res, fmt.Errorf("安装命令已执行成功，但未在 PATH 中找到 %q——可能需要重启 Friday 或手动检查安装位置", e.Check)
+			return res, fmt.Errorf("安装命令已执行成功，但未在 PATH 中找到 npx——请手动检查 node 环境")
 		}
 		res.Path = p
-		res.Template = e.Template
-		res.Template.Command = p // 绝对路径回填：不依赖后续会话的 PATH
+		res.Template = ce.Template
+		res.Template.Command = p
 		return res, nil
+	case supported:
+		bin, out, err := installBinaryDistribution(ctx, m.registryBase, re)
+		res.Output = out
+		if err != nil {
+			return res, err
+		}
+		res.Path = bin
+		res.Template = ce.Template
+		res.Template.Command = bin
+		return res, nil
+	default:
+		return res, fmt.Errorf("agent %q 在本平台（%s）没有分发包", re.Name, platformKey())
 	}
-	return InstallResult{}, fmt.Errorf("目录中没有叫 %q 的 agent", id)
+}
+
+// lookPathFn 可被测试替换（启动器绝对路径解析）。
+var lookPathFn = exec.LookPath
+
+// templateWithPath 把模板命令补成可独立解析的形态：
+//   - 模板命令就是被探测的二进制本身（opencode/gemini/zcode 适配器这类 CLI 形态）
+//     时，回填探测到的绝对路径；
+//   - 否则是启动器形态（npx/uvx 等，绝不能替换成被探测 CLI 的路径——同一条参数
+//     会被当成 CLI 的子命令），锚定启动器的绝对路径：Friday 以 daemon 运行时
+//     PATH 可能与安装时不同。解析失败保留原名（spawn 失败会提示写绝对路径）。
+func templateWithPath(t config.AcpAgentConfig, check, path string) config.AcpAgentConfig {
+	if path != "" && t.Command == check {
+		t.Command = path
+		return t
+	}
+	if p, err := lookPathFn(t.Command); err == nil {
+		t.Command = p
+	}
+	return t
 }
 
 // tailRunes 取文本末尾 n 个 rune（安装输出可能很长，展示尾部即可）。

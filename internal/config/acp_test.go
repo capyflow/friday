@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestAcpNormalized(t *testing.T) {
@@ -130,4 +133,44 @@ func contains(s, sub string) bool {
 			}
 			return false
 		}())
+}
+
+func TestUpdateAcpVersionStamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("accounts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := AcpConfig{Enabled: true, Agents: []AcpAgentConfig{
+		{Name: "codex", Command: "npx", Version: "0.1.0"},
+	}}
+	if err := UpdateAcp(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Acp struct {
+			Agents []struct {
+				Name    string `yaml:"name"`
+				Version string `yaml:"version"`
+			} `yaml:"agents"`
+		} `yaml:"acp"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Acp.Agents) != 1 || doc.Acp.Agents[0].Version != "0.1.0" {
+		t.Fatalf("版本戳未写回: %s", data)
+	}
+	// 无版本的条目不写 version 键（保持配置文件干净）。
+	cfg.Agents[0].Version = ""
+	if err := UpdateAcp(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if bytes.Contains(data, []byte("version")) {
+		t.Fatalf("空版本不应写 version 键: %s", data)
+	}
 }

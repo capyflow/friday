@@ -68,6 +68,9 @@ type AcpAgentConfig struct {
 	// DegradeResume 标记该 agent 的 session/load 恢复保真度实测不可靠：
 	// 重开 thread 不再尝试重接，直接新开会话并标注「上下文已重置」。
 	DegradeResume bool `yaml:"degradeResume,omitempty" json:"degradeResume,omitempty"`
+	// Version 安装时登记的版本戳（M-4）：registry 条目安装/升级时写入，目录页
+	// 据此提示「有新版本」。仅元数据，不影响启动。
+	Version string `yaml:"version,omitempty" json:"version,omitempty"`
 }
 
 // IsEnabled 返回该 agent 是否启用（缺省启用）。
@@ -225,6 +228,9 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 			}
 			if a.DegradeResume {
 				boolPair(item, "degradeResume", true)
+			}
+			if a.Version != "" {
+				strPair(item, "version", a.Version)
 			}
 			seq.Content = append(seq.Content, item)
 		}

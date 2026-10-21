@@ -3,10 +3,12 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/config"
@@ -23,6 +25,60 @@ func dirsBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery 
 		t.Fatalf("解析 dirs 响应 %s: %v", rec.Body.String(), err)
 	}
 	return rec.Code, envelope.Body
+}
+
+func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("#!/bin/sh\necho upgraded\n"))
+	}))
+	defer srv.Close()
+	base := filepath.Join(home, ".vortex", "acp")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := map[string]any{
+		"fetchedAt": time.Now(),
+		"index": map[string]any{"version": "1", "agents": []any{map[string]any{
+			"id": "upgrade-test", "name": "Upgrade Test", "version": "2.0.0",
+			"distribution": map[string]any{"binary": map[string]any{
+				"darwin-aarch64": map[string]any{"archive": srv.URL + "/bin", "cmd": "agent", "args": []string{"--new"}},
+				"linux-x86_64":   map[string]any{"archive": srv.URL + "/bin", "cmd": "agent", "args": []string{"--new"}},
+			}},
+		}}},
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "registry-cache.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _, cookie, _, _ := manageTestServer(t)
+	s.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(s.configPath, []byte("accounts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Acp = config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{{
+		Name: "upgrade-test", Command: "/old/agent", Args: []string{"--old"}, Version: "1.0.0",
+		Env: map[string]string{"CUSTOM": "kept"}, Workspace: "/custom/workspace",
+	}}}
+	m := acp.NewManager(func() config.AcpConfig { return s.cfg.Snapshot().Acp }, nil, filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	t.Cleanup(m.Close)
+	rec := setupTestRequest(s.Handler(), http.MethodPost, "/api/acp/install", []byte(`{"id":"upgrade-test"}`), "127.0.0.1:1234", "localhost", "", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("升级失败: %d %s", rec.Code, rec.Body.String())
+	}
+	got := s.cfg.Snapshot().Acp.Agents[0]
+	want := filepath.Join(base, "agents", "upgrade-test", "2.0.0", "agent")
+	if got.Command != want || len(got.Args) != 1 || got.Args[0] != "--new" || got.Version != "2.0.0" {
+		t.Fatalf("升级后启动配置未更新: %+v", got)
+	}
+	if got.Env["CUSTOM"] != "kept" || got.Workspace != "/custom/workspace" {
+		t.Fatalf("升级覆盖了用户配置: %+v", got)
+	}
 }
 
 func TestAcpDirsListsSubdirectoriesOnly(t *testing.T) {
