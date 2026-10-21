@@ -205,7 +205,16 @@ async function send() {
         pushText(ensureBot(), data.delta)
         nextTick(stick)
       }
-      if (data.done) { done = true; if (data.turn) turnTotal = data.turn; if (data.error) errMsg = data.error }
+      if (data.done) {
+        done = true
+        if (data.turn) turnTotal = data.turn
+        // M-5：agent 自报的上下文水位，并入轮末汇总一起展示。
+        if (data.context && turnTotal) {
+          turnTotal.contextUsed = data.context.used || 0
+          turnTotal.contextSize = data.context.size || 0
+        }
+        if (data.error) errMsg = data.error
+      }
     }
     const consume = () => {
       buf = buf.replace(/\r\n/g, '\n')

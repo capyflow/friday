@@ -544,6 +544,65 @@ func TestPermissionDenied(t *testing.T) {
 	}
 }
 
+// turn 结束（完成/超时/被停止）时，无人处理的权限审批卡必须被自动撤下——
+// 否则用户会对着一个已死的进程点批准，SDK 的请求 goroutine 也白等 30 分钟。
+func TestPermissionReleasedOnTurnEnd(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.sendPermissionRequest(sid, "无人处理的授权")
+		time.Sleep(150 * time.Millisecond) // 等权限请求进审批队列
+		return "end_turn"                  // agent 不等答复直接收尾（超时场景的代理）
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	go func() {
+		waitFor(t, 2*time.Second, "审批卡入队", func() bool { return len(approver.Pending()) == 1 })
+	}()
+	res, err := m.Send(context.Background(), th.ID, "快点决定", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if res.StopReason != "end_turn" {
+		t.Fatalf("stopReason = %q", res.StopReason)
+	}
+	// turn 已结束：卡必须被自动撤下（用户从未点过）。
+	waitFor(t, 2*time.Second, "审批卡自动撤下", func() bool { return len(approver.Pending()) == 0 })
+}
+
+// usage_update 是上下文水位（size=窗口总量、used=占用），turn 结束后应随投影
+// 落盘（M-5）；单轮 in/out 记账仍以 PromptResponse.Usage 为准，互不混淆。
+func TestUsageContextWatermark(t *testing.T) {
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "usage_update", map[string]any{
+			"size": 200000, "used": 12000,
+			"cost": map[string]any{"amount": 0.15, "currency": "USD"},
+		}))
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("水位已更新。")}))
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	res, err := m.Send(context.Background(), th.ID, "看看水位", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if res.In != 10 || res.Out != 5 {
+		t.Fatalf("单轮记账应来自 PromptResponse.Usage，实际 in=%d out=%d", res.In, res.Out)
+	}
+	got, ok := m.Get(th.ID)
+	if !ok {
+		t.Fatal("thread 不存在")
+	}
+	if got.ContextUsed != 12000 || got.ContextSize != 200000 || got.ContextCost != 0.15 {
+		t.Fatalf("上下文水位未落盘: used=%d size=%d cost=%v", got.ContextUsed, got.ContextSize, got.ContextCost)
+	}
+}
+
 func TestStopCancelled(t *testing.T) {
 	f := &fakeAgent{}
 	f.cancelSeen = make(chan struct{}, 1)

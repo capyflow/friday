@@ -63,6 +63,12 @@ type Thread struct {
 	State     string  `json:"state"`
 	Degraded  bool    `json:"degraded,omitempty"` // 上次重接失败过：恢复不可靠
 	Messages  []Entry `json:"messages"`
+	// 上下文水位：agent 最近一次 usage_update 的自报值（M-5）——窗口总量/当前
+	// 占用/会话累计花费。不是本轮 in/out（那是 Entry 上的字段）；cost 是 agent
+	// 自报，仅展示，不进预算闸门（C10）。
+	ContextUsed int     `json:"contextUsed,omitempty"`
+	ContextSize int     `json:"contextSize,omitempty"`
+	ContextCost float64 `json:"contextCost,omitempty"`
 }
 
 // Image 是随消息发送的一张图片（原始字节，发送时 base64 编码进 ContentBlock）。
@@ -81,10 +87,10 @@ type TurnResult struct {
 
 // live 是一个 thread 当前挂着的进程与运行态。
 type live struct {
-	proc       *agentProc
-	turnCancel context.CancelFunc // 当前 turn 的取消（超时/断开路径用）
-	slot       chan struct{}      // 从哪个信号量槽位取得（Reload 可能换槽）
-	idle       *time.Timer
+	proc     *agentProc
+	turnDone chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
+	slot     chan struct{} // 从哪个信号量槽位取得（Reload 可能换槽）
+	idle     *time.Timer
 }
 
 // Manager 管理全部 thread 与存活进程。
@@ -317,6 +323,7 @@ func (m *Manager) Delete(id string) bool {
 			break
 		}
 	}
+	delete(m.locks, id)
 	lv := m.live[id]
 	delete(m.live, id)
 	_ = m.saveLocked()
@@ -418,7 +425,7 @@ func (m *Manager) ensureLive(ctx context.Context, th *Thread, agentCfg config.Ac
 	hooks.status("正在启动 agent " + agentCfg.Name + "…")
 	proc, err := m.spawn(agentCfg, th.Workspace,
 		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second,
-		m.handlePermission(agentCfg.Name),
+		m.handlePermission(th.ID, agentCfg.Name),
 		func() { m.onProcExit(th.ID) })
 	if err != nil {
 		<-m.sem
@@ -486,10 +493,12 @@ func (m *Manager) ensureSession(th *Thread, proc *agentProc, agentCfg config.Acp
 
 // ---------- 权限审批（D7） ----------
 
-// handlePermission 构造某 agent 的权限请求钩子：强制入队人工审批（无视全局
+// handlePermission 构造某 thread 的权限请求钩子：强制入队人工审批（无视全局
 // 权限模式——这是对话空间的独立闸门），30 分钟无人处理自动答复拒绝。
 // 批准选第一个 allow* 选项；拒绝选第一个 reject* 选项；都没有则答复 cancelled。
-func (m *Manager) handlePermission(agentName string) permissionHook {
+// 审批等待绑定 turn 生命周期：turn 结束（完成/超时/用户停止/进程崩溃）即撤卡
+// 并按拒绝结算——卡面向的会话已不存在，留着只会得到一张对着死进程的卡。
+func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 	return func(_ context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 		kind := ""
 		if r.ToolCall.Kind != nil {
@@ -514,8 +523,27 @@ func (m *Manager) handlePermission(agentName string) permissionHook {
 			log.Printf("[智能体] 未装配审批队列，自动允许（仅测试环境应出现）")
 			return respondPermission(r, true), nil
 		}
-		approved, err := m.approver.RequestAlways("智能体权限", summary, detail,
+		m.mu.Lock()
+		var turnDone chan struct{}
+		if lv := m.live[threadID]; lv != nil {
+			turnDone = lv.turnDone
+		}
+		m.mu.Unlock()
+		if turnDone == nil {
+			// 无进行中对话的权限请求（协议外时序）：按拒绝处理，不入队。
+			log.Printf("[智能体] %s 在无进行中对话时请求权限，按拒绝处理", agentName)
+			return respondPermission(r, false), nil
+		}
+		card := m.approver.RequestCancelable("智能体权限", summary, detail,
 			config.AcpPermissionTimeoutSeconds*time.Second)
+		go func() {
+			select {
+			case <-turnDone:
+				card.Cancel()
+			case <-card.Done():
+			}
+		}()
+		approved, err := card.Wait()
 		if err != nil {
 			if !errors.Is(err, approval.ErrDenied) {
 				log.Printf("[智能体] 权限审批异常（按拒绝处理）: %v", err)
@@ -601,8 +629,11 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	turnTimeout := time.Duration(c.TurnSeconds(agentCfg)) * time.Second
 	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	// turn 结束信号：pump 收尾与权限审批撤卡共用（权限钩子在 SDK 的请求
+	// goroutine 上读到它，感知 turn 已结束即自动撤卡）。
+	turnDone := make(chan struct{})
 	m.mu.Lock()
-	lv.turnCancel = cancel
+	lv.turnDone = turnDone
 	th.State = StateRunning
 	if th.Title == "" {
 		th.Title = truncateRunes(text, 40)
@@ -617,7 +648,6 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	blocks = append(blocks, acp.TextBlock(text))
 
 	sink := newTurnSink(hooks)
-	turnDone := make(chan struct{})
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
@@ -660,7 +690,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	}
 
 	m.mu.Lock()
-	lv.turnCancel = nil
+	lv.turnDone = nil
 	current, keep := m.threads[id] // turn 进行中被删除则不再写投影
 	if keep {
 		current.State = StateIdle
@@ -693,6 +723,11 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	if keep {
 		m.mu.Lock()
 		m.appendTurnLocked(current, text, len(imgs), result, degraded, aborted, promptErr != nil && !aborted, errText)
+		if used, size, cost, _ := sink.context(); size > 0 {
+			current.ContextUsed = used
+			current.ContextSize = size
+			current.ContextCost = cost
+		}
 		if serr := m.saveLocked(); serr != nil {
 			log.Printf("[智能体] 投影落盘失败: %v", serr)
 		}

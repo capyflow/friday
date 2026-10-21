@@ -10,12 +10,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,18 +37,26 @@ type agentProc struct {
 	loadSession bool                         // agent 是否声明 loadSession 能力
 	bridge      *bridge
 
+	stderrMu   sync.Mutex
+	stderrMemo string // kill 时缓存的 stderr 尾部（文件随即删除，报错仍可引用）
 	stderrFile string
 	done       <-chan struct{} // 对端断开（进程退出/连接关闭）时关闭
 	kill       func()          // 幂等：进程组击杀 + 管道关闭（N1）
 }
 
-// stderrTail 读取 stderr 落盘文件的末尾 n 行（诊断"没登录"这类故障的关键证据）。
+// stderrTail 读取 stderr 落盘文件（或 kill 时缓存的尾部）的末尾 n 行
+// （诊断"没登录"这类故障的关键证据）。
 func (p *agentProc) stderrTail(n int) string {
-	data, err := os.ReadFile(p.stderrFile)
-	if err != nil {
-		return ""
+	p.stderrMu.Lock()
+	memo := p.stderrMemo
+	p.stderrMu.Unlock()
+	data := memo
+	if memo == "" {
+		if b, err := os.ReadFile(p.stderrFile); err == nil {
+			data = string(b)
+		}
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(data, "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
@@ -93,10 +104,9 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 
 	cmd := exec.Command(bin, cfg.Args...)
 	cmd.Dir = workspace
-	cmd.Env = os.Environ()
-	for k, v := range cfg.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	// env 合并而非追加：同名 key 以配置为准。直接 append 会产生重复 key，
+	// libc 的 getenv 取第一个匹配——覆盖对 node 系 agent 会静默失效。
+	cmd.Env = buildEnv(os.Environ(), cfg.Env)
 	// N1：独立进程组——kill 时连 npx→node→agent 自 spawn 的工具子进程一起带走。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -146,8 +156,14 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Process.Kill()
 		}
+		// 缓存 stderr 尾部再删文件：spawn/Send 的报错在 kill 之后仍要引用它，
+		// 而临时文件不清理会随重启累积（agent 的 stderr 可能刷到很大，截尾即可）。
+		p.stderrMu.Lock()
+		p.stderrMemo = readTail(stderrFile, 64*1024)
+		p.stderrMu.Unlock()
 		_ = stdin.Close()
 		sf.Close()
+		_ = os.Remove(stderrFile)
 	}
 	go func() {
 		<-p.done
@@ -170,13 +186,76 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 	})
 	if err != nil {
 		p.kill()
-		_, _ = cmd.Process.Wait()
-		return nil, fmt.Errorf("agent %q initialize 失败: %w（常见原因：未登录/命令不对；stderr: %s）",
-			cfg.Name, err, firstLine(p.stderrTail(6)))
+		tail := p.stderrTail(8)
+		return nil, fmt.Errorf("agent %q 握手失败：%s（stderr: %s）",
+			cfg.Name, classifyInitError(err, tail, p.done, cfg), firstLine(tail))
+	}
+	if initRes.ProtocolVersion != acp.ProtocolVersionNumber {
+		p.kill()
+		return nil, fmt.Errorf("agent %q 协议版本不支持：agent 应答 v%d，Friday 只讲 v%d（等待 ACP SDK 跟进）",
+			cfg.Name, initRes.ProtocolVersion, acp.ProtocolVersionNumber)
 	}
 	p.loadSession = initRes.AgentCapabilities.LoadSession
 	log.Printf("[智能体] %s 已就绪（workspace=%s，loadSession=%v）", cfg.Name, workspace, p.loadSession)
 	return p, nil
+}
+
+// loginHints 是 per-agent 的登录指引（M-1）：按配置名或命令基名匹配。
+// 凭据都在 HOME 下（C13），服务器无 TTY 环境最容易断在这里。
+var loginHints = map[string]string{
+	"codex":    "在服务器终端运行 `codex login` 完成 ChatGPT 登录",
+	"claude":   "在服务器终端运行 `claude` 并执行 /login，或在 env 里配 ANTHROPIC_API_KEY",
+	"gemini":   "在服务器终端运行一次 `gemini` 完成 Google 登录，或在 env 里配 GEMINI_API_KEY",
+	"opencode": "在服务器终端运行 `opencode auth login` 配置模型渠道",
+	"zcode":    "复用 ~/.zcode 登录态；缺失时在服务器终端运行 `zcode` 登录一次",
+}
+
+// loginHintFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
+func loginHintFor(cfg config.AcpAgentConfig) string {
+	for _, key := range []string{strings.ToLower(cfg.Name), strings.ToLower(filepath.Base(cfg.Command))} {
+		if hint, ok := loginHints[key]; ok {
+			return hint
+		}
+	}
+	return "在该 agent 的官方 CLI 完成一次登录（凭据通常落在 HOME 下）"
+}
+
+// authKeywords：stderr/错误文本命中即提示「疑似未登录」。
+var authKeywords = []string{
+	"login", "log in", "sign in", "signin", "401", "unauthorized", "unauthorised",
+	"api key", "apikey", "not authenticated", "not logged in", "认证", "未登录",
+}
+
+func looksLikeAuthProblem(texts ...string) bool {
+	joined := strings.ToLower(strings.Join(texts, " "))
+	for _, kw := range authKeywords {
+		if strings.Contains(joined, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyInitError 把握手失败归成用户可行动的类别（M-2）；疑似未登录时附上
+// 该 agent 的登录指引（M-1）。done 是连接断开信号——进程在握手期间退出是
+// 与「活着但不说话」（超时）完全不同的故障，线索全在 stderr。
+func classifyInitError(err error, stderr string, done <-chan struct{}, cfg config.AcpAgentConfig) string {
+	select {
+	case <-done:
+		if looksLikeAuthProblem(stderr) {
+			return "进程提前退出，疑似未登录：" + loginHintFor(cfg)
+		}
+		return "进程提前退出（命令秒退——检查命令与参数能否独立运行）"
+	default:
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		return "握手超时（agent 无响应——常见于静默挂起或卡在交互提示）"
+	}
+	if looksLikeAuthProblem(err.Error(), stderr) {
+		return "疑似未登录：" + loginHintFor(cfg)
+	}
+	return "initialize 被拒绝（协议层错误）"
 }
 
 // firstLine 取多行文本的第一行（错误消息里只留一句 stderr）。
@@ -185,6 +264,55 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// buildEnv 在继承环境上叠加覆盖：同名 key 原地替换，结果无重复 key。
+// 直接 append 会出现重复——libc 的 getenv 返回第一个匹配，覆盖对 node 等
+// 非 Go 子进程静默失效，故必须合并。
+func buildEnv(inherit []string, extra map[string]string) []string {
+	env := make([]string, 0, len(inherit)+len(extra))
+	at := make(map[string]int, len(inherit))
+	for _, kv := range inherit {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			if _, dup := at[kv[:i]]; dup {
+				continue // 继承环境自身有重复时保留首条，语义与 libc getenv 一致
+			}
+			at[kv[:i]] = len(env)
+		}
+		env = append(env, kv)
+	}
+	for k, v := range extra {
+		kv := k + "=" + v
+		if i, dup := at[k]; dup {
+			env[i] = kv
+		} else {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// readTail 读取文件末尾至多 max 字节（诊断文件可能被刷到很大，截尾即可）。
+func readTail(path string, max int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := info.Size()
+	if size > max {
+		if _, err := f.Seek(-max, io.SeekEnd); err != nil {
+			return ""
+		}
+		size = max
+	}
+	buf := make([]byte, size)
+	n, _ := io.ReadFull(f, buf)
+	return string(buf[:n])
 }
 
 func sanitizeName(name string) string {

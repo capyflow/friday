@@ -346,7 +346,14 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 	if res.StopReason != "" && res.StopReason != "end_turn" {
 		turn["stopped"] = res.StopReason
 	}
-	write(map[string]any{"done": true, "turn": turn})
+	payload := map[string]any{"done": true, "turn": turn}
+	if th, ok := s.acp.Get(threadID); ok && th.ContextSize > 0 {
+		// M-5：上下文水位（agent 自报，仅展示）。
+		payload["context"] = map[string]any{
+			"used": th.ContextUsed, "size": th.ContextSize, "cost": th.ContextCost,
+		}
+	}
+	write(payload)
 	return nil
 }
 

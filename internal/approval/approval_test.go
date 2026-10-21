@@ -226,3 +226,55 @@ func TestRequestAlwaysBypassesMode(t *testing.T) {
 		t.Fatalf("拒绝应返回 ErrDenied，实际 %v", err)
 	}
 }
+
+func TestRequestCancelableCancel(t *testing.T) {
+	q := New("confirm", nil, 0)
+	card := q.RequestCancelable("智能体权限", "执行命令", "uname -a", time.Minute)
+	done := make(chan struct{})
+	go func() {
+		if _, err := card.Wait(); err != ErrDenied {
+			t.Errorf("Cancel 后 Wait 应返回 ErrDenied，实际 %v", err)
+		}
+		close(done)
+	}()
+	// 等卡入队后由业务侧撤卡。
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(q.Pending()) != 1 {
+		t.Fatal("Cancel 前应有 1 条待审批")
+	}
+	card.Cancel()
+	<-done
+	if len(q.Pending()) != 0 {
+		t.Fatal("Cancel 后卡应从待审批列表移除")
+	}
+	// 迟到的用户决定落空（幂等、不 panic）。
+	if q.Decide(card.req.item.ID, true) {
+		t.Fatal("已撤下的卡不应再可决定")
+	}
+	// 幂等：重复 Cancel 无操作。
+	card.Cancel()
+}
+
+func TestRequestCancelableApprove(t *testing.T) {
+	q := New("confirm", nil, 0)
+	card := q.RequestCancelable("智能体权限", "执行命令", "uname -a", time.Minute)
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for len(q.Pending()) == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		q.Decide(q.Pending()[0].ID, true)
+	}()
+	allow, err := card.Wait()
+	if err != nil || !allow {
+		t.Fatalf("批准应返回 (true,nil)，实际 (%v,%v)", allow, err)
+	}
+	select {
+	case <-card.Done():
+	default:
+		t.Fatal("Wait 返回后 Done 应已关闭")
+	}
+}

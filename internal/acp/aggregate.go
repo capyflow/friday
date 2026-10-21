@@ -5,8 +5,8 @@
 //
 // flush 规则：文本/思考按「≥1200 字 或 距上次 flush ≥3s 或 turn 结束」成段投出；
 // tool_call 只取 kind + title（不取 locations——C11 实测上报假路径），状态映射到
-// 主聊天时间线的 run/ok/fail；usage_update 不投时间线（记账以 PromptResponse.Usage
-// 为准，避免会话级累计被重复计入单轮）。
+// 主聊天时间线的 run/ok/fail；usage_update 不投时间线但记录水位（M-5，随投影
+// 落盘），单轮 in/out 记账以 PromptResponse.Usage 为准。
 package acp
 
 import (
@@ -50,6 +50,11 @@ type turnSink struct {
 	startedAt  time.Time
 	toolTitles map[string]string // toolCallId → 标题（update 常只带 id 不带标题）
 
+	used         int     // 最近一次 usage_update：当前上下文占用（M-5）
+	size         int     // 窗口总量
+	costAmount   float64 // 会话累计花费（agent 自报，仅展示——C10 纪律：不进预算）
+	costCurrency string
+
 	In, Out, Cached int64
 	rawUpdates      int
 	dropped         int64
@@ -57,6 +62,11 @@ type turnSink struct {
 
 // allText 返回本轮全部回答文本。
 func (s *turnSink) allText() string { return s.all.String() }
+
+// context 报告 agent 最近一次 usage_update 的上下文水位（未上报时 size 为 0）。
+func (s *turnSink) context() (used, size int, costAmount float64, costCurrency string) {
+	return s.used, s.size, s.costAmount, s.costCurrency
+}
 
 func newTurnSink(hooks TurnHooks) *turnSink {
 	return &turnSink{hooks: hooks, startedAt: time.Now(), toolTitles: map[string]string{}}
@@ -101,6 +111,16 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 			kind = string(*u.ToolCallUpdate.Kind)
 		}
 		s.emitStep(title, kind, mapStatus(status))
+	case u.UsageUpdate != nil:
+		// M-5：usage_update 是上下文水位（size=窗口总量、used=当前占用）加可选
+		// 的会话累计 cost——不是单轮 in/out。记到 sink，turn 结束随投影落盘；
+		// 单轮记账仍以 PromptResponse.Usage 为准（usage.Record 维度不变）。
+		s.used = u.UsageUpdate.Used
+		s.size = u.UsageUpdate.Size
+		if u.UsageUpdate.Cost != nil {
+			s.costAmount = u.UsageUpdate.Cost.Amount
+			s.costCurrency = u.UsageUpdate.Cost.Currency
+		}
 	default:
 		// available_commands_update（单条实测 25KB，含用户 skill 全表）、
 		// config_option_update、session_info_update、plan_* 等一律丢弃。

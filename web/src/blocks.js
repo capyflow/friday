@@ -81,8 +81,10 @@ export function pushText(m, delta) {
 }
 
 // 轮末汇总文案：token 走 k/百万缩写；耗时缺失（被暂停的现场没有结束时刻）就不写。
+// context 是 agent 自报的上下文水位（usage_update，M-5），有才显示。
 export function turnTotalText(t) {
   if (!t) return ''
-  const s = `本轮 · ${fmtTokens(t.in || 0)}+${fmtTokens(t.out || 0)} tokens`
+  let s = `本轮 · ${fmtTokens(t.in || 0)}+${fmtTokens(t.out || 0)} tokens`
+  if (t.contextSize) s += ` · 上下文 ${fmtTokens(t.contextUsed || 0)}/${fmtTokens(t.contextSize)}`
   return t.ms ? `${s} · 耗时 ${(t.ms / 1000).toFixed(1)}s` : s
 }
