@@ -39,6 +39,11 @@ cwd）不能同时跑两台，并行验证请换 cwd 再换端口。
 
 ## 后端验证
 
+动态工作流目前交付 T0 引擎与脚本宿主，尚无产品入口。安装宿主依赖并运行静态预检：
+`cd wfhost && npm ci && npm run check`。从仓库根目录运行
+`go test -race ./internal/workflow` 验证预检拒绝、跨界调用及超时回收；需要可用的 Node.js。
+详见 [动态工作流设计](docs/WORKFLOW.md)。
+
 ```bash
 go test ./...
 go test -race ./...
