@@ -719,3 +719,36 @@ func TestOrphanedStateComputed(t *testing.T) {
 		t.Fatal("orphaned thread 的 Send 应报错")
 	}
 }
+
+// 未选目录时回退到临时会话目录（~/.vortex/acp-sessions/<threadID>，测试里替换根），
+// 显式指定的目录仍然优先。
+func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
+	base := t.TempDir()
+	old := sessionsBaseDirFn
+	sessionsBaseDirFn = func() (string, error) { return base, nil }
+	t.Cleanup(func() { sessionsBaseDirFn = old })
+
+	cfg := testConfig(t)
+	m := newTestManager(t, &cfg, nil, nil)
+
+	th, err := m.Create("fake", "", "")
+	if err != nil {
+		t.Fatalf("不选目录应能创建（回退临时目录）: %v", err)
+	}
+	want := filepath.Join(base, th.ID)
+	if th.Workspace != want {
+		t.Fatalf("应回退到 %s，实际 %s", want, th.Workspace)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("回退目录应已创建: %v", err)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "chosen")
+	th2, err := m.Create("fake", explicit, "")
+	if err != nil {
+		t.Fatalf("显式目录创建失败: %v", err)
+	}
+	if th2.Workspace != explicit {
+		t.Fatalf("显式目录应优先，实际 %s", th2.Workspace)
+	}
+}

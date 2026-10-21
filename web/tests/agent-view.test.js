@@ -31,7 +31,11 @@ beforeEach(() => {
   vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() })
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null; vi.unstubAllGlobals() })
-async function show() { wrapper = mount(AgentView); await flushPromises() }
+async function show() {
+  // teleport stub 成原地渲染：目录选择器弹窗内容才能被 wrapper 查到
+  wrapper = mount(AgentView, { global: { stubs: { teleport: true } } })
+  await flushPromises()
+}
 
 describe('智能体对话空间', () => {
   it('加载 thread 列表并投影消息（用户气泡 / note 标注 / bot 正文与轮末汇总）', async () => {
@@ -42,6 +46,14 @@ describe('智能体对话空间', () => {
     expect(wrapper.text()).toContain('上下文已重置')
     expect(wrapper.text()).toContain('看完了。')
     expect(wrapper.text()).toContain('本轮 · ')
+  })
+
+  it('输入框挂载为可用的 ChatComposer（textarea，可输入）', async () => {
+    await show()
+    const ta = wrapper.get('[aria-label="智能体输入"]')
+    expect(ta.element.tagName).toBe('TEXTAREA')
+    await ta.setValue('看一下目录')
+    expect(ta.element.value).toBe('看一下目录')
   })
 
   it('未开启功能时显示引导并深链设置', async () => {
@@ -56,17 +68,70 @@ describe('智能体对话空间', () => {
     expect(store.settingsOpen).toBe(true)
   })
 
-  it('新建对话：表单预填 agent 的默认工作目录，提交 POST /api/acp/threads', async () => {
+  it('新建对话（浏览器）：预填 agent 默认工作目录，提交 POST /api/acp/threads', async () => {
     await show()
     await wrapper.get('[aria-label="新建对话"]').trigger('click')
-    const ws = wrapper.get('.ag-form input')
-    expect(ws.element.value).toBe('/home/u/proj') // 预填
+    expect(wrapper.get('.ag-ws-pick').text()).toContain('/home/u/proj') // 预填
     api.mockClear()
-    ws.setValue('/home/u/other')
     await wrapper.findAll('button').find(b => b.text() === '创建').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads',
-      { agent: 'codex', workspace: '/home/u/other', title: '' })
+      { agent: 'codex', workspace: '/home/u/proj', title: '' })
+  })
+
+  it('新建对话：工作目录留空也可创建（后端回退临时会话目录）', async () => {
+    api.mockImplementation(async (method, url) =>
+      method === 'GET' && url === '/api/acp/threads'
+        ? { threads: [], acp: { enabled: true, agents: [{ name: 'codex', command: 'npx', enabled: true }] } }
+        : {})
+    await show()
+    await wrapper.get('[aria-label="新建对话"]').trigger('click')
+    expect(wrapper.text()).toContain('留空则用临时会话目录')
+    expect(wrapper.get('.ag-ws-pick').text()).toContain('选择目录')
+    await wrapper.findAll('button').find(b => b.text() === '创建').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads',
+      { agent: 'codex', workspace: '', title: '' })
+  })
+
+  it('目录选择器：逐层浏览、上一级、路径栏直达，回填所选绝对路径', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/threads')
+        return { threads: [], acp: { enabled: true, agents: [{ name: 'codex', command: 'npx', enabled: true }] } }
+      if (method === 'GET' && url === '/api/acp/dirs')
+        return { path: '/home/u', parent: '/home', dirs: [{ name: 'proj', path: '/home/u/proj' }] }
+      if (method === 'GET' && url === '/api/acp/dirs?path=%2Fhome%2Fu%2Fproj')
+        return { path: '/home/u/proj', parent: '/home/u', dirs: [] }
+      if (method === 'GET' && url === '/api/acp/dirs?path=%2Fhome%2Fu')
+        return { path: '/home/u', parent: '/home', dirs: [{ name: 'proj', path: '/home/u/proj' }] }
+      return {}
+    })
+    await show()
+    await wrapper.get('[aria-label="新建对话"]').trigger('click')
+    await wrapper.get('.ag-ws-pick').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('选择工作目录')
+    // 逐层点进 proj
+    await wrapper.findAll('.ag-dirlist button').find(b => b.text() === 'proj').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.ag-dir-cur').text()).toBe('/home/u/proj')
+    // 上一级回到 /home/u，再用路径栏直达回去
+    await wrapper.findAll('button').find(b => b.text() === '上一级').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.ag-dir-cur').text()).toBe('/home/u')
+    const bar = wrapper.get('[aria-label="目录路径"]')
+    await bar.setValue('/home/u/proj')
+    await bar.trigger('keydown.enter')
+    await flushPromises()
+    expect(wrapper.get('.ag-dir-cur').text()).toBe('/home/u/proj')
+    // 使用此目录 → 回填表单并提交
+    await wrapper.findAll('button').find(b => b.text() === '使用此目录').trigger('click')
+    expect(wrapper.get('.ag-ws-pick').text()).toContain('/home/u/proj')
+    api.mockClear()
+    await wrapper.findAll('button').find(b => b.text() === '创建').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads',
+      { agent: 'codex', workspace: '/home/u/proj', title: '' })
   })
 
   it('删除需要二次确认', async () => {

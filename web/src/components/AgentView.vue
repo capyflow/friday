@@ -9,6 +9,7 @@ import { api } from '../api.js'
 import { pushThinking, pushToolStep, pushText, turnTotalText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
+import ChatComposer from './ChatComposer.vue'
 
 const threads = ref([])
 const acp = ref(null)          // /api/acp/threads 回带的配置（enabled/agents…）
@@ -80,12 +81,38 @@ function syncWorkspace() {
   const a = (acp.value.agents || []).find(x => x.name === form.agent)
   form.workspace = a && a.workspace ? a.workspace : (form.workspace || '')
 }
+// 目录选择器：后端 /api/acp/dirs 只读逐层列举（浏览器与桌面壳共用，浏览器
+// 原生 API 拿不到绝对路径所以不走 showDirectoryPicker）。弹窗里可逐层点选，
+// 也可在路径栏直接粘贴回车跳转；「使用此目录」把绝对路径回填进表单。
+const dirPicker = reactive({ open: false, path: '', parent: '', input: '', dirs: [], loading: false })
+async function browseDirs(path) {
+  dirPicker.loading = true
+  try {
+    const r = await api('GET', '/api/acp/dirs' + (path ? '?path=' + encodeURIComponent(path) : ''))
+    dirPicker.path = r.path
+    dirPicker.parent = r.parent || ''
+    dirPicker.input = r.path
+    dirPicker.dirs = r.dirs || []
+  } catch (e) { toast('读取目录失败：' + e.message, true) } finally { dirPicker.loading = false }
+}
+function openDirPicker() {
+  dirPicker.open = true
+  browseDirs(form.workspace || '')
+}
+function submitDirPath() {
+  if (dirPicker.input.trim()) browseDirs(dirPicker.input.trim())
+}
+function chooseDir() {
+  form.workspace = dirPicker.path
+  dirPicker.open = false
+}
 async function createThread() {
   if (!form.agent) { toast('请选择智能体', true); return }
   try {
-    const r = await api('POST', '/api/acp/threads', form)
+    const r = await api('POST', '/api/acp/threads', { ...form })
     creating.value = false
     form.title = ''
+    form.workspace = ''
     await load()
     select(r.thread.id)
     toast('已创建对话，发第一条消息即会启动 agent')
@@ -267,9 +294,14 @@ function removePreview(p) {
                   :disabled="a.enabled === false">{{ a.name }}{{ a.enabled === false ? '（已停用）' : '' }}</option>
         </select>
         <label class="meta">工作目录（agent 在这里干活，会写入文件）</label>
-        <input v-model="form.workspace" placeholder="如 ~/projects/demo" @keydown.enter="createThread">
+        <button type="button" class="ag-ws-pick" :title="form.workspace || '点击选择，留空则用临时会话目录'"
+                @click="openDirPicker">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>{{ form.workspace || '选择目录…' }}</span>
+        </button>
+        <p class="meta ag-ws-hint">留空则用临时会话目录（~/.vortex/acp-sessions/）</p>
         <div class="ag-form-acts">
-          <button class="btn sm primary" :disabled="!form.agent || !form.workspace" @click="createThread">创建</button>
+          <button class="btn sm primary" :disabled="!form.agent" @click="createThread">创建</button>
           <button class="btn sm" @click="creating = false">取消</button>
         </div>
       </div>
@@ -363,4 +395,37 @@ function removePreview(p) {
         </div>      </template>
     </section>
   </div>
+  <!-- 目录选择器弹窗：逐层点选或路径栏直达，绝对路径由后端返回 -->
+  <Teleport to="body">
+    <div v-if="dirPicker.open" class="dlg-mask" @click.self="dirPicker.open = false">
+      <div class="dlg" role="dialog" aria-modal="true" aria-label="选择工作目录" @keydown.esc="dirPicker.open = false">
+        <header class="dlg-head">
+          <h3 class="dlg-title">选择工作目录</h3>
+          <button type="button" class="set-close" aria-label="关闭目录选择" @click="dirPicker.open = false">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                 stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </header>
+        <div class="dlg-body">
+          <div class="ag-dir-bar">
+            <input v-model="dirPicker.input" aria-label="目录路径" placeholder="输入路径后回车跳转"
+                   :disabled="dirPicker.loading" @keydown.enter="submitDirPath">
+            <button type="button" class="btn sm" :disabled="!dirPicker.parent || dirPicker.loading"
+                    @click="browseDirs(dirPicker.parent)">上一级</button>
+          </div>
+          <ul class="ag-dirlist" aria-label="子目录列表">
+            <li v-for="d in dirPicker.dirs" :key="d.path">
+              <button type="button" @click="browseDirs(d.path)">{{ d.name }}</button>
+            </li>
+            <li v-if="!dirPicker.dirs.length && !dirPicker.loading" class="meta ag-dir-empty">（没有子目录）</li>
+          </ul>
+        </div>
+        <footer class="dlg-foot">
+          <span class="meta ag-dir-cur" :title="dirPicker.path">{{ dirPicker.path }}</span>
+          <button class="btn sm primary" :disabled="dirPicker.loading || !dirPicker.path" @click="chooseDir">使用此目录</button>
+          <button class="btn sm" @click="dirPicker.open = false">取消</button>
+        </footer>
+      </div>
+    </div>
+  </Teleport>
 </template>

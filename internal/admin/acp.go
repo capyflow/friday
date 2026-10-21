@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -123,6 +125,51 @@ func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
 // handleAcpCatalog 返回可安装 agent 目录与本机安装状态（设置页「安装 agent」用）。
 func (s *Server) handleAcpCatalog(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"catalog": s.acp.Catalog()})
+}
+
+// handleAcpDirs 列出某目录下的子目录（新建对话「选择目录」用，浏览器与桌面壳共用）。
+// GET /api/acp/dirs?path=~/projects，path 缺省 = HOME。只读、只列目录、逐层懒列举
+// （不递归、不读文件内容）；返回绝对路径供 thread 创建用作工作目录。
+func (s *Server) handleAcpDirs(ctx *vhttp.Context) error {
+	raw := strings.TrimSpace(ctx.GinContext().Query("path"))
+	target := raw
+	if target == "" || target == "~" || strings.HasPrefix(target, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "解析 HOME 失败"})
+		}
+		target = filepath.Join(home, strings.TrimPrefix(target, "~"))
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "解析路径失败"})
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "目录不存在或不可读"})
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "读取目录失败: " + err.Error()})
+	}
+	type dirItem struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	dirs := make([]dirItem, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, dirItem{Name: e.Name(), Path: filepath.Join(abs, e.Name())})
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name < dirs[j].Name })
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		parent = "" // 已到根
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"path": abs, "parent": parent, "dirs": dirs,
+	})
 }
 
 // handleAcpInstall 执行目录中指定 agent 的官方安装命令（同步，最长 5 分钟），

@@ -192,11 +192,28 @@ func (m *Manager) Get(id string) (Thread, bool) {
 	return cp, true
 }
 
+// sessionsBaseDirFn 可被测试替换：未指定工作目录时，新建临时会话的父目录。
+var sessionsBaseDirFn = defaultSessionsDir
+
+// defaultSessionsDir 返回 $HOME/.vortex/acp-sessions——与 $HOME/.vortex/skills
+// 同族的专用目录，专门存放「没选目录就开聊」的临时会话。
+func defaultSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("解析 HOME 失败: %w", err)
+	}
+	return filepath.Join(home, ".vortex", "acp-sessions"), nil
+}
+
 // resolveWorkspace 解析并准备工作目录：~ 展开 → 绝对路径 → 确保存在且是目录。
-func resolveWorkspace(agentCfg config.AcpAgentConfig, workspace string) (string, error) {
+// 请求与 agent 默认都为空时用 fallback（空 fallback 保持报错）。
+func resolveWorkspace(agentCfg config.AcpAgentConfig, workspace, fallback string) (string, error) {
 	ws := strings.TrimSpace(workspace)
 	if ws == "" {
 		ws = strings.TrimSpace(agentCfg.Workspace)
+	}
+	if ws == "" {
+		ws = fallback
 	}
 	if ws == "" {
 		return "", errors.New("请填写工作目录（该目录是 agent 干活的地方，会被写入文件）")
@@ -235,19 +252,30 @@ func (m *Manager) Create(agentName, workspace, title string) (Thread, error) {
 	if !ok {
 		return Thread{}, fmt.Errorf("没有叫 %q 的智能体（可在设置 → 智能体里添加）", agentName)
 	}
-	ws, err := resolveWorkspace(agentCfg, workspace)
-	if err != nil {
-		return Thread{}, err
-	}
 	th := &Thread{
 		ID:        randHex(8),
 		Agent:     agentCfg.Name,
-		Workspace: ws,
+		Workspace: "",
 		Title:     strings.TrimSpace(title),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		State:     StateIdle,
 	}
+	// 目录未指定（UI 点选/手输都没有）→ 回退到临时会话目录，每个会话一个
+	// 子目录互不踩文件（对齐其他 agent 工具「无需先想目录即可开聊」的默认）。
+	fallback := ""
+	if strings.TrimSpace(workspace) == "" && strings.TrimSpace(agentCfg.Workspace) == "" {
+		base, err := sessionsBaseDirFn()
+		if err != nil {
+			return Thread{}, err
+		}
+		fallback = filepath.Join(base, th.ID)
+	}
+	ws, err := resolveWorkspace(agentCfg, workspace, fallback)
+	if err != nil {
+		return Thread{}, err
+	}
+	th.Workspace = ws
 	m.mu.Lock()
 	m.threads[th.ID] = th
 	m.order = append(m.order, th.ID)

@@ -41,6 +41,9 @@
 //	POST   /api/acp/threads/:id/chat 智能体对话（SSE 流式，帧协议同 /api/chat，需登录）
 //	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
 //	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
+//	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
+//	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
+//	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -324,6 +327,7 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))
 	}
 	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
 	s.registerCostRoutes(root)

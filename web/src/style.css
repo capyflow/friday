@@ -1079,6 +1079,25 @@ html[data-theme="dark"] .selbox-pop {
   border: 1px solid var(--border-strong); border-radius: 8px;
   background: var(--bg); color: var(--fg); }
 .ag-form-acts { display: flex; gap: 8px; margin-top: 4px; }
+.ag-ws-pick { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  font: inherit; font-size: 13px; padding: 7px 9px; border: 1px dashed var(--border-strong);
+  border-radius: 8px; background: var(--bg); color: var(--fg); cursor: pointer; }
+.ag-ws-pick span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-ws-pick:hover { background: rgba(127, 127, 127, .08); }
+.ag-ws-hint { margin: 0; font-size: 12px; }
+.ag-dir-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+.ag-dir-bar input { flex: 1; min-width: 0; font-size: 13px; padding: 7px 9px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--fg); }
+.ag-dirlist { list-style: none; margin: 0; padding: 4px; max-height: 300px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; gap: 2px; }
+.ag-dirlist button { display: block; width: 100%; text-align: left; padding: 7px 10px;
+  border: none; border-radius: 8px; background: transparent; color: var(--fg);
+  cursor: pointer; font: inherit; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-dirlist button:hover { background: rgba(127, 127, 127, .08); }
+.ag-dir-empty { padding: 8px 10px; }
+.ag-dir-cur { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ag-list { flex: 1; overflow-y: auto; padding: 8px; display: flex;
            flex-direction: column; gap: 4px; }
 .ag-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
