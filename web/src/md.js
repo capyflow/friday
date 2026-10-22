@@ -53,12 +53,50 @@ const SANITIZE_OPTIONS = {
   SANITIZE_NAMED_PROPS: true,
 }
 
-export function renderMD(src) {
+// 行内代码里的本机绝对路径转成可点文件 chip（仅 renderMD 开了 fileChips 的调用方，
+// 聊天/智能体时间线）。识别从严，点错顶多提示文件不存在：
+// / 开头且非 //（排除协议形）、排除站点自身路由（/api 等）、无控制字符/反引号，
+// 且最后一段带 1–8 位字母数字扩展名（目录与 /usr/local/go 这类无扩展名不认）。
+export function looksLikeFilePath(text) {
+  const s = String(text ?? '').trim()
+  if (s.length < 4 || !s.startsWith('/') || s.startsWith('//')) return false
+  if (/^\/(api|admin|palette|traces)(\/|$)/.test(s)) return false
+  if (/[`<>|]/.test(s)) return false
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) < 0x20) return false
+  }
+  return /\.[A-Za-z0-9]{1,8}$/.test(s)
+}
+
+// 后处理已消毒 HTML：命中路径的行内 code（pre 里的不动）换成 button.file-chip，
+// 全部经 DOM API 构造（textContent/dataset），不拼字符串，无注入面。
+function linkifyFileChips(html) {
+  const tpl = document.createElement('template')
+  tpl.innerHTML = html
+  let changed = false
+  for (const code of [...tpl.content.querySelectorAll('code')]) {
+    if (code.closest('pre')) continue
+    const path = code.textContent.trim()
+    if (!looksLikeFilePath(path)) continue
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.className = 'file-chip'
+    chip.dataset.path = path
+    chip.title = '预览文件'
+    chip.textContent = path
+    code.replaceWith(chip)
+    changed = true
+  }
+  return changed ? tpl.innerHTML : html
+}
+
+export function renderMD(src, { fileChips = false } = {}) {
   let s = String(src ?? '')
   if ((s.match(/```/g) || []).length % 2 === 1) s += '\n```'
   let html
   try {
     html = markdown.parse(s, { async: false })
   } catch { html = '<p>' + escapeHTML(s).replace(/\n/g, '<br>') + '</p>' }
-  return DOMPurify.sanitize(html, SANITIZE_OPTIONS)
+  html = DOMPurify.sanitize(html, SANITIZE_OPTIONS)
+  return fileChips ? linkifyFileChips(html) : html
 }

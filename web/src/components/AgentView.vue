@@ -10,6 +10,7 @@ import { pushThinking, pushToolStep, pushText, turnTotalText } from '../blocks.j
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import ChatComposer from './ChatComposer.vue'
+import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
 const threads = ref([])
 const acp = ref(null)          // /api/acp/threads 回带的配置（enabled/agents…）
@@ -25,6 +26,7 @@ const form = reactive({ agent: '', workspace: '', title: '' })
 const confirmId = ref('')      // 二次确认删除的 thread id
 const pendingImages = reactive([]) // { id, url }
 const fileInput = ref(null)
+const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 let controller = null
 
 const current = computed(() => threads.value.find(t => t.id === currentId.value) || null)
@@ -367,7 +369,8 @@ function removePreview(p) {
                   <span class="typing"><i></i><i></i><i></i></span>
                 </div>
                 <div v-else-if="m.role === 'bot'" class="turn">
-                  <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round" />
+                  <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
+                                  @preview="path => fileDrawer.open(path)" />
                   <div v-if="m.turn" class="turn-total">
                     {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
                   </div>
@@ -404,6 +407,7 @@ function removePreview(p) {
         </div>      </template>
     </section>
   </div>
+  <FilePreviewDrawer ref="fileDrawer" />
   <!-- 目录选择器弹窗：逐层点选或路径栏直达，绝对路径由后端返回 -->
   <Teleport to="body">
     <div v-if="dirPicker.open" class="dlg-mask" @click.self="dirPicker.open = false">

@@ -12,6 +12,7 @@ import { pushThinking, finishRound, pushToolStep, pushText, turnTotalText } from
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import ChatComposer from './ChatComposer.vue'
+import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -23,6 +24,7 @@ import ChatComposer from './ChatComposer.vue'
 // bot 的 turn 是本轮问答的 token 汇总 { in, out, ms? }，done 帧带来、历史接口同样回带。
 const messages = reactive([])
 const input = ref('')
+const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 const phase = ref('idle')          // 对话阶段：idle（空闲）| streaming（回复中）| paused（已暂停可继续）
 const pausedTurn = ref(null)       // 暂停现场镜像 { question, partial }（服务端为准）
 const busy = computed(() => phase.value === 'streaming')
@@ -806,7 +808,8 @@ async function clearContext() {
           </div>
           <!-- bot：zcode 风时间线——思考 / 工具调用 / 正文按到达顺序分开成块 -->
           <div v-else-if="m.role === 'bot'" class="turn">
-            <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round" />
+            <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
+                            @preview="path => fileDrawer.open(path)" />
             <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
                 <div class="pc-head">
@@ -1012,5 +1015,6 @@ async function clearContext() {
           </button>
         </div>
     </div>
+    <FilePreviewDrawer ref="fileDrawer" />
   </section>
 </template>

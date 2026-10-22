@@ -44,6 +44,7 @@
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
 //	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
+//	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -314,6 +315,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
 	}
+	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
+	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
 	// 智能体（ACP）对话空间：thread CRUD、SSE 对话流、停止、配置与握手诊断。
 	if s.acp != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/config", s.wrap(s.handleAcpConfigGet))

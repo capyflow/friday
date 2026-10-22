@@ -6,12 +6,20 @@
 import { renderMD } from '../md.js'
 import { blockIndex, thinkPreview } from '../blocks.js'
 
+const emit = defineEmits(['preview'])
+
 const props = defineProps({
   blocks: { type: Array, required: true },
   streaming: { type: Boolean, default: false },
   paused: { type: Boolean, default: false },
   round: { type: Number, default: 0 },
 })
+
+// 正文里的文件路径 chip 由后端只读预览（v-html 内的点击走委托）。
+function onTextClick(e) {
+  const chip = e.target.closest?.('.file-chip')
+  if (chip?.dataset.path) emit('preview', chip.dataset.path)
+}
 
 // 正在写的思考块（本轮那一块且轮次未定稿）：标题实时一行预览、灯泡呼吸。
 function liveThink(bi, b) {
@@ -73,7 +81,7 @@ function cursorOn(bi) {
         <div class="tool-out">{{ b.out }}</div>
       </div>
     </div>
-    <!-- 正文块 -->
-    <div v-else class="turn-text chat-md"><span v-html="renderMD(b.text)"></span><span v-if="cursorOn(bi)" class="cursor"></span></div>
+    <!-- 正文块（fileChips：行内代码里的本机文件路径渲染成可点预览 chip） -->
+    <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(b.text, { fileChips: true })"></span><span v-if="cursorOn(bi)" class="cursor"></span></div>
   </template>
 </template>

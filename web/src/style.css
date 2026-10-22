@@ -1135,3 +1135,47 @@ html[data-theme="dark"] .selbox-pop {
   align-items: center; justify-content: center; font-size: 24px; font-weight: 650;
   color: #fff; background: linear-gradient(135deg, #6366F1, #8B5CF6); }
 @media (max-width: 760px) { .ag-rail { width: 200px; } }
+
+/* ===== 文件路径 chip 与侧边预览抽屉 ===== */
+/* 时间线正文行内代码里的本机文件路径：渲染成可点 chip（md.js fileChips 开关） */
+.chat-md .file-chip, .fp-md .file-chip {
+  appearance: none; border: 1px solid var(--border); background: var(--bg-subtle);
+  padding: 1px 7px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--fg-2);
+  display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; text-align: left; }
+.chat-md .file-chip:hover, .fp-md .file-chip:hover {
+  border-color: var(--accent); color: var(--accent); background: var(--accent-subtle); }
+html[data-theme="dark"] .chat-md .file-chip, html[data-theme="dark"] .fp-md .file-chip {
+  background: rgba(255,255,255,.07); border-color: rgba(255,255,255,.12); }
+
+.fp-mask { position: fixed; inset: 0; z-index: 225; background: rgba(24,24,27,.45); }
+.fp-panel { position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 92vw);
+  z-index: 226; background: var(--card); box-shadow: var(--shadow-overlay);
+  display: flex; flex-direction: column; animation: fp-in .22s ease; }
+@keyframes fp-in { from { transform: translateX(28px); opacity: 0; } }
+.fp-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 8px; }
+.fp-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fp-name { font-size: 15px; font-weight: 650; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-meta { font-size: 11.5px; color: var(--faint-fg); font-variant-numeric: tabular-nums; }
+.fp-path { padding: 0 16px 10px; font-size: 11.5px; color: var(--muted-fg);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-bottom: 1px solid var(--border); }
+.fp-body { flex: 1; overflow: auto; padding: 14px 16px; }
+.fp-status { flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--muted-fg); font-size: 13.5px; padding: 24px; text-align: center; }
+.fp-status.is-error { color: #DC2626; }
+html[data-theme="dark"] .fp-status.is-error { color: #F87171; }
+.fp-notice { font-size: 12px; color: var(--muted-fg); background: var(--bg-subtle);
+  border: 1px solid var(--border); border-radius: var(--radius-sm, 8px);
+  padding: 6px 10px; margin-bottom: 10px; }
+.fp-md { font-size: 14px; }
+.fp-code { margin: 0; background: #18181B; color: #E6E6EA; padding: 12px 14px;
+  border-radius: var(--radius-sm, 8px); overflow: auto; font-size: 12.5px;
+  line-height: 1.55; font-family: ui-monospace, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all; }
+html[data-theme="dark"] .fp-code { background: #0D0D0D;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.fp-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; margin: 0 auto; }
