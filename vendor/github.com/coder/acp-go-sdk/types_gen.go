@@ -2509,6 +2509,10 @@ type LoadSessionResponse struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 	// Initial session configuration options if supported by the Agent.
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// Initial model state if supported by the Agent.
+	//
+	// friday vendor patch: session model selection（上游 SDK 尚未收录该规范增补）
+	Models *SessionModelState `json:"models,omitempty"`
 	// Initial mode state if supported by the Agent
 	//
 	// See protocol docs: [Session Modes](https://agentclientprotocol.com/protocol/session-modes)
@@ -3274,6 +3278,10 @@ type NewSessionResponse struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 	// Initial session configuration options if supported by the Agent.
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// Initial model state if supported by the Agent.
+	//
+	// friday vendor patch: session model selection（上游 SDK 尚未收录该规范增补）
+	Models *SessionModelState `json:"models,omitempty"`
 	// Initial mode state if supported by the Agent
 	//
 	// See protocol docs: [Session Modes](https://agentclientprotocol.com/protocol/session-modes)
@@ -4363,6 +4371,10 @@ type ResumeSessionResponse struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 	// Initial session configuration options if supported by the Agent.
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// Initial model state if supported by the Agent.
+	//
+	// friday vendor patch: session model selection（上游 SDK 尚未收录该规范增补）
+	Models *SessionModelState `json:"models,omitempty"`
 	// Initial mode state if supported by the Agent
 	//
 	// See protocol docs: [Session Modes](https://agentclientprotocol.com/protocol/session-modes)
@@ -4963,6 +4975,73 @@ type SessionModeState struct {
 	// The current mode the Agent is in.
 	CurrentModeId SessionModeId `json:"currentModeId"`
 }
+
+// ---- friday vendor patch: session model selection（上游 SDK 尚未收录该规范增补，
+// 仿上方 SessionMode 系生成风格补齐；上游收录后应整体移除本段）----
+
+// A model the agent can operate with.
+type SessionModelInfo struct {
+	// The _meta property is reserved by ACP to allow clients and agents to attach additional
+	// metadata to their interactions. Implementations MUST NOT make assumptions about values at
+	// these keys.
+	//
+	// See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+	Meta        map[string]any `json:"_meta,omitempty"`
+	Description *string        `json:"description,omitempty"`
+	Id          SessionModelId `json:"modelId"`
+	Name        string         `json:"name"`
+}
+
+// Unique identifier for a Session Model.
+type SessionModelId string
+
+// The set of models and the one currently active.
+type SessionModelState struct {
+	// The _meta property is reserved by ACP to allow clients and agents to attach additional
+	// metadata to their interactions. Implementations MUST NOT make assumptions about values at
+	// these keys.
+	//
+	// See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+	Meta map[string]any `json:"_meta,omitempty"`
+	// The set of models that the Agent can operate with
+	AvailableModels []SessionModelInfo `json:"availableModels"`
+	// The current model the Agent is using.
+	CurrentModelId SessionModelId `json:"currentModelId"`
+}
+
+// Request parameters for setting a session model.
+type SetSessionModelRequest struct {
+	// The _meta property is reserved by ACP to allow clients and agents to attach additional
+	// metadata to their interactions. Implementations MUST NOT make assumptions about values at
+	// these keys.
+	//
+	// See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+	Meta map[string]any `json:"_meta,omitempty"`
+	// The ID of the model to set.
+	ModelId SessionModelId `json:"modelId"`
+	// The ID of the session to set the model for.
+	SessionId SessionId `json:"sessionId"`
+}
+
+func (v *SetSessionModelRequest) Validate() error {
+	return nil
+}
+
+// Response to 'session/set_model' method.
+type SetSessionModelResponse struct {
+	// The _meta property is reserved by ACP to allow clients and agents to attach additional
+	// metadata to their interactions. Implementations MUST NOT make assumptions about values at
+	// these keys.
+	//
+	// See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+	Meta map[string]any `json:"_meta,omitempty"`
+}
+
+func (v *SetSessionModelResponse) Validate() error {
+	return nil
+}
+
+// ---- end friday vendor patch: session model selection ----
 
 // Notification containing a session update from the agent.
 //

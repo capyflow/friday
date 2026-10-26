@@ -309,3 +309,9 @@ func (c *ClientSideConnection) SetSessionMode(ctx context.Context, params SetSes
 	resp, err := SendRequest[SetSessionModeResponse](c.conn, ctx, AgentMethodSessionSetMode, params)
 	return resp, err
 }
+
+// friday vendor patch: session model selection（上游 SDK 尚未收录该规范增补）
+func (c *ClientSideConnection) SetSessionModel(ctx context.Context, params SetSessionModelRequest) (SetSessionModelResponse, error) {
+	resp, err := SendRequest[SetSessionModelResponse](c.conn, ctx, AgentMethodSessionSetModel, params)
+	return resp, err
+}
