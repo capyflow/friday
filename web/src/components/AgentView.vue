@@ -172,8 +172,12 @@ function syncWorkspace() {
 // 目录选择器：后端 /api/acp/dirs 只读逐层列举（浏览器与桌面壳共用，浏览器
 // 原生 API 拿不到绝对路径所以不走 showDirectoryPicker）。弹窗里可逐层点选，
 // 也可在路径栏直接粘贴回车跳转；「使用此目录」把绝对路径回填进表单。
-const dirPicker = reactive({ open: false, path: '', parent: '', input: '', dirs: [], loading: false })
-async function browseDirs(path) {
+const dirPicker = reactive({ open: false, path: '', parent: '', input: '', dirs: [], loading: false,
+  showHidden: false, back: [], fwd: [] })
+// 点开头的隐藏目录默认不展示，弹窗内按钮切换；过滤在前端做，切换不用重新请求
+const visibleDirs = computed(() =>
+  dirPicker.showHidden ? dirPicker.dirs : dirPicker.dirs.filter(d => !d.name.startsWith('.')))
+async function loadDirs(path) {
   dirPicker.loading = true
   try {
     const r = await api('GET', '/api/acp/dirs' + (path ? '?path=' + encodeURIComponent(path) : ''))
@@ -183,9 +187,31 @@ async function browseDirs(path) {
     dirPicker.dirs = r.dirs || []
   } catch (e) { toast('读取目录失败：' + e.message, true) } finally { dirPicker.loading = false }
 }
+// 前往新目录并记入历史（后退/前进栈）；后退前进走 loadDirs，不重复入栈
+async function browseDirs(path) {
+  const cur = dirPicker.path
+  await loadDirs(path)
+  if (dirPicker.path && dirPicker.path !== cur) {
+    if (cur) dirPicker.back.push(cur)
+    dirPicker.fwd.length = 0
+  }
+}
+async function dirBack() {
+  if (!dirPicker.back.length || dirPicker.loading) return
+  dirPicker.fwd.push(dirPicker.path)
+  await loadDirs(dirPicker.back.pop())
+}
+async function dirForward() {
+  if (!dirPicker.fwd.length || dirPicker.loading) return
+  dirPicker.back.push(dirPicker.path)
+  await loadDirs(dirPicker.fwd.pop())
+}
 function openDirPicker() {
   dirPicker.open = true
-  browseDirs(form.workspace || '')
+  dirPicker.showHidden = false
+  dirPicker.back.length = 0
+  dirPicker.fwd.length = 0
+  loadDirs(form.workspace || '')
 }
 function submitDirPath() {
   if (dirPicker.input.trim()) browseDirs(dirPicker.input.trim())
@@ -550,32 +576,64 @@ function removePreview(p) {
   <Teleport to="body">
     <div v-if="dirPicker.open" class="dlg-mask" @click.self="dirPicker.open = false">
       <div class="dlg" role="dialog" aria-modal="true" aria-label="选择工作目录" @keydown.esc="dirPicker.open = false">
-        <header class="dlg-head">
-          <h3 class="dlg-title">选择工作目录</h3>
-          <button type="button" class="set-close" aria-label="关闭目录选择" @click="dirPicker.open = false">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
-                 stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </header>
-        <div class="dlg-body">
-          <div class="ag-dir-bar">
-            <input v-model="dirPicker.input" aria-label="目录路径" placeholder="输入路径后回车跳转"
-                   :disabled="dirPicker.loading" @keydown.enter="submitDirPath">
-            <button type="button" class="btn sm" :disabled="!dirPicker.parent || dirPicker.loading"
-                    @click="browseDirs(dirPicker.parent)">上一级</button>
+        <!-- .dlg 是横向 flex 外壳，纵向堆叠靠 .dlg-form（同 AutoView 的弹窗结构） -->
+        <div class="dlg-form">
+          <header class="dlg-head">
+            <h3 class="dlg-title">选择工作目录</h3>
+            <button type="button" class="set-close" aria-label="关闭目录选择" @click="dirPicker.open = false">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                   stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </header>
+          <div class="dlg-body">
+            <div class="ag-dir-bar">
+              <input v-model="dirPicker.input" aria-label="目录路径" placeholder="输入路径后回车跳转"
+                     :disabled="dirPicker.loading" @keydown.enter="submitDirPath">
+              <button type="button" class="ib-btn" title="后退" aria-label="后退"
+                      :disabled="!dirPicker.back.length || dirPicker.loading" @click="dirBack">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+              </button>
+              <button type="button" class="ib-btn" title="前进" aria-label="前进"
+                      :disabled="!dirPicker.fwd.length || dirPicker.loading" @click="dirForward">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+              </button>
+              <button type="button" class="ib-btn" title="上一级" aria-label="上一级"
+                      :disabled="!dirPicker.parent || dirPicker.loading" @click="browseDirs(dirPicker.parent)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              </button>
+              <button type="button" class="ib-btn ag-dir-show" :class="{ active: dirPicker.showHidden }"
+                      :title="dirPicker.showHidden ? '不显示隐藏目录' : '显示隐藏目录'"
+                      :aria-label="dirPicker.showHidden ? '不显示隐藏目录' : '显示隐藏目录'"
+                      :aria-pressed="dirPicker.showHidden" @click="dirPicker.showHidden = !dirPicker.showHidden">
+                <svg v-if="dirPicker.showHidden" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                  <path d="M1 1l22 22"/>
+                </svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+            <ul class="ag-dirlist" aria-label="子目录列表">
+              <li v-for="d in visibleDirs" :key="d.path">
+                <button type="button" @click="browseDirs(d.path)">{{ d.name }}</button>
+              </li>
+              <li v-if="!visibleDirs.length && !dirPicker.loading" class="meta ag-dir-empty">
+                {{ dirPicker.dirs.length ? '（只有隐藏子目录，可点上方按钮显示）' : '（没有子目录）' }}
+              </li>
+            </ul>
           </div>
-          <ul class="ag-dirlist" aria-label="子目录列表">
-            <li v-for="d in dirPicker.dirs" :key="d.path">
-              <button type="button" @click="browseDirs(d.path)">{{ d.name }}</button>
-            </li>
-            <li v-if="!dirPicker.dirs.length && !dirPicker.loading" class="meta ag-dir-empty">（没有子目录）</li>
-          </ul>
+          <footer class="dlg-foot">
+            <span class="meta ag-dir-cur" :title="dirPicker.path">{{ dirPicker.path }}</span>
+            <button class="btn sm primary" :disabled="dirPicker.loading || !dirPicker.path" @click="chooseDir">使用此目录</button>
+            <button class="btn sm" @click="dirPicker.open = false">取消</button>
+          </footer>
         </div>
-        <footer class="dlg-foot">
-          <span class="meta ag-dir-cur" :title="dirPicker.path">{{ dirPicker.path }}</span>
-          <button class="btn sm primary" :disabled="dirPicker.loading || !dirPicker.path" @click="chooseDir">使用此目录</button>
-          <button class="btn sm" @click="dirPicker.open = false">取消</button>
-        </footer>
       </div>
     </div>
   </Teleport>

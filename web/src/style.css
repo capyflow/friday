@@ -1089,6 +1089,14 @@ html[data-theme="dark"] .selbox-pop {
 .ag-dir-bar input { flex: 1; min-width: 0; font-size: 13px; padding: 7px 9px;
   border: 1px solid var(--border-strong); border-radius: 8px;
   background: var(--bg); color: var(--fg); }
+/* 目录栏的图标按钮：与 .btn 同描边风格的方形，悬浮用 title 提示文案 */
+.ag-dir-bar .ib-btn { width: 34px; height: 34px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--card); color: var(--fg-2); }
+.ag-dir-bar .ib-btn:hover { border-color: var(--border-strong); background: #FAFAFC; color: var(--fg); }
+html[data-theme="dark"] .ag-dir-bar .ib-btn:hover { background: rgba(255, 255, 255, .06); }
+.ag-dir-bar .ib-btn:disabled { opacity: .45; cursor: not-allowed; background: var(--card); }
+.ag-dir-show.active { background: var(--bg-muted); color: var(--fg); }
+html[data-theme="dark"] .ag-dir-show.active { background: rgba(255, 255, 255, .09); }
 .ag-dirlist { list-style: none; margin: 0; padding: 4px; max-height: 300px; overflow-y: auto;
   border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; gap: 2px; }
 .ag-dirlist button { display: block; width: 100%; text-align: left; padding: 7px 10px;
