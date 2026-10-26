@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/capyflow/friday/internal/config"
 )
@@ -94,40 +95,53 @@ func TestStderrTailAfterKill(t *testing.T) {
 	}
 }
 
+// expiredCtx 返回已过期的上下文：classifyInitError 靠它识别 SDK 包装过的超时。
+func expiredCtx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	return ctx
+}
+
 func TestClassifyInitError(t *testing.T) {
 	cfg := config.AcpAgentConfig{Name: "codex", Command: "npx"}
 
 	// 进程秒退 + stderr 命中登录关键词 → 指引（含具体命令）。
 	exited := make(chan struct{})
 	close(exited)
-	got := classifyInitError(errors.New("rpc closed"), "Error: Not logged in · run `codex login`", exited, cfg)
+	got := classifyInitError(context.Background(), errors.New("rpc closed"), "Error: Not logged in · run `codex login`", exited, cfg)
 	if !strings.Contains(got, "疑似未登录") || !strings.Contains(got, "codex login") {
 		t.Fatalf("秒退+登录关键词应给出登录指引，实际 %q", got)
 	}
 	// 秒退 + 无关键词 → 命令问题。
-	got = classifyInitError(errors.New("rpc closed"), "boom: config broken", exited, cfg)
+	got = classifyInitError(context.Background(), errors.New("rpc closed"), "boom: config broken", exited, cfg)
 	if !strings.Contains(got, "秒退") {
 		t.Fatalf("秒退+无关键词应归为命令问题，实际 %q", got)
 	}
 	// 活着但超时（C7 的 gemini 形态）。
 	alive := make(chan struct{})
-	got = classifyInitError(context.DeadlineExceeded, "", alive, cfg)
+	got = classifyInitError(expiredCtx(), context.DeadlineExceeded, "", alive, cfg)
 	if !strings.Contains(got, "握手超时") {
 		t.Fatalf("超时应归为握手超时，实际 %q", got)
 	}
+	// SDK 把超时包成不带 Unwrap 链的 *RequestError，errors.Is 认不出，
+	// 只能靠 ictx 判断（proc.go 的回归点：曾被误报成「协议层错误」）。
+	got = classifyInitError(expiredCtx(), errors.New("internal error: context deadline exceeded"), "", alive, cfg)
+	if !strings.Contains(got, "握手超时") {
+		t.Fatalf("SDK 包装的超时应归为握手超时，实际 %q", got)
+	}
 	// 活着且报错文本带凭据关键词 → 指引。
-	got = classifyInitError(errors.New("request failed: 401 unauthorized"), "", alive, cfg)
+	got = classifyInitError(context.Background(), errors.New("request failed: 401 unauthorized"), "", alive, cfg)
 	if !strings.Contains(got, "疑似未登录") {
 		t.Fatalf("401 应归为未登录，实际 %q", got)
 	}
 	// 未知名目 + 未知名 stderr → 通用协议层错误。
-	got = classifyInitError(errors.New("rpc rejected"), "weird payload", alive, cfg)
+	got = classifyInitError(context.Background(), errors.New("rpc rejected"), "weird payload", alive, cfg)
 	if !strings.Contains(got, "协议层错误") {
 		t.Fatalf("未知名目应归为协议层错误，实际 %q", got)
 	}
 	// 指引表按命令基名兜底：配置名不认识时看命令。
 	cfgG := config.AcpAgentConfig{Name: "我的助手", Command: "/usr/local/bin/gemini"}
-	got = classifyInitError(errors.New("x"), "please log in first", exited, cfgG)
+	got = classifyInitError(context.Background(), errors.New("x"), "please log in first", exited, cfgG)
 	if !strings.Contains(got, "Google 登录") {
 		t.Fatalf("命令基名应能命中指引表，实际 %q", got)
 	}

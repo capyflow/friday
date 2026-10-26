@@ -188,7 +188,7 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 		p.kill()
 		tail := p.stderrTail(8)
 		return nil, fmt.Errorf("agent %q 握手失败：%s（stderr: %s）",
-			cfg.Name, classifyInitError(err, tail, p.done, cfg), firstLine(tail))
+			cfg.Name, classifyInitError(ictx, err, tail, p.done, cfg), firstLine(tail))
 	}
 	if initRes.ProtocolVersion != acp.ProtocolVersionNumber {
 		p.kill()
@@ -239,7 +239,9 @@ func looksLikeAuthProblem(texts ...string) bool {
 // classifyInitError 把握手失败归成用户可行动的类别（M-2）；疑似未登录时附上
 // 该 agent 的登录指引（M-1）。done 是连接断开信号——进程在握手期间退出是
 // 与「活着但不说话」（超时）完全不同的故障，线索全在 stderr。
-func classifyInitError(err error, stderr string, done <-chan struct{}, cfg config.AcpAgentConfig) string {
+// ictx 是 initialize 的超时上下文：SDK 会把超时包成不带 Unwrap 链的
+// *RequestError（errors.Is 认不出 DeadlineExceeded），只能看 ctx 本身。
+func classifyInitError(ictx context.Context, err error, stderr string, done <-chan struct{}, cfg config.AcpAgentConfig) string {
 	select {
 	case <-done:
 		if looksLikeAuthProblem(stderr) {
@@ -248,9 +250,8 @@ func classifyInitError(err error, stderr string, done <-chan struct{}, cfg confi
 		return "进程提前退出（命令秒退——检查命令与参数能否独立运行）"
 	default:
 	}
-	switch {
-	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
-		return "握手超时（agent 无响应——常见于静默挂起或卡在交互提示）"
+	if ictx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "握手超时（agent 无响应——常见于 npx 首次下载、静默挂起或卡在交互提示）"
 	}
 	if looksLikeAuthProblem(err.Error(), stderr) {
 		return "疑似未登录：" + loginHintFor(cfg)
