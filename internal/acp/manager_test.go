@@ -88,6 +88,10 @@ type fakeAgent struct {
 	loadSession bool // initialize 里声明 loadSession 能力
 	loadOK      bool // session/load 成功？
 
+	configOptions []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
+	models        map[string]any   // 协议原生 models 状态（nil = agent 不回报）
+	modes         map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
+
 	mu       sync.Mutex
 	methods  []string
 	sessions []string
@@ -153,7 +157,17 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 				"authMethods":       []any{},
 			})
 		case "session/new":
-			fc.w.respond(msg.ID, map[string]any{"sessionId": f.newSessionID()})
+			resp := map[string]any{"sessionId": f.newSessionID()}
+			if f.configOptions != nil {
+				resp["configOptions"] = f.configOptions
+			}
+			if f.models != nil {
+				resp["models"] = f.models
+			}
+			if f.modes != nil {
+				resp["modes"] = f.modes
+			}
+			fc.w.respond(msg.ID, resp)
 		case "session/load":
 			if f.loadOK {
 				// N2：重放两条历史再回空结果（Manager 端应丢弃，不进时间线）。
@@ -162,10 +176,57 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 					map[string]any{"content": textBlock("(历史重放) 上一轮内容")}))
 				fc.w.notify("session/update", update(sid, "agent_message_chunk",
 					map[string]any{"content": textBlock("(历史重放) 第二条")}))
-				fc.w.respond(msg.ID, map[string]any{})
+				resp := map[string]any{}
+				if f.configOptions != nil {
+					resp["configOptions"] = f.configOptions
+				}
+				if f.models != nil {
+					resp["models"] = f.models
+				}
+				if f.modes != nil {
+					resp["modes"] = f.modes
+				}
+				fc.w.respond(msg.ID, resp)
 			} else {
 				fc.w.respondErr(msg.ID, "session not found")
 			}
+		case "session/set_config_option":
+			var p struct {
+				ConfigId string `json:"configId"`
+				Value    string `json:"value"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			f.mu.Lock()
+			for _, o := range f.configOptions {
+				if o["id"] == p.ConfigId {
+					o["currentValue"] = p.Value
+				}
+			}
+			out := append([]map[string]any{}, f.configOptions...)
+			f.mu.Unlock()
+			fc.w.respond(msg.ID, map[string]any{"configOptions": out})
+		case "session/set_model":
+			var p struct {
+				ModelId string `json:"modelId"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			f.mu.Lock()
+			if f.models != nil {
+				f.models["currentModelId"] = p.ModelId
+			}
+			f.mu.Unlock()
+			fc.w.respond(msg.ID, map[string]any{})
+		case "session/set_mode":
+			var p struct {
+				ModeId string `json:"modeId"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			f.mu.Lock()
+			if f.modes != nil {
+				f.modes["currentModeId"] = p.ModeId
+			}
+			f.mu.Unlock()
+			fc.w.respond(msg.ID, map[string]any{})
 		case "session/prompt":
 			sid := f.currentSession()
 			promptID := msg.ID
@@ -809,5 +870,235 @@ func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
 	}
 	if th2.Workspace != explicit {
 		t.Fatalf("显式目录应优先，实际 %s", th2.Workspace)
+	}
+}
+
+// ---------- 会话能力（统一清单：configOptions / models / modes 归一化） ----------
+
+// sessionOptions 是 fake 回报的会话配置项：模型下拉 + 模式下拉。
+func sessionOptions(currentModel string) []map[string]any {
+	return []map[string]any{
+		{"id": "model", "name": "模型", "category": "model", "type": "select", "currentValue": currentModel,
+			"options": []any{
+				map[string]any{"value": "builtin/a", "name": "GLM A"},
+				map[string]any{"value": "builtin/b", "name": "GLM B"},
+			}},
+		{"id": "mode", "name": "模式", "category": "mode", "type": "select", "currentValue": "build",
+			"options": []any{
+				map[string]any{"value": "build", "name": "Build"},
+				map[string]any{"value": "plan", "name": "Plan"},
+			}},
+	}
+}
+
+// sessionModels / sessionModes 是协议原生形态（cc 类 agent 只报这两样）。
+func sessionModels(current string) map[string]any {
+	return map[string]any{
+		"currentModelId": current,
+		"availableModels": []any{
+			map[string]any{"modelId": "m/opus", "name": "Opus"},
+			map[string]any{"modelId": "m/haiku", "name": "Haiku"},
+		},
+	}
+}
+
+func sessionModes(current string) map[string]any {
+	return map[string]any{
+		"currentModeId": current,
+		"availableModes": []any{
+			map[string]any{"id": "default", "name": "Default"},
+			map[string]any{"id": "plan", "name": "Plan Mode"},
+		},
+	}
+}
+
+func findCap(caps []Capability, id string) *Capability {
+	for i := range caps {
+		if caps[i].ID == id {
+			return &caps[i]
+		}
+	}
+	return nil
+}
+
+// 会话响应里的 configOptions 应被归一化透出；set_config_option 切换后
+// currentValue 跟随。Capabilities 在会话未建时直接拉起 agent 建会话。
+func TestThreadCapabilitiesAndSetOption(t *testing.T) {
+	f := &fakeAgent{configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	if len(caps) != 2 {
+		t.Fatalf("应透出 2 个能力项: %+v", caps)
+	}
+	model := findCap(caps, "model")
+	if model == nil {
+		t.Fatalf("缺少 model 能力项: %+v", caps)
+	}
+	if model.Kind != "model" || model.Source != "config-option" || model.CurrentValue != "builtin/a" ||
+		len(model.Values) != 2 || model.Values[1].Value != "builtin/b" || model.Values[1].Name != "GLM B" {
+		t.Fatalf("model 项归一化不符: %+v", model)
+	}
+	if mode := findCap(caps, "approval_mode"); mode == nil || mode.Source != "config-option" {
+		t.Fatalf("mode 应归一化为 approval_mode（config-option）: %+v", caps)
+	}
+
+	got, err := m.SetCapability(th.ID, "model", "builtin/b")
+	if err != nil {
+		t.Fatalf("SetCapability 失败: %v", err)
+	}
+	if !containsMethod(f.recorded(), "session/set_config_option") {
+		t.Fatalf("应路由到 set_config_option: %v", f.recorded())
+	}
+	if c := findCap(got, "model"); c == nil || c.CurrentValue != "builtin/b" {
+		t.Fatalf("切换后 currentValue 未跟随: %+v", got)
+	}
+}
+
+// turn 中的 config_options_update（agent 切换后回推全量）应刷新缓存。
+func TestConfigOptionUpdateDuringTurn(t *testing.T) {
+	f := &fakeAgent{configOptions: sessionOptions("builtin/a")}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "config_options_update",
+			map[string]any{"configOptions": sessionOptions("builtin/b")}))
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("好的。")}))
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	if _, err := m.Send(context.Background(), th.ID, "切个模型", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	if c := findCap(caps, "model"); c == nil || c.CurrentValue != "builtin/b" {
+		t.Fatalf("config_options_update 应刷新缓存: %+v", caps)
+	}
+}
+
+// cc 形态：不报 configOptions，只报协议原生 models/modes——模型与审批模式
+// 从原生状态兜底归一化，切换分别路由到 set_model / set_mode；thought_level
+// 缺席（agent 不支持，不强求）。
+func TestSessionModelAndModeFallback(t *testing.T) {
+	f := &fakeAgent{models: sessionModels("m/opus"), modes: sessionModes("default"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	if len(caps) != 2 {
+		t.Fatalf("应透出 2 个能力项（model + approval_mode）: %+v", caps)
+	}
+	model := findCap(caps, "model")
+	if model == nil || model.Source != "session-model" || model.CurrentValue != "m/opus" ||
+		len(model.Values) != 2 || model.Values[0].Name != "Opus" {
+		t.Fatalf("models 应兜底归一化为 model 能力: %+v", model)
+	}
+	mode := findCap(caps, "approval_mode")
+	if mode == nil || mode.Source != "session-mode" || mode.CurrentValue != "default" {
+		t.Fatalf("modes 应兜底归一化为 approval_mode 能力: %+v", mode)
+	}
+	if findCap(caps, "thought_level") != nil {
+		t.Fatalf("agent 未报 thought_level 时不应出现该项: %+v", caps)
+	}
+
+	if _, err := m.SetCapability(th.ID, "model", "m/haiku"); err != nil {
+		t.Fatalf("SetCapability(model) 失败: %v", err)
+	}
+	if !containsMethod(f.recorded(), "session/set_model") {
+		t.Fatalf("应路由到 set_model: %v", f.recorded())
+	}
+	if _, err := m.SetCapability(th.ID, "approval_mode", "plan"); err != nil {
+		t.Fatalf("SetCapability(approval_mode) 失败: %v", err)
+	}
+	if !containsMethod(f.recorded(), "session/set_mode") {
+		t.Fatalf("应路由到 set_mode: %v", f.recorded())
+	}
+}
+
+// zcode 形态：configOptions 与协议原生 models/modes 双轨并存——config-option
+// 优先（热切链路已验证），原生状态被去重；set 走 config-option 路由。
+func TestConfigOptionWinsOverSessionState(t *testing.T) {
+	f := &fakeAgent{configOptions: sessionOptions("builtin/a"),
+		models: sessionModels("m/opus"), modes: sessionModes("default"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	if len(caps) != 2 {
+		t.Fatalf("双轨并存应去重为 2 项: %+v", caps)
+	}
+	if c := findCap(caps, "model"); c == nil || c.Source != "config-option" {
+		t.Fatalf("model 应取 config-option 来源: %+v", caps)
+	}
+
+	if _, err := m.SetCapability(th.ID, "model", "builtin/b"); err != nil {
+		t.Fatalf("SetCapability 失败: %v", err)
+	}
+	for _, mth := range f.recorded() {
+		if mth == "session/set_model" {
+			t.Fatalf("config-option 优先时不应走 set_model: %v", f.recorded())
+		}
+	}
+}
+
+// turn 中的 current_mode_update（agent 切换审批模式后的推送）应刷新缓存，
+// 且不覆盖已缓存的可选模式列表。
+func TestModeStateUpdateDuringTurn(t *testing.T) {
+	f := &fakeAgent{modes: sessionModes("default")}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "current_mode_update",
+			map[string]any{"currentModeId": "plan"}))
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("好的。")}))
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	if _, err := m.Send(context.Background(), th.ID, "切个模式", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	mode := findCap(caps, "approval_mode")
+	if mode == nil || mode.CurrentValue != "plan" {
+		t.Fatalf("current_mode_update 应刷新当前模式: %+v", mode)
+	}
+	if len(mode.Values) != 2 {
+		t.Fatalf("推送不应覆盖可选模式列表: %+v", mode)
+	}
+}
+
+// agent 什么都不回报（协议可选能力）时透出空清单，前端据此隐藏全部 chip。
+func TestCapabilitiesEmptyWhenAgentOmits(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("Capabilities 失败: %v", err)
+	}
+	if len(caps) != 0 {
+		t.Fatalf("agent 未回报时应为空清单: %+v", caps)
+	}
+	if _, err := m.SetCapability(th.ID, "model", "x"); err == nil {
+		t.Fatalf("空清单上切换应报错（能力不存在）")
 	}
 }

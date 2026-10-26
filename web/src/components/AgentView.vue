@@ -4,8 +4,9 @@
 // TimelineBlocks/blocks.js；status 帧显示在"输入中"气泡里（启动 agent /
 // 重接会话等生命周期占位）。note 行是服务端投影的系统标注（上下文已重置、
 // 中断原因），灰字居中展示。
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
+import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, turnTotalText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
@@ -29,6 +30,60 @@ const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 let controller = null
 
+/* 会话能力（统一清单）：后端把 configOptions 与协议原生 models/modes 归一成
+   Capability 列表（kind=model/thought_level/approval_mode/other），切换按
+   source 路由到 set_config_option / set_model / set_mode。协议可选能力——
+   agent 不支持的能力直接缺席，对应 chip 不渲染。会话没建过时不主动拉列表
+   （GET 会顺带拉起 agent，破坏「首条消息才启动」的惰性）：选中有会话的
+   thread 时取一次，之后每轮结束刷新。 */
+const caps = ref(null)          // 当前 thread 的能力清单（null = 未加载）
+const capOpen = ref('')         // 展开中的能力 id（'' = 全收起）
+const capBusy = ref(false)
+const capWrap = ref(null)
+
+const CAP_LABEL = { model: '模型', thought_level: '思考强度', approval_mode: '审批模式' }
+function capLabel(cap) { return CAP_LABEL[cap.kind] || cap.name }
+function capCurrentName(cap) {
+  return (cap.values || []).find(v => v.value === cap.currentValue)?.name || cap.currentValue
+}
+function capTitle(cap) { return capLabel(cap) + '：' + capCurrentName(cap) }
+// kind → 图标路径（stroke 风格，currentColor；未知 kind 用滑块兜底）
+const CAP_ICON = {
+  model: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
+  thought_level: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10c.6.6 1 1.2 1 2h6c0-.8.4-1.4 1-2a6 6 0 0 0-4-10z"/>',
+  approval_mode: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  other: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+}
+function capIcon(kind) { return CAP_ICON[kind] || CAP_ICON.other }
+
+const openCap = computed(() => (caps.value || []).find(c => c.id === capOpen.value) || null)
+async function loadOptions(id) {
+  try {
+    const r = await api('GET', `/api/acp/threads/${id}/options`)
+    if (currentId.value === id) caps.value = r.capabilities || []
+    return null
+  } catch (e) { return e } // agent 拉起失败等：保持未加载态，下一轮结束后重试
+}
+function toggleCap(cap) {
+  if (busy.value || capBusy.value) return
+  popOpen.value = false
+  if (capOpen.value === cap.id) { capOpen.value = ''; return }
+  capOpen.value = cap.id
+  nextTick(() => { const el = document.getElementById('agCapPopover'); if (el) popIn(el) })
+}
+async function setCap(cap, value) {
+  if (capBusy.value || busy.value) return
+  if (value === cap.currentValue) { capOpen.value = ''; return }
+  capBusy.value = true
+  try {
+    const r = await api('POST', `/api/acp/threads/${currentId.value}/options`, { id: cap.id, value })
+    caps.value = r.capabilities || []
+    const fresh = (caps.value || []).find(c => c.id === cap.id)
+    toast(capLabel(cap) + '已切换为 ' + (fresh ? capCurrentName(fresh) : value))
+    capOpen.value = ''
+  } catch (e) { toast('切换失败：' + e.message, true) } finally { capBusy.value = false }
+}
+
 const current = computed(() => threads.value.find(t => t.id === currentId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.length > 0)
@@ -39,7 +94,34 @@ const STATE_HINT = {
   orphaned: '该对话绑定的智能体已被删除；历史仍可查看，但不能继续对话。',
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onKey)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onKey)
+})
+
+/* 「添加」弹窗：与主会话同款交互（外点/Esc 关闭），agent 只保留添加图片一项 */
+const popOpen = ref(false)
+const popWrap = ref(null)
+function setPop(open) {
+  if (open === popOpen.value) return
+  popOpen.value = open
+  if (open) {
+    capOpen.value = '' // 弹层互斥：都从 composer 左组向上长
+    nextTick(() => { const el = document.getElementById('agAddPopover'); if (el) popIn(el) })
+  }
+}
+function onDocClick(e) {
+  if (popOpen.value && popWrap.value && !popWrap.value.contains(e.target)) setPop(false)
+  if (capOpen.value && capWrap.value && !capWrap.value.contains(e.target)) capOpen.value = ''
+}
+function onKey(e) {
+  if (e.key === 'Escape') { setPop(false); capOpen.value = '' }
+}
 
 async function load() {
   try {
@@ -55,6 +137,9 @@ async function select(id) {
   try {
     const r = await api('GET', '/api/acp/threads/' + id)
     currentId.value = id
+    caps.value = null
+    capOpen.value = ''
+    if (r.thread.sessionId) loadOptions(id) // 会话已存在：清单顺带取到；没建过则等首条消息
     messages.length = 0
     for (const e of (r.thread.messages || [])) {
       if (e.role === 'user') {
@@ -256,6 +341,7 @@ async function send() {
     }
     for (const p of pendingImages.splice(0)) URL.revokeObjectURL(p.url)
     load() // 刷新列表状态（标题/状态/更新时间）
+    if (currentId.value) loadOptions(currentId.value) // 一轮跑完会话必已建立：配置项（含 agent 侧的切换回推）跟着刷新
   }
 }
 
@@ -402,8 +488,20 @@ function removePreview(p) {
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </button>
               <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
+              <!-- 会话能力 chips（统一清单，agent 报什么显示什么；不支持的自动缺席） -->
+              <button v-for="cap in (caps || [])" :key="cap.id"
+                      class="ib-btn ctx-btn model-btn" :class="{ active: capOpen === cap.id }"
+                      aria-haspopup="true" :title="capTitle(cap)" :disabled="busy || capBusy"
+                      @click.stop="toggleCap(cap)">
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="capIcon(cap.kind)"></svg>
+                <span class="ctx-short model-short">{{ capCurrentName(cap) }}</span>
             </template>
           </ChatComposer>
+              <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg></span>
+          <div v-if="openCap" v-show="capOpen" ref="capWrap" class="popover model-popover" id="agCapPopover">
+            <div class="popover-title pop-anim">{{ capLabel(openCap) }}</div>
+                    :class="{ selected: v.value === openCap.currentValue }" :disabled="capBusy"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="capIcon(openCap.kind)"></svg>
         </div>      </template>
     </section>
   </div>

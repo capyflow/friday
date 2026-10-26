@@ -173,3 +173,21 @@ MCP 调用被 C1 的 15s 超时逼着立即返回，才需要 submit/check 轮�
 `cmd/acp-probe/` 二期不删：转正为 S6/S9 的联调工具与 fake agent 脚手架蓝本，其 `-fs/-terminal/-mock-mcp/-approve-mode/-followup-*` 全部保留为回归开关。
 
 原始 ACP/MCP 报文归档在 worktree 本地 `evidence/`（约 560K），**已加入 `.gitignore` 不入库**：其中 `available_commands_update` 完整包含用户 skill 全表，且含本机绝对路径。入库的固定测试输入由 §九 的 fake agent 生成；需要复现坏案例时用 `cmd/acp-probe` 的对应 flag 重跑即可。
+
+## 十二、会话能力归一化（统一能力清单）
+
+各 agent 暴露可选配置的机制不一致，WebUI 只对接归一化后的 Capability 清单（`internal/acp/options.go`）：
+
+- **来源三路**：configOptions（session/new、load/resume 响应与 `config_options_update` 推送）、
+  协议原生 models（`session/set_model`）、协议原生 modes（`session/set_mode`）。modes 全套已在
+  SDK v0.13.5；models 为 vendor 补丁（代码带「friday vendor patch」标记，上游收录后整体移除）。
+- **kind 词汇表**：model / thought_level / approval_mode / other。去重规则：同一 kind 先到先得，
+  config-option 优先于协议原生（zcode 模式双轨取热切路径）；thought_level 仅 config-option 来源。
+  **agent 不支持的能力直接缺席**（而非占位），前端 chip 不渲染。
+- **切换按 source 路由**：set_config_option / set_model / set_mode，均为会话内热切；
+  set_model/set_mode 响应无状态回执，本地兜底改当前值、真值靠 current_mode_update 等推送刷新。
+- **实测形态**（2026-10-26）：codex=configOptions(模型/强度/审批/协作)+models；claude-code=仅
+  models+modes（模型热切可用，思考强度未暴露）；zcode=configOptions(模型/思考/模式)+modes 双轨。
+  cc 思考强度（`_meta.claudeCode.options.maxThinkingTokens`，会话重建级切换）未接入，属可选后续。
+- 管理接口：`GET/POST /api/acp/threads/:id/options`（响应键 `capabilities`），会话未建时 GET 会
+  拉起 agent 建会话（清单是静态配置，进程随后照常空闲回收）。

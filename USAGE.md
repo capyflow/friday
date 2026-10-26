@@ -97,6 +97,10 @@ npm run build
   要让它真的弹卡，需把 agent 自身配置里的审批模式调紧为"每次询问"。
 - 支持发图（复用聊天页上传，单张 ≤5MB、最多 4 张）；用量计入账本 `acp:<agent>` 维度，
   金额显示"配额在对面"（agent 烧它自己的订阅）。
+- composer 左组的能力 chips 由统一清单驱动：后端把各 agent 的 configOptions 与协议原生
+  models/modes 归一成同一形状（模型/思考强度/审批模式等），agent 报什么显示什么，不支持的能力
+  自动缺席不占位；点选即会话内热切（按来源路由 set_config_option / set_model / set_mode），
+  每轮结束自动刷新。设计与去重规则见 [ACP-AGENTS.md](docs/ACP-AGENTS.md)。
 - agent 上报上下文水位时，实时轮末汇总显示占用/窗口大小；单轮 token 仍取 prompt 结果。
   握手失败会区分提前退出、超时、协议错误，并在疑似未登录时提示对应 CLI 登录方式。
   权限审批随本轮结束自动撤下，迟到的审批会提示已失效。实现与限制见

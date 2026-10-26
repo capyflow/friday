@@ -461,12 +461,15 @@ func (m *Manager) ensureSession(th *Thread, proc *agentProc, agentCfg config.Acp
 	if th.SessionID != "" && proc.loadSession && !agentCfg.DegradeResume {
 		hooks.status("正在重接上次会话…")
 		lctx, lcancel := context.WithTimeout(context.Background(), handshake)
-		_, err := proc.conn.LoadSession(lctx, acp.LoadSessionRequest{
+		lres, err := proc.conn.LoadSession(lctx, acp.LoadSessionRequest{
 			SessionId: acp.SessionId(th.SessionID), Cwd: proc.workspace, McpServers: []acp.McpServer{},
 		})
 		lcancel()
 		if err == nil {
 			proc.drainEvents() // 重放不入时间线（投影已有）
+			proc.setOptions(lres.ConfigOptions)
+			proc.setModelState(lres.Models)
+			proc.setModeState(lres.Modes)
 			log.Printf("[智能体] %s thread %s 已重接会话 %s", th.Agent, th.ID, th.SessionID)
 			return th.SessionID, false, nil
 		}
@@ -484,6 +487,9 @@ func (m *Manager) ensureSession(th *Thread, proc *agentProc, agentCfg config.Acp
 			err, firstLine(proc.stderrTail(6)))
 	}
 	proc.drainEvents()
+	proc.setOptions(res.ConfigOptions)
+	proc.setModelState(res.Models)
+	proc.setModeState(res.Modes)
 	degraded := th.SessionID != "" && string(res.SessionId) != th.SessionID
 	if degraded {
 		log.Printf("[智能体] %s thread %s 上下文已重置（新会话 %s）", th.Agent, th.ID, res.SessionId)
@@ -657,6 +663,16 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 				if !ok {
 					return
 				}
+				// config_options_update 是 agent 侧配置变化的推送（切模型/模式后
+				// 回推全量）：刷新进程级缓存，不进时间线。
+				if ev.Update.ConfigOptionUpdate != nil {
+					lv.proc.setOptions(ev.Update.ConfigOptionUpdate.ConfigOptions)
+				}
+				// current_mode_update 是 agent 切换审批模式后的单向推送（只带
+				// 当前值）：更新进程级模式缓存当前值，不进时间线。
+				if ev.Update.CurrentModeUpdate != nil {
+					lv.proc.setCurrentMode(string(ev.Update.CurrentModeUpdate.CurrentModeId))
+				}
 				sink.handle(ev)
 			case <-turnDone:
 				for { // Prompt 返回后清空已入队残留（watermark 保证不会再有新增）
@@ -791,6 +807,129 @@ func (m *Manager) Stop(id string) bool {
 		return false
 	}
 	return lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: acp.SessionId(sid)}) == nil
+}
+
+// ensureProc 保证 thread 有存活进程与会话并返回它（Options/SetOption 共用）。
+// 全程持 thread 串行锁：与 Send 互斥，避免和 turn 里的 ensureLive 竞争拉起
+// 两个进程；返回的 unlock 在用完后调用（顺带重置空闲回收计时）。
+func (m *Manager) ensureProc(id string) (*agentProc, *Thread, func(), error) {
+	mu := m.threadLock(id)
+	mu.Lock()
+	c := m.cfgFn().Normalized()
+	if !c.Enabled {
+		mu.Unlock()
+		return nil, nil, nil, errors.New("智能体功能未开启（设置 → 智能体）")
+	}
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	m.mu.Unlock()
+	if !ok {
+		mu.Unlock()
+		return nil, nil, nil, fmt.Errorf("未找到 thread %s", id)
+	}
+	agentCfg, avail := c.Agent(th.Agent)
+	if !avail {
+		mu.Unlock()
+		return nil, nil, nil, fmt.Errorf("thread 绑定的智能体 %q 已删除或停用", th.Agent)
+	}
+	// 槽位占满/冷启动都会在这里等待（ensureLive 随 ctx 等待），必须带超时兜底
+	// ——否则 chip 触发的 Options 请求在并发已满时无限期挂住，前端按钮永远置灰。
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(c.HandshakeTimeoutSeconds)*time.Second)
+	defer cancel()
+	lv, _, err := m.ensureLive(ctx, th, agentCfg, TurnHooks{})
+	if err != nil {
+		mu.Unlock()
+		return nil, nil, nil, err
+	}
+	return lv.proc, th, func() { m.resetIdle(id); mu.Unlock() }, nil
+}
+
+// Capabilities 返回该 thread 当前会话的统一能力清单（归一化，见 options.go）。
+// 协议里没有「未建会话先查列表」的方法，会话不在时这里会拉起 agent 建会话
+// ——列表是静态配置（agent 装好后不变），进程随后照常空闲回收。
+func (m *Manager) Capabilities(id string) ([]Capability, error) {
+	proc, _, unlock, err := m.ensureProc(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return normalizeCapabilities(proc.getOptions(), proc.getModelState(), proc.getModeState()), nil
+}
+
+// SetCapability 切换某项能力的取值（如 id=model, value=gpt-6.1-sol）：
+// 按归一化时的 source 路由到 set_config_option / set_model / set_mode。
+// 切换即时生效于会话；config-option 响应回带全量配置项，session-model /
+// session-mode 响应为空、本地兜底改当前值（真值靠 agent 推送刷新）。
+func (m *Manager) SetCapability(id, capID, value string) ([]Capability, error) {
+	proc, th, unlock, err := m.ensureProc(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	// 路由：从缓存重建 capID → source 的映射（与 normalizeCapabilities 同规则）
+	opts := proc.getOptions()
+	source, configID := "", ""
+	for _, o := range opts {
+		origID, cap, ok := convertConfigOption(o.Select)
+		if ok && cap.ID == capID {
+			source, configID = cap.Source, origID
+			break
+		}
+	}
+	if source == "" {
+		switch capID {
+		case CapKindModel:
+			if proc.getModelState() != nil {
+				source = CapSourceSessionModel
+			}
+		case CapKindApprovalMode:
+			if proc.getModeState() != nil {
+				source = CapSourceSessionMode
+			}
+		}
+	}
+	if source == "" {
+		return nil, fmt.Errorf("能力项 %q 不存在或该 agent 不支持", capID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second)
+	defer cancel()
+	switch source {
+	case CapSourceConfigOption:
+		res, err := proc.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				ConfigId:  acp.SessionConfigId(configID),
+				SessionId: acp.SessionId(th.SessionID),
+				Value:     acp.SessionConfigValueId(value),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("切换失败: %w", err)
+		}
+		if len(res.ConfigOptions) > 0 {
+			proc.setOptions(res.ConfigOptions)
+		} else {
+			proc.setCurrent(configID, value)
+		}
+	case CapSourceSessionModel:
+		if _, err := proc.conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+			ModelId: acp.SessionModelId(value), SessionId: acp.SessionId(th.SessionID),
+		}); err != nil {
+			return nil, fmt.Errorf("切换失败: %w", err)
+		}
+		proc.setCurrentModel(value)
+	case CapSourceSessionMode:
+		if _, err := proc.conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
+			ModeId: acp.SessionModeId(value), SessionId: acp.SessionId(th.SessionID),
+		}); err != nil {
+			return nil, fmt.Errorf("切换失败: %w", err)
+		}
+		proc.setCurrentMode(value)
+	}
+	return normalizeCapabilities(proc.getOptions(), proc.getModelState(), proc.getModeState()), nil
 }
 
 // Test 对指定 agent 做一次握手诊断（设置页「测试」按钮）：拉起进程、initialize、

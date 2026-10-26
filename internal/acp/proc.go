@@ -37,6 +37,15 @@ type agentProc struct {
 	loadSession bool                         // agent 是否声明 loadSession 能力
 	bridge      *bridge
 
+	// 会话配置项缓存（模型/模式/推理档位下拉）：ensureSession 从会话响应捕获，
+	// turn 中的 config_options_update 与 set_config_option 的响应刷新。进程级
+	// 而非 thread 级——进程回收重接后由新会话的响应重新填充。models/modeState
+	// 是协议原生的模型/模式状态（部分 agent 只报这两样，如 cc）。
+	optMu      sync.Mutex
+	opts       []acp.SessionConfigOption
+	models     *acp.SessionModelState
+	modeState  *acp.SessionModeState
+
 	stderrMu   sync.Mutex
 	stderrMemo string // kill 时缓存的 stderr 尾部（文件随即删除，报错仍可引用）
 	stderrFile string
@@ -357,5 +366,78 @@ func (p *agentProc) alive() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// setOptions 记录会话最近一次回报的配置项（会话响应或 config_options_update）。
+func (p *agentProc) setOptions(opts []acp.SessionConfigOption) {
+	p.optMu.Lock()
+	p.opts = opts
+	p.optMu.Unlock()
+}
+
+// getOptions 返回缓存的配置项（agent 未回报时为 nil）。
+func (p *agentProc) getOptions() []acp.SessionConfigOption {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	return p.opts
+}
+
+// setModelState 记录会话最近一次回报的模型状态（协议原生 models 字段）。
+func (p *agentProc) setModelState(ms *acp.SessionModelState) {
+	p.optMu.Lock()
+	p.models = ms
+	p.optMu.Unlock()
+}
+
+// getModelState 返回缓存的模型状态（agent 未回报时为 nil）。
+func (p *agentProc) getModelState() *acp.SessionModelState {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	return p.models
+}
+
+// setCurrentModel 兜底更新当前模型：set_model 的响应不带状态回执，仅保 UI 一致性。
+func (p *agentProc) setCurrentModel(value string) {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	if p.models != nil {
+		p.models.CurrentModelId = acp.SessionModelId(value)
+	}
+}
+
+// setModeState 记录会话最近一次回报的模式状态（协议原生 modes 字段）。
+func (p *agentProc) setModeState(ms *acp.SessionModeState) {
+	p.optMu.Lock()
+	p.modeState = ms
+	p.optMu.Unlock()
+}
+
+// getModeState 返回缓存的模式状态（agent 未回报时为 nil）。
+func (p *agentProc) getModeState() *acp.SessionModeState {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	return p.modeState
+}
+
+// setCurrentMode 兜底更新当前模式：set_mode 的响应为空，真值靠 current-mode
+// 推送刷新，这里仅保切换后的即时 UI 一致性。
+func (p *agentProc) setCurrentMode(value string) {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	if p.modeState != nil {
+		p.modeState.CurrentModeId = acp.SessionModeId(value)
+	}
+}
+
+// setCurrent 兜底更新某配置项的当前值：agent 在 set_config_option 的响应里
+// 没回带全量 options 时，仅保 UI 一致性用。
+func (p *agentProc) setCurrent(configID, value string) {
+	p.optMu.Lock()
+	defer p.optMu.Unlock()
+	for _, o := range p.opts {
+		if o.Select != nil && string(o.Select.Id) == configID {
+			o.Select.CurrentValue = acp.SessionConfigValueId(value)
+		}
 	}
 }

@@ -122,6 +122,38 @@ func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已发送停止指令"})
 }
 
+// handleAcpOptionsGet 返回该 thread 会话的统一能力清单（GET
+// /api/acp/threads/:id/options）。清单是归一化产物（configOptions/models/modes
+// 三种来源收敛，见 internal/acp/options.go）：agent 不支持的能力直接缺席，前端
+// 据此隐藏对应 chip。会话不在时后端会拉起 agent 建会话——清单是 agent 侧的
+// 静态配置，进程随后照常空闲回收。
+func (s *Server) handleAcpOptionsGet(ctx *vhttp.Context) error {
+	caps, err := s.acp.Capabilities(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"capabilities": caps})
+}
+
+// handleAcpOptionsSet 切换某项能力的取值（POST /api/acp/threads/:id/options，
+// {"id":"model","value":"…"}）：后端按能力的 source 路由到 set_config_option /
+// set_model / set_mode，返回切换后的全量能力清单。切换即时生效于会话，无需
+// 重启对话。
+func (s *Server) handleAcpOptionsSet(ctx *vhttp.Context) error {
+	var req struct {
+		ID    string `json:"id"`
+		Value string `json:"value"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.ID) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"id": "...", "value": "..."}`})
+	}
+	caps, err := s.acp.SetCapability(ctx.GinContext().Param("id"), strings.TrimSpace(req.ID), req.Value)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"capabilities": caps})
+}
+
 // handleAcpCatalog 返回可安装 agent 目录（内置精选 + 官方注册表合并）与本机
 // 状态（设置页「安装 agent」用）。?refresh=1 强制重拉官方目录（默认缓存 TTL 1h，
 // 拉取失败回退过期缓存；离线时仅内置目录）。
