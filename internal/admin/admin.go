@@ -283,6 +283,7 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
+		root.AddRouter([]string{http.MethodGet}, "/api/upload/:id", s.wrap(s.handleUploadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
 		root.AddRouter([]string{http.MethodGet}, "/api/context", s.wrap(s.handleContextUsage))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/compact", s.wrap(s.handleContextCompact))

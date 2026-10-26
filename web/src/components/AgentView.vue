@@ -143,7 +143,8 @@ async function select(id) {
     messages.length = 0
     for (const e of (r.thread.messages || [])) {
       if (e.role === 'user') {
-        messages.push({ role: 'user', text: e.text, images: e.images || 0 })
+        messages.push({ role: 'user', text: e.text,
+          images: (e.files || []).map(id => '/api/upload/' + id), imgCount: e.images || 0 })
       } else if (e.role === 'note') {
         messages.push({ role: 'note', text: e.text })
       } else {
@@ -243,10 +244,15 @@ async function send() {
   input.value = ''
   if (inputEl.value) inputEl.value.style.height = 'auto'
   const attachments = await uploadImages()
-  const userMsg = reactive({ role: 'user', text: text || `（发送了 ${attachments.length} 张图片）`, images: attachments.length })
+  // 气泡直接渲染原图：用服务端 URL（/api/upload/:id），刷新后历史重载也能显示
+  const sentImgs = attachments.map(id => '/api/upload/' + id)
+  const userMsg = reactive({ role: 'user', text,
+    images: sentImgs, imgCount: attachments.length })
   const typing = reactive({ role: 'typing', label: '' })
   messages.push(userMsg)
   messages.push(typing)
+  // 预览即时清空（气泡已接手展示，对象 URL 用完即释放）
+  for (const p of pendingImages.splice(0)) URL.revokeObjectURL(p.url)
   phase.value = 'streaming'
   nextTick(stick)
 
@@ -339,7 +345,6 @@ async function send() {
     } else if (errMsg) {
       messages.push({ role: 'note', text: errMsg })
     }
-    for (const p of pendingImages.splice(0)) URL.revokeObjectURL(p.url)
     load() // 刷新列表状态（标题/状态/更新时间）
     if (currentId.value) loadOptions(currentId.value) // 一轮跑完会话必已建立：配置项（含 agent 侧的切换回推）跟着刷新
   }
@@ -350,11 +355,25 @@ async function stop() {
   try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, {}) } catch (e) { toast('停止失败：' + e.message, true) }
 }
 
-/* ---------- 图片附件（复用聊天页上传链路，单张 ≤5MB） ---------- */
+/* ---------- 图片附件（复用聊天页上传链路，单张 ≤5MB；按钮选图与粘贴共用） ---------- */
 function pick() { fileInput.value && fileInput.value.click() }
-async function onFilesPicked(ev) {
+function onFilesPicked(ev) {
   const files = Array.from(ev.target.files || [])
   ev.target.value = ''
+  addImageFiles(files)
+}
+// 剪贴板里有文件才接管：只认图片（上传链路仅 png/jpeg/webp），非图片文件明确忽略；
+// 纯文本粘贴保持浏览器默认行为（同主会话聊天页）。
+function onPaste(ev) {
+  const files = Array.from(ev.clipboardData?.files || [])
+  if (!files.length) return
+  ev.preventDefault()
+  const imgs = files.filter(f => f.type.startsWith('image/'))
+  const skipped = files.length - imgs.length
+  if (skipped) toast(`剪贴板里有 ${skipped} 个非图片文件，已忽略（目前只支持图片）`, true)
+  if (imgs.length) addImageFiles(imgs)
+}
+async function addImageFiles(files) {
   for (const file of files) {
     if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (file.size > 5 * 1024 * 1024) { toast(`图片 ${file.name} 超过 5MB 上限`, true); continue }
@@ -463,7 +482,8 @@ function removePreview(p) {
                 </div>
                 <div v-else class="bubble">
                   {{ m.text }}
-                  <span v-if="m.images" class="meta"> 📷 ×{{ m.images }}</span>
+                  <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
+                  <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
                 </div>
               </div>
             </template>
@@ -473,7 +493,7 @@ function removePreview(p) {
           <ChatComposer v-model="input" :placeholder="'给 ' + current.agent + ' 派活…'"
                         aria-label="智能体输入" :busy="busy"
                         :send-label="busy ? '停止' : '发送'" :send-disabled="!busy && !canSend"
-                        @primary="send">
+                        @primary="send" @paste="onPaste">
             <template #previews>
               <div v-if="pendingImages.length" id="attachPreviews">
                 <div v-for="p in pendingImages" :key="p.url" class="thumb">
@@ -483,8 +503,8 @@ function removePreview(p) {
               </div>
             </template>
             <template #left>
-              <button class="ib-btn plus-btn" aria-label="添加图片" title="添加图片（≤5MB，最多 4 张）"
-                      :disabled="busy" @click="pick">
+              <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
+                      aria-haspopup="true" :disabled="busy" @click.stop="setPop(!popOpen)">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </button>
               <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
@@ -493,15 +513,35 @@ function removePreview(p) {
                       class="ib-btn ctx-btn model-btn" :class="{ active: capOpen === cap.id }"
                       aria-haspopup="true" :title="capTitle(cap)" :disabled="busy || capBusy"
                       @click.stop="toggleCap(cap)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="capIcon(cap.kind)"></svg>
                 <span class="ctx-short model-short">{{ capCurrentName(cap) }}</span>
+              </button>
             </template>
           </ChatComposer>
+          <!-- 加号弹窗：与主会话同款；权限/模式/上下文/模型 chips 是 Friday 大脑功能，ACP agent 不适用 -->
+          <div v-show="popOpen" ref="popWrap" class="popover" id="agAddPopover">
+            <div class="popover-title pop-anim">添加</div>
+            <button class="pop-item pop-anim" @click="pick(); setPop(false)">
               <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg></span>
+              <span class="pl">添加图片</span>
+              <span class="pd">≤5MB，最多 4 张</span>
+            </button>
+          </div>
+          <!-- 能力弹层：按 source 路由热切换，会话上下文保持连续 -->
           <div v-if="openCap" v-show="capOpen" ref="capWrap" class="popover model-popover" id="agCapPopover">
             <div class="popover-title pop-anim">{{ capLabel(openCap) }}</div>
+            <button v-for="v in openCap.values" :key="v.value" class="pop-item pop-anim"
                     :class="{ selected: v.value === openCap.currentValue }" :disabled="capBusy"
+                    @click="setCap(openCap, v.value)">
+              <span class="pi">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="capIcon(openCap.kind)"></svg>
+              </span>
+              <span class="pl">{{ v.name }}</span>
+              <span class="pd">{{ v.value }}</span>
+            </button>
+          </div>
         </div>      </template>
     </section>
   </div>

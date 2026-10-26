@@ -314,7 +314,7 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 		if err != nil {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "附件不存在或已过期"})
 		}
-		imgs = append(imgs, acp.Image{MIME: detectImageMIME(data), Data: data})
+		imgs = append(imgs, acp.Image{MIME: detectImageMIME(data), Data: data, ID: id})
 	}
 
 	gin := ctx.GinContext()
@@ -386,6 +386,26 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 		}
 	}
 	write(payload)
+	return nil
+}
+
+// handleUploadGet 回读一张已上传的图片（智能体对话历史回显原图用）：
+// GET /api/upload/:id，仅限 uploads 目录内合法 ID，登录后可读；ID 随机生成
+// 不可枚举，内容不可变，允许长缓存。
+func (s *Server) handleUploadGet(ctx *vhttp.Context) error {
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "聊天服务未启用"})
+	}
+	path, ok := s.chat.ResolveUpload(ctx.GinContext().Param("id"))
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "非法的附件 ID"})
+	}
+	if _, err := os.Stat(path); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "附件不存在或已过期"})
+	}
+	gin := ctx.GinContext()
+	gin.Header("Cache-Control", "private, max-age=86400")
+	gin.File(path)
 	return nil
 }
 

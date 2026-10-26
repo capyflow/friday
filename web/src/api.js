@@ -3,10 +3,16 @@ import { toast, store } from './store.js'
 
 export async function api(method, url, body) {
   const headers = {}
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  let payload
+  if (body instanceof FormData) {
+    payload = body // 上传：浏览器自动生成 multipart 头，不能手工设 Content-Type
+  } else if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    payload = JSON.stringify(body)
+  }
   let res
   try {
-    res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    res = await fetch(url, { method, headers, body: payload })
   } catch (e) {
     throw new Error('无法连接服务器，请确认小五服务正在运行')
   }

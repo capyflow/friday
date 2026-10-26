@@ -253,12 +253,16 @@ function onFilesPicked(ev) {
   addImageFiles(files)
 }
 
-// 剪贴板里有文件才接管：纯文本粘贴保持浏览器默认行为。
+// 剪贴板里有文件才接管：只认图片（上传链路仅 png/jpeg/webp），非图片文件明确忽略；
+// 纯文本粘贴保持浏览器默认行为。
 function onPaste(ev) {
   const files = Array.from(ev.clipboardData?.files || [])
   if (!files.length) return
   ev.preventDefault()
-  addImageFiles(files)
+  const imgs = files.filter(f => f.type.startsWith('image/'))
+  const skipped = files.length - imgs.length
+  if (skipped) toast(`剪贴板里有 ${skipped} 个非图片文件，已忽略（目前只支持图片）`, true)
+  if (imgs.length) addImageFiles(imgs)
 }
 
 async function uploadImages(images, signal) {

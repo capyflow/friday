@@ -43,7 +43,8 @@ type Entry struct {
 	Role    string    `json:"role"` // user | assistant | note
 	Text    string    `json:"text"`
 	At      time.Time `json:"at"`
-	Images  int       `json:"images,omitempty"` // 随消息发送的图片数
+	Images  int       `json:"images,omitempty"` // 随消息发送的图片数（旧数据只有数量）
+	Files   []string  `json:"files,omitempty"`  // 图片的上传 ID，前端经 /api/upload/:id 回显原图
 	In      int64     `json:"in,omitempty"`
 	Out     int64     `json:"out,omitempty"`
 	Ms      int64     `json:"ms,omitempty"`
@@ -75,6 +76,7 @@ type Thread struct {
 type Image struct {
 	MIME string
 	Data []byte
+	ID   string // 上传 ID（记录进 thread 历史供前端回显；仅供内部传递）
 }
 
 // TurnResult 是一轮对话的归集结果。
@@ -738,7 +740,13 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	if keep {
 		m.mu.Lock()
-		m.appendTurnLocked(current, text, len(imgs), result, degraded, aborted, promptErr != nil && !aborted, errText)
+		var files []string
+		for _, img := range imgs {
+			if img.ID != "" {
+				files = append(files, img.ID)
+			}
+		}
+		m.appendTurnLocked(current, text, files, result, degraded, aborted, promptErr != nil && !aborted, errText)
 		if used, size, cost, _ := sink.context(); size > 0 {
 			current.ContextUsed = used
 			current.ContextSize = size
@@ -763,13 +771,13 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 // appendTurnLocked 把本轮问答追加进投影（调用方须持 m.mu）。
 // degraded 为真说明本轮跑在新会话里（旧上下文丢失），插入显式标注。
-func (m *Manager) appendTurnLocked(th *Thread, question string, imgs int, r TurnResult, degraded, aborted, crashed bool, errText string) {
+func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, r TurnResult, degraded, aborted, crashed bool, errText string) {
 	if degraded && len(th.Messages) > 0 {
 		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
 			Text: "agent 进程已重建，旧会话无法恢复，上下文已重置（历史记录仍可见）"})
 	}
 	th.Messages = append(th.Messages, Entry{
-		Role: "user", Text: question, At: time.Now(), Images: imgs,
+		Role: "user", Text: question, At: time.Now(), Images: len(files), Files: files,
 	})
 	entry := Entry{Role: "assistant", Text: r.Answer, At: time.Now(),
 		In: r.In, Out: r.Out, Ms: r.Ms, Stopped: r.StopReason}
