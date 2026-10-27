@@ -34,7 +34,8 @@ func (t *McpEditTool) Name() string { return "mcp_edit" }
 
 func (t *McpEditTool) Description() string {
 	return "管理 MCP 服务器（增删改查）：接入新的外部工具/数据源、查看已接入的服务器与连接状态、" +
-		"修改或移除已有配置。本地命令服务器用 command/args/env，远程服务器用 url/headers（鉴权放 headers）。" +
+		"修改或移除已有配置。本地命令服务器用 command/args/env，远程服务器用 url/headers（静态凭据放 headers）" +
+		"或 auth=oauth（由用户在设置页点「授权」走浏览器登录，Friday 保存并自动刷新令牌）。" +
 		"变更保存后立即热生效，无需重启；confirm 审批模式下变更需用户在网页批准。"
 }
 
@@ -53,7 +54,12 @@ func (t *McpEditTool) Schema() map[string]any {
 			"args":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "command 的启动参数，如 [\"-y\",\"@modelcontextprotocol/server-filesystem\",\"/tmp\"]"},
 			"env":     map[string]any{"type": "object", "description": "command 的额外环境变量，如 {\"API_KEY\":\"sk-...\"}"},
 			"url":     map[string]any{"type": "string", "description": "远程服务器的 Streamable HTTP 地址（http:// 或 https:// 开头）"},
-			"headers": map[string]any{"type": "object", "description": "url 的请求头（鉴权等），如 {\"Authorization\":\"Bearer xxx\"}"},
+			"headers": map[string]any{"type": "object", "description": "url 的请求头（静态凭据等），如 {\"Authorization\":\"Bearer xxx\"}"},
+			"auth": map[string]any{
+				"type":        "string",
+				"enum":        []string{"header", "oauth"},
+				"description": "url 的鉴权方式：header=只用 headers（默认）；oauth=标准 MCP 授权，需用户在设置页点「授权」登录一次",
+			},
 		},
 		"required": []string{"action"},
 	}
@@ -95,6 +101,8 @@ func (t *McpEditTool) list() (string, error) {
 		Name      string `json:"name"`
 		Type      string `json:"type"`
 		Target    string `json:"target"`
+		Auth      string `json:"auth,omitempty"`
+		AuthState string `json:"authState,omitempty"`
 		Running   bool   `json:"running"`
 		Tools     int    `json:"tools"`
 		Restarts  int    `json:"restarts"`
@@ -102,7 +110,7 @@ func (t *McpEditTool) list() (string, error) {
 	}
 	out := make([]row, 0, len(servers))
 	for _, sv := range servers {
-		r := row{Name: sv.Name, Target: sv.URL}
+		r := row{Name: sv.Name, Target: sv.URL, Auth: sv.Auth}
 		if sv.URL == "" {
 			r.Type = "stdio"
 			r.Target = strings.TrimSpace(sv.Command + " " + strings.Join(sv.Args, " "))
@@ -111,6 +119,7 @@ func (t *McpEditTool) list() (string, error) {
 		}
 		if st, ok := status[sv.Name]; ok {
 			r.Running, r.Tools, r.Restarts, r.LastError = st.Running, st.Tools, st.Restarts, st.LastError
+			r.AuthState = st.AuthState // required 时提示用户去设置页点「授权」
 		}
 		out = append(out, r)
 	}
@@ -237,10 +246,9 @@ func (t *McpEditTool) commit(ctx context.Context, servers []config.McpServerConf
 	}
 	live := make([]mcp.ServerConfig, 0, len(servers))
 	for _, sv := range servers {
-		live = append(live, mcp.ServerConfig{
-			Name: sv.Name, Command: sv.Command, Args: sv.Args, Env: sv.Env,
-			URL: sv.URL, Headers: sv.Headers,
-		})
+		// 字段集与 config.McpServerConfig 一致，直接类型转换：以后 config 加字段
+		// 时这里会编译失败，而不是悄悄丢掉一个新配置项（如 auth）。
+		live = append(live, mcp.ServerConfig(sv))
 	}
 	var extra string
 	if err := t.Manager.Apply(ctx, live); err != nil {
@@ -295,6 +303,15 @@ func serverFromArgs(args map[string]any, base *config.McpServerConfig) (*config.
 		}
 		sv.URL = url
 		sv.Command, sv.Args, sv.Env = "", nil, nil
+		if a, ok := stringOpt(args, "auth"); ok {
+			normalized, err := normalizeMcpAuth(a)
+			if err != nil {
+				return nil, err
+			}
+			sv.Auth = normalized
+		} else if base == nil {
+			sv.Auth = ""
+		}
 		if hdr, err := strMapArg(args, "headers"); err != nil {
 			return nil, err
 		} else if hdr != nil {
@@ -304,7 +321,7 @@ func serverFromArgs(args map[string]any, base *config.McpServerConfig) (*config.
 		}
 	case hasCmd:
 		// 显式提供 command：转为本地模式，丢弃远程字段。
-		sv.Command, sv.URL, sv.Headers = strings.TrimSpace(cmd), "", nil
+		sv.Command, sv.URL, sv.Headers, sv.Auth = strings.TrimSpace(cmd), "", nil, ""
 		if arr, err := strSliceArg(args, "args"); err != nil {
 			return nil, err
 		} else if arr != nil {
@@ -337,12 +354,35 @@ func serverFromArgs(args map[string]any, base *config.McpServerConfig) (*config.
 			} else if hdr != nil {
 				sv.Headers = hdr
 			}
+			if a, ok := stringOpt(args, "auth"); ok {
+				normalized, err := normalizeMcpAuth(a)
+				if err != nil {
+					return nil, err
+				}
+				sv.Auth = normalized
+			}
 		}
 	}
 	if sv.URL != "" && !strings.HasPrefix(sv.URL, "http://") && !strings.HasPrefix(sv.URL, "https://") {
 		return nil, fmt.Errorf("url 须以 http:// 或 https:// 开头，当前 %q", sv.URL)
 	}
+	if sv.URL == "" && sv.Auth != "" {
+		return nil, fmt.Errorf("鉴权方式只适用于远程服务器（需要 url）")
+	}
 	return &sv, nil
+}
+
+// normalizeMcpAuth 校验并归一鉴权方式：header（默认，静态请求头）或 oauth。
+func normalizeMcpAuth(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "", mcp.AuthHeader:
+		return "", nil
+	case mcp.AuthOAuth:
+		return mcp.AuthOAuth, nil
+	default:
+		return "", fmt.Errorf("auth 只支持 %q（静态请求头）或 %q（浏览器授权），当前 %q", mcp.AuthHeader, mcp.AuthOAuth, v)
+	}
 }
 
 // findServer 从当前配置快照中按名取服务器定义。
@@ -364,7 +404,8 @@ func sameServerDef(a, b config.McpServerConfig) bool {
 	return a.Command == b.Command && a.URL == b.URL &&
 		strings.Join(a.Args, "\x00") == strings.Join(b.Args, "\x00") &&
 		fmt.Sprint(a.Env) == fmt.Sprint(b.Env) &&
-		fmt.Sprint(a.Headers) == fmt.Sprint(b.Headers)
+		fmt.Sprint(a.Headers) == fmt.Sprint(b.Headers) &&
+		a.Auth == b.Auth
 }
 
 // requestMcpApproval 在 confirm 模式（且未开启编辑免审批）下为 MCP 变更发起

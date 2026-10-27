@@ -2,7 +2,8 @@
 // JSON-RPC 经 HTTP POST 发往服务器 URL，响应可能是单个 application/json
 // 或 text/event-stream（SSE 流）；initialize 时记录服务器下发的
 // MCP-Session-Id 并在后续请求回带。适用于"只给一个 URL"的托管型 MCP 服务
-// （鉴权经自定义请求头，如 Authorization: Bearer xxx）。
+// （鉴权经自定义请求头，如 Authorization: Bearer xxx，或由 TokenProvider
+// 提供 OAuth 令牌并在 401 时刷新重试）。
 package mcp
 
 import (
@@ -28,6 +29,7 @@ type HTTPConn struct {
 	name    string
 	url     string
 	headers map[string]string
+	tokens  TokenProvider // 非 nil 时每请求注入 Authorization，并在 401 时刷新重试
 
 	mu      sync.Mutex
 	session string // 服务器在 initialize 响应头下发的 MCP-Session-Id
@@ -38,12 +40,19 @@ type HTTPConn struct {
 	client  *http.Client
 }
 
-// StartHTTP 连接远程 MCP 服务器并完成握手（initialize → initialized → tools/list）。
+// StartHTTP 连接远程 MCP 服务器并完成握手（静态请求头鉴权）。
 func StartHTTP(name, rawURL string, headers map[string]string) (*HTTPConn, error) {
+	return StartHTTPAuth(name, rawURL, headers, nil)
+}
+
+// StartHTTPAuth 在 StartHTTP 的基础上接入 OAuth 令牌提供者：握手与后续每次
+// 请求都按需带 Bearer，被拒 401 时先刷新再重试一次，仍不行就报 ErrMCPAuthRequired。
+func StartHTTPAuth(name, rawURL string, headers map[string]string, tokens TokenProvider) (*HTTPConn, error) {
 	c := &HTTPConn{
 		name:    name,
 		url:     strings.TrimRight(rawURL, "/"),
 		headers: headers,
+		tokens:  tokens,
 		client:  &http.Client{Timeout: 2 * time.Minute},
 	}
 	raw, hdr, err := c.post(context.Background(), "initialize", map[string]any{
@@ -105,24 +114,8 @@ func (c *HTTPConn) post(ctx context.Context, method string, params any, timeout 
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(b))
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", declareVersion)
-	if version != "" {
-		req.Header.Set("MCP-Protocol-Version", version)
-	}
-	if session != "" {
-		req.Header.Set("MCP-Session-Id", session)
-	}
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(ctx, http.MethodPost, b, session, version)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,34 +148,83 @@ func (c *HTTPConn) post(ctx context.Context, method string, params any, timeout 
 	return envelope.Result, resp.Header, nil
 }
 
+// do 发送一次 JSON-RPC 请求：配了令牌提供者时按需注入 Authorization，被 401
+// 拒绝则把 WWW-Authenticate 交回提供者（记录挑战 + 尝试刷新），拿到新令牌就重试
+// 一次。只重试一次——刷新仍不被接受时说明确实要用户重新授权，不能循环打转。
+func (c *HTTPConn) do(ctx context.Context, method string, payload []byte, session, version string) (*http.Response, error) {
+	authValue := ""
+	if c.tokens != nil {
+		if v, ok := c.tokens.Authorization(ctx); ok {
+			authValue = v
+		}
+	}
+	req, err := c.newRequest(ctx, method, payload, session, version, authValue)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized || c.tokens == nil {
+		return resp, nil
+	}
+	challenge := resp.Header.Get("WWW-Authenticate")
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	value, ok := c.tokens.Unauthorized(ctx, challenge)
+	if !ok {
+		return nil, ErrMCPAuthRequired
+	}
+	req, err = c.newRequest(ctx, method, payload, session, version, value)
+	if err != nil {
+		return nil, err
+	}
+	return c.client.Do(req)
+}
+
+// newRequest 组装一次远程 MCP 请求（协议版本、会话 ID、静态头与令牌头）。
+func (c *HTTPConn) newRequest(ctx context.Context, method string, payload []byte, session, version, authValue string) (*http.Request, error) {
+	var body io.Reader
+	if len(payload) > 0 {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", declareVersion)
+	if version != "" {
+		req.Header.Set("MCP-Protocol-Version", version)
+	}
+	if session != "" {
+		req.Header.Set("MCP-Session-Id", session)
+	}
+	if authValue != "" {
+		req.Header.Set("Authorization", authValue)
+	}
+	for k, v := range c.headers {
+		if k == "Authorization" && authValue != "" {
+			continue // OAuth 令牌优先于配置里的静态头，避免两套凭据混发
+		}
+		req.Header.Set(k, v)
+	}
+	return req, nil
+}
+
 // notify 发送一条无 id 的 JSON-RPC 通知（服务器回 202 即视为成功）。
 func (c *HTTPConn) notify(ctx context.Context, method string) error {
 	c.mu.Lock()
 	closed := c.closed
+	session, version := c.session, c.version
 	c.mu.Unlock()
 	if closed {
 		return errors.New("MCP 连接已关闭")
 	}
 	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	c.mu.Lock()
-	session, version := c.session, c.version
-	c.mu.Unlock()
-	if session != "" {
-		req.Header.Set("MCP-Session-Id", session)
-	}
-	if version != "" {
-		req.Header.Set("MCP-Protocol-Version", version)
-	}
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := c.client.Do(req)
+	resp, err := c.do(ctx, http.MethodPost, b, session, version)
 	if err != nil {
 		return err
 	}
@@ -277,11 +319,19 @@ func (c *HTTPConn) Close() {
 	if session != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil); err == nil {
-			req.Header.Set("MCP-Session-Id", session)
-			if resp, err := c.client.Do(req); err == nil {
-				resp.Body.Close()
+		authValue := ""
+		if c.tokens != nil {
+			if v, ok := c.tokens.Authorization(ctx); ok {
+				authValue = v
 			}
+		}
+		// 会话终止也要带凭据：托管型服务器普遍对未鉴权的 DELETE 直接拒绝。
+		req, err := c.newRequest(ctx, http.MethodDelete, nil, session, "", authValue)
+		if err != nil {
+			return
+		}
+		if resp, err := c.client.Do(req); err == nil {
+			resp.Body.Close()
 		}
 	}
 }

@@ -266,16 +266,21 @@ planFile: plans.json
 # MCP 服务器（Model Context Protocol）：工具以 mcp_<名称>_<工具名> 前缀动态注册进
 # agent。两种接入方式二选一（管理后台"设置 → MCP 服务器"可在线配置，保存即热生效）：
 #   本地命令（stdio）：Friday 拉起本机子进程，崩溃自动重启；
-#   远程 URL（Streamable HTTP）：连接托管 MCP 服务，headers 可带鉴权。
+#   远程 URL（Streamable HTTP）：连接托管 MCP 服务，鉴权可选 headers 静态请求头
+#     或 auth: oauth（MCP 标准授权：设置页点「授权」在浏览器登录服务商，
+#     令牌存进数据目录 mcp-oauth.json 并自动刷新，失效后重新显示「待授权」）。
 # mcp:
 #   servers:
 #     - name: filesystem                      # 方式一：本地命令
 #       command: npx
 #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/shared"]
 #       env: {}
-#     - name: remote-tools                    # 方式二：远程 URL
+#     - name: remote-tools                    # 方式二：远程 URL + 静态请求头
 #       url: https://mcp.example.com/mcp
 #       headers: {"Authorization": "Bearer xxx"}
+#     - name: notion                          # 方式三：远程 URL + 浏览器授权
+#       url: https://mcp.notion.com/mcp
+#       auth: oauth
 
 # 文件工具（read_file / list_files / write_file / edit_file）的访问白名单：
 # agent 只能读写这些目录内的文件。相对路径基于服务运行目录。

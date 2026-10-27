@@ -311,6 +311,9 @@ func main() {
 	// MCP 管理器先于 Agent 首建创建（mcp_edit 工具依赖它），onChange 触发 rebuild；
 	// rebuild 在下方赋值，首次 Apply 发生在 brain 就绪之后，不会提前触发。
 	mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
+	// 远程 MCP 的 OAuth 会话落在数据目录里（0600：含 refresh_token 与
+	// client_secret）。桌面模式下进程已切到数据目录，相对名即落在该目录。
+	mcpMgr.EnableOAuth("mcp-oauth.json")
 	memStore := memory.NewWikiStore(cfg.Memory.Dir, cfg.Memory.File)
 	log.Printf("[记忆] wiki 页面目录：%s", cfg.Memory.Dir)
 
@@ -429,10 +432,7 @@ func main() {
 	if len(cfg.Mcp.Servers) > 0 {
 		servers := make([]mcp.ServerConfig, 0, len(cfg.Mcp.Servers))
 		for _, s := range cfg.Mcp.Servers {
-			servers = append(servers, mcp.ServerConfig{
-				Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env,
-				URL: s.URL, Headers: s.Headers,
-			})
+			servers = append(servers, mcp.ServerConfig(s))
 		}
 		if err := mcpMgr.Apply(ctx, servers); err != nil {
 			log.Printf("[MCP] 部分服务器连接失败（不影响其余功能）: %v", err)

@@ -325,6 +325,10 @@ func (s *Server) Handler() http.Handler {
 			root.AddRouter([]string{http.MethodPost}, "/api/mcp/config", s.wrap(s.handleMCPConfigSet))
 		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
+		// OAuth 鉴权：发起浏览器授权、查状态（前端轮询）、断开（撤销令牌）。
+		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/authorize", s.wrap(s.handleMCPAuthorize))
+		root.AddRouter([]string{http.MethodGet}, "/api/mcp/:name/auth", s.wrap(s.handleMCPAuthStatus))
+		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/disconnect", s.wrap(s.handleMCPDisconnect))
 	}
 	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
 	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))

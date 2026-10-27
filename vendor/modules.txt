@@ -51,7 +51,7 @@ github.com/bytedance/sonic/loader/internal/rt
 github.com/capyflow/allspark-go/ansi
 github.com/capyflow/allspark-go/jwtx
 github.com/capyflow/allspark-go/logx
-# github.com/capyflow/vortexagent v0.0.0-20261014084044-66f2a578013f
+# github.com/capyflow/vortexagent v0.0.0-20261027081641-32e0de9c24fc
 ## explicit; go 1.23.0
 github.com/capyflow/vortexagent/agent
 github.com/capyflow/vortexagent/agent/sessionstore
@@ -60,6 +60,7 @@ github.com/capyflow/vortexagent/ctxengine
 github.com/capyflow/vortexagent/internal/textscore
 github.com/capyflow/vortexagent/llm
 github.com/capyflow/vortexagent/tools/exec
+github.com/capyflow/vortexagent/tools/mcp/auth
 # github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f
 ## explicit; go 1.25.5
 github.com/capyflow/vortexv3

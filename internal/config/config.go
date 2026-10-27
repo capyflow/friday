@@ -477,6 +477,9 @@ type McpServerConfig struct {
 	URL string `yaml:"url" json:"url"`
 	// Headers 远程请求头（鉴权等，如 Authorization: Bearer xxx）。
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Auth 远程服务器的鉴权方式：留空或 header 用 Headers 静态头；oauth 走
+	// MCP 标准授权（浏览器登录一次，令牌由 Friday 保存并自动刷新）。
+	Auth string `yaml:"auth" json:"auth"`
 }
 
 // 模型输入格式。text 恒隐含支持；其余值声明在 ModelProfile.Inputs 里。
@@ -846,8 +849,11 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 		}
 		strPair("name", s.Name)
 		if s.URL != "" {
-			// 远程服务器：写 url + headers。
+			// 远程服务器：写 url + auth + headers。
 			strPair("url", s.URL)
+			if auth := strings.TrimSpace(s.Auth); auth != "" && auth != "header" {
+				strPair("auth", auth)
+			}
 			if len(s.Headers) > 0 {
 				hdrMap := &yaml.Node{Kind: yaml.MappingNode}
 				keys := make([]string, 0, len(s.Headers))
