@@ -33,10 +33,12 @@ let controller = null
 /* 会话能力（统一清单）：后端把 configOptions 与协议原生 models/modes 归一成
    Capability 列表（kind=model/thought_level/approval_mode/other），切换按
    source 路由到 set_config_option / set_model / set_mode。协议可选能力——
-   agent 不支持的能力直接缺席，对应 chip 不渲染。会话没建过时不主动拉列表
-   （GET 会顺带拉起 agent，破坏「首条消息才启动」的惰性）：选中有会话的
-   thread 时取一次，之后每轮结束刷新。 */
+   agent 不支持的能力直接缺席，对应 chip 不渲染。选中线程即拉清单（Zed 同款：
+   不发消息也能切模型/思考强度）——清单只能在建会话后获得，GET 会顺带把 agent
+   拉起建会话（新线程因此「选中即启动」，冷启动期间显示加载 chip），之后每轮
+   结束刷新。 */
 const caps = ref(null)          // 当前 thread 的能力清单（null = 未加载）
+const capsLoading = ref(false)  // 清单拉取中（新线程含冷启动建会话，可能数秒）
 const capOpen = ref('')         // 展开中的能力 id（'' = 全收起）
 const capBusy = ref(false)
 const capWrap = ref(null)
@@ -58,11 +60,13 @@ function capIcon(kind) { return CAP_ICON[kind] || CAP_ICON.other }
 
 const openCap = computed(() => (caps.value || []).find(c => c.id === capOpen.value) || null)
 async function loadOptions(id) {
+  capsLoading.value = true
   try {
     const r = await api('GET', `/api/acp/threads/${id}/options`)
     if (currentId.value === id) caps.value = r.capabilities || []
     return null
-  } catch (e) { return e } // agent 拉起失败等：保持未加载态，下一轮结束后重试
+  } catch (e) { return e } // agent 拉起失败等：保持未加载态，下次选中重试
+  finally { if (currentId.value === id) capsLoading.value = false }
 }
 function toggleCap(cap) {
   if (busy.value || capBusy.value) return
@@ -139,7 +143,9 @@ async function select(id) {
     currentId.value = id
     caps.value = null
     capOpen.value = ''
-    if (r.thread.sessionId) loadOptions(id) // 会话已存在：清单顺带取到；没建过则等首条消息
+    loadOptions(id).then(err => { // 选中即拉清单（Zed 同款）：没会话的顺带建会话，冷启动可能数秒
+      if (err && currentId.value === id) toast('能力清单加载失败：' + (err.message || err), true)
+    })
     messages.length = 0
     for (const e of (r.thread.messages || [])) {
       if (e.role === 'user') {
@@ -229,7 +235,7 @@ async function createThread() {
     form.workspace = ''
     await load()
     select(r.thread.id)
-    toast('已创建对话，发第一条消息即会启动 agent')
+    toast('已创建对话，正在启动 agent（就绪后即可切模型/思考强度）')
   } catch (e) { toast('创建失败：' + e.message, true) }
 }
 
@@ -535,6 +541,10 @@ function removePreview(p) {
               </button>
               <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
               <!-- 会话能力 chips（统一清单，agent 报什么显示什么；不支持的自动缺席） -->
+              <button v-if="capsLoading && !caps" class="ib-btn ctx-btn model-btn" disabled
+                      title="正在拉起 agent、建立会话…" aria-label="能力加载中">
+                <span class="ctx-short model-short cap-loading">能力加载中…</span>
+              </button>
               <button v-for="cap in (caps || [])" :key="cap.id"
                       class="ib-btn ctx-btn model-btn" :class="{ active: capOpen === cap.id }"
                       aria-haspopup="true" :title="capTitle(cap)" :disabled="busy || capBusy"

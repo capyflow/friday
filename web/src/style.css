@@ -545,6 +545,9 @@ html[data-theme="dark"] .perm-btn.pm-fullAccess { color: #F87171; }
 /* 模型 chip：与上下文 chip 同形，模型名可能很长，截断显示 */
 .model-btn .model-short { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 640px) { .model-btn .model-short { max-width: 64px; } }
+/* 能力加载中 chip：弱化色 + 呼吸，会话建好（或确认 agent 不报任何能力）即消失 */
+.cap-loading { color: var(--muted-fg); animation: cap-pulse 1.6s ease-in-out infinite; }
+@keyframes cap-pulse { 50% { opacity: .45; } }
 html[data-theme="dark"] .ctx-btn:hover,
 html[data-theme="dark"] .ctx-btn.active { background: rgba(255,255,255,.09); color: #fff; }
 html[data-theme="dark"] .ctx-btn.warm { color: #E8A33D; }

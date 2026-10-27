@@ -191,3 +191,7 @@ MCP 调用被 C1 的 15s 超时逼着立即返回，才需要 submit/check 轮�
   cc 思考强度（`_meta.claudeCode.options.maxThinkingTokens`，会话重建级切换）未接入，属可选后续。
 - 管理接口：`GET/POST /api/acp/threads/:id/options`（响应键 `capabilities`），会话未建时 GET 会
   拉起 agent 建会话（清单是静态配置，进程随后照常空闲回收）。
+- **前端加载时机（Zed 同款）**：选中线程即拉清单——不发消息也能切模型/思考强度/审批模式。
+  零消息新线程因此在「选中/创建」时即启动 agent（冷启动期间 composer 显示加载 chip）；
+  加载失败（并发槽位满、agent 起不来）toast 报错、按钮不卡死，下次选中重试。协议没有
+  「不建会话查清单」的方法，这是「随时可切」的必要代价；进程照常 600s 空闲回收。
