@@ -26,7 +26,12 @@ export async function api(method, url, body) {
     }
     throw new Error(serverMsg || '未登录或会话已过期')
   }
-  if (!res.ok) throw new Error(serverMsg || ('请求失败（HTTP ' + res.status + '）'))
+  if (!res.ok) {
+    const err = new Error(serverMsg || ('请求失败（HTTP ' + res.status + '）'))
+    // 安装类接口会另带命令输出：挂到 error 上，调用方决定是否展开显示。
+    if (data && data.body && data.body.output) err.output = data.body.output
+    throw err
+  }
   return data.body
 }
 

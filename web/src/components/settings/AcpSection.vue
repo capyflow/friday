@@ -14,6 +14,7 @@ const cfg = reactive({
 const busy = ref(false)
 const catalog = ref([])
 const installing = ref('') // 正在安装的目录条目 id
+const installOutput = ref('') // 安装失败时的命令输出（后端 output 字段）
 const msg = reactive({ text: '', cls: '' })
 let timer = null
 function show(t, ok) {
@@ -21,9 +22,17 @@ function show(t, ok) {
   clearTimeout(timer); timer = setTimeout(() => { msg.text = '' }, 5000)
 }
 
+// 卡片默认收起：折叠态只留名称 + 启动命令摘要 + 测试/删除，展开才给全字段。
+// open 是纯前端状态（toAgent 不带它，不会写回 config.yaml）。
 function blankAgent() {
-  return { name: '', command: '', argsText: '', envText: '', workspace: '',
+  return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
            enabled: true, turnTimeoutSeconds: 0, degradeResume: false, version: '', testing: false }
+}
+// launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
+// 一眼看出是哪个 agent、怎么起的。
+function launchText(a) {
+  const args = (a.argsText || '').split(',').map(s => s.trim()).filter(Boolean)
+  return [a.command, ...args].filter(Boolean).join(' ') || '未填启动命令'
 }
 function toAgent(a) {
   return {
@@ -31,6 +40,8 @@ function toAgent(a) {
     command: (a.command || '').trim(),
     args: (a.argsText || '').split(',').map(s => s.trim()).filter(Boolean),
     env: parseEnv(a.envText),
+    // 工作目录不在卡片上填（每个对话建 thread 时自己选目录），但这里原样带回，
+    // 免得手写在 config.yaml 里的 acp.agents[].workspace 被一次保存抹掉。
     workspace: (a.workspace || '').trim(),
     enabled: a.enabled,
     turnTimeoutSeconds: Math.max(0, Math.floor(Number(a.turnTimeoutSeconds) || 0)),
@@ -69,13 +80,14 @@ async function refreshCatalog() {
 // 这里把返回的 agent 模板同步进本地表单，列表即刻可见。
 async function installAgent(entry) {
   installing.value = entry.id
+  installOutput.value = ''
   try {
     const r = await api('POST', '/api/acp/install', { id: entry.id })
     await loadCatalog()
     if (r.agent) {
       const existing = cfg.agents.find(a => a.name === r.agent.name)
       const installed = {
-        command: r.agent.command,
+        command: r.agent.command, open: true,
         argsText: (r.agent.args || []).join(', '), version: r.agent.version || '',
       }
       if (existing) Object.assign(existing, installed)
@@ -84,6 +96,7 @@ async function installAgent(entry) {
     }
     show(r.message || '安装完成', true)
   } catch (e) {
+    installOutput.value = e.output || ''
     show('安装失败：' + e.message, false)
   } finally { installing.value = '' }
 }
@@ -99,7 +112,7 @@ function appendTemplate(entry) {
   // 只有模板命令就是被探测的 CLI 时才回填绝对路径；npx/uvx 适配器模板要保留启动器。
   const command = t.command === entry.check ? (entry.path || t.command) : t.command
   cfg.agents.push({
-    ...blankAgent(), name: t.name,
+    ...blankAgent(), open: true, name: t.name,
     command,
     argsText: (t.args || []).join(', '),
   })
@@ -156,7 +169,7 @@ async function test(a) {
     show((a.name || 'agent') + '：' + (r.message || '握手成功'), true)
   } catch (e) { show((a.name || 'agent') + '：' + e.message, false) } finally { a.testing = false }
 }
-function addAgent() { cfg.agents.push(blankAgent()) }
+function addAgent() { cfg.agents.push({ ...blankAgent(), open: true }) }
 function removeAgent(i) { cfg.agents.splice(i, 1) }
 
 onMounted(load)
@@ -218,26 +231,34 @@ onMounted(load)
     <div class="acp-agents">
       <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent">
         <div class="acp-agent-head">
-          <b>{{ a.name || '未命名 agent' }}</b>
+          <button class="acp-agent-toggle" type="button" :aria-expanded="a.open ? 'true' : 'false'"
+                  :aria-controls="`acp-agent-body-${i}`" @click="a.open = !a.open">
+            <span class="acp-agent-caret" :class="{ open: a.open }" aria-hidden="true">›</span>
+            <b>{{ a.name || '未命名 agent' }}</b>
+            <span v-if="!a.enabled" class="acp-agent-tag">已停用</span>
+            <span v-if="a.version" class="acp-agent-tag">v{{ a.version }}</span>
+            <span v-if="!a.open" class="meta mono acp-agent-sum" :title="launchText(a)">{{ launchText(a) }}</span>
+          </button>
           <span class="pm-acts">
             <button class="btn sm" type="button" :disabled="a.testing || !a.name" @click="test(a)">
               {{ a.testing ? '测试中…' : '测试' }}</button>
             <button class="btn sm danger" type="button" @click="removeAgent(i)">删除</button>
           </span>
         </div>
-        <div class="acp-grid">
-          <label><span>名称</span><input v-model="a.name" placeholder="codex"></label>
-          <label><span>启动命令</span><input v-model="a.command" placeholder="npx 或绝对路径"></label>
-          <label><span>参数（逗号分隔）</span><input v-model="a.argsText" placeholder='-y, @zed-industries/codex-acp'></label>
-          <label><span>预填工作目录</span><input v-model="a.workspace" placeholder="~/projects"></label>
-          <label><span>单轮超时覆盖（秒，0=全局）</span><input v-model="a.turnTimeoutSeconds" type="number" min="0"></label>
-        </div>
-        <label class="acp-env"><span>额外环境变量（每行 K=V）</span>
-          <textarea v-model="a.envText" rows="2" placeholder="API_KEY=sk-..."></textarea></label>
-        <div class="acp-checks">
-          <label class="acp-check"><input v-model="a.enabled" type="checkbox"><span>启用</span></label>
-          <label class="acp-check"><input v-model="a.degradeResume" type="checkbox">
-            <span>会话恢复不可靠（重开对话不再尝试重接，直接新开并标注）</span></label>
+        <div v-if="a.open" :id="`acp-agent-body-${i}`" class="acp-agent-body">
+          <div class="acp-grid">
+            <label><span>名称</span><input v-model="a.name" placeholder="codex"></label>
+            <label><span>启动命令</span><input v-model="a.command" placeholder="npx 或绝对路径"></label>
+            <label><span>参数（逗号分隔）</span><input v-model="a.argsText" placeholder='-y, @zed-industries/codex-acp'></label>
+            <label><span>单轮超时覆盖（秒，0=全局）</span><input v-model="a.turnTimeoutSeconds" type="number" min="0"></label>
+          </div>
+          <label class="acp-env"><span>额外环境变量（每行 K=V）</span>
+            <textarea v-model="a.envText" rows="2" placeholder="API_KEY=sk-..."></textarea></label>
+          <div class="acp-checks">
+            <label class="acp-check"><input v-model="a.enabled" type="checkbox"><span>启用</span></label>
+            <label class="acp-check"><input v-model="a.degradeResume" type="checkbox">
+              <span>会话恢复不可靠（重开对话不再尝试重接，直接新开并标注）</span></label>
+          </div>
         </div>
       </div>
       <button class="btn sm" type="button" @click="addAgent">+ 添加 agent</button>
@@ -247,6 +268,7 @@ onMounted(load)
       <button class="btn primary" type="button" :disabled="busy" @click="save">保存并生效</button>
     </div>
     <div class="msg" :class="msg.cls">{{ msg.text }}</div>
+    <pre v-if="installOutput" class="acp-install-output" aria-label="安装命令输出">{{ installOutput }}</pre>
     <div class="set-note">敏感操作经网页审批卡人工放行（30 分钟无人处理自动拒绝）。要让它真的弹卡，
       需把 agent 自己配置里的审批模式调紧为"每次询问"——否则 agent 按自身配置自审批，Friday 收不到请求。
       进程空闲后自动回收；重开对话经 session/load 重接上下文，恢复失败的 agent 勾选「会话恢复不可靠」走降级。</div>
@@ -279,7 +301,22 @@ onMounted(load)
 .acp-agents { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .acp-agent { width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
              display: flex; flex-direction: column; gap: 10px; }
-.acp-agent-head { display: flex; align-items: center; justify-content: space-between; }
+.acp-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .acp-agent-head b { font-size: 13px; }
+/* 折叠开关：整行标题即按钮（名称 + 摘要 + 版本/停用标记），点一下展开全字段。 */
+.acp-agent-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
+  padding: 2px 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer; }
+.acp-agent-caret { color: var(--muted-fg); font-size: 15px; line-height: 1;
+  transition: transform .12s ease; }
+.acp-agent-caret.open { transform: rotate(90deg); }
+.acp-agent-tag { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+.acp-agent-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-agent-body { display: flex; flex-direction: column; gap: 10px; }
 .acp-checks { display: flex; gap: 18px; flex-wrap: wrap; }
+.acp-install-output { margin: 8px 0 0; padding: 10px 12px; max-height: 240px; overflow: auto;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle);
+  font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+  word-break: break-word; color: var(--muted-fg); }
 </style>
