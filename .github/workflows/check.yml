@@ -29,6 +29,9 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
+      # Windows 交叉编译门禁：syscall/SysProcAttr 这类平台专有调用一旦回潮立即编译失败
+      - name: Cross-compile Windows binary
+        run: GOOS=windows CGO_ENABLED=0 go build ./...
       - run: npm ci --no-audit --no-fund
         working-directory: web
       - run: npm run check
@@ -39,3 +42,21 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/friday ./cmd/robot
       - name: Exercise first run and persistent P0 flows with a local mock model
         run: python3 scripts/p0_smoke.py --binary /tmp/friday
+
+  checks-windows:
+    runs-on: windows-latest
+    env:
+      GOPRIVATE: github.com/capyflow/*
+      GOPROXY: https://proxy.golang.org,direct
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Go 依赖经仓库内 vendor/ 离线可用（go 自动 -mod=vendor）。不跑 -race：
+      # Windows 上需要 mingw 工具链，竞态门禁由 Linux job 承担。
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go build ./...
