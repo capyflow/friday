@@ -696,6 +696,7 @@ html[data-theme="dark"] .pop-item:hover { background: rgba(255,255,255,.06); }
 html[data-theme="dark"] .pop-item.selected { background: rgba(110,168,242,.15); color: #B9D4F8; }
 html[data-theme="dark"] .pop-item.selected .pi { color: #8FBDF6; }
 .pop-group { padding: 9px 10px 4px; font-size: 12px; font-weight: 500; color: var(--faint-fg); }
+.pop-empty { padding: 4px 10px 10px; font-size: 12.5px; line-height: 1.6; color: var(--faint-fg); }
 .pop-sep { height: 1px; background: var(--border); margin: 6px 8px; }
 html[data-theme="dark"] .pop-sep { background: rgba(255,255,255,.08); }
 
@@ -912,6 +913,8 @@ html[data-theme="dark"] .mcp-row { background: rgba(255,255,255,.03); }
   gap: 10px; margin-top: 8px; }
 .mr-field input { width: 100%; }
 .mr-error { margin-top: 8px; color: var(--danger-fg); }
+.mr-authlink { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+  font-size: 12px; color: var(--muted-fg); }
 
 /* ---------- 描边下拉框（SelectBox） ---------- */
 .selbox { position: relative; display: inline-block; }
