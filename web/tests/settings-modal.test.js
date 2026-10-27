@@ -50,7 +50,7 @@ describe('设置弹窗', () => {
     expect(api).not.toHaveBeenCalledWith('GET', '/api/mcp/config')
     expect(api).not.toHaveBeenCalledWith('GET', '/api/sessions')
     // 库条目渲染成收起的行卡片，激活条目带「生效中」徽标
-    expect(document.querySelector('input[placeholder="如 step-5-preview"]').value).toBe('gpt-x')
+    expect(document.querySelector('input[aria-label="模型显示名"]').value).toBe('gpt-x')
     expect(document.body.textContent).toContain('生效中')
   })
 
@@ -59,7 +59,7 @@ describe('设置弹窗', () => {
     await flushPromises()
     api.mockClear()
     // 改名 + 关掉图片输入 + 换激活到新条目：先加一条再选它
-    const nameInputs = () => Array.from(document.querySelectorAll('input[placeholder="如 step-5-preview"]'))
+    const nameInputs = () => Array.from(document.querySelectorAll('input[aria-label="模型显示名"]'))
     nameInputs()[0].value = 'gpt-x-renamed'
     nameInputs()[0].dispatchEvent(new window.Event('input', { bubbles: true }))
     const addBtn = byText('button', '＋ 添加模型')
@@ -73,7 +73,7 @@ describe('设置弹窗', () => {
     modelInputs[1].value = 'deepseek-chat'
     modelInputs[1].dispatchEvent(new window.Event('input', { bubbles: true }))
     await flushPromises()
-    const radio = Array.from(document.querySelectorAll('input[type="radio"]')).find(r => r.value === 'deepseek')
+    const radio = Array.from(document.querySelectorAll('input[type="radio"]')).find(r => r.getAttribute('aria-label') === '使用模型 deepseek')
     radio.click()
     await flushPromises()
     await click(byText('button', '保存并生效'))

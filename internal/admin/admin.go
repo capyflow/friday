@@ -668,6 +668,10 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 	if s.cfg != nil {
 		cfg := s.cfg.Snapshot()
 		model, baseURL, keyConfigured = cfg.Provider.Model, cfg.Provider.BaseURL, cfg.ProviderAPIKey() != ""
+		// 首次启动种子里的示例占位不算已配置模型：状态卡显示「未配置模型」。
+		if (config.ModelProfile{BaseURL: baseURL, Model: model}).IsPlaceholder() {
+			model, baseURL = "", ""
+		}
 	}
 	// 输入格式与窗口取激活条目（未建库时缺省全支持 + 按模型名查表）。
 	inputs := []string{config.InputText, config.InputImage}

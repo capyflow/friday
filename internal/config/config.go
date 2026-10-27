@@ -495,6 +495,21 @@ const (
 // 「模型未返回任何文本内容」。4096 够多数日常回答，长计划类请求仍可在模型库里调高。
 const DefaultMaxTokens = 4096
 
+// 首次启动种子里的示例占位。Validate 要求 baseURL/model 非空，服务才能起来；
+// 但这对值不是任何真实服务商，模型库/状态页不应把它当成已配置模型展示。
+const (
+	PlaceholderBaseURL = "https://api.example.com/v1"
+	PlaceholderModel   = "请填模型名"
+)
+
+// IsPlaceholder 报告条目是否仍是首次启动写入的示例占位（不是用户配置的模型）。
+// 两项严格成对匹配，避免误伤用户自己起名叫「请填模型名」的真实配置。
+func (m ModelProfile) IsPlaceholder() bool {
+	return strings.TrimSpace(m.Model) == PlaceholderModel &&
+		strings.EqualFold(strings.TrimRight(strings.TrimSpace(m.BaseURL), "/"),
+			strings.TrimRight(PlaceholderBaseURL, "/"))
+}
+
 // ModelProfile 是模型库（provider.models）里的一条模型档案：不同服务商各带各的
 // 地址与密钥。激活（切换）时套用到 ProviderConfig 的扁平字段并热重建。
 type ModelProfile struct {

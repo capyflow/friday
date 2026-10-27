@@ -8,9 +8,10 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api } from '../api.js'
 import { fmtTokens } from '../format.js'
-import { pushThinking, finishRound, pushToolStep, pushText, turnTotalText } from '../blocks.js'
+import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
+import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
@@ -390,6 +391,9 @@ const modelBusy = ref(false)
 const modelWrap = ref(null)
 const activeModel = computed(() => modelLib.value?.models?.find(m => m.name === modelLib.value.active) || null)
 const modelShort = computed(() => activeModel.value?.name || '')
+// 模型库明确为空（首次安装）才算「未配置」；加载失败/旧响应缺字段时仍按未知处理。
+const noModels = computed(() => Array.isArray(modelLib.value?.models) && modelLib.value.models.length === 0)
+const modelChipLabel = computed(() => modelShort.value || (noModels.value ? '未配置模型' : '模型'))
 // 未建库（合成条目无 inputs 声明）时视为全支持，向后兼容老配置
 const imageSupported = computed(() => !activeModel.value || (activeModel.value.inputs || []).includes('image'))
 
@@ -614,7 +618,11 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       reader.releaseLock()
     }
     removeTyping()
-    if (bot && phase.value !== 'paused') bot.streaming = false
+    if (bot && phase.value !== 'paused') {
+      // 本轮已了结（完成或出错断流）：漏收尾的工具块不会再有结果事件了，就地收掉
+      bot.streaming = false
+      closeRunningTools(bot)
+    }
     if (request === controller) request = null
     if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
     if (!disposed) nextTick(() => composerEl.value && composerEl.value.focus())
@@ -630,6 +638,11 @@ async function sendChat(presetText) {
   }
   const text = draft.text.trim()
   if (!text && !draft.images.length) return
+  // 首次安装是「未配置模型」：先明确拦住并指路，别拿占位地址发请求。
+  if (noModels.value) {
+    toast('还没有配置模型，请先在「设置 → 模型服务」添加', true)
+    return
+  }
   // 计划与目标都走后端 mode 字段：计划=可审阅清单 + 确认后逐步执行；
   // 目标=登记成后台多轮推进的即时目标。不再往消息里拼 【计划】/【目标】 前缀。
   const reqMode = draft.mode === 'plan' || draft.mode === 'goal' ? draft.mode : undefined
@@ -853,13 +866,23 @@ async function clearContext() {
                   </template>
                 </div>
               </div>
-            <!-- 轮末一行汇总：本轮 token 与耗时（思考块只报每轮耗时，总量在这里收口） -->
-            <div v-if="m.turn" class="turn-total">{{ turnTotalText(m.turn) }}</div>
+            <!-- 轮末：token/耗时汇总在左，复制正文在右（回复进行中不给复制，避免复制半截答案） -->
+            <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
+              <div v-if="m.turn" class="turn-total">{{ turnTotalText(m.turn) }}</div>
+              <div v-if="!m.streaming" class="msg-acts">
+                <CopyMessageButton :blocks="m.blocks" kind="answer" />
+              </div>
+            </div>
           </div>
-          <!-- 用户 / 错误消息仍是气泡 -->
-          <div v-else class="bubble">
-            {{ m.text }}
-            <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+          <!-- 用户 / 错误消息仍是气泡（发出即可复制，不等本轮回复结束） -->
+          <div v-else class="msg-col">
+            <div class="bubble">
+              {{ m.text }}
+              <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+            </div>
+            <div class="msg-acts">
+              <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />
+            </div>
           </div>
         </div>
       </div>
@@ -910,11 +933,11 @@ async function clearContext() {
           <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
           <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
                   aria-label="当前模型" aria-haspopup="true"
-                  :title="'当前模型：' + (modelShort || '未配置')" :disabled="clearing"
+                  :title="'当前模型：' + (modelShort || (noModels ? '未配置模型' : '未配置'))" :disabled="clearing"
                   @click.stop="toggleModel">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
-            <span class="ctx-short model-short">{{ modelShort || '模型' }}</span>
+            <span class="ctx-short model-short">{{ modelChipLabel }}</span>
           </button>
         </template>
       </ChatComposer>
@@ -1002,7 +1025,8 @@ async function clearContext() {
         <!-- 模型弹层：点选即热切换（对话上下文保持连续），入口去设置管理模型库 -->
         <div v-if="modelLib" v-show="modelOpen" ref="modelWrap" class="popover model-popover" id="modelPopover">
           <div class="popover-title pop-anim">模型</div>
-          <button v-for="m in modelLib.models" :key="m.name" class="pop-item pop-anim"
+          <p v-if="noModels" class="pop-empty pop-anim">还没有配置模型，先添加一个再对话</p>
+          <button v-for="m in (modelLib.models || [])" :key="m.name" class="pop-item pop-anim"
                   :class="{ selected: m.name === modelLib.active }" :disabled="modelBusy" @click="setModel(m.name)">
             <span class="pi">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
