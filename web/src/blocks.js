@@ -72,12 +72,30 @@ export function pushToolStep(m, s) {
   }
 }
 
+// 轮次收尾兜底：把还没收到结束事件的运行中工具块标成完成。过程事件走 SSE
+// 非阻塞发布，ok/fail 可能被丢在半路，缺了它对应块就永远转圈；Ask 循环是
+// 同步收齐工具结果才会继续的，done 帧到了就说明这些调用实际都已执行完。
+export function closeRunningTools(m) {
+  for (const b of m.blocks || []) {
+    if (b.kind === 'tool' && b.status === 'run') b.status = 'ok'
+  }
+}
+
 // 回答增量并入本轮的正文块；工具调用之后的新一轮回答另起一块。
 export function pushText(m, delta) {
   m.text += delta
   const xi = blockIndex(m, 'text')
   if (xi >= 0) m.blocks[xi].text += delta
   else m.blocks.push({ kind: 'text', text: delta, round: m.round })
+}
+
+// answerText 提取一条回答的正文：只取 text 块（思考、工具调用不进剪贴板），
+// 多段正文之间空一行；供「复制」按钮使用。
+export function answerText(blocks) {
+  return (blocks || [])
+    .filter(b => b && b.kind === 'text' && (b.text || '').trim())
+    .map(b => b.text.trim())
+    .join('\n\n')
 }
 
 // 轮末汇总文案：token 走 k/百万缩写；耗时缺失（被暂停的现场没有结束时刻）就不写。

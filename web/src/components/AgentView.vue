@@ -7,9 +7,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
 import { popIn } from '../anim.js'
-import { pushThinking, pushToolStep, pushText, turnTotalText } from '../blocks.js'
+import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
+import { fmtTokens } from '../format.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
+import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
@@ -58,6 +60,27 @@ const CAP_ICON = {
 }
 function capIcon(kind) { return CAP_ICON[kind] || CAP_ICON.other }
 
+/* 上下文水位（只读）：agent 经 usage_update 自报的窗口占用。上下文归 agent
+   的会话自己管理，ACP 协议没有压缩/清除接口——这里只展示数字，agent 不上报
+   就整块缺席（与主对话那个带压缩/清除的 chip 区分开）。 */
+const ctx = ref(null)       // { used, size }；null = 该 agent 未上报
+const ctxOpen = ref(false)
+const ctxWrap = ref(null)
+const ctxPct = computed(() => (ctx.value ? Math.round(ctx.value.used / ctx.value.size * 100) : 0))
+const ctxBarPct = computed(() => Math.min(ctxPct.value, 100)) // 超窗时进度条封顶，数字照实显示
+const ctxHot = computed(() => !!ctx.value && ctxPct.value >= 95)
+function syncCtx(used, size) {
+  ctx.value = size > 0 ? { used: used || 0, size } : null
+  if (!ctx.value) ctxOpen.value = false
+}
+function toggleCtx() {
+  if (!ctx.value) return
+  popOpen.value = false
+  capOpen.value = ''
+  ctxOpen.value = !ctxOpen.value
+  if (ctxOpen.value) nextTick(() => { const el = document.getElementById('agCtxPopover'); if (el) popIn(el) })
+}
+
 const openCap = computed(() => (caps.value || []).find(c => c.id === capOpen.value) || null)
 async function loadOptions(id) {
   capsLoading.value = true
@@ -71,6 +94,7 @@ async function loadOptions(id) {
 function toggleCap(cap) {
   if (busy.value || capBusy.value) return
   popOpen.value = false
+  ctxOpen.value = false
   if (capOpen.value === cap.id) { capOpen.value = ''; return }
   capOpen.value = cap.id
   nextTick(() => { const el = document.getElementById('agCapPopover'); if (el) popIn(el) })
@@ -116,15 +140,17 @@ function setPop(open) {
   popOpen.value = open
   if (open) {
     capOpen.value = '' // 弹层互斥：都从 composer 左组向上长
+    ctxOpen.value = false
     nextTick(() => { const el = document.getElementById('agAddPopover'); if (el) popIn(el) })
   }
 }
 function onDocClick(e) {
   if (popOpen.value && popWrap.value && !popWrap.value.contains(e.target)) setPop(false)
   if (capOpen.value && capWrap.value && !capWrap.value.contains(e.target)) capOpen.value = ''
+  if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
 }
 function onKey(e) {
-  if (e.key === 'Escape') { setPop(false); capOpen.value = '' }
+  if (e.key === 'Escape') { setPop(false); capOpen.value = ''; ctxOpen.value = false }
 }
 
 async function load() {
@@ -132,6 +158,11 @@ async function load() {
     const r = await api('GET', '/api/acp/threads')
     threads.value = r.threads || []
     acp.value = r.acp || { enabled: false, agents: [] }
+    // 每轮结束后刷新列表时顺带更新水位；线程已被别处删掉则收起 chip
+    if (currentId.value) {
+      const t = threads.value.find(x => x.id === currentId.value)
+      syncCtx(t && t.contextUsed, t && t.contextSize)
+    }
     if (!currentId.value && threads.value.length) select(threads.value[0].id)
   } catch (e) { toast('加载智能体对话失败：' + e.message, true) }
 }
@@ -143,6 +174,8 @@ async function select(id) {
     currentId.value = id
     caps.value = null
     capOpen.value = ''
+    ctxOpen.value = false
+    syncCtx(r.thread.contextUsed, r.thread.contextSize)
     loadOptions(id).then(err => { // 选中即拉清单（Zed 同款）：没会话的顺带建会话，冷启动可能数秒
       if (err && currentId.value === id) toast('能力清单加载失败：' + (err.message || err), true)
     })
@@ -244,7 +277,7 @@ async function removeThread(id) {
   confirmId.value = ''
   try {
     await api('DELETE', '/api/acp/threads/' + id)
-    if (currentId.value === id) { currentId.value = ''; messages.length = 0 }
+    if (currentId.value === id) { currentId.value = ''; messages.length = 0; syncCtx(0, 0) }
     load()
     toast('已删除该对话')
   } catch (e) { toast('删除失败：' + e.message, true) }
@@ -333,11 +366,13 @@ async function send() {
       if (data.done) {
         done = true
         if (data.turn) turnTotal = data.turn
-        // M-5：agent 自报的上下文水位，并入轮末汇总一起展示。
+        // M-5：agent 自报的上下文水位，并入轮末汇总一起展示；chip 立即跟上，
+        // 不必等 finally 里的列表刷新。
         if (data.context && turnTotal) {
           turnTotal.contextUsed = data.context.used || 0
           turnTotal.contextSize = data.context.size || 0
         }
+        if (data.context) syncCtx(data.context.used, data.context.size)
         if (data.error) errMsg = data.error
       }
     }
@@ -366,7 +401,9 @@ async function send() {
     phase.value = 'idle'
     removeTyping()
     if (bot) {
+      // 本轮已了结：漏收尾的工具块不会再有结果事件了，就地收掉
       bot.streaming = false
+      closeRunningTools(bot)
       bot.turn = turnTotal
       if (errMsg) {
         bot.blocks.push({ kind: 'text', text: '⚠️ ' + errMsg })
@@ -508,14 +545,24 @@ function removePreview(p) {
                 <div v-else-if="m.role === 'bot'" class="turn">
                   <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
                                   @preview="path => fileDrawer.open(path)" />
-                  <div v-if="m.turn" class="turn-total">
-                    {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
+                  <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
+                    <div v-if="m.turn" class="turn-total">
+                      {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
+                    </div>
+                    <div v-if="!m.streaming" class="msg-acts">
+                      <CopyMessageButton :blocks="m.blocks" kind="answer" />
+                    </div>
                   </div>
                 </div>
-                <div v-else class="bubble">
-                  {{ m.text }}
-                  <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
-                  <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+                <div v-else class="msg-col">
+                  <div class="bubble">
+                    {{ m.text }}
+                    <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
+                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+                  </div>
+                  <div class="msg-acts">
+                    <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />
+                  </div>
                 </div>
               </div>
             </template>
@@ -540,6 +587,15 @@ function removePreview(p) {
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </button>
               <input type="file" ref="fileInput" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFilesPicked">
+              <!-- 上下文水位：agent 自报的窗口占用，常驻只读；未上报就不出现 -->
+              <button v-if="ctx" class="ib-btn ctx-btn" :class="[ctxHot ? 'hot' : '', { active: ctxOpen }]"
+                      aria-label="上下文使用率" aria-haspopup="true"
+                      :title="'上下文占用 ' + ctxPct + '%（agent 自报），点击查看'"
+                      @click.stop="toggleCtx">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
+                <span class="ctx-short">{{ ctxPct }}%</span>
+              </button>
               <!-- 会话能力 chips（统一清单，agent 报什么显示什么；不支持的自动缺席） -->
               <button v-if="capsLoading && !caps" class="ib-btn ctx-btn model-btn" disabled
                       title="正在拉起 agent、建立会话…" aria-label="能力加载中">
@@ -577,6 +633,20 @@ function removePreview(p) {
               <span class="pl">{{ v.name }}</span>
               <span class="pd">{{ v.value }}</span>
             </button>
+          </div>
+          <!-- 上下文弹层：agent 自报的窗口水位，只读；ACP 无压缩/清除接口 -->
+          <div v-if="ctx" v-show="ctxOpen" ref="ctxWrap" class="popover ctx-popover" id="agCtxPopover">
+            <div class="popover-title pop-anim">上下文</div>
+            <div class="ctx-meter pop-anim" :class="ctxHot ? 'hot' : ''">
+              <div class="ctx-fill" :style="{ width: ctxBarPct + '%' }"></div>
+            </div>
+            <p class="ctx-line pop-anim">
+              <b>{{ ctxPct }}%</b>
+              <span class="meta">占用约 {{ fmtTokens(ctx.used) }} / 窗口 {{ fmtTokens(ctx.size) }} tokens（agent 自报）</span>
+            </p>
+            <div class="perm-foot pop-anim">
+              数字来自 agent 的 usage_update，上下文由 agent 的会话自己管理；ACP 协议不提供压缩或清除，重开会话会丢历史。
+            </div>
           </div>
         </div>      </template>
     </section>

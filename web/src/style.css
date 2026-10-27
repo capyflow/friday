@@ -402,6 +402,25 @@ html[data-theme="dark"] .mrow.user .bubble {
 /* 轮末汇总：本轮 token 与耗时收成一行小字（思考块只报每轮耗时，总量在这里收口） */
 .turn-total { font-size: 11.5px; color: var(--faint-fg); padding: 0 8px;
               font-variant-numeric: tabular-nums; }
+/* 轮末操作行：汇总在左，复制图标在右 */
+.turn-foot { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
+.turn-foot .turn-total { padding: 0; }
+.turn-foot .msg-acts { margin-left: auto; }
+/* 消息列：气泡在上、操作行在下（用户行随气泡右对齐，错误行左对齐） */
+.msg-col { display: flex; flex-direction: column; gap: 2px; max-width: 78%; min-width: 0; }
+.msg-col .bubble { max-width: 100%; }
+.mrow.user .msg-col { align-items: flex-end; }
+.mrow.err .msg-col { align-items: flex-start; }
+/* 消息操作（复制）：Qoder 风——平时不占视觉，悬停该条消息或键盘聚焦时才现身 */
+.msg-acts { display: flex; align-items: center; gap: 2px; opacity: 0;
+            transition: opacity var(--tr); }
+.mrow:hover .msg-acts, .mrow:focus-within .msg-acts, .turn:hover .msg-acts { opacity: 1; }
+.copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px;
+  padding: 0; border: 0; border-radius: 6px; background: none; color: var(--faint-fg); cursor: pointer;
+  transition: background var(--tr), color var(--tr); }
+.copy-btn:hover { background: var(--bg-muted); color: var(--fg); }
+html[data-theme="dark"] .copy-btn:hover { background: rgba(255,255,255,.08); color: #fff; }
+@media (pointer: coarse) { .msg-acts { opacity: 1; } } /* 触屏没有悬停：常显 */
 .chat-md { white-space: normal; line-height: 1.6; }
 .chat-md p { margin: 0 0 6px; }
 .chat-md > :last-child { margin-bottom: 0; }
