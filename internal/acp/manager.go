@@ -446,6 +446,10 @@ func (m *Manager) ensureLive(ctx context.Context, th *Thread, agentCfg config.Ac
 	m.mu.Lock()
 	th.SessionID = sid
 	th.Degraded = degraded
+	if degraded {
+		// 会话是重开的新会话：旧上下文已丢，旧水位不再适用（等 agent 下次自报）。
+		th.ContextUsed, th.ContextSize, th.ContextCost = 0, 0, 0
+	}
 	serr = m.saveLocked()
 	m.mu.Unlock()
 	if serr != nil {

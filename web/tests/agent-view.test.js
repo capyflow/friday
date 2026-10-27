@@ -5,6 +5,8 @@ import { api } from '../src/api.js'
 import { toast } from '../src/store.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
+// AgentView 静态引入 anim.js，模块加载即调 window.matchMedia（jsdom 未实现）。
+vi.mock('../src/anim.js', () => ({ popIn: vi.fn() }))
 vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()), toast: vi.fn() }))
 
 const thread = {
@@ -46,6 +48,29 @@ describe('智能体对话空间', () => {
     expect(wrapper.text()).toContain('上下文已重置')
     expect(wrapper.text()).toContain('看完了。')
     expect(wrapper.text()).toContain('本轮 · ')
+    expect(wrapper.find('[aria-label="复制回答正文"]').exists()).toBe(true)
+  })
+
+  it('agent 自报上下文时，composer 左组出现只读水位 chip，点开看 used/size', async () => {
+    const withCtx = { ...thread, contextUsed: 12000, contextSize: 30000 }
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/threads') return { threads: [withCtx], acp: config }
+      if (method === 'GET' && url === '/api/acp/threads/th1') return { thread: withCtx }
+      return {}
+    })
+    wrapper = mount(AgentView, { global: { stubs: { teleport: true } } })
+    await flushPromises()
+    const chip = wrapper.get('[aria-label="上下文使用率"]')
+    expect(chip.text()).toContain('40%')
+    await chip.trigger('click')
+    expect(wrapper.get('#agCtxPopover').text()).toContain('占用约 12k / 窗口 30k tokens')
+    // 只读：弹层里没有压缩/清除动作
+    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(0)
+  })
+
+  it('agent 未上报上下文时不显示水位 chip', async () => {
+    await show()
+    expect(wrapper.find('[aria-label="上下文使用率"]').exists()).toBe(false)
   })
 
   it('输入框挂载为可用的 ChatComposer（textarea，可输入）', async () => {
@@ -116,7 +141,7 @@ describe('智能体对话空间', () => {
     await flushPromises()
     expect(wrapper.get('.ag-dir-cur').text()).toBe('/home/u/proj')
     // 上一级回到 /home/u，再用路径栏直达回去
-    await wrapper.findAll('button').find(b => b.text() === '上一级').trigger('click')
+    await wrapper.get('[aria-label="上一级"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('.ag-dir-cur').text()).toBe('/home/u')
     const bar = wrapper.get('[aria-label="目录路径"]')

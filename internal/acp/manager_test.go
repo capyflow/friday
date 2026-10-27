@@ -527,6 +527,40 @@ func TestLoadFailDegraded(t *testing.T) {
 	}
 }
 
+// 降级新开会话意味着旧上下文已丢：上一会话的水位必须清掉，界面不应显示过期数字。
+func TestDegradedSessionClearsContextWatermark(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.IdleKillSeconds = 1
+	f := &fakeAgent{loadSession: true, loadOK: false, promptScript: defaultScript}
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThread(t, m)
+
+	if _, err := m.Send(context.Background(), th.ID, "第一轮", nil, TurnHooks{}); err != nil {
+		t.Fatalf("第一轮失败: %v", err)
+	}
+	// 伪造上一会话留下的水位（fake agent 默认不上报 usage_update）
+	m.mu.Lock()
+	m.threads[th.ID].ContextUsed = 12000
+	m.threads[th.ID].ContextSize = 30000
+	m.mu.Unlock()
+	waitFor(t, 3*time.Second, "空闲回收", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.live) == 0
+	})
+
+	if _, err := m.Send(context.Background(), th.ID, "第二轮", nil, TurnHooks{}); err != nil {
+		t.Fatalf("第二轮失败: %v", err)
+	}
+	got, _ := m.Get(th.ID)
+	if !got.Degraded {
+		t.Fatal("恢复失败应标记降级")
+	}
+	if got.ContextUsed != 0 || got.ContextSize != 0 {
+		t.Fatalf("降级新开会话应清空旧水位，实际 used=%d size=%d", got.ContextUsed, got.ContextSize)
+	}
+}
+
 func TestDegradeResumeSkipsLoad(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Agents[0].DegradeResume = true

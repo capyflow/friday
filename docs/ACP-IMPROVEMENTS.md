@@ -101,6 +101,10 @@ bug 类问题已于同日修复（附录 A）。
 - **实施记录**（2026-10-21）：`aggregate.go` 捕获 `UsageUpdate`；`manager.go` 落盘；
   `admin/acp.go` done 帧带水位；前端 `blocks.js`/`AgentView.vue` 展示。回归
   `TestUsageContextWatermark`（校验单轮记账与水位互不混淆）。
+- **补充**（2026-10-27）：智能体页 composer 左组新增常驻只读水位 chip（百分比 +
+  used/size 弹层，agent 不上报则缺席）；降级重开会话时清空旧水位，避免展示已失效
+  的数字。ACP 协议无压缩/清除接口，故不提供对应操作。回归
+  `TestDegradedSessionClearsContextWatermark` 与 agent-view 前端用例。
 
 ### M-6 进程复用模型（一 thread 一进程 → 一连接多会话）
 
