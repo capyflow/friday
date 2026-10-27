@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -23,9 +24,10 @@ func TestBootstrapCreatesLoadableConfigurationAndKeepsExisting(t *testing.T) {
 	if cfg.Provider.BaseURL != "https://api.example.com/v1" || cfg.Provider.Model != "请填模型名" {
 		t.Fatalf("初始配置应为占位值，实际 %q / %q", cfg.Provider.BaseURL, cfg.Provider.Model)
 	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0600 {
-		t.Fatal("初始配置必须仅当前用户可读写")
+	if runtime.GOOS != "windows" { // Windows 的 Stat 不反映 Unix 权限位，0600 由创建调用声明
+		if fi, _ := os.Stat(path); fi.Mode().Perm() != 0600 {
+			t.Fatal("初始配置必须仅当前用户可读写")
+		}
 	}
 	old := []byte("{broken")
 	if err := os.WriteFile(path, old, 0600); err != nil {

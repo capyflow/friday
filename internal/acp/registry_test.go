@@ -44,7 +44,8 @@ const registryJSON = `{
       "description": "binary 分发条目",
       "distribution": {"binary": {
         "darwin-aarch64": {"archive": "PLACEHOLDER", "cmd": "./sub/agent-bin", "sha256": "PLACEHOLDER"},
-        "linux-x86_64": {"archive": "PLACEHOLDER", "cmd": "./agent-bin"}
+        "linux-x86_64": {"archive": "PLACEHOLDER", "cmd": "./agent-bin"},
+        "windows-x86_64": {"archive": "PLACEHOLDER", "cmd": "./sub/agent-bin"}
       }}
     },
     {
@@ -134,7 +135,8 @@ func TestParseAndConvertRegistry(t *testing.T) {
 	}
 }
 
-// binCmdForTest 返回当前平台在样例里的 cmd（测试机是 darwin/arm64 或 linux/amd64）。
+// binCmdForTest 返回当前平台在样例里的 cmd（测试机是 darwin/arm64、linux/amd64
+// 或 windows/amd64；windows 样例与 darwin 同用 sub/agent-bin 布局）。
 func binCmdForTest() string {
 	if platformKey() == "linux-x86_64" {
 		return "./agent-bin"

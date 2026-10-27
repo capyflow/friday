@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -128,6 +129,10 @@ func TestFilePreviewDetectsBinaryAndImage(t *testing.T) {
 func TestFilePreviewExpandsHomePrefix(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
+		t.Setenv("USERPROFILE", home)
+	}
 	s, _, cookie, _, _ := manageTestServer(t)
 	handler := s.Handler()
 

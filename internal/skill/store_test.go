@@ -3,6 +3,7 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -146,6 +147,10 @@ func TestStoreDuplicateNameNoted(t *testing.T) {
 func TestStoreProjectOverridesUser(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
+		t.Setenv("USERPROFILE", home)
+	}
 	userDir := filepath.Join(home, ".vortex", "skills")
 	writeSkill(t, userDir, "morning-user", morningSkill)
 
@@ -315,6 +320,10 @@ func TestStoreSetEnabledKeepsBodyAndComments(t *testing.T) {
 func TestStoreSetEnabledRejectsUserScope(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
+		t.Setenv("USERPROFILE", home)
+	}
 	writeSkill(t, filepath.Join(home, ".vortex", "skills"), "u1", morningSkill)
 
 	s := newStoreAt(t, t.TempDir())

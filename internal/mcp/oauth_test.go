@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -425,8 +426,10 @@ func TestOAuthStorePersistsAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("会话未落盘: %v", err)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("会话文件权限应为 0600: %v %v", fi, err)
+	if runtime.GOOS != "windows" { // Windows 的 Stat 不反映 Unix 权限位，0600 由写盘调用声明
+		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("会话文件权限应为 0600: %v %v", fi, err)
+		}
 	}
 	if !strings.Contains(string(data), "refresh-1") {
 		t.Fatalf("落盘内容缺少令牌: %s", data)

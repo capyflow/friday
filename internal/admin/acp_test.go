@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -30,6 +31,10 @@ func dirsBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery 
 func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
+		t.Setenv("USERPROFILE", home)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("#!/bin/sh\necho upgraded\n"))
 	}))
@@ -45,6 +50,7 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 			"distribution": map[string]any{"binary": map[string]any{
 				"darwin-aarch64": map[string]any{"archive": srv.URL + "/bin", "cmd": "agent", "args": []string{"--new"}},
 				"linux-x86_64":   map[string]any{"archive": srv.URL + "/bin", "cmd": "agent", "args": []string{"--new"}},
+				"windows-x86_64": map[string]any{"archive": srv.URL + "/bin", "cmd": "agent", "args": []string{"--new"}},
 			}},
 		}}},
 	}
