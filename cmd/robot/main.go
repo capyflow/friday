@@ -92,8 +92,10 @@ func main() {
 		return
 	}
 
-	// 桌面模式：先落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
+	// 桌面模式：先补用户 PATH（Finder/launchd 只有系统目录，npm/npx/uv 会 127），
+	// 再落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
 	if *desktop {
+		ensureUserPath()
 		dir := strings.TrimSpace(*dataDir)
 		if dir == "" {
 			base, err := os.UserConfigDir()
