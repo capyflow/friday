@@ -63,7 +63,9 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 ```
 
 - 数据目录：`~/Library/Application Support/Friday`（Win `%APPDATA%\Friday`、Linux `~/.config/Friday`），
-  首次启动外壳会把随包的 `config.yaml.example` 播种为该目录的 `config.yaml`。
+  首次启动先在启动页确认数据目录（默认即该路径），确认后才进入建账号页；删除
+  `~/Library/Application Support/Friday.launcher.json` 可重跑这一步。确认后外壳把随包的
+  `config.yaml.example` 播种为该目录的 `config.yaml`。
 - 新安装会进入首次设置页面创建管理员账号；已有有效账号文件保持兼容，删除账号文件不会恢复默认账号。
 - **API 密钥**：推荐直接在软件「设置」页填写（写盘 config.yaml，任意 OpenAI 兼容
   服务商通用）；也可用数据目录的 `friday.env`（KEY=VALUE 行式，如
