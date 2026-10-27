@@ -4,6 +4,9 @@ fn main() {
             "kernel_state",
             "enable_notifications",
             "notifications_enabled",
+            "pick_data_dir_dialog",
+            "apply_data_dir",
+            "open_url",
         ]),
     ))
     .expect("无法生成桌面权限清单");

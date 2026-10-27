@@ -14,6 +14,7 @@ import SettingsModal from './components/SettingsModal.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
 import SetupView from './components/SetupView.vue'
 import { startNotifications, stopNotifications } from './notifications.js'
+import { desktopInvoke, openExternal } from './open-url.js'
 
 // 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
 const NAV = [
@@ -39,6 +40,16 @@ function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
   if (userPopOpen.value && !e.target.closest('.side-foot') && !e.target.closest('.user-pop')) {
     userPopOpen.value = false
+  }
+  // 桌面外壳里 window.open / target=_blank 都不会开窗（WebView 拒新窗口）：正文外链
+  // 统一交给系统浏览器。浏览器直连时保持原生行为（不拦，避免破坏中键/右键习惯）。
+  const a = e.target?.closest?.('a[target="_blank"]')
+  if (a && desktopInvoke()) {
+    const href = a.getAttribute('href') || ''
+    if (/^https?:\/\//i.test(href)) {
+      e.preventDefault()
+      openExternal(href)
+    }
   }
 }
 function onKeydown(e) {

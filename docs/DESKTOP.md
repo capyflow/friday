@@ -90,6 +90,7 @@ desktop/
 | 全局快捷键/弹窗 | 本方案第一个样例 | ✅ |
 | 系统托盘菜单 | tauri `tray-icon` feature | 已接入 |
 | 系统通知 | 显式授权、系统状态检查与通知中心兜底 | 已接入，跨平台系统联调待验收 |
+| 外部链接（MCP 授权 / 正文外链） | 外壳命令 `open_url` 交给系统浏览器（WebView 不允许 `window.open`）；只放行 http/https | 已接入 |
 | 开机自启 | autostart 插件 | 低 |
 | 自动更新 | updater 插件（需签名密钥对） | 中 |
 | 剪贴板/文件拖拽 | clipboard-manager 插件 / 拖放事件 → 内核文件工具 | 低 |

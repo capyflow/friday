@@ -1,6 +1,7 @@
 import { reactive, watch } from 'vue'
 import { api } from './api.js'
 import { store } from './store.js'
+import { desktopInvoke } from './open-url.js'
 
 export const notificationSettings = reactive({ status: '未开启', busy: false })
 let timer = null
@@ -18,8 +19,6 @@ watch(() => [store.loggedIn, store.username], () => {
   seen = new Set()
   polling = false
 }, { flush:'sync' })
-
-function desktopInvoke() { return window.__TAURI__?.core?.invoke }
 
 export async function enableSystemNotifications() {
   if (notificationSettings.busy) return
