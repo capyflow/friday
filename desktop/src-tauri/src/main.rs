@@ -14,6 +14,7 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::{NotificationExt, PermissionState};
@@ -26,6 +27,8 @@ const PALETTE_SHORTCUT: &str = "Alt+Space";
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 /// 内核数据目录名（系统配置目录下）。
 const DATA_DIR_NAME: &str = "Friday";
+/// 数据目录指针文件（系统配置目录下，记录首跑选定的数据目录；删除即重跑首导向）。
+const LAUNCHER_POINTER: &str = "Friday.launcher.json";
 
 /// 内核进程状态：服务地址、子进程句柄、退出标记、数据目录、最后一条 stderr 行。
 struct Kernel {
@@ -234,6 +237,181 @@ fn kernel_state(state: tauri::State<Kernel>) -> KernelState {
     }
 }
 
+// ---------- 数据目录解析与内核定位 ----------
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct LauncherPointer {
+    #[serde(rename = "dataDir")]
+    data_dir: String,
+}
+
+fn read_pointer(path: &std::path::Path) -> Option<PathBuf> {
+    let raw = std::fs::read(path).ok()?;
+    let pointer: LauncherPointer = serde_json::from_slice(&raw).ok()?;
+    let dir = PathBuf::from(pointer.data_dir);
+    if !dir.is_absolute() {
+        return None;
+    }
+    Some(dir)
+}
+
+fn write_pointer(path: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    let data = serde_json::to_vec(&LauncherPointer {
+        data_dir: dir.to_string_lossy().to_string(),
+    })
+    .map_err(|_| "无法编码数据目录指针".to_string())?;
+    std::fs::write(path, data).map_err(|e| format!("无法写入数据目录指针：{e}"))
+}
+
+/// 网盘同步目录特征：文件锁与半透明占位文件会拖挂数据目录，选中时须确认。
+fn looks_like_sync_drive(path: &std::path::Path) -> bool {
+    const MARKERS: [&str; 5] = [
+        "Mobile Documents",
+        "com~apple~CloudDocs",
+        "OneDrive",
+        "Dropbox",
+        "Google Drive",
+    ];
+    let text = path.to_string_lossy();
+    MARKERS.iter().any(|m| text.contains(m))
+}
+
+/// 已有 Friday 数据的特征文件（首装种子与「接管已有数据」的判断依据）。
+fn looks_like_friday_data(dir: &std::path::Path) -> bool {
+    dir.join("config.yaml").is_file()
+        || dir.join("friday-kernel.log").is_file()
+        || dir.join("bin").exists()
+}
+
+/// 把用户在目录选择框里选中的路径收敛成实际数据目录：
+/// 不存在/空目录 → 原样；已有 Friday 数据 → 原样（接管）；其它非空 → 收进其下 Friday 子目录。
+fn effective_target(picked: &std::path::Path) -> PathBuf {
+    let is_empty = std::fs::read_dir(picked).map(|mut entries| entries.next().is_none());
+    match is_empty {
+        Ok(true) | Err(_) => picked.to_path_buf(),
+        Ok(false) => {
+            if looks_like_friday_data(picked) {
+                picked.to_path_buf()
+            } else {
+                picked.join(DATA_DIR_NAME)
+            }
+        }
+    }
+}
+
+fn ensure_writable(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
+    let probe = dir.join(".friday-write-probe");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("目录不可写 {}：{e}", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+fn pick_data_dir(
+    app: &tauri::AppHandle,
+    default_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    app.dialog()
+        .file()
+        .set_title("选择 Friday 数据目录")
+        .set_directory(default_dir)
+        .blocking_pick_folder()
+        .and_then(|picked| picked.into_path().ok())
+}
+
+fn confirm_sync_drive(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
+    app.dialog()
+        .message(format!(
+            "{} 位于网盘同步目录，可能出现文件锁与性能问题。\n仍要使用这个位置吗？",
+            dir.display()
+        ))
+        .title("同步盘提醒")
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+            "仍要使用".into(),
+            "换个位置".into(),
+        ))
+        .blocking_show()
+}
+
+/// 数据目录解析：开发覆盖（FRIDAY_DESKTOP_DATA_DIR，不落指针）→ 指针文件 →
+/// 首跑目录选择（默认系统配置目录/Friday；取消即认可默认并落指针，此后不再询问）。
+fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os("FRIDAY_DESKTOP_DATA_DIR").filter(|v| !v.is_empty()) {
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err("FRIDAY_DESKTOP_DATA_DIR 必须为绝对路径".into());
+        }
+        return Ok(path);
+    }
+    let cfg = app
+        .path()
+        .config_dir()
+        .map_err(|_| "无法定位系统配置目录".to_string())?;
+    let default_dir = cfg.join(DATA_DIR_NAME);
+    let pointer = cfg.join(LAUNCHER_POINTER);
+    if let Some(dir) = read_pointer(&pointer) {
+        // 指针失效（目录被移动/删除）→ 回退默认路径，不重跑首导向，避免数据惊吓。
+        if dir.exists() {
+            return Ok(dir);
+        }
+        eprintln!(
+            "[外壳] 指针指向的数据目录不存在，回退默认：{}",
+            default_dir.display()
+        );
+        return Ok(default_dir);
+    }
+    loop {
+        let Some(picked) = pick_data_dir(app, &default_dir) else {
+            // 取消 = 认可默认位置，落指针防止每次启动都弹框。
+            ensure_writable(&default_dir)?;
+            write_pointer(&pointer, &default_dir)?;
+            return Ok(default_dir);
+        };
+        let target = effective_target(&picked);
+        if looks_like_sync_drive(&target) && !confirm_sync_drive(app, &target) {
+            continue; // 拒绝同步盘 → 重新选
+        }
+        ensure_writable(&target)?;
+        write_pointer(&pointer, &target)?;
+        return Ok(target);
+    }
+}
+
+/// 内核二进制的运行路径：数据目录/bin/friday（更新通道未来的替换目标；
+/// 包内那份只是首装种子）。改这里要同步 docs/DESKTOP.md。
+fn kernel_path(data_dir: &std::path::Path) -> PathBuf {
+    let name = if cfg!(windows) { "friday.exe" } else { "friday" };
+    data_dir.join("bin").join(name)
+}
+
+/// 首装种子：把随包分发的内核拷到数据目录 bin/（已存在则不动——版本归更新通道管）。
+fn seed_kernel(data_dir: &std::path::Path) {
+    let dst = kernel_path(data_dir);
+    if dst.exists() {
+        return;
+    }
+    std::fs::create_dir_all(dst.parent().expect("内核路径必有父目录"))
+        .expect("创建内核目录失败");
+    let src = std::env::current_exe()
+        .expect("无法定位外壳可执行文件")
+        .parent()
+        .map(|dir| {
+            dir.join(if cfg!(windows) { "friday.exe" } else { "friday" })
+        })
+        .expect("无法定位随包内核");
+    match std::fs::copy(&src, &dst) {
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
+            }
+            eprintln!("[外壳] 已播种内核：{} ← {}", dst.display(), src.display());
+        }
+        Err(err) => panic!("播种内核失败（{}）：{err}", src.display()),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -244,6 +422,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -261,24 +440,10 @@ fn main() {
             let palette_shortcut: Shortcut = PALETTE_SHORTCUT
                 .parse()
                 .unwrap_or_else(|_| panic!("PALETTE_SHORTCUT 非法: {PALETTE_SHORTCUT}"));
-            // 数据目录 = 系统配置目录/Friday（与内核 --desktop 缺省、docs/DESKTOP.md 一致）。
+            // 数据目录：开发覆盖（env）→ 指针文件 → 首跑目录选择（见 resolve_data_dir）。
             // 注意不要用 app_config_dir()：v2 会再拼一层 identifier，产生 com.capyflow.friday/Friday。
-            let data_dir = match std::env::var_os("FRIDAY_DESKTOP_DATA_DIR")
-                .filter(|value| !value.is_empty())
-            {
-                Some(value) => {
-                    let path = PathBuf::from(value);
-                    if !path.is_absolute() {
-                        return Err("FRIDAY_DESKTOP_DATA_DIR 必须为绝对路径".into());
-                    }
-                    path
-                }
-                None => app
-                    .path()
-                    .config_dir()
-                    .expect("无法定位系统配置目录")
-                    .join(DATA_DIR_NAME),
-            };
+            let data_dir = resolve_data_dir(app.handle())
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             std::fs::create_dir_all(&data_dir).expect("创建数据目录失败");
             app.manage(NativeNotifications::load(
                 data_dir.join("desktop-notifications.json"),
@@ -377,18 +542,19 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 拉起 Go 内核 sidecar 并在后台线程解析其 stdout。
+/// 拉起 Go 内核并在后台线程解析其 stdout。内核运行于数据目录 bin/ 下的
+/// 种子拷贝（首装时从包内复制），更新通道未来只替换这一份。
 fn spawn_kernel(app: tauri::AppHandle) {
     let data_dir = app.state::<Kernel>().data_dir.clone();
     eprintln!("[外壳] 数据目录：{}", data_dir.display());
     seed_config(&app, &data_dir);
+    seed_kernel(&data_dir);
     let envs = read_env_file(&data_dir.join("friday.env"));
 
     let data_arg = data_dir.to_string_lossy().to_string();
     let (mut rx, child) = app
         .shell()
-        .sidecar("friday")
-        .expect("定位 sidecar 失败（binaries/friday-<triple> 未随包分发）")
+        .command(kernel_path(&data_dir).to_string_lossy().to_string())
         .args(["--desktop", "--data-dir", data_arg.as_str(), "--port", "0"])
         // cwd 必须落在数据目录：allspark-go/logx 在包 init 阶段（早于 Go 侧 chdir）
         // 就 mkdir ./logs，launchd 拉起的进程 cwd 是 /（只读）会直接 panic。
@@ -740,6 +906,93 @@ fn show_native_notice(_app: &tauri::AppHandle, notice: &NativeNotice) -> Result<
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    fn fixture_dir(tag: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "friday-data-dir-test-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn sync_drive_markers_are_detected_anywhere_in_path() {
+        assert!(looks_like_sync_drive(std::path::Path::new(
+            "/Users/a/Library/Mobile Documents/com~apple~CloudDocs/Friday"
+        )));
+        assert!(looks_like_sync_drive(std::path::Path::new(
+            r"C:\Users\a\OneDrive\Friday"
+        )));
+        assert!(looks_like_sync_drive(std::path::Path::new(
+            "/Users/a/Dropbox/Friday"
+        )));
+        assert!(!looks_like_sync_drive(std::path::Path::new(
+            "/Users/a/Library/Application Support/Friday"
+        )));
+        assert!(!looks_like_sync_drive(std::path::Path::new("/tmp/friday")));
+    }
+
+    #[test]
+    fn picked_dir_resolution_uses_marker_and_subdir_rules() {
+        // 不存在的目录 → 原样（将创建）
+        let missing = std::env::temp_dir().join("friday-nope-never-exists");
+        assert_eq!(effective_target(&missing), missing);
+        // 空目录 → 原样
+        let empty = fixture_dir("empty");
+        assert_eq!(effective_target(&empty), empty);
+        // 已有 Friday 数据 → 原样接管
+        let existing = fixture_dir("existing");
+        std::fs::write(existing.join("config.yaml"), b"# friday").unwrap();
+        assert_eq!(effective_target(&existing), existing);
+        // 非空无关目录 → 收进其下 Friday 子目录
+        let foreign = fixture_dir("foreign");
+        std::fs::write(foreign.join("unrelated.txt"), b"x").unwrap();
+        assert_eq!(effective_target(&foreign), foreign.join("Friday"));
+        for dir in [empty, existing, foreign] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn pointer_roundtrip_rejects_relative_and_corrupt_payloads() {
+        let dir = fixture_dir("pointer");
+        let path = dir.join("Friday.launcher.json");
+        assert!(read_pointer(&path).is_none()); // 不存在
+        write_pointer(&path, std::path::Path::new("/tmp/friday-data")).unwrap();
+        assert_eq!(
+            read_pointer(&path),
+            Some(PathBuf::from("/tmp/friday-data"))
+        );
+        std::fs::write(&path, b"{damaged").unwrap();
+        assert!(read_pointer(&path).is_none());
+        // 相对路径视为无效指针
+        std::fs::write(&path, br#"{"dataDir":"relative/path"}"#).unwrap();
+        assert!(read_pointer(&path).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn kernel_path_lives_in_data_dir_bin() {
+        let path = kernel_path(std::path::Path::new("/data"));
+        assert_eq!(path.parent(), Some(std::path::Path::new("/data/bin")));
+        assert!(path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("friday")));
+    }
+
+    #[test]
+    fn writable_probe_passes_on_real_dir_and_fails_when_path_is_a_file() {
+        let dir = fixture_dir("writable");
+        assert!(ensure_writable(&dir).is_ok());
+        // 路径中间被一个普通文件占住：create_dir_all 失败（如把文件路径当目录选入）
+        std::fs::write(dir.join("occupied"), b"x").unwrap();
+        let blocked = dir.join("occupied").join("deeper");
+        assert!(ensure_writable(&blocked).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn fixture_path() -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);

@@ -11,11 +11,23 @@
 
 启动链路：
 
-1. Tauri 启动 → 拉起 sidecar：`friday --desktop --data-dir <系统应用数据目录>/Friday --port 0`
+1. Tauri 启动 → 解析数据目录（见「数据目录与内核二进制」）→ 拉起内核：`<数据目录>/bin/friday --desktop --data-dir <数据目录> --port 0`
 2. 首次运行：外壳把随包分发的 `config.yaml.example` 播种为数据目录的 `config.yaml`（对齐 docker entrypoint 模式）；API 密钥经数据目录可选的 `friday.env`（KEY=VALUE）注入子进程环境——解决 Finder/Dock 启动拿不到 shell 环境变量的问题
 3. Go 内核 chdir 到数据目录 → 随机空闲端口起服务 → stdout 打印 `FRIDAY_ADDR=http://127.0.0.1:<port>`
 4. 外壳逐行解析 stdout，拿到地址后通知主窗口导航（此前显示启动占位页）
 5. 退出链路见「生命周期一致性」
+
+## 一·五、数据目录与内核二进制（更新通道的地基）
+
+**数据目录解析顺序**（`resolve_data_dir`）：
+
+1. `FRIDAY_DESKTOP_DATA_DIR` 环境变量（开发/测试覆盖，须绝对路径，不落指针）
+2. 指针文件 `系统配置目录/Friday.launcher.json`（`{"dataDir": "…"}`）；指针指向的目录已不存在 → 回退默认路径（不重跑首导向，避免数据惊吓）
+3. 都没有 → 首跑首导向：原生目录选择框（默认位置即标准路径）。规则：空目录/不存在 → 原样使用；已有 Friday 数据（config.yaml 等）→ 原样接管；其它非空目录 → 收进其下 `Friday/` 子目录。网盘同步目录（iCloud/OneDrive/Dropbox/Google Drive）需二次确认。**取消选择 = 认可默认并落指针**（此后不再弹框）；删除指针文件即可重跑首导向
+
+**内核二进制外置**：内核运行于 `<数据目录>/bin/friday`，包内 sidecar（`binaries/friday-<triple>`）只是**首装种子**——bin/ 下没有时从包内拷贝（0755），已存在则不动，版本归内核更新通道管。这样设计的原因：macOS 签名封印禁止改包内文件（换内核即毁签），Windows 运行中 exe 可改名不可覆盖（rename-swap 可行）；壳-内核契约（`--desktop/--data-dir/--port 0`、stdout 的 `FRIDAY_ADDR`、stdin 的 `/quit`）冻结后，内核自更新无需动壳。后续更新通道（`.prev` 兜底 + 签名 manifest）在此基础上叠加。
+
+已知取舍：Windows 上数据目录在 `%APPDATA%`（Roaming），域环境漫游同步会带上内核二进制——个人版可接受，企业部署需求出现时再拆 `%LocalAppData%`。
 
 ## 二、生命周期一致性（三层保证）
 

@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] } # 透明弹窗与系统托盘
 tauri-plugin-shell = "2"                # sidecar 拉起内核
+tauri-plugin-dialog = "2"               # 首跑数据目录选择（原生对话框）
 tauri-plugin-global-shortcut = "2"      # Alt+Space 全局快捷键
 tauri-plugin-single-instance = "2"      # 防多开
 tauri-plugin-notification = "2"         # 用户授权后的系统提醒
