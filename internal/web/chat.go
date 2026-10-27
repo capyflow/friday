@@ -564,7 +564,21 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 		for {
 			select {
 			case <-rctx.Done():
-				return
+				// 对话已结束、不再有新事件发布：把通道里积压的过程事件抽干
+				// 写完再退。select 在两侧同时就绪时随机挑一个，直接 return
+				// 会把轮末的 tool ok/fail 留在通道里，前端的工具块永远停在
+				// 运行中（转圈）。
+				for {
+					select {
+					case s, ok := <-steps:
+						if !ok {
+							return
+						}
+						_ = write(map[string]any{"step": s})
+					default:
+						return
+					}
+				}
 			case s, ok := <-steps:
 				if !ok {
 					return
