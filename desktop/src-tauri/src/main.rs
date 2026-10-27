@@ -36,10 +36,19 @@ struct Kernel {
     child: Mutex<Option<CommandChild>>,
     exited: AtomicBool,
     quitting: AtomicBool,
-    data_dir: PathBuf,
+    /// 数据目录。首装向导确认新目录后会在运行中切换，故加锁。
+    data_dir: Mutex<PathBuf>,
+    /// 数据目录尚未经向导确认（首装向导步骤，确认后清除）。
+    needs_dir_setup: AtomicBool,
     last_stderr: Mutex<String>,
     dead_reason: Mutex<Option<String>>,
     palette_shortcut: Shortcut,
+}
+
+impl Kernel {
+    fn data_dir(&self) -> PathBuf {
+        self.data_dir.lock().unwrap().clone()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -220,12 +229,150 @@ async fn notifications_enabled(
     .map_err(|_| "无法查询系统通知权限".to_string())?
 }
 
+/// 首装向导：弹出原生目录选择框（仅浏览选择，不落任何状态）。
+/// 必须是 async 命令：同步命令在 Tauri 主线程执行，而 blocking_pick_folder
+/// 会阻塞事件循环，表现为面板弹出但一直转圈、无法选择。
+#[tauri::command]
+async fn pick_data_dir_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let current = app.state::<Kernel>().data_dir();
+    Ok(pick_data_dir(&app, &current).map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 首装向导应用结果：重启后的内核地址 + 目录是否实际变更。
+#[derive(serde::Serialize)]
+struct ApplyDirResult {
+    addr: String,
+    changed: bool,
+}
+
+/// 首装向导：确认数据目录。校验 → 写指针 →（必要时）迁移本次向导产生的文件
+/// 并以新目录重启内核，返回新内核地址。空 path = 认可当前位置。
+#[tauri::command]
+async fn apply_data_dir(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ApplyDirResult, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_data_dir_blocking(&app, path))
+        .await
+        .map_err(|_| "应用数据目录未完成".to_string())?
+}
+
+fn apply_data_dir_blocking(app: &tauri::AppHandle, raw: String) -> Result<ApplyDirResult, String> {
+    let kernel = app.state::<Kernel>();
+    let current = kernel.data_dir();
+    let target = if raw.trim().is_empty() {
+        current.clone()
+    } else {
+        let picked = std::path::PathBuf::from(&raw);
+        if !picked.is_absolute() {
+            return Err("数据目录必须是绝对路径".into());
+        }
+        let target = effective_target(&picked);
+        if looks_like_sync_drive(&target) && !confirm_sync_drive(app, &target) {
+            return Err("已在同步盘提醒中取消，请重新选择".into());
+        }
+        ensure_writable(&target)?;
+        target
+    };
+    let pointer = app
+        .path()
+        .config_dir()
+        .map_err(|_| "无法定位系统配置目录".to_string())?
+        .join(LAUNCHER_POINTER);
+    write_pointer(&pointer, &target)?; // 先落指针：中途崩溃下次启动也能落到所选目录
+    kernel.needs_dir_setup.store(false, Ordering::SeqCst);
+
+    if target == current {
+        let addr = kernel.addr.lock().unwrap().clone().unwrap_or_default();
+        return Ok(ApplyDirResult { addr, changed: false });
+    }
+
+    // 切目录：quitting 置位防止旧内核退出被误判为故障并跳错误页；
+    // 停旧 → 迁移向导产生的文件 → 换目录起新 → 等地址回传。
+    kernel.quitting.store(true, Ordering::SeqCst);
+    drop(kernel);
+    quit_kernel(app);
+    migrate_fresh_files(&current, &target);
+    *app.state::<Kernel>().data_dir.lock().unwrap() = target;
+    spawn_kernel(app.clone());
+    for _ in 0..150 {
+        {
+            let kernel = app.state::<Kernel>();
+            if let Some(addr) = kernel.addr.lock().unwrap().clone() {
+                return Ok(ApplyDirResult { addr, changed: true });
+            }
+            if kernel.exited.load(Ordering::SeqCst) {
+                let reason = kernel.dead_reason.lock().unwrap().clone().unwrap_or_default();
+                return Err(format!("切换数据目录后内核启动失败：{reason}"));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("切换数据目录后内核 30 秒未就绪，请重启应用并查看 friday-kernel.log".into())
+}
+
+/// 首装向导切目录：把默认目录里首启产生的文件（种子配置、账号占位等）搬到新目录。
+/// 目标已有 Friday 数据时跳过（接管模式：以目标数据为准，默认目录的首启文件不带走）；
+/// bin/（内核种子，按新目录重新播种）与日志不搬。
+fn migrate_fresh_files(from: &std::path::Path, to: &std::path::Path) {
+    if looks_like_friday_data(to) {
+        eprintln!(
+            "[外壳] 目标目录已有 Friday 数据，跳过迁移（接管模式）：{}",
+            to.display()
+        );
+        return;
+    }
+    if std::fs::create_dir_all(to).is_err() {
+        return;
+    }
+    let entries = match std::fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    const KEEP: [&str; 3] = ["bin", "logs", "friday-kernel.log"];
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if KEEP.iter().any(|s| *s == name) {
+            continue;
+        }
+        let dst = to.join(&name);
+        if std::fs::rename(entry.path(), &dst).is_ok() {
+            continue;
+        }
+        // 跨卷 rename 失败退回复制+删除
+        if std::fs::copy(entry.path(), &dst).is_ok() {
+            let _ = std::fs::remove_dir_all(entry.path());
+            let _ = std::fs::remove_file(entry.path());
+        } else {
+            eprintln!("[外壳] 迁移失败（保留在原目录）：{}", name.to_string_lossy());
+        }
+    }
+}
+
+/// 打开外部链接（仅 http/https）。桌面 WebView 默认拒绝 window.open（wry 不装
+/// 新窗口处理器就直接返回 None），页面里点「授权」或聊天里的外链都得走这里，
+/// 交给系统默认浏览器。浏览器直连内核时前端仍用 window.open，不经过外壳。
+#[tauri::command]
+#[allow(deprecated)] // 官方建议换 tauri-plugin-opener；本机只缓存了 shell，先沿用其 Rust 侧 open
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("https://") || u.starts_with("http://")) {
+        return Err("只允许打开 http/https 链接".into());
+    }
+    app.shell()
+        .open(u, None)
+        .map_err(|e| format!("打开浏览器失败：{e}"))
+}
+
 /// 内核状态快照：占位页主动查询用（防"就绪事件早于页面监听注册"的竞态）。
+/// needs_dir_setup/dataDir 供首装向导决定进入哪个页面。
 #[derive(serde::Serialize)]
 struct KernelState {
     addr: Option<String>,
     dead: bool,
     reason: Option<String>,
+    needs_dir_setup: bool,
+    data_dir: String,
 }
 
 #[tauri::command]
@@ -234,6 +381,8 @@ fn kernel_state(state: tauri::State<Kernel>) -> KernelState {
         addr: state.addr.lock().unwrap().clone(),
         dead: state.exited.load(Ordering::SeqCst),
         reason: state.dead_reason.lock().unwrap().clone(),
+        needs_dir_setup: state.needs_dir_setup.load(Ordering::SeqCst),
+        data_dir: state.data_dir().to_string_lossy().to_string(),
     }
 }
 
@@ -334,14 +483,16 @@ fn confirm_sync_drive(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
 }
 
 /// 数据目录解析：开发覆盖（FRIDAY_DESKTOP_DATA_DIR，不落指针）→ 指针文件 →
-/// 首跑目录选择（默认系统配置目录/Friday；取消即认可默认并落指针，此后不再询问）。
-fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// 默认路径 + 首装向导标记。首装不弹原生框：目录确认放在应用内启动页
+/// （index.html 在进入内核建账号页之前先确认/更换数据目录），返回值第二项
+/// 即「尚未确认」。
+fn resolve_data_dir(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
     if let Some(value) = std::env::var_os("FRIDAY_DESKTOP_DATA_DIR").filter(|v| !v.is_empty()) {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
             return Err("FRIDAY_DESKTOP_DATA_DIR 必须为绝对路径".into());
         }
-        return Ok(path);
+        return Ok((path, false));
     }
     let cfg = app
         .path()
@@ -350,31 +501,15 @@ fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let default_dir = cfg.join(DATA_DIR_NAME);
     let pointer = cfg.join(LAUNCHER_POINTER);
     if let Some(dir) = read_pointer(&pointer) {
-        // 指针失效（目录被移动/删除）→ 回退默认路径，不重跑首导向，避免数据惊吓。
         if dir.exists() {
-            return Ok(dir);
+            return Ok((dir, false));
         }
         eprintln!(
-            "[外壳] 指针指向的数据目录不存在，回退默认：{}",
+            "[外壳] 指针指向的数据目录不存在，回退默认并重跑向导：{}",
             default_dir.display()
         );
-        return Ok(default_dir);
     }
-    loop {
-        let Some(picked) = pick_data_dir(app, &default_dir) else {
-            // 取消 = 认可默认位置，落指针防止每次启动都弹框。
-            ensure_writable(&default_dir)?;
-            write_pointer(&pointer, &default_dir)?;
-            return Ok(default_dir);
-        };
-        let target = effective_target(&picked);
-        if looks_like_sync_drive(&target) && !confirm_sync_drive(app, &target) {
-            continue; // 拒绝同步盘 → 重新选
-        }
-        ensure_writable(&target)?;
-        write_pointer(&pointer, &target)?;
-        return Ok(target);
-    }
+    Ok((default_dir, true))
 }
 
 /// 内核二进制的运行路径：数据目录/bin/friday（更新通道未来的替换目标；
@@ -442,7 +577,7 @@ fn main() {
                 .unwrap_or_else(|_| panic!("PALETTE_SHORTCUT 非法: {PALETTE_SHORTCUT}"));
             // 数据目录：开发覆盖（env）→ 指针文件 → 首跑目录选择（见 resolve_data_dir）。
             // 注意不要用 app_config_dir()：v2 会再拼一层 identifier，产生 com.capyflow.friday/Friday。
-            let data_dir = resolve_data_dir(app.handle())
+            let (data_dir, needs_dir_setup) = resolve_data_dir(app.handle())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             std::fs::create_dir_all(&data_dir).expect("创建数据目录失败");
             app.manage(NativeNotifications::load(
@@ -453,7 +588,8 @@ fn main() {
                 child: Mutex::new(None),
                 exited: AtomicBool::new(false),
                 quitting: AtomicBool::new(false),
-                data_dir,
+                data_dir: Mutex::new(data_dir),
+                needs_dir_setup: AtomicBool::new(needs_dir_setup),
                 last_stderr: Mutex::new(String::new()),
                 dead_reason: Mutex::new(None),
                 palette_shortcut,
@@ -478,7 +614,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             kernel_state,
             enable_notifications,
-            notifications_enabled
+            notifications_enabled,
+            pick_data_dir_dialog,
+            apply_data_dir,
+            open_url
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
@@ -544,15 +683,24 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// 拉起 Go 内核并在后台线程解析其 stdout。内核运行于数据目录 bin/ 下的
 /// 种子拷贝（首装时从包内复制），更新通道未来只替换这一份。
+/// 可重入：向导切换数据目录后会先停旧内核再调本函数，故先复位状态标记。
 fn spawn_kernel(app: tauri::AppHandle) {
-    let data_dir = app.state::<Kernel>().data_dir.clone();
+    {
+        let kernel = app.state::<Kernel>();
+        kernel.addr.lock().unwrap().take();
+        kernel.exited.store(false, Ordering::SeqCst);
+        kernel.quitting.store(false, Ordering::SeqCst);
+        *kernel.last_stderr.lock().unwrap() = String::new();
+        *kernel.dead_reason.lock().unwrap() = None;
+    }
+    let data_dir = app.state::<Kernel>().data_dir();
     eprintln!("[外壳] 数据目录：{}", data_dir.display());
     seed_config(&app, &data_dir);
     seed_kernel(&data_dir);
     let envs = read_env_file(&data_dir.join("friday.env"));
 
     let data_arg = data_dir.to_string_lossy().to_string();
-    let (mut rx, child) = app
+    let spawned = app
         .shell()
         .command(kernel_path(&data_dir).to_string_lossy().to_string())
         .args(["--desktop", "--data-dir", data_arg.as_str(), "--port", "0"])
@@ -560,8 +708,14 @@ fn spawn_kernel(app: tauri::AppHandle) {
         // 就 mkdir ./logs，launchd 拉起的进程 cwd 是 /（只读）会直接 panic。
         .current_dir(&data_dir)
         .envs(envs)
-        .spawn()
-        .expect("拉起 Friday 内核失败");
+        .spawn();
+    let (mut rx, child) = match spawned {
+        Ok(pair) => pair,
+        Err(err) => {
+            kernel_dead(&app, format!("拉起 Friday 内核失败：{err}"));
+            return;
+        }
+    };
     app.state::<Kernel>().child.lock().unwrap().replace(child);
 
     tauri::async_runtime::spawn(async move {
@@ -624,7 +778,7 @@ fn spawn_kernel(app: tauri::AppHandle) {
 /// 把内核输出追加到数据目录的 friday-kernel.log（用户排障入口），同步打到终端。
 fn kernel_log(app: &tauri::AppHandle, line: &str) {
     eprintln!("[内核] {line}");
-    let path = app.state::<Kernel>().data_dir.join("friday-kernel.log");
+    let path = app.state::<Kernel>().data_dir().join("friday-kernel.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -668,7 +822,7 @@ fn kernel_dead(app: &tauri::AppHandle, reason: String) {
         } else {
             "tauri://localhost"
         };
-        let dir = app.state::<Kernel>().data_dir.display().to_string();
+        let dir = app.state::<Kernel>().data_dir().display().to_string();
         let _ = win.eval(&format!(
             "location.replace('{origin}/error.html?reason={}&dir={}')",
             percent_encode(&reason),
@@ -984,6 +1138,33 @@ mod tests {
     }
 
     #[test]
+    fn migrate_moves_wizard_files_but_not_bin_logs_and_respects_takeover() {
+        // 全新目录：账号/配置搬走，bin/logs/日志留下
+        let from = fixture_dir("mig-from");
+        let to = fixture_dir("mig-to");
+        std::fs::create_dir_all(from.join("bin")).unwrap();
+        std::fs::create_dir_all(from.join("logs")).unwrap();
+        std::fs::write(from.join("admin-account.json"), b"{}").unwrap();
+        std::fs::write(from.join("config.yaml"), b"# friday").unwrap();
+        std::fs::write(from.join("bin").join("friday"), b"bin").unwrap();
+        std::fs::write(from.join("friday-kernel.log"), b"log").unwrap();
+        migrate_fresh_files(&from, &to);
+        assert!(to.join("admin-account.json").is_file());
+        assert!(to.join("config.yaml").is_file());
+        assert!(!to.join("bin").exists());
+        assert!(!to.join("friday-kernel.log").exists());
+        assert!(from.join("bin").join("friday").is_file());
+        // 接管模式：目标已有 Friday 数据时不再搬（向导账号不覆盖目标数据）
+        let from2 = fixture_dir("mig-from2");
+        std::fs::write(from2.join("admin-account.json"), b"{}").unwrap();
+        migrate_fresh_files(&from2, &to);
+        assert!(from2.join("admin-account.json").is_file()); // 停在源目录 = 未迁移
+        for dir in [from, to, from2] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
     fn writable_probe_passes_on_real_dir_and_fails_when_path_is_a_file() {
         let dir = fixture_dir("writable");
         assert!(ensure_writable(&dir).is_ok());
@@ -1175,7 +1356,8 @@ mod tests {
             child: Mutex::new(None),
             exited: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
-            data_dir: PathBuf::new(),
+            data_dir: Mutex::new(PathBuf::new()),
+            needs_dir_setup: AtomicBool::new(false),
             last_stderr: Mutex::new(String::new()),
             dead_reason: Mutex::new(None),
             palette_shortcut: PALETTE_SHORTCUT.parse().unwrap(),

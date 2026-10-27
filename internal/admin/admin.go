@@ -13,6 +13,7 @@
 //
 //	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
 //	GET    /palette           全局快捷键弹窗页（桌面外壳加载，公开静态；对话仍走 /api/chat）
+//	GET    /wizard            首装向导页（桌面外壳首装流程加载，公开静态；含建号表单）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
 //	POST   /api/chat/stop     暂停当前回复（需登录，已生成部分可继续）
 //	POST   /api/chat/resume   继续被暂停的对话（需登录，SSE 流式）
@@ -148,6 +149,11 @@ var placeholderPalette = []byte(`<!doctype html><html lang="zh"><meta charset="u
 <p>前端尚未构建，快捷面板不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
 </body></html>`)
 
+var placeholderWizard = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday 初始设置</title><body style="font-family:system-ui;margin:8vh auto;max-width:480px;padding:0 24px">
+<p>前端尚未构建，首装向导不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
+</body></html>`)
+
 // webdistFile 读取内嵌产物，缺失（未构建）返回 false。
 func webdistFile(name string) ([]byte, bool) {
 	b, err := webdistFS.ReadFile("webdist/" + name)
@@ -278,6 +284,8 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/", s.handleIndex)
 	// 全局快捷键弹窗页（桌面外壳加载）：公开下发，对话仍走需登录的 /api/chat。
 	root.AddStaticRouter("/palette", s.handlePalette)
+	// 首装向导页（桌面外壳首装流程加载）：公开下发——向导本身就是建号入口。
+	root.AddStaticRouter("/wizard", s.handleWizard)
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
@@ -539,6 +547,18 @@ func (s *Server) handlePalette(ctx *vhttp.Context) error {
 		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
 	} else {
 		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderPalette)
+	}
+	return nil
+}
+
+// handleWizard 返回首装向导页（桌面外壳首次运行时的账号创建与数据目录确认；
+// 与 /api/setup 同级公开下发——向导本身就是建号入口）。
+func (s *Server) handleWizard(ctx *vhttp.Context) error {
+	noCache(ctx)
+	if b, ok := webdistFile("wizard.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderWizard)
 	}
 	return nil
 }

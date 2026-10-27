@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Friday 初始设置</title>
+<style>
+  /* 向导目录步骤专用：数据目录卡片与操作行（账号步骤样式来自全局 style.css） */
+  .dir-card { border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+    display: flex; flex-direction: column; gap: 10px; text-align: left; }
+  .dir-row { display: flex; flex-direction: column; gap: 4px; }
+  .dir-label { font-size: 12px; color: var(--muted-fg, #888); }
+  .dir-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    line-height: 1.5; word-break: break-all; padding: 8px 10px; border-radius: 8px;
+    background: var(--bg-muted, rgba(127,127,127,.12)); }
+  .dir-path.picked { outline: 1px solid var(--border-strong, rgba(127,127,127,.4)); }
+  .dir-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+  .dir-actions .btn { min-height: 42px; }
+</style>
+</head>
+<body>
+<div id="wizard"></div>
+<script type="module" src="/src/wizard.js"></script>
+</body>
+</html>

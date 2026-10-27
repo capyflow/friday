@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>Friday 启动中</title>
-<!-- 启动占位页：外壳解析内核 stdout 的 FRIDAY_ADDR 后 emit server-ready，本页跳转过去。 -->
+<!-- 启动占位页：外壳解析内核 stdout 的 FRIDAY_ADDR 后 emit server-ready，本页跳转过去。
+     首装未确认数据目录时先进入应用内向导（/wizard.html：建账号 → 确认目录）。 -->
 <style>
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
@@ -17,7 +18,7 @@
   #logo::after { content: ""; position: absolute; inset: 20px; border-radius: 50%;
     background: rgba(20, 20, 20, .92); }
   h1 { font-size: 18px; font-weight: 500; }
-  #status { font-size: 13px; color: rgba(232, 232, 232, .55); }
+  #status { font-size: 13px; color: rgba(232, 232, 232, .55); text-align: center; }
   #bar { width: 180px; height: 4px; border-radius: 2px; overflow: hidden;
     background: rgba(255, 255, 255, .1); }
   #bar i { display: block; width: 40%; height: 100%; border-radius: 2px;
@@ -48,6 +49,12 @@
     status.classList.add('err');
     status.textContent = '内核已退出' + (reason ? '：' + reason : '') + '。请先从托盘菜单退出 Friday，再重新打开；详见数据目录 friday-kernel.log。';
   }
+  function applyState(s) {
+    // 首装未确认数据目录 → 应用内向导（建账号 → 确认目录 → 重启内核 → 登录）。
+    if (s.addr) enter(s.addr + (s.needsDirSetup ? '/wizard' : ''));
+    else if (s.dead) showDead(s.reason);
+    return !!(s.addr || s.dead);
+  }
 
   async function boot() {
     if (!window.__TAURI__) {
@@ -59,16 +66,12 @@
     const { listen } = window.__TAURI__.event;
     // 三重保障防竞态：① 先查一次当前状态（事件可能在页面加载前就已发过）；
     // ② 监听后续事件；③ 兜底轮询（事件丢失也能进入）。死因同理由 kernel_state 查询。
-    const apply = (s) => {
-      if (s.addr) enter(s.addr);
-      else if (s.dead) showDead(s.reason);
-      return !!(s.addr || s.dead);
-    };
-    if (await apply(await invoke('kernel_state'))) return;
-    await listen('server-ready', (e) => enter(e.payload));
+    if (applyState(await invoke('kernel_state'))) return;
+    // 事件只带地址，向导标记要重查完整状态（否则首装会绕过向导直接进入）。
+    await listen('server-ready', async () => applyState(await invoke('kernel_state')));
     await listen('kernel-dead', (e) => showDead(e.payload));
     const poll = setInterval(async () => {
-      if (await apply(await invoke('kernel_state'))) clearInterval(poll);
+      if (applyState(await invoke('kernel_state'))) clearInterval(poll);
     }, 1500);
     setTimeout(() => {
       if (!entered) status.textContent = '仍在启动…若超过一分钟无响应，请重启应用并查看数据目录 friday-kernel.log';
