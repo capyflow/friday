@@ -17,6 +17,14 @@ async function fill(password = 'secret-password', confirmation = password) {
 }
 
 describe('首次设置向导', () => {
+  it('用户名输入关闭 macOS 自动大写与纠错，避免输入 aaron 被建议成 Aaron', () => {
+    show()
+    const u = wrapper.get('input[name="username"]')
+    expect(u.attributes('autocapitalize')).toBe('none')
+    expect(u.attributes('autocorrect')).toBe('off')
+    expect(u.attributes('spellcheck')).toBe('false')
+  })
+
   it('远程未初始化部署显示预置方式，不显示可提交账号表单', () => {
     show({ ...first, localSetupAllowed: false })
     expect(wrapper.find('form').exists()).toBe(false)

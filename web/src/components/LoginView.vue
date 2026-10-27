@@ -33,7 +33,7 @@ async function submit() {
       <div class="sub">你的私人 AI 生活管家</div>
       <form @submit.prevent="submit">
         <div class="field">
-          <input id="loginUser" v-model="user" aria-label="用户名" placeholder="用户名" autocomplete="username" :disabled="busy" required>
+          <input id="loginUser" v-model="user" aria-label="用户名" placeholder="用户名" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" :disabled="busy" required>
         </div>
         <div class="field">
           <input id="loginPass" v-model="pass" aria-label="密码" type="password" placeholder="密码" autocomplete="current-password" :disabled="busy" required>
