@@ -19,12 +19,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/procctl"
 )
 
 // agentProc 是一个存活中的 agent 进程与它的连接。
@@ -41,10 +41,10 @@ type agentProc struct {
 	// turn 中的 config_options_update 与 set_config_option 的响应刷新。进程级
 	// 而非 thread 级——进程回收重接后由新会话的响应重新填充。models/modeState
 	// 是协议原生的模型/模式状态（部分 agent 只报这两样，如 cc）。
-	optMu      sync.Mutex
-	opts       []acp.SessionConfigOption
-	models     *acp.SessionModelState
-	modeState  *acp.SessionModeState
+	optMu     sync.Mutex
+	opts      []acp.SessionConfigOption
+	models    *acp.SessionModelState
+	modeState *acp.SessionModeState
 
 	stderrMu   sync.Mutex
 	stderrMemo string // kill 时缓存的 stderr 尾部（文件随即删除，报错仍可引用）
@@ -116,8 +116,8 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 	// env 合并而非追加：同名 key 以配置为准。直接 append 会产生重复 key，
 	// libc 的 getenv 取第一个匹配——覆盖对 node 系 agent 会静默失效。
 	cmd.Env = buildEnv(os.Environ(), cfg.Env)
-	// N1：独立进程组——kill 时连 npx→node→agent 自 spawn 的工具子进程一起带走。
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// N1：整树击杀载体——Unix 独立进程组，Windows Job Object（见 procctl 包）。
+	procctl.Prepare(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -142,6 +142,11 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 	// 收尸 goroutine：kill 之后不留 zombie（与 Done() 的断开通知各自独立）。
 	go func() { _ = cmd.Wait() }()
 
+	// 挂接整树击杀载体：Unix 无操作（进程组已就位），Windows 塞进 Job Object。
+	// 失败（Windows 罕见）退化为 kill 闭包里只杀直接子进程——agent 主进程必死，
+	// 对端断开照常触发，孙进程可能残留，可接受。
+	killTree, closeTree, _ := procctl.Attach(cmd)
+
 	p := &agentProc{
 		agent:      cfg.Name,
 		workspace:  workspace,
@@ -161,9 +166,15 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 		}
 		killed = true
 		if cmd.Process != nil {
-			// 杀整个进程组（负 pid）；进程组已消散时忽略错误，直接 Kill 兜底。
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			// 整树击杀（Unix 进程组负 pid / Windows TerminateJobObject）；
+			// 载体消散或缺失时直接 Kill 兜底。
+			if killTree != nil {
+				_ = killTree()
+			}
 			_ = cmd.Process.Kill()
+		}
+		if closeTree != nil {
+			_ = closeTree()
 		}
 		// 缓存 stderr 尾部再删文件：spawn/Send 的报错在 kill 之后仍要引用它，
 		// 而临时文件不清理会随重启累积（agent 的 stderr 可能刷到很大，截尾即可）。

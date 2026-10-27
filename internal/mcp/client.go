@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/capyflow/friday/internal/procctl"
 )
 
 // protocolVersion 是本客户端声明的 MCP 协议版本。
@@ -37,10 +39,12 @@ type Tool struct {
 type Client struct {
 	Name string
 
-	cmd    *exec.Cmd
-	cancel context.CancelFunc // 取消即终止子进程（Close 调用）
-	stdin  io.WriteCloser
-	stderr io.ReadCloser
+	cmd      *exec.Cmd
+	cancel   context.CancelFunc // 取消即终止子进程（Close 调用）
+	stdin    io.WriteCloser
+	stderr   io.ReadCloser
+	killTree func() error // 整树击杀（Windows Job Object / Unix 进程组），可为 nil
+	closeJob func() error // 释放击杀载体句柄，可为 nil
 
 	mu      sync.Mutex
 	nextID  int64
@@ -89,6 +93,8 @@ func Start(name, command string, args []string, env map[string]string, onExit fu
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// 平台进程属性（Windows CREATE_NO_WINDOW 不闪黑窗；Unix 进程组整树击杀）。
+	procctl.Prepare(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -110,15 +116,20 @@ func Start(name, command string, args []string, env map[string]string, onExit fu
 		cancel()
 		return nil, fmt.Errorf("启动 MCP 服务器 %q: %w", command, err)
 	}
+	// 挂接整树击杀载体：npx 系 MCP 服务器同样有 node→server 孙进程；失败
+	// 退化为 Close 里的 Process.Kill（只杀直接子进程）。
+	killTree, closeJob, _ := procctl.Attach(cmd)
 
 	c := &Client{
-		Name:    name,
-		cmd:     cmd,
-		cancel:  cancel,
-		stdin:   stdin,
-		stderr:  nil,
-		pending: make(map[int64]chan rpcResp),
-		onExit:  onExit,
+		Name:     name,
+		cmd:      cmd,
+		cancel:   cancel,
+		stdin:    stdin,
+		stderr:   nil,
+		killTree: killTree,
+		closeJob: closeJob,
+		pending:  make(map[int64]chan rpcResp),
+		onExit:   onExit,
 	}
 	go c.readLoop(stdout)
 	go c.waitExit()
@@ -320,7 +331,8 @@ func parseToolResult(res json.RawMessage) (string, error) {
 }
 
 // Close 关闭连接并终止子进程（幂等）：取消生命周期 context 杀进程，
-// 显式 Kill 兜底，再关闭 stdin。
+// 整树击杀优先（npx 系服务器的 node 孙进程一并带走），显式 Kill 兜底，
+// 再关闭 stdin 与击杀载体句柄。
 func (c *Client) Close() {
 	c.mu.Lock()
 	if c.closed {
@@ -330,8 +342,14 @@ func (c *Client) Close() {
 	c.closed = true
 	c.mu.Unlock()
 	c.cancel()
+	if c.killTree != nil {
+		_ = c.killTree()
+	}
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
 	}
 	_ = c.stdin.Close()
+	if c.closeJob != nil {
+		_ = c.closeJob()
+	}
 }

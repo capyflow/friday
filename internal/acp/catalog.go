@@ -5,15 +5,17 @@
 package acp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/procctl"
 )
 
 // CatalogEntry 是目录里的一个可安装 agent。
@@ -203,25 +205,50 @@ func defaultAcpBaseDir() (string, error) {
 	return filepath.Join(home, ".vortex", "acp"), nil
 }
 
-// runInstallCommand 可被测试替换：执行一条官方安装命令（固定字符串经 sh -c）。
-// 超时击杀整个进程组——CommandContext 默认只杀 sh，npm/curl 这类孙进程会残留
-// （与 agent 进程的 N1 同一纪律）。
+// runInstallCommand 可被测试替换：执行一条官方安装命令（固定字符串经平台
+// shell——Unix sh -c，Windows 优先 Git Bash、退 PowerShell，见 procctl 包）。
+// 超时击杀整棵进程树——默认 Cancel 只杀 shell，npm/curl 这类孙进程会残留
+// （与 agent 进程的 N1 同一纪律）。输出收集与 Attach 之后的 Wait 手工编排：
+// CombinedOutput 无法在 Start 与 Wait 之间挂 Job Object。
 var runInstallCommand = func(ctx context.Context, installCmd string) ([]byte, error) {
 	ictx, cancel := context.WithTimeout(ctx, installTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ictx, "sh", "-c", installCmd)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd := procctl.ShellCommandContext(ictx, installCmd)
+	procctl.Prepare(cmd)
+	// Cancel 在 ictx 到点时由 exec 内部异步调用，而 killTree 要等 Start 之后
+	// 才能挂接——用锁保护读写，未就绪时退化为只杀直接子进程。
+	var mu sync.Mutex
+	var killTree func() error
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			return cmd.Process.Kill()
+		mu.Lock()
+		kt := killTree
+		mu.Unlock()
+		if kt != nil {
+			if err := kt(); err != nil {
+				return cmd.Process.Kill()
+			}
+			return nil
 		}
-		return nil
+		return cmd.Process.Kill()
 	}
 	cmd.WaitDelay = 2 * time.Second
-	return cmd.CombinedOutput()
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if kt, closeTree, err := procctl.Attach(cmd); err == nil {
+		mu.Lock()
+		killTree = kt
+		mu.Unlock()
+		defer func() { _ = closeTree() }()
+	}
+	werr := cmd.Wait()
+	return out.Bytes(), werr
 }
 
 // InstallResult 是一次安装的归集结果。
