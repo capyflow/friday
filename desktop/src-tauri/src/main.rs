@@ -271,6 +271,9 @@ fn apply_data_dir_blocking(app: &tauri::AppHandle, raw: String) -> Result<ApplyD
         if looks_like_sync_drive(&target) && !confirm_sync_drive(app, &target) {
             return Err("已在同步盘提醒中取消，请重新选择".into());
         }
+        if looks_like_temp_dir(&target) && !confirm_temp_dir(app, &target) {
+            return Err("已在临时目录提醒中取消，请重新选择".into());
+        }
         ensure_writable(&target)?;
         target
     };
@@ -425,6 +428,13 @@ fn looks_like_sync_drive(path: &std::path::Path) -> bool {
     MARKERS.iter().any(|m| text.contains(m))
 }
 
+/// 系统临时目录特征：重启即清空，绝不能当数据目录（曾发生向导把数据迁进 /tmp 的事故）。
+fn looks_like_temp_dir(path: &std::path::Path) -> bool {
+    const PREFIXES: [&str; 4] = ["/tmp/", "/private/tmp/", "/private/var/", "/var/folders/"];
+    let text = format!("{}/", path.to_string_lossy());
+    PREFIXES.iter().any(|p| text.starts_with(p))
+}
+
 /// 已有 Friday 数据的特征文件（首装种子与「接管已有数据」的判断依据）。
 fn looks_like_friday_data(dir: &std::path::Path) -> bool {
     dir.join("config.yaml").is_file()
@@ -477,6 +487,20 @@ fn confirm_sync_drive(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
         .title("同步盘提醒")
         .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
             "仍要使用".into(),
+            "换个位置".into(),
+        ))
+        .blocking_show()
+}
+
+fn confirm_temp_dir(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
+    app.dialog()
+        .message(format!(
+            "{} 位于系统临时目录，重启或系统清理后数据会全部丢失。\n仍要使用这个位置吗？",
+            dir.display()
+        ))
+        .title("临时目录警告")
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+            "仍要使用（数据不保留）".into(),
             "换个位置".into(),
         ))
         .blocking_show()
@@ -1087,6 +1111,25 @@ mod tests {
             "/Users/a/Library/Application Support/Friday"
         )));
         assert!(!looks_like_sync_drive(std::path::Path::new("/tmp/friday")));
+    }
+
+    #[test]
+    fn temp_dirs_are_flagged_but_user_locations_are_not() {
+        for path in ["/tmp/friday", "/private/tmp/a", "/private/var/folders/x", "/var/folders/ab"] {
+            assert!(
+                looks_like_temp_dir(std::path::Path::new(path)),
+                "应识别为临时目录：{path}"
+            );
+        }
+        for path in [
+            "/Users/a/Library/Application Support/Friday",
+            "/tmpx/friday", // 前缀必须按路径段匹配，不能被 /tmp 误伤
+        ] {
+            assert!(
+                !looks_like_temp_dir(std::path::Path::new(path)),
+                "不应识别为临时目录：{path}"
+            );
+        }
     }
 
     #[test]
