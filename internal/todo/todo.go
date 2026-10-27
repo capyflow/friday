@@ -60,14 +60,18 @@ func parseTags(text string) []string {
 
 // Store 是待办仓库。
 type Store struct {
-	mu      sync.Mutex
-	opMu    sync.Mutex // 业务变更串行；绝不在持有 mu 时调用任务引擎，避免调度门卫锁反转。
-	path    string     // 为空表示不持久化（测试用）
-	todos   []Todo
-	loadErr error // 已有文件不可读取时禁止覆盖，修复文件并重启后恢复
-	engine  *task.Engine
-	syncErr error
-	syncing bool
+	mu    sync.Mutex
+	opMu  sync.Mutex // 业务变更串行；绝不在持有 mu 时调用任务引擎，避免调度门卫锁反转。
+	path  string     // 为空表示不持久化（测试用）
+	todos []Todo
+	// lastCreated 是最近一次入库的 CreatedAt（墙钟，已剥离单调钟）。Windows 的
+	// 系统时钟粒度粗（~15.6ms 一跳）且可能被 NTP 回拨，直接用 time.Now() 会让
+	// 「后创建的条目时间更大」不成立；AddEntry 据此强制严格递增。
+	lastCreated time.Time
+	loadErr     error // 已有文件不可读取时禁止覆盖，修复文件并重启后恢复
+	engine      *task.Engine
+	syncErr     error
+	syncing     bool
 }
 
 // NewStore 创建待办仓库并从 path 加载；仅文件不存在时以空仓库启动。
@@ -187,9 +191,10 @@ func (s *Store) List() []Todo {
 			return !out[i].Done
 		}
 		if !out[i].Done {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
+			// 只比墙钟（剥离单调钟），与 ListEntries 时间线同一纪律。
+			return out[i].CreatedAt.Round(0).Before(out[j].CreatedAt.Round(0))
 		}
-		return out[i].doneAt().After(out[j].doneAt())
+		return out[i].doneAt().Round(0).After(out[j].doneAt().Round(0))
 	})
 	return out
 }

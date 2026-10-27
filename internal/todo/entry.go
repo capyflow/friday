@@ -57,7 +57,14 @@ func (s *Store) AddEntry(kind, text string, dueAt, remindAt *time.Time) (Todo, e
 	if err := s.ready(); err != nil {
 		return Todo{}, err
 	}
-	td := Todo{Kind: kind, Text: strings.TrimSpace(text), CreatedAt: time.Now(),
+	s.mu.Lock()
+	now := time.Now().Round(0) // 剥离单调钟：Windows 上其读数同样可能回退
+	if !now.After(s.lastCreated) {
+		now = s.lastCreated.Add(time.Nanosecond)
+	}
+	s.lastCreated = now
+	s.mu.Unlock()
+	td := Todo{Kind: kind, Text: strings.TrimSpace(text), CreatedAt: now,
 		DueAt: cloneTime(dueAt), RemindAt: cloneTime(remindAt), Tags: parseTags(strings.TrimSpace(text))}
 	if kind == KindNote {
 		id, err := newNoteID()
@@ -149,11 +156,13 @@ func (s *Store) ListEntries(f EntryFilter) []Todo {
 		}
 		filtered = append(filtered, td)
 	}
+	// 只比墙钟（Round(0) 剥离单调钟）：Windows 上单调钟读数可能回退，
+	// 且 AddEntry 已保证墙钟严格递增，时间线顺序由入库先后唯一决定。
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if filtered[i].Pinned != filtered[j].Pinned {
 			return filtered[i].Pinned
 		}
-		return filtered[i].CreatedAt.After(filtered[j].CreatedAt)
+		return filtered[i].CreatedAt.Round(0).After(filtered[j].CreatedAt.Round(0))
 	})
 	return filtered
 }

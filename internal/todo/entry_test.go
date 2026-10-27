@@ -168,7 +168,9 @@ func TestListEntriesFilterAndSort(t *testing.T) {
 	s := NewStore("")
 	n1, _ := s.AddEntry(KindNote, "#工作 会议纪要", nil, nil)
 	t1, _ := s.Add("买牛奶 #生活")
-	time.Sleep(2 * time.Millisecond)
+	// 间隔须大于 Windows 中断时间的 ~15.6ms 粒度，否则两批条目的 CreatedAt
+	// 无法区分、时间线顺序退化不确定。
+	time.Sleep(25 * time.Millisecond)
 	n2, _ := s.AddEntry(KindNote, "#灵感 突然的想法", nil, nil)
 	t2, _ := s.Add("还书")
 	if _, _, err := s.Complete(t2.ID, true); err != nil {
