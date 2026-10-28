@@ -108,7 +108,7 @@ type Manager struct {
 	cfgFn    func() config.AcpConfig
 	approver *approval.Queue
 
-	// registryBase 官方目录数据的基目录（$HOME/.vortex/acp）：registry-cache.json
+	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
 	// 表示只显示内置目录（基目录不可建或测试隔离）。fetchMu 串行化拉取与缓存写。
 	registryBase string
@@ -217,14 +217,10 @@ func (m *Manager) Get(id string) (Thread, bool) {
 // sessionsBaseDirFn 可被测试替换：未指定工作目录时，新建临时会话的父目录。
 var sessionsBaseDirFn = defaultSessionsDir
 
-// defaultSessionsDir 返回 $HOME/.vortex/acp-sessions——与 $HOME/.vortex/skills
-// 同族的专用目录，专门存放「没选目录就开聊」的临时会话。
+// defaultSessionsDir 返回 <数据目录>/acp-sessions——与 acp/ 同族的专用目录，
+// 专门存放「没选目录就开聊」的临时会话（内核 chdir 到数据目录后按相对路径使用）。
 func defaultSessionsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("解析 HOME 失败: %w", err)
-	}
-	return filepath.Join(home, ".vortex", "acp-sessions"), nil
+	return "acp-sessions", nil
 }
 
 // resolveWorkspace 解析并准备工作目录：~ 展开 → 绝对路径 → 确保存在且是目录。

@@ -24,7 +24,7 @@ allowed-tools: [list_todos]
 func skillsTestServer(t *testing.T) (*Server, http.Handler, *http.Cookie) {
 	t.Helper()
 	s, _, cookie, _, _ := manageTestServer(t)
-	s.skills = skill.NewStore(filepath.Join(t.TempDir(), "skills"))
+	s.skills = skill.NewStore(filepath.Join(t.TempDir(), "skills"), "")
 	return s, s.Handler(), cookie
 }
 

@@ -874,7 +874,7 @@ func TestOrphanedStateComputed(t *testing.T) {
 	}
 }
 
-// 未选目录时回退到临时会话目录（~/.vortex/acp-sessions/<threadID>，测试里替换根），
+// 未选目录时回退到临时会话目录（<数据目录>/acp-sessions/<threadID>，测试里替换根），
 // 显式指定的目录仍然优先。
 func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
 	base := t.TempDir()

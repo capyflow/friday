@@ -148,8 +148,8 @@ onMounted(load)
   </div>
 
   <div class="set-note">技能沿用 vortexagent 的 SKILL.md 格式（<b>name / description / model /
-    allowed-tools / temperature / argument-hint</b> + 正文指令），本机
-    <b>$HOME/.vortex/skills</b> 下的技能会一并列出（只读），同名时以项目目录为准。
+    allowed-tools / temperature / argument-hint</b> + 正文指令），数据目录
+    <b>skills-user/</b> 下的技能会一并列出（只读），同名时以项目目录为准。
     <b>allowed-tools 只能收窄本轮可用的工具</b>：技能里写了 exec_command，权限模式该问你还是问你；
     毁灭性命令黑名单任何情况都拦。自动匹配是 opt-in——技能要写 <b>auto: true</b> 且这里开着总开关才会被猜中。</div>
 </template>

@@ -18,8 +18,11 @@ import (
 // 技能作用域。
 const (
 	ScopeProject = "project" // <dataDir>/skills/<id>/SKILL.md，后台可写
-	ScopeUser    = "user"    // $HOME/.vortex/skills，与 vortexagent CLI 共享，只读
+	ScopeUser    = "user"    // <dataDir>/skills-user/<id>/SKILL.md，个人技能，后台只读
 )
+
+// UserScopeDir 是 user 级技能在数据目录下的目录名（内核 chdir 到数据目录后按相对路径使用）。
+const UserScopeDir = "skills-user"
 
 // maxBodyRunes 限制技能正文长度：正文会作为 <skill-instruction> 进系统提示词，
 // 过长的技能会让每轮对话都变贵。

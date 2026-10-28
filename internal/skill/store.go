@@ -19,22 +19,23 @@ import (
 type Store struct {
 	mu      sync.RWMutex
 	dir     string // 可写：默认 <数据目录>/skills
-	userDir string // 只读：$HOME/.vortex/skills
+	userDir string // 只读：默认 <数据目录>/skills-user
 	entries []*Entry
 	byName  map[string]*Entry
 	byID    map[string]*Entry
 	loadErr error
 }
 
-// NewStore 创建仓库并首次扫描。dir 为空表示不持久化（测试用纯内存）。
-func NewStore(dir string) *Store {
-	s := &Store{dir: dir, byName: map[string]*Entry{}, byID: map[string]*Entry{}}
-	if home, err := os.UserHomeDir(); err == nil {
-		s.userDir = filepath.Join(home, ".vortex", "skills")
-	}
-	if dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			s.loadErr = fmt.Errorf("创建技能目录 %q 失败: %w", dir, err)
+// NewStore 创建仓库并首次扫描。dir/userDir 为空表示不启用该目录
+// （测试用纯内存传两个空串）。
+func NewStore(dir, userDir string) *Store {
+	s := &Store{dir: dir, userDir: userDir, byName: map[string]*Entry{}, byID: map[string]*Entry{}}
+	for _, d := range []string{dir, userDir} {
+		if d == "" {
+			continue
+		}
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			s.loadErr = fmt.Errorf("创建技能目录 %q 失败: %w", d, err)
 		}
 	}
 	s.reloadLocked()
@@ -256,7 +257,7 @@ func (s *Store) SetEnabled(id string, enabled bool) (Summary, error) {
 		return Summary{}, fmt.Errorf("技能不存在: %s", id)
 	}
 	if e.Scope == ScopeUser {
-		return Summary{}, fmt.Errorf("用户目录技能（%s）在本机 $HOME/.vortex/skills 下，后台只读", id)
+		return Summary{}, fmt.Errorf("用户目录技能（%s）位于 %s，后台只读", id, s.userDir)
 	}
 	raw, err := os.ReadFile(e.Path)
 	if err != nil {
@@ -289,7 +290,7 @@ func (s *Store) Delete(id string) error {
 		return fmt.Errorf("技能不存在: %s", id)
 	}
 	if e.Scope == ScopeUser {
-		return fmt.Errorf("用户目录技能（%s）由本机 $HOME/.vortex/skills 管理，后台不删", id)
+		return fmt.Errorf("用户目录技能（%s）位于 %s，后台不删", id, s.userDir)
 	}
 	dir := filepath.Dir(e.Path)
 	stash := filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+".disabled-"+

@@ -4,7 +4,7 @@
 // 拉取 → 本地缓存（TTL 1h）→ 与内置精选目录按 id 合并（内置优先：它们的探测
 // 与安装命令更贴合无 TTY 服务器场景）。上游上架新 agent 时 Friday 无需发版：
 // 打开目录即见，npx 条目走 npm -g 安装，binary 条目按平台下载 + sha256 校验 +
-// 解压到 $HOME/.vortex/acp/agents/<id>/<version>/。拉取失败回退过期缓存，
+// 解压到 <数据目录>/acp/agents/<id>/<version>/。拉取失败回退过期缓存，
 // 连缓存都没有则只展示内置目录——离线时目录页照常可用。
 package acp
 

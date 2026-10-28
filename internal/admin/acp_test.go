@@ -28,13 +28,14 @@ func dirsBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery 
 }
 
 func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	// 默认 acp 基目录是相对路径 <数据目录>/acp：chdir 到临时目录隔离真实数据目录。
+	tmp := t.TempDir()
+	t.Chdir(tmp)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("#!/bin/sh\necho upgraded\n"))
 	}))
 	defer srv.Close()
-	base := filepath.Join(home, ".vortex", "acp")
+	base := filepath.Join(tmp, "acp")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 		t.Fatalf("升级失败: %d %s", rec.Code, rec.Body.String())
 	}
 	got := s.cfg.Snapshot().Acp.Agents[0]
-	want := filepath.Join(base, "agents", "upgrade-test", "2.0.0", "agent")
+	want := filepath.Join("acp", "agents", "upgrade-test", "2.0.0", "agent")
 	if got.Command != want || len(got.Args) != 1 || got.Args[0] != "--new" || got.Version != "2.0.0" {
 		t.Fatalf("升级后启动配置未更新: %+v", got)
 	}

@@ -69,9 +69,8 @@ func skillBrain(t *testing.T, skillFiles map[string]string, autoTrigger bool) (*
 			t.Fatal(err)
 		}
 	}
-	// 用户目录隔离到另一个临时 HOME，避免读到本机真实技能。
-	t.Setenv("HOME", t.TempDir())
-	store := skill.NewStore(dir)
+	// 用户目录不启用（传空），与本机真实技能隔离。
+	store := skill.NewStore(dir, "")
 
 	reg := vxagent.NewRegistry()
 	for _, name := range []string{"alpha", "beta"} {
