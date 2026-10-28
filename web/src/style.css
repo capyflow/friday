@@ -515,7 +515,22 @@ html[data-theme="dark"] .inputbar textarea {
 /* 第二行工具条：左附件与模式 chip，右快捷键提示与主键。 */
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px;
                 padding: 2px 1px 1px; }
-.bar-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.bar-left { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0;
+            overflow-x: auto; scrollbar-width: none;
+            /* 内边距 + 负外边距：滚动容器不裁掉 chip 的悬浮底色与焦点圈 */
+            padding: 4px; margin: -4px; }
+.bar-left::-webkit-scrollbar { display: none; }
+/* 装不下的 chip 横向滚动：两端渐隐提示还有内容（can-l/can-r 由 ChatComposer
+   按实际滚动位置打上），滚动条本身不占位。 */
+.bar-left.can-l { -webkit-mask-image: linear-gradient(to right, transparent, #000 18px);
+                  mask-image: linear-gradient(to right, transparent, #000 18px); }
+.bar-left.can-r { -webkit-mask-image: linear-gradient(to left, transparent, #000 18px);
+                  mask-image: linear-gradient(to left, transparent, #000 18px); }
+.bar-left.can-l.can-r {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px,
+                                      #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 18px,
+                              #000 calc(100% - 18px), transparent); }
 .bar-right { display: flex; align-items: center; gap: 8px; flex: none; }
 .kbd-hint { font-size: 11.5px; color: var(--faint-fg); white-space: nowrap; }
 @media (max-width: 560px) { .kbd-hint { display: none; } }
@@ -567,6 +582,9 @@ html[data-theme="dark"] .perm-btn.pm-fullAccess { color: #F87171; }
 /* 能力加载中 chip：弱化色 + 呼吸，会话建好（或确认 agent 不报任何能力）即消失 */
 .cap-loading { color: var(--muted-fg); animation: cap-pulse 1.6s ease-in-out infinite; }
 @keyframes cap-pulse { 50% { opacity: .45; } }
+/* chip 一律按自然宽度排，放不下就横向滚动：压缩会让名字变成一排省略号，反而
+   认不出是哪个；滚动条不显示，靠两端渐隐 + 滚轮横移引导。 */
+.bar-left > * { flex: none; }
 html[data-theme="dark"] .ctx-btn:hover,
 html[data-theme="dark"] .ctx-btn.active { background: rgba(255,255,255,.09); color: #fff; }
 html[data-theme="dark"] .ctx-btn.warm { color: #E8A33D; }

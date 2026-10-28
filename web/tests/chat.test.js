@@ -500,6 +500,33 @@ describe('composer 两行布局', () => {
     await wrapper.get('.mode-chip button').trigger('click')
     expect(wrapper.get('.mode-chip').classes()).not.toContain('show')
   })
+
+  it('chip 装不下时滚轮横向滚动，到头把滚轮让回页面', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 300 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const wheel = deltaY => {
+      const ev = new window.WheelEvent('wheel', { deltaY, cancelable: true, bubbles: true })
+      bar.dispatchEvent(ev)
+      return ev
+    }
+    expect(wheel(40).defaultPrevented).toBe(true)
+    expect(bar.scrollLeft).toBe(40)
+    bar.scrollLeft = 200 // 已到最右
+    expect(wheel(40).defaultPrevented).toBe(false)
+    expect(bar.scrollLeft).toBe(200)
+  })
+
+  it('chip 放得下时滚轮不拦截页面滚动', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 100 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const ev = new window.WheelEvent('wheel', { deltaY: 40, cancelable: true, bubbles: true })
+    bar.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false)
+  })
 })
 
 describe('粘贴附件', () => {
