@@ -549,7 +549,9 @@ fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 
 /// 内核状态快照：占位页主动查询用（防"就绪事件早于页面监听注册"的竞态）。
 /// needs_dir_setup/dataDir 供首装向导决定进入哪个页面。
+/// 字段名对外暴露给占位页与向导页（JS 读 needsDirSetup/dataDir），必须驼峰。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct KernelState {
     addr: Option<String>,
     dead: bool,
