@@ -6,7 +6,8 @@
 // 本组件在登录期间常驻（App 里 v-show），切到别的视图不会打断进行中的回复。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
-import { api } from '../api.js'
+import { api, authFailed } from '../api.js'
+import { authHeaders, mediaURL } from '../auth.js'
 import { fmtTokens } from '../format.js'
 import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { store, toast } from '../store.js'
@@ -271,10 +272,9 @@ async function uploadImages(images, signal) {
   for (const p of images) {
     const fd = new FormData()
     fd.append('file', p.file)
-    const res = await fetch('/api/upload', { method: 'POST', body: fd, signal })
-    if (res.status === 401) {
-      toast('登录已过期，请重新登录', true)
-      store.loggedIn = false
+    const res = await fetch('/api/upload', { method: 'POST', headers: authHeaders(), body: fd, signal })
+    if (res.status === 403) {
+      authFailed()
       throw new Error('登录已过期，请重新登录')
     }
     const data = await res.json()
@@ -490,13 +490,12 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
     nextTick(() => stick(true))
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: controller.signal,
     })
-    if (res.status === 401) {
-      store.loggedIn = false
-      toast('登录已过期，请重新登录', true)
+    if (res.status === 403) {
+      authFailed()
       return
     }
     if (!res.ok || !res.body) {
@@ -878,7 +877,7 @@ async function clearContext() {
           <div v-else class="msg-col">
             <div class="bubble">
               {{ m.text }}
-              <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+              <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="mediaURL(src)" alt="">
             </div>
             <div class="msg-acts">
               <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />

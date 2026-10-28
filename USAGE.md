@@ -23,13 +23,17 @@ cwd）不能同时跑两台，并行验证请换 cwd 再换端口。
 
 管理员凭据由 `FRIDAY_ADMIN_USERNAME` / `FRIDAY_ADMIN_PASSWORD` 或
 `admin.username/password` 预置，两项须一起提供。新部署在本机页面创建管理员账号，不能使用默认密码登录；已有账号保持兼容。
+登录成功后内核签发 JWT（7 天有效，签名密钥在数据目录 `auth-key`），网页把 token 保存在本地，
+之后每个接口请求带 `Authorization: Bearer <token>`；token 缺失/过期/被吊销时服务端返回
+403（响应体带 `"auth": true`），网页清掉本地 token 回到登录页。换密码会让旧 token 立即失效；
+退出登录会吊销当前 token。图片附件回读使用 `<img>`，额外允许 `?token=` 查询参数。
 损坏或不可读取的账号文件会停止启动并保留原路径。
 
 ## 任务、通知与恢复
 
 - 可通过模型对话或后台任务接口创建单次、多次、循环和智能任务。
 - 到期任务先保存到 `notifications.json`，成功后才推进任务计划；网页启用时可查询通知记录。
-- `GET /api/notifications` 获取最新记录，`POST /api/notifications/:id/retry` 重试失败通知；两者需要登录 Cookie。
+- `GET /api/notifications` 获取最新记录，`POST /api/notifications/:id/retry` 重试失败通知；两者需要登录（Bearer token）。
 - 无网页或真实输出通道时，通知会明确记录失败。远程通道重试最多 5 次，保留已确认成功通道的去重状态。
 - 任务、闪念（todos.json，笔记+待办）、会话及通知分别落盘；保存失败返回错误。损坏文件不会被空数据覆盖，恢复有效文件后重启。
 - 模型和人设配置写回成功后才热生效；失败继续使用旧配置。清除上下文会等待同会话在途请求结束。

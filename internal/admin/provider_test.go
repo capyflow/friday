@@ -166,23 +166,23 @@ func TestProviderDiagnosticAuthorizationAndStoredKeyTarget(t *testing.T) {
 	s.cfg = &config.Config{Provider: config.ProviderConfig{BaseURL: provider.URL, Model: "model", APIKey: "stored-secret"}}
 	handler := s.Handler()
 	body, _ := json.Marshal(providerTestRequest{BaseURL: provider.URL + "/", Model: "model"})
-	unauth := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", nil)
-	if unauth.Code != http.StatusUnauthorized {
+	unauth := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", "")
+	if unauth.Code != http.StatusForbidden {
 		t.Fatalf("诊断必须登录授权: %d %s", unauth.Code, unauth.Body)
 	}
-	cookie := &http.Cookie{Name: sessionCookie, Value: s.newSession()}
-	ok := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", cookie)
+	token := testAuthToken(t, s)
+	ok := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", token)
 	if ok.Code != http.StatusOK || count.Load() != 1 {
 		t.Fatalf("同目标保留密钥诊断失败: %d %s", ok.Code, ok.Body)
 	}
 	changed, _ := json.Marshal(providerTestRequest{BaseURL: "http://other.example/v1", Model: "model"})
-	rejected := setupTestRequest(handler, "POST", "/api/provider/test", changed, "127.0.0.1:1234", "localhost", "http://localhost", cookie)
+	rejected := setupTestRequest(handler, "POST", "/api/provider/test", changed, "127.0.0.1:1234", "localhost", "http://localhost", token)
 	if rejected.Code != http.StatusBadRequest || count.Load() != 1 {
 		t.Fatal("不能将现有密钥发往新目标")
 	}
 	for _, request := range []providerTestRequest{{BaseURL: provider.URL, Model: ""}, {BaseURL: "", Model: "model"}, {BaseURL: "https://user:password@example.com/v1", Model: "model"}} {
 		body, _ := json.Marshal(request)
-		response := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", cookie)
+		response := setupTestRequest(handler, "POST", "/api/provider/test", body, "127.0.0.1:1234", "localhost", "http://localhost", token)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("空/非法配置不得测试成功: %d", response.Code)
 		}

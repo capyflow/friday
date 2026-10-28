@@ -14,9 +14,9 @@ import (
 )
 
 // costTestServer 装配一个带价格表与预算闸门的后台（日额度 1000 token，预警线 0.8）。
-func costTestServer(t *testing.T) (*Server, http.Handler, *http.Cookie) {
+func costTestServer(t *testing.T) (*Server, http.Handler, string) {
 	t.Helper()
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 
 	pricer, err := cost.NewPricer(filepath.Join(t.TempDir(), "pricing.json"))
 	if err != nil {
@@ -39,7 +39,7 @@ func costTestServer(t *testing.T) (*Server, http.Handler, *http.Cookie) {
 	// /api/status 会读记忆条数，测试服需自备一份空仓库。
 	s.memory = memory.NewWikiStore(filepath.Join(t.TempDir(), "memories"), "")
 	// 路由在 Handler() 构建时按已装配的依赖挂载，故装配完成后才取 handler。
-	return s, s.Handler(), cookie
+	return s, s.Handler(), token
 }
 
 // costBody 解出 { body: ... } 信封内容。
@@ -86,19 +86,19 @@ func findRow(rows []map[string]any, key string) map[string]any {
 	return nil
 }
 
-func getCost(handler http.Handler, cookie *http.Cookie, path string) *httptest.ResponseRecorder {
-	return setupTestRequest(handler, "GET", path, nil, "127.0.0.1:1234", "localhost", "", cookie)
+func getCost(handler http.Handler, token string, path string) *httptest.ResponseRecorder {
+	return setupTestRequest(handler, "GET", path, nil, "127.0.0.1:1234", "localhost", "", token)
 }
 
 // TestUsageHandlerGroupsByDimensions 用量接口给出多维拆分，且保留旧 days/total 字段。
 func TestUsageHandlerGroupsByDimensions(t *testing.T) {
-	_, handler, cookie := costTestServer(t)
+	_, handler, token := costTestServer(t)
 	usage.Init("")
 	usage.Record(usage.Call{Model: "priced-model", Origin: "web", Session: "web", In: 600, Out: 100, CacheRead: 200})
 	usage.Record(usage.Call{Model: "mystery", Origin: "task", Session: "task", Run: "goal:g1", In: 200, Out: 20})
 	usage.Record(usage.Call{Model: "priced-model", Origin: "web", Session: "web"}) // 零用量哨兵
 
-	body := costBody(t, getCost(handler, cookie, "/api/usage"))
+	body := costBody(t, getCost(handler, token, "/api/usage"))
 	if body["days"] == nil || body["total"] == nil {
 		t.Fatalf("旧字段缺失（前端按天表依赖）: %v", body)
 	}
@@ -145,12 +145,12 @@ func TestUsageHandlerGroupsByDimensions(t *testing.T) {
 
 // TestCostHandlerTracksBudget 预算态势接口随用量推进 ok → warn → over。
 func TestCostHandlerTracksBudget(t *testing.T) {
-	_, handler, cookie := costTestServer(t)
+	_, handler, token := costTestServer(t)
 	usage.Init("")
 
 	check := func(want string) {
 		t.Helper()
-		v := costBody(t, getCost(handler, cookie, "/api/cost"))["cost"].(map[string]any)
+		v := costBody(t, getCost(handler, token, "/api/cost"))["cost"].(map[string]any)
 		if v["state"] != want {
 			t.Fatalf("state = %v，期望 %s（完整视图 %v）", v["state"], want, v)
 		}
@@ -161,7 +161,7 @@ func TestCostHandlerTracksBudget(t *testing.T) {
 	usage.Record(usage.Call{Model: "priced-model", In: 800}) // 900/1000
 	check("warn")
 	usage.Record(usage.Call{Model: "priced-model", In: 200}) // 1100/1000
-	v := costBody(t, getCost(handler, cookie, "/api/cost"))["cost"].(map[string]any)
+	v := costBody(t, getCost(handler, token, "/api/cost"))["cost"].(map[string]any)
 	if v["state"] != "over" || v["tightest"] != "dailyTokens" {
 		t.Fatalf("超限视图不符: %v", v)
 	}
@@ -172,15 +172,15 @@ func TestCostHandlerTracksBudget(t *testing.T) {
 
 // TestCostPauseResumeHandlers 手动暂停开关（不写配置，只影响闸门）。
 func TestCostPauseResumeHandlers(t *testing.T) {
-	s, handler, cookie := costTestServer(t)
+	s, handler, token := costTestServer(t)
 	usage.Init("")
 	usage.Record(usage.Call{Model: "priced-model", In: 10}) // 远低于预算
 
-	r := setupTestRequest(handler, "POST", "/api/cost/pause", []byte(`{}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/cost/pause", []byte(`{}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("暂停失败: %d %s", r.Code, r.Body)
 	}
-	view := costBody(t, getCost(handler, cookie, "/api/cost"))["cost"].(map[string]any)
+	view := costBody(t, getCost(handler, token, "/api/cost"))["cost"].(map[string]any)
 	if view["manualPaused"] != true || view["proactivePaused"] != true {
 		t.Errorf("暂停状态不符: %v", view)
 	}
@@ -188,11 +188,11 @@ func TestCostPauseResumeHandlers(t *testing.T) {
 		t.Error("手动暂停时闸门应拦下主动任务")
 	}
 
-	r = setupTestRequest(handler, "POST", "/api/cost/resume", []byte(`{}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/cost/resume", []byte(`{}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("恢复失败: %d %s", r.Code, r.Body)
 	}
-	view = costBody(t, getCost(handler, cookie, "/api/cost"))["cost"].(map[string]any)
+	view = costBody(t, getCost(handler, token, "/api/cost"))["cost"].(map[string]any)
 	if view["manualPaused"] != false {
 		t.Errorf("恢复后仍标记暂停: %v", view)
 	}
@@ -203,14 +203,14 @@ func TestCostPauseResumeHandlers(t *testing.T) {
 
 // TestPricingHandlersApplyAndReject 价格表保存后热生效；非法表被拒且不覆盖原表。
 func TestPricingHandlersApplyAndReject(t *testing.T) {
-	_, handler, cookie := costTestServer(t)
+	_, handler, token := costTestServer(t)
 	usage.Init("")
 	usage.Record(usage.Call{Model: "mystery", Origin: "web", In: 10, Out: 1})
 
 	bad, _ := json.Marshal(map[string]any{"currency": "CNY", "prices": []map[string]any{
 		{"model": "mystery", "inputPerMTok": -1},
 	}})
-	r := setupTestRequest(handler, "POST", "/api/cost/pricing", bad, "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/cost/pricing", bad, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code == http.StatusOK {
 		t.Fatalf("负单价应被拒绝，响应: %s", r.Body)
 	}
@@ -218,12 +218,12 @@ func TestPricingHandlersApplyAndReject(t *testing.T) {
 	good, _ := json.Marshal(map[string]any{"currency": "CNY", "prices": []map[string]any{
 		{"model": "mystery", "inputPerMTok": 3, "outputPerMTok": 6},
 	}})
-	r = setupTestRequest(handler, "POST", "/api/cost/pricing", good, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/cost/pricing", good, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("保存价格表失败: %d %s", r.Code, r.Body)
 	}
 
-	body := costBody(t, getCost(handler, cookie, "/api/cost/pricing"))
+	body := costBody(t, getCost(handler, token, "/api/cost/pricing"))
 	if len(body["prices"].([]any)) != 1 {
 		t.Fatalf("价格表未热生效: %v", body)
 	}
@@ -235,11 +235,11 @@ func TestPricingHandlersApplyAndReject(t *testing.T) {
 
 // TestStatusHandlerIncludesCostSummary 运行状态页依赖的 cost 摘要。
 func TestStatusHandlerIncludesCostSummary(t *testing.T) {
-	_, handler, cookie := costTestServer(t)
+	_, handler, token := costTestServer(t)
 	usage.Init("")
 	usage.Record(usage.Call{Model: "priced-model", Origin: "web", In: 50, Out: 5})
 
-	body := costBody(t, getCost(handler, cookie, "/api/status"))
+	body := costBody(t, getCost(handler, token, "/api/status"))
 	costView, ok := body["cost"].(map[string]any)
 	if !ok {
 		t.Fatalf("status 缺 cost 摘要: %v", body)
@@ -252,14 +252,14 @@ func TestStatusHandlerIncludesCostSummary(t *testing.T) {
 // TestCostRoutesAbsentWithoutGuard 未装配闸门/价格表时不挂载成本接口
 // （老部署零变化），但用量接口仍在。
 func TestCostRoutesAbsentWithoutGuard(t *testing.T) {
-	s, handler, cookie, _, _ := manageTestServer(t)
+	s, handler, token, _, _ := manageTestServer(t)
 	s.pricer, s.guard = nil, nil
 
-	r := getCost(handler, cookie, "/api/cost")
+	r := getCost(handler, token, "/api/cost")
 	if r.Code == http.StatusOK {
 		t.Fatal("未装配闸门时 /api/cost 不应可用")
 	}
-	if r2 := getCost(handler, cookie, "/api/usage"); r2.Code != http.StatusOK {
+	if r2 := getCost(handler, token, "/api/usage"); r2.Code != http.StatusOK {
 		t.Errorf("用量接口应始终可用: %d", r2.Code)
 	}
 }

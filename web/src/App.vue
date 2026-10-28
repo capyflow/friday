@@ -2,6 +2,7 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { store, hideModal, toast, toastState, modalState } from './store.js'
 import { api } from './api.js'
+import { setToken, hydrateToken } from './auth.js'
 import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
@@ -75,10 +76,12 @@ onMounted(refreshSetup)
 
 async function refreshSetup() {
   try {
+    await hydrateToken() // 桌面端先回填原生冷备的 token（端口回退/WebView 数据被清时兜底）
     store.setupStatus = await api('GET', '/api/setup/status')
     const s = await api('GET', '/api/session')
     store.loggedIn = !!s.authenticated
     store.username = s.username || ''
+    if (!s.authenticated) setToken('') // token 缺失/过期：清掉本地残留
   } catch { /* 服务器暂不可达时保留当前界面 */ }
 }
 
@@ -89,6 +92,7 @@ watch(() => store.loggedIn, async ok => {
 
 async function logout() {
   try { await api('POST', '/api/logout', {}) } catch (e) {}
+  setToken('')
   userPopOpen.value = false
   store.settingsOpen = false
   store.loggedIn = false

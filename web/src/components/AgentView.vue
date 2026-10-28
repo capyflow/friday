@@ -5,7 +5,8 @@
 // 重接会话等生命周期占位）。note 行是服务端投影的系统标注（上下文已重置、
 // 中断原因），灰字居中展示。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { api } from '../api.js'
+import { api, authFailed } from '../api.js'
+import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { fmtTokens } from '../format.js'
@@ -338,11 +339,11 @@ async function send() {
   try {
     const res = await fetch(`/api/acp/threads/${currentId.value}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ message: text, attachments }),
       signal: controller.signal,
     })
-    if (res.status === 401) { store.loggedIn = false; toast('登录已过期，请重新登录', true); return }
+    if (res.status === 403) { authFailed(); return }
     if (!res.ok || !res.body) {
       let msg = 'HTTP ' + res.status
       try { const d = await res.json(); if (d.body && d.body.error) msg = d.body.error } catch {}
@@ -558,7 +559,7 @@ function removePreview(p) {
                   <div class="bubble">
                     {{ m.text }}
                     <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
-                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="mediaURL(src)" alt="">
                   </div>
                   <div class="msg-acts">
                     <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />

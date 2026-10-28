@@ -25,15 +25,15 @@ func setupTestServer(t *testing.T) (*Server, http.Handler, string) {
 	return s, s.Handler(), path
 }
 
-func setupTestRequest(handler http.Handler, method, path string, body []byte, remote, host, origin string, cookie *http.Cookie) *httptest.ResponseRecorder {
+func setupTestRequest(handler http.Handler, method, path string, body []byte, remote, host, origin, token string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, "http://localhost"+path, bytes.NewReader(body))
 	r.RemoteAddr, r.Host = remote, host
 	r.Header.Set("Content-Type", "application/json")
 	if origin != "" {
 		r.Header.Set("Origin", origin)
 	}
-	if cookie != nil {
-		r.AddCookie(cookie)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
@@ -42,7 +42,7 @@ func setupTestRequest(handler http.Handler, method, path string, body []byte, re
 
 func TestSetupCreatesAccountOnceAndKeepsLegacyLogin(t *testing.T) {
 	s, handler, path := setupTestServer(t)
-	status := setupTestRequest(handler, "GET", "/api/setup/status", nil, "127.0.0.1:1234", "localhost", "", nil)
+	status := setupTestRequest(handler, "GET", "/api/setup/status", nil, "127.0.0.1:1234", "localhost", "", "")
 	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"accountRequired":true`)) {
 		t.Fatalf("首次设置状态错误: %d %s", status.Code, status.Body)
 	}
@@ -50,15 +50,27 @@ func TestSetupCreatesAccountOnceAndKeepsLegacyLogin(t *testing.T) {
 		t.Fatal("首次设置前不能登录默认账号")
 	}
 	body := []byte(`{"username":"owner","password":"independent-password"}`)
-	created := setupTestRequest(handler, "POST", "/api/setup", body, "127.0.0.1:1234", "localhost", "http://localhost", nil)
+	created := setupTestRequest(handler, "POST", "/api/setup", body, "127.0.0.1:1234", "localhost", "http://localhost", "")
 	if created.Code != http.StatusOK {
 		t.Fatalf("设置失败: %d %s", created.Code, created.Body)
 	}
 	if bytes.Contains(created.Body.Bytes(), []byte("independent-password")) {
 		t.Fatal("首次设置响应泄露密码")
 	}
-	if cookies := created.Result().Cookies(); len(cookies) != 1 || !s.validSession(cookies[0].Value) || !cookies[0].HttpOnly {
-		t.Fatal("首次设置成功后应建立受保护登录会话")
+	// 建号即登录：返回 JWT，且不能再走 Cookie（鉴权改为 Authorization 头）。
+	var createdBody struct {
+		Body struct {
+			Token string `json:"token"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil || createdBody.Body.Token == "" {
+		t.Fatalf("首次设置应返回登录 token: %s", created.Body)
+	}
+	if !s.authenticated(createdBody.Body.Token) {
+		t.Fatal("首次设置签发的 token 应能通过鉴权")
+	}
+	if len(created.Result().Cookies()) != 0 {
+		t.Fatal("登录凭据不应再写 Cookie")
 	}
 	if s.accounts.Current().SetupRequired {
 		t.Fatal("成功设置后仍要求首次设置")
@@ -69,7 +81,7 @@ func TestSetupCreatesAccountOnceAndKeepsLegacyLogin(t *testing.T) {
 	if _, ok := s.accounts.Login(DefaultUsername, DefaultPassword); ok {
 		t.Fatal("新账号创建后仍可用默认账号")
 	}
-	repeated := setupTestRequest(handler, "POST", "/api/setup", body, "127.0.0.1:1234", "localhost", "http://localhost", nil)
+	repeated := setupTestRequest(handler, "POST", "/api/setup", body, "127.0.0.1:1234", "localhost", "http://localhost", "")
 	if repeated.Code == http.StatusOK {
 		t.Fatal("已初始化部署不应接受重复首次设置")
 	}
@@ -104,7 +116,7 @@ func TestSetupRejectsRemoteAndCrossOrigin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, handler, _ := setupTestServer(t)
-			response := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), tc.remote, tc.host, tc.origin, nil)
+			response := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), tc.remote, tc.host, tc.origin, "")
 			if response.Code != http.StatusForbidden || !s.accounts.Current().SetupRequired {
 				t.Fatalf("应拒绝不可信首次设置: %d %s", response.Code, response.Body)
 			}
@@ -122,7 +134,7 @@ func TestSetupConcurrentInitializeHasOneWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			r := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), "127.0.0.1:1234", "localhost", "http://localhost", nil)
+			r := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), "127.0.0.1:1234", "localhost", "http://localhost", "")
 			codes <- r.Code
 		}()
 	}
@@ -153,12 +165,12 @@ func TestSetupWriteFailureRemainsUninitialized(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.accounts.path = filepath.Join(filepath.Dir(path), "missing", "account.json")
-	r := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), "127.0.0.1:1234", "localhost", "http://localhost", nil)
+	r := setupTestRequest(handler, "POST", "/api/setup", []byte(`{"username":"owner","password":"secret-password"}`), "127.0.0.1:1234", "localhost", "http://localhost", "")
 	if r.Code == http.StatusOK || !s.accounts.Current().SetupRequired {
 		t.Fatal("保存失败不能完成首次设置")
 	}
-	if len(r.Result().Cookies()) != 0 {
-		t.Fatal("账号保存失败不能建立登录会话")
+	if bytes.Contains(r.Body.Bytes(), []byte(`"token"`)) {
+		t.Fatal("账号保存失败不能签发登录 token")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(data, original) {

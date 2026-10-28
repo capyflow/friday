@@ -12,9 +12,9 @@ import (
 )
 
 // previewBody 发一次 GET /api/files/preview 并解出 { body: ... } 信封。
-func previewBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery string) (int, map[string]any) {
+func previewBody(t *testing.T, handler http.Handler, token string, rawQuery string) (int, map[string]any) {
 	t.Helper()
-	rec := setupTestRequest(handler, http.MethodGet, "/api/files/preview?"+rawQuery, nil, "127.0.0.1:1234", "localhost", "", cookie)
+	rec := setupTestRequest(handler, http.MethodGet, "/api/files/preview?"+rawQuery, nil, "127.0.0.1:1234", "localhost", "", token)
 	var envelope struct {
 		Body map[string]any `json:"body"`
 	}
@@ -25,7 +25,7 @@ func previewBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQue
 }
 
 func TestFilePreviewReturnsTextContent(t *testing.T) {
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	handler := s.Handler()
 
 	dir := t.TempDir()
@@ -33,7 +33,7 @@ func TestFilePreviewReturnsTextContent(t *testing.T) {
 	if err := os.WriteFile(file, []byte("# 标题\n\n正文"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, body := previewBody(t, handler, cookie, "path="+url.QueryEscape(file))
+	code, body := previewBody(t, handler, token, "path="+url.QueryEscape(file))
 	if code != http.StatusOK {
 		t.Fatalf("状态码 %d: %v", code, body)
 	}
@@ -55,31 +55,31 @@ func TestFilePreviewReturnsTextContent(t *testing.T) {
 }
 
 func TestFilePreviewRejectsMissingAndNonRegular(t *testing.T) {
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	handler := s.Handler()
 
 	dir := t.TempDir()
 	for _, raw := range []string{filepath.Join(dir, "没有.md"), dir} {
-		code, body := previewBody(t, handler, cookie, "path="+url.QueryEscape(raw))
+		code, body := previewBody(t, handler, token, "path="+url.QueryEscape(raw))
 		if code != http.StatusBadRequest {
 			t.Fatalf("%s 应 400，实际 %d: %v", raw, code, body)
 		}
 	}
-	code, _ := previewBody(t, handler, cookie, "")
+	code, _ := previewBody(t, handler, token, "")
 	if code != http.StatusBadRequest {
 		t.Fatalf("缺 path 应 400，实际 %d", code)
 	}
 }
 
 func TestFilePreviewTruncatesLargeText(t *testing.T) {
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	handler := s.Handler()
 
 	file := filepath.Join(t.TempDir(), "big.txt")
 	if err := os.WriteFile(file, bytes.Repeat([]byte("a"), filePreviewTextMax+4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, body := previewBody(t, handler, cookie, "path="+url.QueryEscape(file))
+	code, body := previewBody(t, handler, token, "path="+url.QueryEscape(file))
 	if code != http.StatusOK {
 		t.Fatalf("状态码 %d: %v", code, body)
 	}
@@ -92,7 +92,7 @@ func TestFilePreviewTruncatesLargeText(t *testing.T) {
 }
 
 func TestFilePreviewDetectsBinaryAndImage(t *testing.T) {
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	handler := s.Handler()
 
 	dir := t.TempDir()
@@ -101,7 +101,7 @@ func TestFilePreviewDetectsBinaryAndImage(t *testing.T) {
 	if err := os.WriteFile(png, append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 64)...), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, body := previewBody(t, handler, cookie, "path="+url.QueryEscape(png))
+	code, body := previewBody(t, handler, token, "path="+url.QueryEscape(png))
 	if code != http.StatusOK || body["kind"] != "image" {
 		t.Fatalf("PNG 应识别为 image: %d %v", code, body)
 	}
@@ -113,7 +113,7 @@ func TestFilePreviewDetectsBinaryAndImage(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("text\x00text"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, body = previewBody(t, handler, cookie, "path="+url.QueryEscape(bin))
+	code, body = previewBody(t, handler, token, "path="+url.QueryEscape(bin))
 	if code != http.StatusOK || body["kind"] != "binary" {
 		t.Fatalf("含 NUL 应识别为 binary: %d %v", code, body)
 	}
@@ -128,14 +128,14 @@ func TestFilePreviewDetectsBinaryAndImage(t *testing.T) {
 func TestFilePreviewExpandsHomePrefix(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	handler := s.Handler()
 
 	file := filepath.Join(home, "home.txt")
 	if err := os.WriteFile(file, []byte("home"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, body := previewBody(t, handler, cookie, "path="+url.QueryEscape("~/home.txt"))
+	code, body := previewBody(t, handler, token, "path="+url.QueryEscape("~/home.txt"))
 	if code != http.StatusOK {
 		t.Fatalf("状态码 %d: %v", code, body)
 	}

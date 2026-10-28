@@ -558,6 +558,7 @@ func main() {
 			Host:          cfg.Admin.Host,
 			Port:          cfg.Admin.Port,
 			Accounts:      accounts,
+			AuthKeyFile:   filepath.Join(filepath.Dir(cfg.Admin.AccountFile), "auth-key"),
 			Engine:        eng,
 			Todos:         todos,
 			Memory:        deps.Memory,
