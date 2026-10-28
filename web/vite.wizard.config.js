@@ -8,6 +8,11 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 export default defineConfig({
   base: './',
   plugins: [vue(), viteSingleFile()],
+  // 向导组件用运行时 template 字符串（wizard.js 内联模板），必须带上编译器的
+  // vue 构建——默认入口是纯运行时，模板编译不了，页面渲染为空白。
+  resolve: {
+    alias: { vue: 'vue/dist/vue.esm-bundler.js' },
+  },
   build: {
     outDir: '../internal/admin/webdist',
     emptyOutDir: false,
