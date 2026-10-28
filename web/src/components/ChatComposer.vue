@@ -3,7 +3,7 @@
 // 底部工具条）。外观与交互统一在这里：Enter 发送 / Shift+Enter 换行、自动增高、
 // 发送键一位多态（发送/停止/暂停/继续由父组件经 send-label 决定语义）。
 // 各页差异全部走插槽：#previews 附件预览条、#left 工具条左侧（附件/模式/权限等 chips）。
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -39,6 +39,45 @@ function onKeydown(e) {
 }
 function focus() { inputEl.value && inputEl.value.focus() }
 defineExpose({ focus })
+
+/* 工具条 chip 只按自然宽度排，装不下就横向滚动（不收缩成省略号）。滚动条本身
+   不显示，所以：滚轮/触控板悬停在 chip 上时把纵向滚动转成横向；两端按实际
+   滚动位置打 can-l/can-r，用渐隐提示还有内容。 */
+const barEl = ref(null)
+const barEdges = ref({ left: false, right: false })
+let barRO = null
+let barMO = null
+function syncBar() {
+  const el = barEl.value
+  if (!el) return
+  const max = el.scrollWidth - el.clientWidth
+  barEdges.value = { left: el.scrollLeft > 1, right: max > 1 && el.scrollLeft < max - 1 }
+}
+function onBarWheel(e) {
+  const el = barEl.value
+  if (!el) return
+  const max = el.scrollWidth - el.clientWidth
+  if (max <= 0) return
+  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+  if (!delta) return
+  const next = Math.min(max, Math.max(0, el.scrollLeft + delta))
+  if (next === el.scrollLeft) return // 已经在头/尾：把滚轮让回页面
+  e.preventDefault()
+  el.scrollLeft = next
+}
+onMounted(() => {
+  syncBar()
+  // 容器宽度变化（窗口缩放）与 chip 增减（能力清单异步到）都要重算两端提示
+  if (typeof window.ResizeObserver !== 'undefined' && barEl.value) {
+    barRO = new window.ResizeObserver(syncBar)
+    barRO.observe(barEl.value)
+  }
+  if (typeof window.MutationObserver !== 'undefined' && barEl.value) {
+    barMO = new window.MutationObserver(syncBar)
+    barMO.observe(barEl.value, { childList: true, subtree: true, characterData: true, attributes: true })
+  }
+})
+onBeforeUnmount(() => { barRO && barRO.disconnect(); barMO && barMO.disconnect() })
 </script>
 
 <template>
@@ -51,7 +90,9 @@ defineExpose({ focus })
               @keydown="onKeydown" @input="onInput" @paste="$emit('paste', $event)"></textarea>
     <!-- 第二行：左=各页自己的 chips（插槽），右=快捷键提示与主按钮 -->
     <div class="composer-bar">
-      <div class="bar-left">
+      <div ref="barEl" class="bar-left"
+           :class="{ 'can-l': barEdges.left, 'can-r': barEdges.right }"
+           @wheel="onBarWheel" @scroll.passive="syncBar">
         <slot name="left"></slot>
       </div>
       <div class="bar-right">

@@ -2,6 +2,7 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { store, hideModal, toast, toastState, modalState } from './store.js'
 import { api } from './api.js'
+import { setToken, hydrateToken } from './auth.js'
 import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
@@ -35,6 +36,11 @@ const userPopOpen = ref(false)
 const userInitial = ref('U')
 watch(() => store.username, v => { userInitial.value = (v || 'U').charAt(0).toUpperCase() }, { immediate: true })
 const host = ref(location.host)
+
+/* 智能体页懒挂载、挂载后常驻（v-show）：首次进入才拉配置/建会话；之后切到
+   别的导航也不卸载，进行中的 SSE、滚动位置与选中的 thread 都保留。 */
+const agentReady = ref(false)
+watch(() => store.view, v => { if (v === 'agent') agentReady.value = true }, { immediate: true })
 
 function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
@@ -75,10 +81,12 @@ onMounted(refreshSetup)
 
 async function refreshSetup() {
   try {
+    await hydrateToken() // 桌面端先回填原生冷备的 token（端口回退/WebView 数据被清时兜底）
     store.setupStatus = await api('GET', '/api/setup/status')
     const s = await api('GET', '/api/session')
     store.loggedIn = !!s.authenticated
     store.username = s.username || ''
+    if (!s.authenticated) setToken('') // token 缺失/过期：清掉本地残留
   } catch { /* 服务器暂不可达时保留当前界面 */ }
 }
 
@@ -89,6 +97,7 @@ watch(() => store.loggedIn, async ok => {
 
 async function logout() {
   try { await api('POST', '/api/logout', {}) } catch (e) {}
+  setToken('')
   userPopOpen.value = false
   store.settingsOpen = false
   store.loggedIn = false
@@ -189,7 +198,7 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
-      <Transition name="view"><AgentView v-if="store.view === 'agent'" /></Transition>
+      <Transition name="view"><AgentView v-if="agentReady" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>

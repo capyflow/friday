@@ -8,9 +8,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -194,15 +192,11 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 const installTimeout = 5 * time.Minute
 
 // acpBaseDirFn 可被测试替换：registry 缓存与 binary 安装目录的父目录
-// （$HOME/.vortex/acp，与 acp-sessions 同族）。
+// （<数据目录>/acp，与 acp-sessions 同族；内核已 chdir 到数据目录，用相对路径）。
 var acpBaseDirFn = defaultAcpBaseDir
 
 func defaultAcpBaseDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("解析 HOME 失败: %w", err)
-	}
-	return filepath.Join(home, ".vortex", "acp"), nil
+	return "acp", nil
 }
 
 // runInstallCommand 可被测试替换：执行一条官方安装命令（固定字符串经平台

@@ -3,7 +3,6 @@ package skill
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,7 +43,7 @@ func writeSkill(t *testing.T, dir, id, content string) string {
 
 func newStoreAt(t *testing.T, dir string) *Store {
 	t.Helper()
-	s := NewStore(dir)
+	s := NewStore(dir, "")
 	if err := s.Err(); err != nil {
 		t.Fatalf("Store.Err: %v", err)
 	}
@@ -145,19 +144,14 @@ func TestStoreDuplicateNameNoted(t *testing.T) {
 
 // TestStoreProjectOverridesUser 同名时项目覆盖用户目录，用户条目带说明。
 func TestStoreProjectOverridesUser(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if runtime.GOOS == "windows" {
-		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
-		t.Setenv("USERPROFILE", home)
-	}
-	userDir := filepath.Join(home, ".vortex", "skills")
+	base := t.TempDir()
+	userDir := filepath.Join(base, UserScopeDir)
 	writeSkill(t, userDir, "morning-user", morningSkill)
 
 	dir := t.TempDir()
 	writeSkill(t, dir, "morning-project", morningSkill)
 
-	s := newStoreAt(t, dir)
+	s := NewStore(dir, userDir)
 	var userEntry *Summary
 	for i := range s.List() {
 		if s.List()[i].Scope == ScopeUser {
@@ -318,15 +312,10 @@ func TestStoreSetEnabledKeepsBodyAndComments(t *testing.T) {
 
 // TestStoreSetEnabledRejectsUserScope 用户目录技能后台只读。
 func TestStoreSetEnabledRejectsUserScope(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if runtime.GOOS == "windows" {
-		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
-		t.Setenv("USERPROFILE", home)
-	}
-	writeSkill(t, filepath.Join(home, ".vortex", "skills"), "u1", morningSkill)
+	base := t.TempDir()
+	writeSkill(t, filepath.Join(base, UserScopeDir), "u1", morningSkill)
 
-	s := newStoreAt(t, t.TempDir())
+	s := NewStore(t.TempDir(), filepath.Join(base, UserScopeDir))
 	if _, err := s.SetEnabled("u1", false); err == nil {
 		t.Fatal("用户目录技能应拒绝改写")
 	}
@@ -380,7 +369,7 @@ func TestStoreReloadPicksUpManualEdit(t *testing.T) {
 
 // TestStoreEmptyDirIsMemoryOnly 未配置目录时可用但不落盘。
 func TestStoreEmptyDirIsMemoryOnly(t *testing.T) {
-	s := NewStore("")
+	s := NewStore("", "")
 	if len(s.List()) != 0 {
 		t.Errorf("空目录仓库应为空: %+v", s.List())
 	}

@@ -187,6 +187,186 @@ fn trusted_notification_origin(label: &str, current: &str, kernel: Option<&str>)
         && current.origin() == kernel.origin()
 }
 
+// ---------- 登录 token 的原生持久化（桌面壳存数据目录，前端启动回填） ----------
+
+/// token 文件：数据目录根下、0600。WebView 的 localStorage 只当运行时缓存，
+/// 本文件是跨重启的冷备——端口回退随机（origin 变化）或 WebView 数据被清时，
+/// 由前端 hydrateToken 从这里回填，登录态不丢。
+const AUTH_TOKEN_FILE: &str = "desktop-auth-token";
+
+/// token 身份宽松校验：三段式 JWT（header.payload.signature）+ 长度上限，
+/// 防前端误写别的内容；真正的有效性由内核验签负责。
+fn looks_like_session_token(token: &str) -> bool {
+    token.len() <= 4096 && token.split('.').count() == 3 && !token.contains(char::is_whitespace)
+}
+
+/// 只允许内核页面读写 token：主窗口与快捷键弹窗，且当前 URL 的 origin
+/// 必须与内核地址一致（防被导航到其它来源的页面窃取凭据）。
+fn trusted_auth_origin(label: &str, current: &str, kernel: Option<&str>) -> bool {
+    if label != "main" && label != "palette" {
+        return false;
+    }
+    let (Ok(current), Some(kernel)) = (tauri::Url::parse(current), kernel) else {
+        return false;
+    };
+    let Ok(kernel) = tauri::Url::parse(kernel) else {
+        return false;
+    };
+    current.scheme() == "http"
+        && kernel.scheme() == "http"
+        && current.host_str() == Some("127.0.0.1")
+        && kernel.host_str() == Some("127.0.0.1")
+        && current.username().is_empty()
+        && current.password().is_none()
+        && current.origin() == kernel.origin()
+}
+
+fn auth_token_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.state::<Kernel>().data_dir().join(AUTH_TOKEN_FILE)
+}
+
+fn check_kernel_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
+    let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
+    let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
+    if !trusted_auth_origin(window.label(), current.as_str(), addr.as_deref()) {
+        return Err("当前窗口不能访问本地数据".into());
+    }
+    Ok(())
+}
+
+/// 读回登录 token；文件不存在（从未登录/已退出）返回 None。
+#[tauri::command]
+fn auth_get_token(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, String> {
+    check_kernel_window(&app, &window)?;
+    match std::fs::read_to_string(auth_token_path(&app)) {
+        Ok(raw) => {
+            let token = raw.trim();
+            Ok(if token.is_empty() { None } else { Some(token.to_string()) })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("读取登录凭据失败：{e}")),
+    }
+}
+
+/// 落盘登录 token：原子写（同目录 tmp + rename），Unix 上收紧到 0600。
+#[tauri::command]
+fn auth_set_token(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    token: String,
+) -> Result<(), String> {
+    check_kernel_window(&app, &window)?;
+    let token = token.trim();
+    if !looks_like_session_token(token) {
+        return Err("登录凭据格式不正确".into());
+    }
+    let path = auth_token_path(&app);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建数据目录失败：{e}"))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, token.as_bytes()).map_err(|e| format!("写入登录凭据失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置登录凭据权限失败：{e}"))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("保存登录凭据失败：{e}"))?;
+    Ok(())
+}
+
+/// 清除登录 token（退出登录/凭据失效）；不存在视为成功。
+#[tauri::command]
+fn auth_clear_token(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    check_kernel_window(&app, &window)?;
+    match std::fs::remove_file(auth_token_path(&app)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("清除登录凭据失败：{e}")),
+    }
+}
+
+// ---------- 前端本地偏好的原生持久化（主题/通知开关/通知去重） ----------
+//
+// 这些是前端自己的数据，只是借壳的磁盘跨 origin 保存：localStorage 按 origin
+// 隔离，端口回退随机时会整片丢失；桌面端把快照写数据目录，启动时由
+// prefs.js hydratePrefs 补齐。浏览器直访没有这层，退化为纯 localStorage。
+
+const PREFS_FILE: &str = "desktop-prefs.json";
+const PREFS_MAX_KEYS: usize = 64;
+const PREFS_KEY_MAX: usize = 64;
+const PREFS_VALUE_MAX: usize = 8 * 1024;
+
+/// 偏好键白名单：只收前端自有的 friday- 前缀键；token 有独立通道，不走这里。
+const AUTH_TOKEN_FILE_KEY: &str = "friday.authToken";
+
+fn valid_pref_key(key: &str) -> bool {
+    key.starts_with("friday-") && key != AUTH_TOKEN_FILE_KEY && key.len() <= PREFS_KEY_MAX
+}
+
+fn prefs_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.state::<Kernel>().data_dir().join(PREFS_FILE)
+}
+
+/// 读回偏好快照；文件不存在（从未写过）返回空表。
+#[tauri::command]
+fn prefs_get(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    check_kernel_window(&app, &window)?;
+    match std::fs::read(prefs_path(&app)) {
+        Ok(raw) => serde_json::from_slice(&raw).map_err(|e| format!("偏好文件损坏：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::collections::HashMap::new())
+        }
+        Err(e) => Err(format!("读取偏好失败：{e}")),
+    }
+}
+
+/// 整表落盘偏好快照：白名单 + 尺寸上限校验后原子写（同目录 tmp + rename，0600）。
+#[tauri::command]
+fn prefs_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    prefs: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    check_kernel_window(&app, &window)?;
+    if prefs.len() > PREFS_MAX_KEYS {
+        return Err("偏好项过多".into());
+    }
+    for (key, value) in &prefs {
+        if !valid_pref_key(key) {
+            return Err(format!("不支持的偏好键：{key}"));
+        }
+        if value.len() > PREFS_VALUE_MAX {
+            return Err(format!("偏好值过大：{key}"));
+        }
+    }
+    let path = prefs_path(&app);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建数据目录失败：{e}"))?;
+    }
+    let data = serde_json::to_vec(&prefs).map_err(|e| format!("编码偏好失败：{e}"))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data).map_err(|e| format!("写入偏好失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置偏好文件权限失败：{e}"))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("保存偏好失败：{e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn enable_notifications(
     app: tauri::AppHandle,
@@ -316,7 +496,7 @@ fn apply_data_dir_blocking(app: &tauri::AppHandle, raw: String) -> Result<ApplyD
 
 /// 首装向导切目录：把默认目录里首启产生的文件（种子配置、账号占位等）搬到新目录。
 /// 目标已有 Friday 数据时跳过（接管模式：以目标数据为准，默认目录的首启文件不带走）；
-/// bin/（内核种子，按新目录重新播种）与日志不搬。
+/// bin/（旧版外置内核遗留，一体包后不再产生）与日志不搬。
 fn migrate_fresh_files(from: &std::path::Path, to: &std::path::Path) {
     if looks_like_friday_data(to) {
         eprintln!(
@@ -536,39 +716,51 @@ fn resolve_data_dir(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
     Ok((default_dir, true))
 }
 
-/// 内核二进制的运行路径：数据目录/bin/friday（更新通道未来的替换目标；
-/// 包内那份只是首装种子）。改这里要同步 docs/DESKTOP.md。
-fn kernel_path(data_dir: &std::path::Path) -> PathBuf {
+/// 内核二进制：随包分发的 sidecar，落在外壳可执行文件旁边（tauri externalBin）。
+/// 一体包：卸载外壳即随之删除，数据目录只存数据。改这里要同步 docs/DESKTOP.md。
+fn kernel_path() -> PathBuf {
     let name = if cfg!(windows) { "friday.exe" } else { "friday" };
-    data_dir.join("bin").join(name)
-}
-
-/// 首装种子：把随包分发的内核拷到数据目录 bin/（已存在则不动——版本归更新通道管）。
-fn seed_kernel(data_dir: &std::path::Path) {
-    let dst = kernel_path(data_dir);
-    if dst.exists() {
-        return;
-    }
-    std::fs::create_dir_all(dst.parent().expect("内核路径必有父目录"))
-        .expect("创建内核目录失败");
-    let src = std::env::current_exe()
+    std::env::current_exe()
         .expect("无法定位外壳可执行文件")
         .parent()
-        .map(|dir| {
-            dir.join(if cfg!(windows) { "friday.exe" } else { "friday" })
-        })
-        .expect("无法定位随包内核");
-    match std::fs::copy(&src, &dst) {
-        Ok(_) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
-            }
-            eprintln!("[外壳] 已播种内核：{} ← {}", dst.display(), src.display());
+        .expect("外壳可执行文件必有父目录")
+        .join(name)
+}
+
+/// 内核首选监听端口：固定 origin 让 localStorage 保持稳定（省一次回填），
+/// 主题/偏好与登录态另有原生冷备兜底。端口被占用时退回系统分配（0）——
+/// 新 origin 的 localStorage 是空的，但前端启动时从 desktop-auth-token /
+/// desktop-prefs.json 回填，功能不受影响。
+const PREFERRED_PORT: u16 = 47831;
+
+fn desktop_port() -> u16 {
+    match std::net::TcpListener::bind(("127.0.0.1", PREFERRED_PORT)) {
+        Ok(listener) => {
+            drop(listener);
+            PREFERRED_PORT
         }
-        Err(err) => panic!("播种内核失败（{}）：{err}", src.display()),
+        Err(_) => {
+            eprintln!("[外壳] 端口 {PREFERRED_PORT} 被占用，本次改用系统分配端口（登录态与偏好由原生冷备回填）");
+            0
+        }
     }
+}
+
+/// 清理旧版外置内核布局的遗留（<数据目录>/bin/friday）：内核改为随包分发后，
+/// 这份旧种子不再被运行，留着会让人误以为它还在生效。尽力清理，失败保留。
+fn remove_seeded_kernel(data_dir: &std::path::Path) {
+    let legacy = data_dir.join("bin").join(if cfg!(windows) { "friday.exe" } else { "friday" });
+    if !legacy.exists() {
+        return;
+    }
+    match std::fs::remove_file(&legacy) {
+        Ok(_) => eprintln!("[外壳] 已清理旧版外置内核：{}", legacy.display()),
+        Err(err) => eprintln!(
+            "[外壳] 清理旧版外置内核失败（保留原文件）：{}：{err}",
+            legacy.display()
+        ),
+    }
+    let _ = std::fs::remove_dir(data_dir.join("bin")); // 只在空目录时删得掉，失败无妨
 }
 
 fn main() {
@@ -637,6 +829,11 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             kernel_state,
+            auth_get_token,
+            auth_set_token,
+            auth_clear_token,
+            prefs_get,
+            prefs_save,
             enable_notifications,
             notifications_enabled,
             pick_data_dir_dialog,
@@ -705,8 +902,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 拉起 Go 内核并在后台线程解析其 stdout。内核运行于数据目录 bin/ 下的
-/// 种子拷贝（首装时从包内复制），更新通道未来只替换这一份。
+/// 拉起 Go 内核并在后台线程解析其 stdout。内核即随包分发的 sidecar
+/// （外壳可执行文件旁边），数据目录只承载配置与数据。
 /// 可重入：向导切换数据目录后会先停旧内核再调本函数，故先复位状态标记。
 fn spawn_kernel(app: tauri::AppHandle) {
     {
@@ -720,14 +917,17 @@ fn spawn_kernel(app: tauri::AppHandle) {
     let data_dir = app.state::<Kernel>().data_dir();
     eprintln!("[外壳] 数据目录：{}", data_dir.display());
     seed_config(&app, &data_dir);
-    seed_kernel(&data_dir);
+    remove_seeded_kernel(&data_dir);
     let envs = read_env_file(&data_dir.join("friday.env"));
 
     let data_arg = data_dir.to_string_lossy().to_string();
+    // 固定首选端口：origin 稳定时 localStorage 直接可用，省掉一次原生回填；
+    // 端口被占用（开发实例等）退回 0，由 token/偏好冷备接管。
+    let port_arg = desktop_port().to_string();
     let spawned = app
         .shell()
-        .command(kernel_path(&data_dir).to_string_lossy().to_string())
-        .args(["--desktop", "--data-dir", data_arg.as_str(), "--port", "0"])
+        .command(kernel_path().to_string_lossy().to_string())
+        .args(["--desktop", "--data-dir", data_arg.as_str(), "--port", port_arg.as_str()])
         // cwd 必须落在数据目录：allspark-go/logx 在包 init 阶段（早于 Go 侧 chdir）
         // 就 mkdir ./logs，launchd 拉起的进程 cwd 是 /（只读）会直接 panic。
         .current_dir(&data_dir)
@@ -1172,9 +1372,10 @@ mod tests {
     }
 
     #[test]
-    fn kernel_path_lives_in_data_dir_bin() {
-        let path = kernel_path(std::path::Path::new("/data"));
-        assert_eq!(path.parent(), Some(std::path::Path::new("/data/bin")));
+    fn kernel_path_sits_beside_shell_executable() {
+        let path = kernel_path();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(path.parent(), exe.parent());
         assert!(path
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with("friday")));

@@ -1,15 +1,21 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-kernel",
-  "description": "主窗口内核页面仅可显式启用系统通知与首装向导的目录操作；Rust 再检查当前内核准确 origin。",
+  "description": "主窗口内核页面仅可显式启用系统通知、首装向导的目录操作与系统浏览器外链（授权/帮助链接）；Rust 再检查当前内核准确 origin。",
   "local": false,
   "windows": ["main"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "permissions": [
+    "allow-auth-get-token",
+    "allow-auth-set-token",
+    "allow-auth-clear-token",
+    "allow-prefs-get",
+    "allow-prefs-save",
     "allow-enable-notifications",
     "allow-notifications-enabled",
     "allow-kernel-state",
     "allow-pick-data-dir-dialog",
-    "allow-apply-data-dir"
+    "allow-apply-data-dir",
+    "allow-open-url"
   ]
 }

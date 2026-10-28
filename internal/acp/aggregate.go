@@ -7,9 +7,15 @@
 // tool_call 只取 kind + title（不取 locations——C11 实测上报假路径），状态映射到
 // 主聊天时间线的 run/ok/fail；usage_update 不投时间线但记录水位（M-5，随投影
 // 落盘），单轮 in/out 记账以 PromptResponse.Usage 为准。
+//
+// 一次工具调用会被 agent 拆成多条 update：首条 tool_call 带 title/status，
+// 之后大量 tool_call_update 只带 toolCallId + 进度内容（codebuddy 实测不带
+// status）。时间线按 toolCallId 归并、同状态只投一次——否则每次进度更新都会
+// 新起一个转圈的"工具调用"，而最终 completed 只能回填其中一行。
 package acp
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -49,6 +55,10 @@ type turnSink struct {
 	thoughtAt  time.Time
 	startedAt  time.Time
 	toolTitles map[string]string // toolCallId → 标题（update 常只带 id 不带标题）
+	toolStatus map[string]string // toolCallId → 已投出的状态（同状态不重复投）
+	toolDetail map[string]string // toolCallId → 已投出的详情（参数/结果）
+	toolInput  map[string]string // toolCallId → 最近参数（args；codebuddy 在进度 update 里才给）
+	toolOutput map[string]string // toolCallId → 最近输出（content/rawOutput，可能只在进度里给）
 
 	used         int     // 最近一次 usage_update：当前上下文占用（M-5）
 	size         int     // 窗口总量
@@ -69,7 +79,9 @@ func (s *turnSink) context() (used, size int, costAmount float64, costCurrency s
 }
 
 func newTurnSink(hooks TurnHooks) *turnSink {
-	return &turnSink{hooks: hooks, startedAt: time.Now(), toolTitles: map[string]string{}}
+	return &turnSink{hooks: hooks, startedAt: time.Now(),
+		toolTitles: map[string]string{}, toolStatus: map[string]string{}, toolDetail: map[string]string{},
+		toolInput: map[string]string{}, toolOutput: map[string]string{}}
 }
 
 // handle 消费一条 update（在 turn 的 pump goroutine 上串行调用）。
@@ -89,10 +101,19 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 			s.maybeFlush(&s.thought, &s.thoughtAt, s.hooks.OnThought)
 		}
 	case u.ToolCall != nil:
+		id := string(u.ToolCall.ToolCallId)
 		if u.ToolCall.Title != "" {
-			s.toolTitles[string(u.ToolCall.ToolCallId)] = u.ToolCall.Title
+			s.toolTitles[id] = u.ToolCall.Title
 		}
-		s.emitStep(u.ToolCall.Title, string(u.ToolCall.Kind), mapStatus(string(u.ToolCall.Status)))
+		// 展开区：参数优先，其次工具自带的 content（部分 agent 把摘要放这里）。
+		input := summarizeJSON(u.ToolCall.RawInput, toolDetailLimit)
+		if input == "" {
+			input = summarizeToolContent(u.ToolCall.Content, toolDetailLimit)
+		}
+		if input != "" {
+			s.toolInput[id] = input
+		}
+		s.emitTool(id, u.ToolCall.Title, string(u.ToolCall.Kind), string(u.ToolCall.Status), input)
 	case u.ToolCallUpdate != nil:
 		id := string(u.ToolCallUpdate.ToolCallId)
 		title := ""
@@ -102,15 +123,36 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 		} else {
 			title = s.toolTitles[id] // 沿用该工具调用首次上报的标题
 		}
-		status := ""
-		if u.ToolCallUpdate.Status != nil {
-			status = string(*u.ToolCallUpdate.Status)
-		}
 		kind := ""
 		if u.ToolCallUpdate.Kind != nil {
 			kind = string(*u.ToolCallUpdate.Kind)
 		}
-		s.emitStep(title, kind, mapStatus(status))
+		// 参数/输出在 codebuddy 的进度 update 里才出现（且不带 status）。
+		input := summarizeJSON(u.ToolCallUpdate.RawInput, toolDetailLimit)
+		prevInput := s.toolInput[id]
+		if input != "" {
+			s.toolInput[id] = input
+		}
+		output := summarizeJSON(u.ToolCallUpdate.RawOutput, toolDetailLimit)
+		if output == "" {
+			output = summarizeToolContent(u.ToolCallUpdate.Content, toolDetailLimit)
+		}
+		if output != "" {
+			s.toolOutput[id] = output
+		}
+		if u.ToolCallUpdate.Status != nil {
+			detail := output
+			if detail == "" {
+				detail = s.toolOutput[id] // 完成事件常不带内容，沿用进度里见过的输出
+			}
+			s.emitTool(id, title, kind, string(*u.ToolCallUpdate.Status), detail)
+			break
+		}
+		// 不带 status 的进度更新不新起行；参数首次到位时原地刷新展开区。
+		// 已收尾的调用不再因迟到的进度改状态或内容。
+		if input != "" && input != prevInput && s.toolStatus[id] == "run" {
+			s.emitTool(id, title, kind, "in_progress", input)
+		}
 	case u.UsageUpdate != nil:
 		// M-5：usage_update 是上下文水位（size=窗口总量、used=当前占用）加可选
 		// 的会话累计 cost——不是单轮 in/out。记到 sink，turn 结束随投影落盘；
@@ -129,19 +171,49 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 
 // finish 在 turn 结束（Prompt 返回）后调用：清空残留缓冲并归集结果。
 func (s *turnSink) finish() {
+	s.flushNow()
+}
+
+// flushNow 立即投出文本/思考缓冲。工具步骤前必须先调：文本是按 3s/1200 字
+// 成段投的，缓冲里可能已有"工具之前"写下的半句话；若先投步骤，这段话会在
+// 工具行之后才到，时间线上就成了被工具调用从中间切开的残句。
+func (s *turnSink) flushNow() {
+	now := time.Now()
 	if s.text.Len() > 0 {
 		s.emit(s.text.String(), s.hooks.OnText)
 		s.text.Reset()
+		s.textAt = now
 	}
 	if s.thought.Len() > 0 {
 		s.emit(s.thought.String(), s.hooks.OnThought)
 		s.thought.Reset()
+		s.thoughtAt = now
 	}
 }
 
-func (s *turnSink) emitStep(title, kind, status string) {
+// emitTool 按 toolCallId 归并一次工具调用：同 id 同状态同详情只投一次，
+// 让前端始终「一行 = 一次调用」，run → ok/fail 在原行上收敛。
+// 完成事件若带来结果详情（同状态但新内容），允许再投一次让展开区更新。
+func (s *turnSink) emitTool(id, title, kind, rawStatus, detail string) {
+	status := mapStatus(rawStatus)
+	if id != "" {
+		if s.toolStatus[id] == status && s.toolDetail[id] == detail {
+			return
+		}
+		s.toolStatus[id] = status
+		s.toolDetail[id] = detail
+	}
+	s.flushNow() // 工具调用是时间线边界：先把之前的文本落到它前面
+	s.emitStep(id, title, kind, status, detail)
+}
+
+func (s *turnSink) emitStep(id, title, kind, status, detail string) {
 	if s.hooks.OnStep == nil {
 		return
+	}
+	// 详情优先用参数/结果；没有时退回工具类别（"other" 是 codebuddy 的占位，不展示）。
+	if detail == "" && kind != "" && kind != "other" {
+		detail = kind
 	}
 	if title == "" {
 		title = kind
@@ -150,7 +222,48 @@ func (s *turnSink) emitStep(title, kind, status string) {
 		title = string([]rune(title)[:80]) + "…"
 	}
 	// C11：kind/title 来自子 agent 自述，前端展示时带「文案来自子 agent」标注。
-	s.hooks.OnStep(agent.Step{Kind: "acp", Name: title, Detail: kind, Status: status})
+	s.hooks.OnStep(agent.Step{Kind: "acp", ID: id, Name: title, Detail: detail, Status: status})
+}
+
+// toolDetailLimit 是展开区参数/结果的字符上限（时间线只做线索，不做全量归档）。
+const toolDetailLimit = 600
+
+// summarizeJSON 把工具参数/输出压成一行可读文本（对象转 JSON，超长截断）。
+func summarizeJSON(v any, limit int) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return truncateRunes(s, limit)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	switch s {
+	case "", "{}", "[]", "null", `""`:
+		return ""
+	}
+	return truncateRunes(s, limit)
+}
+
+// summarizeToolContent 汇总标准 ToolCallContent（文本 / 改文件 / 终端引用）。
+func summarizeToolContent(items []acp.ToolCallContent, limit int) string {
+	var parts []string
+	for _, it := range items {
+		switch {
+		case it.Content != nil:
+			if t := strings.TrimSpace(blockText(it.Content.Content)); t != "" {
+				parts = append(parts, t)
+			}
+		case it.Diff != nil:
+			parts = append(parts, "修改 "+it.Diff.Path)
+		case it.Terminal != nil:
+			parts = append(parts, "终端 "+it.Terminal.TerminalId)
+		}
+	}
+	return truncateRunes(strings.Join(parts, "\n"), limit)
 }
 
 func (s *turnSink) maybeFlush(buf *strings.Builder, last *time.Time, emit func(string)) {
@@ -178,11 +291,12 @@ func blockText(c acp.ContentBlock) string {
 }
 
 // mapStatus 把 ACP 的 ToolCallStatus 映射到主聊天时间线的三态。
+// cancelled 不在 SDK 枚举里，但 codebuddy 拒权时会发，按失败收尾。
 func mapStatus(s string) string {
 	switch s {
 	case "completed":
 		return "ok"
-	case "failed":
+	case "failed", "cancelled":
 		return "fail"
 	default: // pending / in_progress / 空
 		return "run"

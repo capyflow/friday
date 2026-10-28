@@ -4,7 +4,9 @@
 // ——产物不入库（.gitignore），新克隆先构建前端再编译（Docker 构建自动包含该步）；
 // 未构建时以占位页兜底，go build 始终可过。
 //
-// 鉴权：账号密码登录换取会话 Cookie（7 天有效）。
+// 鉴权：账号密码登录换取 JWT（HS256，7 天有效），之后请求带
+// Authorization: Bearer <token>；token 缺失/失效返回 403。token 不落库，
+// 签名密钥在数据目录（auth-key），换密码即令旧 token 失效。
 // 账号来源：启动时由配置文件（admin.username/password）或环境变量
 // （FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD）预置；两者都未提供时
 // 使用默认账号 admin/admin。密码以 bcrypt 哈希落盘。
@@ -91,9 +93,7 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -163,11 +163,6 @@ func webdistFile(name string) ([]byte, bool) {
 	return b, true
 }
 
-const (
-	sessionCookie = "friday_admin_session"
-	sessionTTL    = 7 * 24 * time.Hour
-)
-
 // Info 是由 main 注入的管家静态运行信息（展示用）。
 type Info struct {
 	Model     string
@@ -182,8 +177,9 @@ type Server struct {
 	host          string
 	port          int
 	accounts      *AccountStore
-	sessMu        sync.Mutex
-	sessions      map[string]time.Time // 会话 token → 过期时刻（内存态，重启需重新登录）
+	authKey       []byte // JWT 签名密钥（落盘在数据目录，重启后仍有效）
+	authMu        sync.Mutex
+	revoked       map[string]time.Time // 已退出登录的 token → 过期时刻（内存态）
 	engine        *task.Engine
 	todos         *todo.Store
 	memory        *memory.WikiStore
@@ -212,19 +208,20 @@ type Server struct {
 
 // Options 汇总管理后台的构建参数。
 type Options struct {
-	Host       string
-	Port       int
-	Accounts   *AccountStore
-	Engine     *task.Engine
-	Todos      *todo.Store
-	Memory     *memory.WikiStore
-	Info       Info
-	Chat       *web.Chat
-	Cfg        *config.Config
-	ConfigPath string
-	Registry   func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
-	Approver   *approval.Queue
-	Mcp        *mcp.Manager
+	Host        string
+	Port        int
+	Accounts    *AccountStore
+	AuthKeyFile string // JWT 签名密钥文件；为空则用进程内随机密钥（测试）
+	Engine      *task.Engine
+	Todos       *todo.Store
+	Memory      *memory.WikiStore
+	Info        Info
+	Chat        *web.Chat
+	Cfg         *config.Config
+	ConfigPath  string
+	Registry    func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
+	Approver    *approval.Queue
+	Mcp         *mcp.Manager
 	// Acp 智能体管理器（可为 nil：不挂载 /api/acp*，侧栏入口由前端按配置隐藏）。
 	Acp           *acp.Manager
 	HeartbeatFile string
@@ -252,7 +249,8 @@ func New(o Options) *Server {
 		host:          o.Host,
 		port:          o.Port,
 		accounts:      o.Accounts,
-		sessions:      make(map[string]time.Time),
+		authKey:       loadOrCreateAuthKey(o.AuthKeyFile),
+		revoked:       make(map[string]time.Time),
 		engine:        o.Engine,
 		todos:         o.Todos,
 		memory:        o.Memory,
@@ -291,7 +289,7 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
-		root.AddRouter([]string{http.MethodGet}, "/api/upload/:id", s.wrap(s.handleUploadGet))
+		root.AddRouter([]string{http.MethodGet}, "/api/upload/:id", s.wrapMedia(s.handleUploadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
 		root.AddRouter([]string{http.MethodGet}, "/api/context", s.wrap(s.handleContextUsage))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/compact", s.wrap(s.handleContextCompact))
@@ -431,55 +429,26 @@ func (s *Server) Start(ctx context.Context) error {
 
 // ---------- 会话 ----------
 
-// newSession 生成会话 token 并登记过期时刻。
-func (s *Server) newSession() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic("admin: 生成会话 token 失败: " + err.Error())
-	}
-	token := hex.EncodeToString(b)
-	s.sessMu.Lock()
-	s.sessions[token] = time.Now().Add(sessionTTL)
-	s.sessMu.Unlock()
-	return token
-}
-
-// validSession 校验会话 token；有效则顺带滑动续期。
-func (s *Server) validSession(token string) bool {
-	if token == "" {
-		return false
-	}
-	s.sessMu.Lock()
-	defer s.sessMu.Unlock()
-	exp, ok := s.sessions[token]
-	if !ok || time.Now().After(exp) {
-		delete(s.sessions, token)
-		return false
-	}
-	s.sessions[token] = time.Now().Add(sessionTTL)
-	return true
-}
-
-func (s *Server) dropSession(token string) {
-	s.sessMu.Lock()
-	delete(s.sessions, token)
-	s.sessMu.Unlock()
-}
-
-func (s *Server) sessionToken(ctx *vhttp.Context) string {
-	tok, err := ctx.GinContext().Cookie(sessionCookie)
-	if err != nil {
-		return ""
-	}
-	return tok
-}
-
-// wrap 要求已登录（Cookie 会话）。
+// wrap 要求已登录（Authorization: Bearer JWT）。
 func (s *Server) wrap(fn func(*vhttp.Context) error) func(*vhttp.Context) error {
 	return func(ctx *vhttp.Context) error {
-		if !s.validSession(s.sessionToken(ctx)) {
-			return ctx.JsonResponse(vhttp.Codes.Unauthorized,
-				map[string]string{"error": "未登录或会话已过期"})
+		if !s.authenticated(bearerToken(ctx.GinContext().Request)) {
+			return forbidden(ctx)
+		}
+		return fn(ctx)
+	}
+}
+
+// wrapMedia 用于 <img> 这类无法带自定义头的读取：允许 header，也允许 ?token=
+// （仅附件回读走这条路，token 只在本机页面 URL 上出现）。
+func (s *Server) wrapMedia(fn func(*vhttp.Context) error) func(*vhttp.Context) error {
+	return func(ctx *vhttp.Context) error {
+		raw := bearerToken(ctx.GinContext().Request)
+		if raw == "" {
+			raw = strings.TrimSpace(ctx.GinContext().Query("token"))
+		}
+		if !s.authenticated(raw) {
+			return forbidden(ctx)
 		}
 		return fn(ctx)
 	}
@@ -494,7 +463,7 @@ func (s *Server) wrapPublic(fn func(*vhttp.Context) error) func(*vhttp.Context) 
 
 // handleSession 返回当前登录状态，前端据此显示登录页或主界面。
 func (s *Server) handleSession(ctx *vhttp.Context) error {
-	if s.validSession(s.sessionToken(ctx)) {
+	if s.authenticated(bearerToken(ctx.GinContext().Request)) {
 		acc := s.accounts.Current()
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 			"authenticated": true, "username": acc.Username,
@@ -503,7 +472,7 @@ func (s *Server) handleSession(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"authenticated": false})
 }
 
-// handleLogin 账号密码登录。
+// handleLogin 账号密码登录：校验通过后下发 JWT，前端自行保存并随请求携带。
 func (s *Server) handleLogin(ctx *vhttp.Context) error {
 	var req struct {
 		Username string `json:"username"`
@@ -516,17 +485,19 @@ func (s *Server) handleLogin(ctx *vhttp.Context) error {
 	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.Unauthorized, map[string]string{"error": "用户名或密码错误"})
 	}
-	token := s.newSession()
-	ctx.GinContext().SetCookie(sessionCookie, token, int(sessionTTL.Seconds()), "/", "", false, true)
+	token, err := s.issueToken(acc.Username)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "签发登录凭据失败，请重试"})
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"username": acc.Username,
+		"token":    token,
 	})
 }
 
-// handleLogout 退出登录，销毁会话并清 Cookie。
+// handleLogout 退出登录：吊销当前 token（前端同时清掉本地保存）。
 func (s *Server) handleLogout(ctx *vhttp.Context) error {
-	s.dropSession(s.sessionToken(ctx))
-	ctx.GinContext().SetCookie(sessionCookie, "", -1, "/", "", false, true)
+	s.revokeToken(bearerToken(ctx.GinContext().Request))
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已退出"})
 }
 

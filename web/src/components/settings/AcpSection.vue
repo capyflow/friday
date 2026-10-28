@@ -224,8 +224,6 @@ onMounted(load)
           <div v-if="c.installed && c.path" class="meta mono acp-cat-path">{{ c.path }}</div>
         </div>
       </div>
-      <div class="set-note">目录 = 内置精选 + 官方 ACP 注册表（与 Zed 同源，上游上架新 agent 点「刷新官方目录」即可见）。
-      安装走各 agent 的官方分发；安装 ≠ 登录——装完用清单行的「测试」做握手诊断，未登录会在报错里给指引。</div>
     </div>
 
     <div class="acp-agents">
@@ -269,9 +267,6 @@ onMounted(load)
     </div>
     <div class="msg" :class="msg.cls">{{ msg.text }}</div>
     <pre v-if="installOutput" class="acp-install-output" aria-label="安装命令输出">{{ installOutput }}</pre>
-    <div class="set-note">敏感操作经网页审批卡人工放行（30 分钟无人处理自动拒绝）。要让它真的弹卡，
-      需把 agent 自己配置里的审批模式调紧为"每次询问"——否则 agent 按自身配置自审批，Friday 收不到请求。
-      进程空闲后自动回收；重开对话经 session/load 重接上下文，恢复失败的 agent 勾选「会话恢复不可靠」走降级。</div>
   </div>
 </template>
 

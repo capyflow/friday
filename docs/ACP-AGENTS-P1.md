@@ -21,7 +21,7 @@ thread 创建时绑定一个外部 agent 与一个真实工作目录，用户与
 | # | 决策 |
 |---|---|
 | D1 | thread 创建时绑定 agent + 工作目录，**之后不可切换**；换 agent 或换目录 = 新开 thread。绕开一切"中途换脑子"的上下文续接问题 |
-| D2 | 工作目录用**真实目录**（用户选择，按 agent 记住上次选择），不用一次性沙箱——外部 agent 的价值就是在真实项目里干活。thread 头部常驻显示当前路径。**补（2026-10-20）**：目录可留空——UI 点「选择目录」经 `GET /api/acp/dirs`（只读、只列子目录、逐层懒列举）在弹窗里浏览，路径栏可直达；留空回退 `~/.vortex/acp-sessions/<threadID>`（每会话一个子目录）。不用浏览器 showDirectoryPicker：它出于安全只回文件夹名，拿不到后端要的绝对路径（whatwg/fs #59 提案被隐私理由否决）；也不走 Tauri 原生对话框——一套 web 选择器全形态（浏览器/桌面 App/Docker）通用，壳保持无业务 |
+| D2 | 工作目录用**真实目录**（用户选择，按 agent 记住上次选择），不用一次性沙箱——外部 agent 的价值就是在真实项目里干活。thread 头部常驻显示当前路径。**补（2026-10-20）**：目录可留空——UI 点「选择目录」经 `GET /api/acp/dirs`（只读、只列子目录、逐层懒列举）在弹窗里浏览，路径栏可直达；留空回退数据目录下 `acp-sessions/<threadID>`（每会话一个子目录；2026-10-28 起随数据目录走，原 `~/.vortex/acp-sessions/`）。不用浏览器 showDirectoryPicker：它出于安全只回文件夹名，拿不到后端要的绝对路径（whatwg/fs #59 提案被隐私理由否决）；也不走 Tauri 原生对话框——一套 web 选择器全形态（浏览器/桌面 App/Docker）通用，壳保持无业务 |
 | D3 | 进程空闲 **10 分钟**自动回收；回收**不再等于上下文丢失**——重开 thread 时经 `session/load` 重接（协议要求 agent 全量重放对话，见 N2）；不支持或恢复失败的 agent 走降级：新开 session，thread 标注「上下文已重置」，记录仍可见 |
 | D4 | 时间线**抽共享组件**：消息块渲染器从 ChatView 抽出复用，一次小型重构（带现有 16 个测试文件做），换取单份维护 |
 | D5 | thought 流（`agent_thought_chunk`）**默认显示**——独立 agent 页的心智是"看着 agent 干活"；设置留全局开关 |
@@ -90,6 +90,9 @@ client ：approval.Queue 入队 → 网页现有审批卡出卡（字段模板�
 ### 5.3 取消
 
 `POST /api/acp/threads/:id/stop` → 显式 `session/cancel` → 读 `stopReason`（C8，"cancelled" 不判失败）。
+取消只是通知，agent 可能不执行（实测有 agent 收到 cancel 后继续跑工具）：宽限 8s 仍未收尾就强杀
+整个进程组；若宽限内已正常收尾则不动进程。整轮超时（含浏览器断开）则直接回收进程组——
+客户端已放弃这一轮，不让 agent 继续在后台写文件/跑命令；下一条消息按 `session/load` 重接。
 **没有 PausedTurn 机制**：部分回答已在 agent 自己的 session 里，cancel 后用户直接发下一句即可续聊——
 比主聊天（internal/web/chat.go 的暂停/继续）少一整套现场保存，这是独立会话的简化红利。
 
@@ -153,9 +156,10 @@ ContentBlock image 下发。实测不过则整体挪后续，前端不出现入�
 ## 目录与版本管理（2026-10-21）
 
 设置页合并内置精选与官方 ACP registry.json（同 id 内置优先），支持手动刷新、
-npx 安装与按平台 binary 安装。缓存 `~/.vortex/acp/registry-cache.json` 有效期一小时；
+npx 安装与按平台 binary 安装。缓存 `acp/registry-cache.json`（数据目录下，2026-10-28 起，
+原 `~/.vortex/acp/`）有效期一小时；
 首次写入自动创建目录，拉取失败回退缓存，无缓存则只展示内置精选。
-binary 安装到 `~/.vortex/acp/agents/<id>/<version>/`，校验上游提供的 SHA-256，
+binary 安装到 `acp/agents/<id>/<version>/`，校验上游提供的 SHA-256，
 拒绝链接和路径越界的压缩包，限制下载与解包大小。
 
 注册表条目的版本戳写入 `acp.agents[].version`；目录对比后提示升级。升级同步命令、

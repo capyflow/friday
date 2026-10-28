@@ -330,6 +330,22 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.find('.cursor').exists()).toBe(false)
   })
 
+  it('工具调用只有名字（无结果）时也能展开查看，而不是禁用', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'run' } },
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'ok' } },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('跑一下')
+    const tool = wrapper.get('.tool')
+    expect(tool.find('.tool-head .think-chev').exists()).toBe(true)
+    expect(tool.get('.tool-head').attributes('disabled')).toBeUndefined()
+    await tool.get('.tool-head').trigger('click')
+    expect(tool.get('.tool-call .step-name').text()).toBe('Bash')
+    expect(tool.find('.tool-out').exists()).toBe(false)
+  })
+
   it('结束帧兜底：结果事件丢失的工具块就地收掉，不再转圈', async () => {
     let controller
     fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
@@ -499,6 +515,33 @@ describe('composer 两行布局', () => {
     expect(wrapper.get('.bar-left .mode-chip').text()).toContain('计划')
     await wrapper.get('.mode-chip button').trigger('click')
     expect(wrapper.get('.mode-chip').classes()).not.toContain('show')
+  })
+
+  it('chip 装不下时滚轮横向滚动，到头把滚轮让回页面', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 300 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const wheel = deltaY => {
+      const ev = new window.WheelEvent('wheel', { deltaY, cancelable: true, bubbles: true })
+      bar.dispatchEvent(ev)
+      return ev
+    }
+    expect(wheel(40).defaultPrevented).toBe(true)
+    expect(bar.scrollLeft).toBe(40)
+    bar.scrollLeft = 200 // 已到最右
+    expect(wheel(40).defaultPrevented).toBe(false)
+    expect(bar.scrollLeft).toBe(200)
+  })
+
+  it('chip 放得下时滚轮不拦截页面滚动', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 100 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const ev = new window.WheelEvent('wheel', { deltaY: 40, cancelable: true, bubbles: true })
+    bar.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false)
   })
 })
 

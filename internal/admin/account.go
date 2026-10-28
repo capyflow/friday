@@ -209,6 +209,14 @@ func (s *AccountStore) Current() Account {
 	return Account{Username: s.acc.Username, SetupRequired: s.acc.SetupRequired}
 }
 
+// CredentialVersion 返回密码哈希的指纹（不暴露哈希本身）：登录凭据把版本写进
+// token，换密码后旧 token 立即失效。
+func (s *AccountStore) CredentialVersion() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return passwordVersion(s.acc.PasswordHash)
+}
+
 // subtleMismatch 常量时间比较用户名，避免用户名枚举计时侧信道。
 func subtleMismatch(a, b string) bool {
 	if len(a) != len(b) {

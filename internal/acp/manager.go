@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -37,6 +38,10 @@ const (
 	StateInterrupted = "interrupted"
 	StateOrphaned    = "orphaned"
 )
+
+// stopKillGrace 是用户点停止后等 agent 自报 cancelled 的宽限；超时仍未收尾
+// 就强杀进程组（取消只是通知，agent 可能不执行）。测试会临时改小。
+var stopKillGrace = 8 * time.Second
 
 // Entry 是投影对话记录里的一条消息。
 type Entry struct {
@@ -89,10 +94,12 @@ type TurnResult struct {
 
 // live 是一个 thread 当前挂着的进程与运行态。
 type live struct {
-	proc     *agentProc
-	turnDone chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
-	slot     chan struct{} // 从哪个信号量槽位取得（Reload 可能换槽）
-	idle     *time.Timer
+	proc      *agentProc
+	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
+	slot      chan struct{} // 从哪个信号量槽位取得（Reload 可能换槽）
+	idle      *time.Timer
+	stopTimer *time.Timer // 用户停止后的强杀兜底
+	stopping  atomic.Bool // 用户已请求停止（强杀收尾时按 cancelled 记账）
 }
 
 // Manager 管理全部 thread 与存活进程。
@@ -108,7 +115,7 @@ type Manager struct {
 	cfgFn    func() config.AcpConfig
 	approver *approval.Queue
 
-	// registryBase 官方目录数据的基目录（$HOME/.vortex/acp）：registry-cache.json
+	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
 	// 表示只显示内置目录（基目录不可建或测试隔离）。fetchMu 串行化拉取与缓存写。
 	registryBase string
@@ -217,14 +224,10 @@ func (m *Manager) Get(id string) (Thread, bool) {
 // sessionsBaseDirFn 可被测试替换：未指定工作目录时，新建临时会话的父目录。
 var sessionsBaseDirFn = defaultSessionsDir
 
-// defaultSessionsDir 返回 $HOME/.vortex/acp-sessions——与 $HOME/.vortex/skills
-// 同族的专用目录，专门存放「没选目录就开聊」的临时会话。
+// defaultSessionsDir 返回 <数据目录>/acp-sessions——与 acp/ 同族的专用目录，
+// 专门存放「没选目录就开聊」的临时会话（内核 chdir 到数据目录后按相对路径使用）。
 func defaultSessionsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("解析 HOME 失败: %w", err)
-	}
-	return filepath.Join(home, ".vortex", "acp-sessions"), nil
+	return "acp-sessions", nil
 }
 
 // resolveWorkspace 解析并准备工作目录：~ 展开 → 绝对路径 → 确保存在且是目录。
@@ -343,6 +346,9 @@ func (m *Manager) Delete(id string) bool {
 func (m *Manager) release(lv *live, reason string) {
 	if lv.idle != nil {
 		lv.idle.Stop()
+	}
+	if lv.stopTimer != nil {
+		lv.stopTimer.Stop()
 	}
 	lv.proc.kill()
 	if lv.slot != nil {
@@ -646,6 +652,11 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	turnDone := make(chan struct{})
 	m.mu.Lock()
 	lv.turnDone = turnDone
+	lv.stopping.Store(false)
+	if lv.stopTimer != nil {
+		lv.stopTimer.Stop()
+		lv.stopTimer = nil
+	}
 	th.State = StateRunning
 	if th.Title == "" {
 		th.Title = truncateRunes(text, 40)
@@ -706,12 +717,22 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	elapsed := time.Since(started)
 
 	// 超时/断开时 agent 可能仍在跑：显式取消（C8，读 stopReason 而非猜）。
+	// 取消只是通知，agent 不一定执行（实测有 agent 超时后继续跑工具），
+	// 客户端已经放弃这一轮，直接回收进程组保证它真的停下；下轮按
+	// session/load 重接上下文。
 	aborted := turnCtx.Err() != nil
+	stopped := lv.stopping.Load()
 	if aborted && promptErr != nil {
 		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: acp.SessionId(th.SessionID)})
+		m.killLive(id, "本轮超时/断开，回收进程")
 	}
+	interrupted := aborted || (stopped && promptErr != nil)
 
 	m.mu.Lock()
+	if lv.stopTimer != nil {
+		lv.stopTimer.Stop()
+		lv.stopTimer = nil
+	}
 	lv.turnDone = nil
 	current, keep := m.threads[id] // turn 进行中被删除则不再写投影
 	if keep {
@@ -736,6 +757,10 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	case aborted:
 		result.Answer = sink.allText()
 		result.StopReason = "timeout"
+	case stopped:
+		// 停止指令未生效、兜底强杀：按用户取消收尾，不算崩溃。
+		result.Answer = sink.allText()
+		result.StopReason = "cancelled"
 	default:
 		runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, firstLine(lv.proc.stderrTail(4)))
 		result.StopReason = "error"
@@ -750,7 +775,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 				files = append(files, img.ID)
 			}
 		}
-		m.appendTurnLocked(current, text, files, result, degraded, aborted, promptErr != nil && !aborted, errText)
+		m.appendTurnLocked(current, text, files, result, degraded, interrupted, promptErr != nil && !interrupted, errText)
 		if used, size, cost, _ := sink.context(); size > 0 {
 			current.ContextUsed = used
 			current.ContextSize = size
@@ -790,7 +815,7 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 	}
 	th.Messages = append(th.Messages, entry)
 	if aborted {
-		reason := "超时（agent 可能仍在执行，结果不会回到本对话）"
+		reason := "超时（已中止本轮 agent 执行，结果不会回到本对话）"
 		if r.StopReason == "cancelled" {
 			reason = "被用户停止"
 		}
@@ -804,15 +829,30 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 	}
 }
 
-// Stop 取消该 thread 正在进行的一轮：显式 session/cancel（C8），Prompt 端
-// 会拿到 stopReason=cancelled 正常收尾。没有 PausedTurn 机制——agent 侧
-// 会话上下文还在，用户直接发下一句即可续聊。
+// Stop 取消该 thread 正在进行的一轮：先显式 session/cancel（C8），Prompt 端
+// 会拿到 stopReason=cancelled 正常收尾；若 agent 不理会取消，宽限 stopKillGrace
+// 后强杀进程组，保证"停止"真的停。没有 PausedTurn 机制——agent 侧会话上下文
+// 还在，用户直接发下一句即可续聊（强杀后下轮按 session/load 重接）。
 func (m *Manager) Stop(id string) bool {
 	m.mu.Lock()
 	lv, ok := m.live[id]
 	sid := ""
 	if th, tok := m.threads[id]; tok {
 		sid = th.SessionID
+	}
+	if ok && sid != "" && lv.turnDone != nil {
+		lv.stopping.Store(true)
+		if lv.stopTimer == nil {
+			turnDone := lv.turnDone
+			lv.stopTimer = time.AfterFunc(stopKillGrace, func() {
+				select {
+				case <-turnDone:
+					return // 这一轮已自行收尾
+				default:
+				}
+				m.killLive(id, "停止指令未生效，强杀进程")
+			})
+		}
 	}
 	m.mu.Unlock()
 	if !ok || sid == "" {

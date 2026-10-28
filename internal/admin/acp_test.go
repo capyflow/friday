@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -16,9 +15,9 @@ import (
 )
 
 // dirsBody 发一次 GET /api/acp/dirs 并解出 { body: ... } 信封。
-func dirsBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery string) (int, map[string]any) {
+func dirsBody(t *testing.T, handler http.Handler, token string, rawQuery string) (int, map[string]any) {
 	t.Helper()
-	rec := setupTestRequest(handler, http.MethodGet, "/api/acp/dirs?"+rawQuery, nil, "127.0.0.1:1234", "localhost", "", cookie)
+	rec := setupTestRequest(handler, http.MethodGet, "/api/acp/dirs?"+rawQuery, nil, "127.0.0.1:1234", "localhost", "", token)
 	var envelope struct {
 		Body map[string]any `json:"body"`
 	}
@@ -29,17 +28,14 @@ func dirsBody(t *testing.T, handler http.Handler, cookie *http.Cookie, rawQuery 
 }
 
 func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if runtime.GOOS == "windows" {
-		// os.UserHomeDir 在 Windows 读 USERPROFILE，测试隔离需两个都设。
-		t.Setenv("USERPROFILE", home)
-	}
+	// 默认 acp 基目录是相对路径 <数据目录>/acp：chdir 到临时目录隔离真实数据目录。
+	tmp := t.TempDir()
+	t.Chdir(tmp)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("#!/bin/sh\necho upgraded\n"))
 	}))
 	defer srv.Close()
-	base := filepath.Join(home, ".vortex", "acp")
+	base := filepath.Join(tmp, "acp")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +57,7 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "registry-cache.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	s.configPath = filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(s.configPath, []byte("accounts: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -73,12 +69,12 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 	m := acp.NewManager(func() config.AcpConfig { return s.cfg.Snapshot().Acp }, nil, filepath.Join(t.TempDir(), "threads.json"))
 	s.acp = m
 	t.Cleanup(m.Close)
-	rec := setupTestRequest(s.Handler(), http.MethodPost, "/api/acp/install", []byte(`{"id":"upgrade-test"}`), "127.0.0.1:1234", "localhost", "", cookie)
+	rec := setupTestRequest(s.Handler(), http.MethodPost, "/api/acp/install", []byte(`{"id":"upgrade-test"}`), "127.0.0.1:1234", "localhost", "", token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("升级失败: %d %s", rec.Code, rec.Body.String())
 	}
 	got := s.cfg.Snapshot().Acp.Agents[0]
-	want := filepath.Join(base, "agents", "upgrade-test", "2.0.0", "agent")
+	want := filepath.Join("acp", "agents", "upgrade-test", "2.0.0", "agent")
 	if got.Command != want || len(got.Args) != 1 || got.Args[0] != "--new" || got.Version != "2.0.0" {
 		t.Fatalf("升级后启动配置未更新: %+v", got)
 	}
@@ -88,7 +84,7 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 }
 
 func TestAcpDirsListsSubdirectoriesOnly(t *testing.T) {
-	s, _, cookie, _, _ := manageTestServer(t)
+	s, _, token, _, _ := manageTestServer(t)
 	m := acp.NewManager(func() config.AcpConfig { return config.AcpConfig{} }, nil, filepath.Join(t.TempDir(), "threads.json"))
 	s.acp = m
 	t.Cleanup(m.Close)
@@ -105,7 +101,7 @@ func TestAcpDirsListsSubdirectoriesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, body := dirsBody(t, handler, cookie, "path="+url.QueryEscape(root))
+	code, body := dirsBody(t, handler, token, "path="+url.QueryEscape(root))
 	if code != http.StatusOK {
 		t.Fatalf("状态码 %d: %v", code, body)
 	}
@@ -129,18 +125,18 @@ func TestAcpDirsListsSubdirectoriesOnly(t *testing.T) {
 	}
 
 	// 缺省 path = HOME（只要求可用，不假设内容）。
-	code, body = dirsBody(t, handler, cookie, "")
+	code, body = dirsBody(t, handler, token, "")
 	home, _ := os.UserHomeDir()
 	if code != http.StatusOK || body["path"] != home {
 		t.Fatalf("缺省 path 应列 HOME %s，状态 %d，实际 %v", home, code, body["path"])
 	}
 
 	// 不存在的目录 / 文件路径报 400。
-	code, _ = dirsBody(t, handler, cookie, "path="+url.QueryEscape(filepath.Join(root, "nope")))
+	code, _ = dirsBody(t, handler, token, "path="+url.QueryEscape(filepath.Join(root, "nope")))
 	if code != http.StatusBadRequest {
 		t.Fatalf("不存在的目录应报 400，实际 %d", code)
 	}
-	code, _ = dirsBody(t, handler, cookie, "path="+url.QueryEscape(filepath.Join(root, "file.txt")))
+	code, _ = dirsBody(t, handler, token, "path="+url.QueryEscape(filepath.Join(root, "file.txt")))
 	if code != http.StatusBadRequest {
 		t.Fatalf("文件路径应报 400，实际 %d", code)
 	}

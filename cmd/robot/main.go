@@ -400,7 +400,7 @@ func main() {
 	// 后台"设置 → 技能"增删改即时生效——技能是按次注入的，不需要重建 Agent。
 	var skillStore *skill.Store
 	if cfg.Skills.EnabledOrDefault() {
-		skillStore = skill.NewStore(cfg.Skills.Dir)
+		skillStore = skill.NewStore(cfg.Skills.Dir, skill.UserScopeDir)
 		brain.SetSkills(skillStore, cfg.Skills.AutoTriggerEnabled())
 		list := skillStore.List()
 		broken := 0
@@ -558,6 +558,7 @@ func main() {
 			Host:          cfg.Admin.Host,
 			Port:          cfg.Admin.Port,
 			Accounts:      accounts,
+			AuthKeyFile:   filepath.Join(filepath.Dir(cfg.Admin.AccountFile), "auth-key"),
 			Engine:        eng,
 			Todos:         todos,
 			Memory:        deps.Memory,

@@ -29,13 +29,14 @@ function thinkTitle(b, bi) {
   if (liveThink(bi, b)) return thinkPreview(b.text) || '思考中…'
   return b.meta ? '思考 · ' + b.meta : '思考'
 }
-// 工具调用折叠行的可访问标题：出错时把状态说在前面，运行中没有可展开的内容故留空。
+// 工具调用折叠行：有工具名/参数/结果就能展开（运行中也允许看参数）。
+function toolHasBody(b) {
+  return !!(b.name || b.text || b.out)
+}
+// 可访问标题：出错时把状态说在前面，没有可展开内容时留空。
 function toolTitle(b) {
-  if (b.status === 'fail') {
-    if (!b.out) return '工具执行出错'
-    return b.open ? '收起出错详情' : '工具执行出错，展开详情'
-  }
-  if (!b.out) return ''
+  if (!toolHasBody(b)) return ''
+  if (b.status === 'fail') return b.open ? '收起出错详情' : '工具执行出错，展开详情'
   return b.open ? '收起详情' : '展开详情'
 }
 // 光标跟着本轮正在写的正文走（思考分片插进来时不该跑到思考行下面）。
@@ -63,22 +64,22 @@ function cursorOn(bi) {
     <!-- 工具调用块：收起只报"工具调用"，工具名与参数、结果都收进展开区 -->
     <div v-else-if="b.kind === 'tool'" class="tool"
          :class="{ open: b.open, 'is-fail': b.status === 'fail' }">
-      <button class="tool-head" type="button" :disabled="!b.out" :title="toolTitle(b)"
-              @click="b.open = b.out ? !b.open : false">
+      <button class="tool-head" type="button" :disabled="!toolHasBody(b)" :title="toolTitle(b)"
+              @click="b.open = toolHasBody(b) ? !b.open : false">
         <span class="step-ico" :class="b.status" aria-hidden="true">
           <i v-if="b.status === 'run'" class="spin step-ring"></i>
           <svg v-else-if="b.status === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
         </span>
         <span class="step-name">工具调用</span>
-        <svg v-if="b.out" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        <svg v-if="toolHasBody(b)" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
       </button>
       <div v-show="b.open" class="tool-body">
         <div class="tool-call">
           <span class="step-name">{{ b.name }}</span>
           <span class="step-detail">{{ b.text }}</span>
         </div>
-        <div class="tool-out">{{ b.out }}</div>
+        <div v-if="b.out" class="tool-out">{{ b.out }}</div>
       </div>
     </div>
     <!-- 正文块（fileChips：行内代码里的本机文件路径渲染成可点预览 chip） -->

@@ -59,6 +59,10 @@ type WikiStore struct {
 	dir        string
 	legacyFile string
 	pages      map[string]*Page
+	// lastNow 是最近一次经 nextNowLocked 发放的墙钟。Windows 的系统时钟粗粒度
+	// （同 tick 读数全等）且可能被 NTP 回拨，页面 ID 与「最近更新排前」都依赖
+	// 「后写的更大」——统一从守卫钟发放（与 internal/todo 的 lastCreated 同纪律）。
+	lastNow time.Time
 }
 
 // NewWikiStore 创建 wiki 记忆仓库：加载 dir 下的页面，并在目录为空且
@@ -196,10 +200,23 @@ func (s *WikiStore) writePageLocked(p *Page) error {
 	return os.Rename(tmp, path)
 }
 
-// newIDLocked 生成未占用的新页面 ID（调用方须持有 mu）。
+// nextNowLocked 返回严格递增的墙钟（Round(0) 剥离单调钟）。同 tick 内的两次
+// time.Now() 读数全等会让新页面拿到与上一页相同的 ID/UpdatedAt——原 newIDLocked
+// 靠撞ID重试，实际是空转到时钟跳格；这里每次调用至少推进 1ns，循环必然终止。
+func (s *WikiStore) nextNowLocked() time.Time {
+	now := time.Now().Round(0)
+	if !now.After(s.lastNow) {
+		now = s.lastNow.Add(time.Nanosecond)
+	}
+	s.lastNow = now
+	return now
+}
+
+// newIDLocked 生成未占用的新页面 ID（调用方须持有 mu）。ID 取自守卫钟，
+// 与已加载页面撞 ID 时逐纳秒推进重试（有限步，含时钟回拨后重启的情形）。
 func (s *WikiStore) newIDLocked() string {
 	for {
-		id := "m" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		id := "m" + strconv.FormatInt(s.nextNowLocked().UnixNano(), 10)
 		if _, ok := s.pages[id]; !ok {
 			return id
 		}
@@ -220,7 +237,7 @@ func (s *WikiStore) Save(id, title, body, source string) (Page, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.nextNowLocked()
 	var p *Page
 	created := false
 	if trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), "#")); trimmed != "" {
@@ -312,7 +329,14 @@ func (s *WikiStore) Search(keyword string) []PageMeta {
 		out = append(out, metaOf(p, ""))
 	}
 	s.mu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	// 更新时间倒序；UpdatedAt 相同（磁盘加载的页面可同 tick）以 ID 兜底——
+	// ID 取自守卫钟、同长数字串，字典序即时间序，保证两次调用结果一致。
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Round(0).Equal(out[j].UpdatedAt.Round(0)) {
+			return out[i].UpdatedAt.Round(0).After(out[j].UpdatedAt.Round(0))
+		}
+		return out[i].ID > out[j].ID
+	})
 	return out
 }
 
@@ -387,7 +411,7 @@ func (s *WikiStore) migrateLegacy() {
 		body.WriteString(fmt.Sprintf("- （%s · %s）%s\n",
 			m.CreatedAt.Format("2006-01-02"), sourceLabel(m.Source), m.Content))
 	}
-	now := time.Now()
+	now := s.nextNowLocked()
 	p := &Page{ID: s.newIDLocked(), Title: "用户档案", Body: body.String(), Source: "migrate", CreatedAt: now, UpdatedAt: now}
 	s.pages[p.ID] = p
 	if err := s.writePageLocked(p); err != nil {

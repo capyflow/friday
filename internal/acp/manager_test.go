@@ -264,6 +264,9 @@ func defaultScript(fc *fakeConn, sid string) string {
 		map[string]any{"content": textBlock("这是回答。")}))
 	fc.w.notify("session/update", update(sid, "tool_call", map[string]any{
 		"toolCallId": "t1", "title": "运行 ls", "kind": "execute", "status": "in_progress"}))
+	// 进度更新（codebuddy 实测不带 status）：不应新起一行工具调用
+	fc.w.notify("session/update", update(sid, "tool_call_update", map[string]any{
+		"toolCallId": "t1"}))
 	fc.w.notify("session/update", update(sid, "tool_call_update", map[string]any{
 		"toolCallId": "t1", "status": "completed"}))
 	fc.w.notify("session/update", update(sid, "available_commands_update",
@@ -874,7 +877,7 @@ func TestOrphanedStateComputed(t *testing.T) {
 	}
 }
 
-// 未选目录时回退到临时会话目录（~/.vortex/acp-sessions/<threadID>，测试里替换根），
+// 未选目录时回退到临时会话目录（<数据目录>/acp-sessions/<threadID>，测试里替换根），
 // 显式指定的目录仍然优先。
 func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
 	base := t.TempDir()
@@ -1134,5 +1137,83 @@ func TestCapabilitiesEmptyWhenAgentOmits(t *testing.T) {
 	}
 	if _, err := m.SetCapability(th.ID, "model", "x"); err == nil {
 		t.Fatalf("空清单上切换应报错（能力不存在）")
+	}
+}
+
+func TestTimeoutKillsAgentProcess(t *testing.T) {
+	f := &fakeAgent{}
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	f.promptScript = func(*fakeConn, string) string {
+		<-blocked // 模拟不理会客户端取消的长任务
+		return "end_turn"
+	}
+	cfg := testConfig(t)
+	cfg.TurnTimeoutSeconds = 1
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThread(t, m)
+
+	res, err := m.Send(context.Background(), th.ID, "长任务", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("超时不应算失败: %v", err)
+	}
+	if res.StopReason != "timeout" {
+		t.Fatalf("stopReason 应为 timeout: %+v", res)
+	}
+	m.mu.Lock()
+	alive := m.live[th.ID]
+	m.mu.Unlock()
+	if alive != nil {
+		t.Fatal("超时后 agent 进程必须被回收，不能继续在后台跑")
+	}
+}
+
+func TestStopKillsUnresponsiveAgent(t *testing.T) {
+	oldGrace := stopKillGrace
+	stopKillGrace = 100 * time.Millisecond
+	t.Cleanup(func() { stopKillGrace = oldGrace })
+
+	f := &fakeAgent{}
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	f.promptScript = func(*fakeConn, string) string {
+		<-blocked // 不理会 session/cancel
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	done := make(chan struct{})
+	var res TurnResult
+	var sendErr error
+	go func() {
+		defer close(done)
+		res, sendErr = m.Send(context.Background(), th.ID, "长任务", nil, TurnHooks{})
+	}()
+	waitFor(t, 2*time.Second, "turn 启动", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.live[th.ID] != nil
+	})
+	time.Sleep(50 * time.Millisecond)
+	if !m.Stop(th.ID) {
+		t.Fatal("Stop 应成功发出取消")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("停止未生效时应强杀进程并让 Send 返回")
+	}
+	if sendErr != nil {
+		t.Fatalf("强杀收尾不应算失败: %v", sendErr)
+	}
+	if res.StopReason != "cancelled" {
+		t.Fatalf("强杀应按用户停止收尾: %+v", res)
+	}
+	m.mu.Lock()
+	alive := m.live[th.ID]
+	m.mu.Unlock()
+	if alive != nil {
+		t.Fatal("停止后 agent 进程必须被回收")
 	}
 }

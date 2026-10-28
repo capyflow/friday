@@ -4,8 +4,12 @@
 // TimelineBlocks/blocks.js；status 帧显示在"输入中"气泡里（启动 agent /
 // 重接会话等生命周期占位）。note 行是服务端投影的系统标注（上下文已重置、
 // 中断原因），灰字居中展示。
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { api } from '../api.js'
+// 在 App 里用 v-show 常驻（同聊天页）：切换左侧导航不卸载组件，进行中的一轮
+// SSE 与滚动位置都不会丢。首次打开先拉配置/列表，拿到结果前显示加载态，
+// 不能把"还没加载完"当成"功能未开启"。
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { api, authFailed } from '../api.js'
+import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { fmtTokens } from '../format.js'
@@ -17,6 +21,8 @@ import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
 const threads = ref([])
 const acp = ref(null)          // /api/acp/threads 回带的配置（enabled/agents…）
+const loaded = ref(false)      // 配置/列表是否已拉到：加载中 ≠ 功能未开启
+const loadError = ref('')      // 首次加载失败原因（可重试）
 const currentId = ref('')
 const messages = reactive([])
 const input = ref('')
@@ -158,13 +164,19 @@ async function load() {
     const r = await api('GET', '/api/acp/threads')
     threads.value = r.threads || []
     acp.value = r.acp || { enabled: false, agents: [] }
+    loaded.value = true
+    loadError.value = ''
     // 每轮结束后刷新列表时顺带更新水位；线程已被别处删掉则收起 chip
     if (currentId.value) {
       const t = threads.value.find(x => x.id === currentId.value)
       syncCtx(t && t.contextUsed, t && t.contextSize)
     }
     if (!currentId.value && threads.value.length) select(threads.value[0].id)
-  } catch (e) { toast('加载智能体对话失败：' + e.message, true) }
+  } catch (e) {
+    // 已经加载过（轮末刷新失败）就保留现有界面；首次加载失败给可重试的说明。
+    if (!loaded.value) loadError.value = e.message || String(e)
+    toast('加载智能体对话失败：' + e.message, true)
+  }
 }
 
 async function select(id) {
@@ -192,7 +204,7 @@ async function select(id) {
           turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
       }
     }
-    nextTick(stick)
+    nextTick(() => stick(true)) // 打开会话默认落到最新一条，不沿用上一个 thread 的滚动位置
   } catch (e) { toast('加载对话失败：' + e.message, true) }
 }
 
@@ -288,10 +300,20 @@ function nearBottom() {
   const el = scroller.value
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
-function stick() {
+function stick(force) {
   const el = scroller.value
-  if (el && nearBottom()) el.scrollTop = el.scrollHeight
+  // 组件隐藏（display:none）时布局高度为 0，不能在这里改 scrollTop，否则会把
+  // 位置重置到顶部；回到本页时再按离开前的意图落底。
+  if (!el || store.view !== 'agent') return
+  if (force || nearBottom()) el.scrollTop = el.scrollHeight
 }
+
+// 切走时记住是否停在底部（或正在流式），切回来按需落到最新一条。
+let backToBottom = false
+watch(() => store.view, (v, prev) => {
+  if (prev === 'agent' && v !== 'agent') backToBottom = nearBottom() || busy.value
+  else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
+})
 
 async function uploadImages() {
   const ids = []
@@ -338,11 +360,11 @@ async function send() {
   try {
     const res = await fetch(`/api/acp/threads/${currentId.value}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ message: text, attachments }),
       signal: controller.signal,
     })
-    if (res.status === 401) { store.loggedIn = false; toast('登录已过期，请重新登录', true); return }
+    if (res.status === 403) { authFailed(); return }
     if (!res.ok || !res.body) {
       let msg = 'HTTP ' + res.status
       try { const d = await res.json(); if (d.body && d.body.error) msg = d.body.error } catch {}
@@ -462,7 +484,9 @@ function removePreview(p) {
 </script>
 
 <template>
-  <div id="agentView" class="view">
+  <!-- 组件多根（抽屉/Teleport 是兄弟节点），v-show 只能落在主根上；
+       App 只在首次进入时挂载，之后靠这里随导航隐藏/恢复。 -->
+  <div id="agentView" class="view" v-show="store.view === 'agent'">
     <!-- 左：thread 列表 -->
     <aside class="ag-rail">
       <div class="ag-rail-head">
@@ -484,7 +508,7 @@ function removePreview(p) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           <span>{{ form.workspace || '选择目录…' }}</span>
         </button>
-        <p class="meta ag-ws-hint">留空则用临时会话目录（~/.vortex/acp-sessions/）</p>
+        <p class="meta ag-ws-hint">留空则用临时会话目录（数据目录 acp-sessions/）</p>
         <div class="ag-form-acts">
           <button class="btn sm primary" :disabled="!form.agent" @click="createThread">创建</button>
           <button class="btn sm" @click="creating = false">取消</button>
@@ -501,13 +525,22 @@ function removePreview(p) {
           <span class="ag-del" role="button" :aria-label="'删除 ' + (t.title || '对话')"
                 @click.stop="removeThread(t.id)">{{ confirmId === t.id ? '确认删除?' : '×' }}</span>
         </button>
-        <div v-if="!threads.length" class="ag-empty meta">还没有对话。右上角 + 新建一个，把 agent 绑到一个工作目录上。</div>
+        <div v-if="!loaded" class="ag-empty meta">正在加载对话…</div>
+        <div v-else-if="!threads.length" class="ag-empty meta">还没有对话。右上角 + 新建一个，把 agent 绑到一个工作目录上。</div>
       </div>
     </aside>
 
     <!-- 右：对话 -->
     <section class="ag-main">
-      <template v-if="!enabled">
+      <template v-if="!loaded">
+        <div class="ag-blank">
+          <div class="ag-blank-logo">智</div>
+          <h3>{{ loadError ? '加载失败' : '正在加载智能体…' }}</h3>
+          <p class="meta">{{ loadError || '读取已配置的 agent 与对话列表。' }}</p>
+          <button v-if="loadError" class="btn primary" @click="load()">重试</button>
+        </div>
+      </template>
+      <template v-else-if="!enabled">
         <div class="ag-blank">
           <div class="ag-blank-logo">智</div>
           <h3>智能体功能未开启</h3>
@@ -558,7 +591,7 @@ function removePreview(p) {
                   <div class="bubble">
                     {{ m.text }}
                     <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
-                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="mediaURL(src)" alt="">
                   </div>
                   <div class="msg-acts">
                     <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />

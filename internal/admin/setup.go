@@ -81,10 +81,13 @@ func (s *Server) handleSetup(ctx *vhttp.Context) error {
 		}
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "账号设置失败，请检查用户名、密码和账号目录是否可写"})
 	}
-	token := s.newSession()
-	ctx.GinContext().SetCookie(sessionCookie, token, int(sessionTTL.Seconds()), "/", "", r.TLS != nil, true)
+	acc := s.accounts.Current()
 	out := s.setupStatus(r)
-	out["username"] = s.accounts.Current().Username
+	out["username"] = acc.Username
+	// 建号即登录：下发与 /api/login 同形的 JWT，前端保存后直接进主界面。
+	if token, err := s.issueToken(acc.Username); err == nil {
+		out["token"] = token
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, out)
 }
 

@@ -52,23 +52,40 @@ export function finishRound(m, detail) {
   m.round++
 }
 
-// 工具调用事件：run 新起一行并推进轮次（工具调用是轮次边界）；
-// ok/fail 回填最近的同名运行中块。
+// 工具调用事件：一次调用一行。ACP 会按 toolCallId 把同一次调用拆成多条更新，
+// run 只认第一次（同 id 已在跑就更新文案，不新起行）；ok/fail 优先按 id 回填
+// 原行，主会话的工具事件没有 id，退回最近的同名运行中块。
 export function pushToolStep(m, s) {
   const name = s.name || ''
+  let hit = -1
+  if (s.id) {
+    for (let i = m.blocks.length - 1; i >= 0; i--) {
+      if (m.blocks[i].kind === 'tool' && m.blocks[i].id === s.id) { hit = i; break }
+    }
+  }
   if (s.status === 'run') {
-    m.blocks.push({ kind: 'tool', name, text: s.detail || '', out: '',
+    if (hit >= 0) {
+      const b = m.blocks[hit]
+      if (name) b.name = name
+      if (s.detail) b.text = s.detail
+      return
+    }
+    m.blocks.push({ kind: 'tool', id: s.id || '', name, text: s.detail || '', out: '',
       status: 'run', open: false, round: m.round })
     m.round++
     return
   }
-  for (let i = m.blocks.length - 1; i >= 0; i--) {
-    const b = m.blocks[i]
-    if (b.kind === 'tool' && b.status === 'run' && b.name === name) {
-      b.out = s.detail || ''
-      b.status = s.status === 'fail' ? 'fail' : 'ok'
-      return
+  if (hit < 0 && !s.id) {
+    // 只有主会话没 id 时才按名字找：ACP 同名调用可能并行，按名字会收错行。
+    for (let i = m.blocks.length - 1; i >= 0; i--) {
+      const b = m.blocks[i]
+      if (b.kind === 'tool' && b.status === 'run' && b.name === name) { hit = i; break }
     }
+  }
+  if (hit >= 0) {
+    const b = m.blocks[hit]
+    if (s.detail) b.out = s.detail // 完成事件没带结果时保留原有展开内容
+    b.status = s.status === 'fail' ? 'fail' : 'ok'
   }
 }
 
