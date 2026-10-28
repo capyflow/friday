@@ -261,9 +261,4 @@ onBeforeUnmount(() => { clearTimeout(timer); authPolls.forEach(t => clearInterva
     <button class="btn primary" type="button" @click="save">保存并生效</button>
   </div>
   <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-  <div class="set-note">两种接入方式二选一：<b>本地命令</b>（Friday 拉起本机子进程，崩溃自动重启）
-    或<b>远程 URL</b>（连接托管 MCP 服务，Streamable HTTP）。远程服务器的鉴权可选
-    <b>静态请求头</b>（自己填 token）或<b>浏览器授权</b>：点「授权」在浏览器里登录服务商，
-    令牌由 Friday 存在数据目录里并自动刷新，失效时会重新显示「待授权」。
-    保存后立即热生效并写回 config.yaml，无需重启服务。</div>
 </template>

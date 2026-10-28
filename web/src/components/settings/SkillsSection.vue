@@ -115,8 +115,6 @@ onMounted(load)
     </div>
     <textarea v-model="editing.raw" class="se-raw" rows="14" spellcheck="false"
               aria-label="SKILL.md 内容"></textarea>
-    <div class="meta">frontmatter 里 <b>name</b> 必填；正文会作为技能指令注入本轮对话（限 8000 字）。
-      保存失败会说明原因且不覆盖原文件。</div>
   </div>
 
   <div v-if="skills.length" class="skill-list">
@@ -146,10 +144,4 @@ onMounted(load)
     <template v-if="broken.length">{{ broken.length }} 个技能文件无效，已按原因标出（原文件保留）。</template>
     <template v-if="shadowed.length">{{ shadowed.length }} 个技能因重名未生效。</template>
   </div>
-
-  <div class="set-note">技能沿用 vortexagent 的 SKILL.md 格式（<b>name / description / model /
-    allowed-tools / temperature / argument-hint</b> + 正文指令），数据目录
-    <b>skills-user/</b> 下的技能会一并列出（只读），同名时以项目目录为准。
-    <b>allowed-tools 只能收窄本轮可用的工具</b>：技能里写了 exec_command，权限模式该问你还是问你；
-    毁灭性命令黑名单任何情况都拦。自动匹配是 opt-in——技能要写 <b>auto: true</b> 且这里开着总开关才会被猜中。</div>
 </template>

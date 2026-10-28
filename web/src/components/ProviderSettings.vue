@@ -13,7 +13,6 @@ const emit = defineEmits(['saved'])
 const models = reactive([])
 const activeIdx = ref(-1)    // radio 选中的条目下标（保存时生效；用下标避免改名后丢选择）
 const appliedName = ref('')  // 加载时已在生效的条目名（「生效中」徽标）
-const globalWindow = ref(0)  // context.windowTokens 全局覆盖（0 = 未设置，优先级最高）
 const busy = ref(false)
 const msg = reactive({ text: '', cls: '' })
 let msgTimer = null
@@ -41,7 +40,6 @@ async function load() {
   let data
   try { data = await api('GET', '/api/provider/models') }
   catch (e) { show('模型库加载失败：' + e.message, false); return }
-  globalWindow.value = data.globalWindowTokens || 0
   appliedName.value = data.active || ''
   const rows = (data.models || []).map(toRow)
   models.splice(0, models.length, ...rows)
@@ -206,8 +204,6 @@ onMounted(load)
       <button class="btn primary" type="button" :disabled="busy || !models.length" @click="save">{{ busy ? '正在保存…' : '保存并生效' }}</button>
     </div>
     <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-    <p class="set-note">点选 radio 的模型在保存后立即生效；上下文窗口留空按模型名自动识别<template v-if="globalWindow">（当前设了全局覆盖 context.windowTokens={{ globalWindow }}，优先于此处）</template>。
-      最大输出 token 留空按 {{ DEFAULT_MAX_TOKENS }} 提交：思考型模型的「思考」也计入这份预算，给小了会出现只有思考、没有正文（回复中断）。</p>
   </div>
 </template>
 

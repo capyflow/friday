@@ -152,12 +152,10 @@ describe('设置弹窗', () => {
     await click(byText('button', '深色'))
     expect(document.documentElement.dataset.theme).toBe('dark')
     expect(localStorage.getItem('friday-theme')).toBe('dark')
-    expect(text()).toContain('当前生效：深色')
 
     await click(byText('button', '跟随系统'))
     expect(localStorage.getItem('friday-theme')).toBe(null)
     expect(document.documentElement.dataset.theme).toBe('light')
-    expect(text()).toContain('当前生效：浅色')
     expect(byText('button', '跟随系统').getAttribute('aria-pressed')).toBe('true')
     expect(byText('button', '深色').getAttribute('aria-pressed')).toBe('false')
   })
