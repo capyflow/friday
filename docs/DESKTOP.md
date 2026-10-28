@@ -35,6 +35,8 @@
 2. **固定端口（origin）**：外壳固定传 `--port 47831`，WebView origin 恒定，localStorage（`friday.authToken`，主窗口与弹窗共享）天然跨重启保留；端口被占时退回 `--port 0` 随机端口
 3. **原生冷备（兜底）**：外壳把 token 原子写入 `<数据目录>/desktop-auth-token`（Unix 0600），原生命令 `auth_get_token/auth_set_token/auth_clear_token` 仅在 origin 与内核一致的主窗口/弹窗内可用；前端 `auth.js` 启动 `hydrateToken()` 回填（native 为准，本地多出的推给 native），`setToken` 写穿同步。**端口回退随机或 WebView 数据被清时，登录态由这层兜住**。浏览器直访无 `__TAURI__`，自动降级为纯 localStorage
 
+**前端偏好同款冷备**：主题（`friday-theme`）、系统通知开关（`friday-notifications-enabled`）、通知去重（`friday-notices-<user>`）是前端自己的数据，经 `prefs.js` 写穿到 `<数据目录>/desktop-prefs.json`（键白名单 `friday-` 前缀、排除 token、单值 ≤8KB、原子写 0600），启动时 `hydratePrefs()` 在挂载前补齐缺失项（本地为准）。浏览器直访退化为纯 localStorage。
+
 ## 二、生命周期一致性（三层保证）
 
 sidecar 机制本身不提供父子进程生命周期绑定（Tauri 不自动杀子进程），需显式接线：

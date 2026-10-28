@@ -1,7 +1,10 @@
 // 主题：浅色（Quiet SaaS）/ 深色（中性炭灰），html[data-theme] 驱动。
-// 偏好存在 localStorage：存 light/dark 是用户的显式选择，没有键 = 跟随系统。
-// 生效主题变化经 friday:theme 广播（账号菜单的图标文案与设置页的选中态都听它），
-// index.html 头部有同逻辑的内联脚本，在挂载前预设 data-theme 防止首帧闪烁。
+// 偏好存 localStorage，桌面端写穿到壳的数据目录（prefs.js，跨 origin 保留）；
+// 没有键 = 跟随系统。生效主题变化经 friday:theme 广播（账号菜单的图标文案与
+// 设置页的选中态都听它），index.html 头部有同逻辑的内联脚本，在挂载前预设
+// data-theme 防止首帧闪烁。
+import { getPref, setPref, removePref } from './prefs.js'
+
 const KEY = 'friday-theme'
 const QUERY = '(prefers-color-scheme: dark)'
 
@@ -10,7 +13,7 @@ export function systemTheme() {
 }
 
 export function savedTheme() {
-  try { return localStorage.getItem(KEY) } catch (e) { return null }
+  return getPref(KEY)
 }
 
 // themePreference 返回用户的选择（'auto' | 'light' | 'dark'），不是当前生效主题。
@@ -40,13 +43,13 @@ export function initTheme() {
 
 export function setTheme(t) {
   applyTheme(t)
-  try { localStorage.setItem(KEY, t) } catch (e) {}
+  setPref(KEY, t)
   announce(t)
 }
 
 // clearTheme 回到「跟随系统」：删掉显式选择，按当前系统偏好立即生效。
 export function clearTheme() {
-  try { localStorage.removeItem(KEY) } catch (e) {}
+  removePref(KEY)
   const t = systemTheme()
   applyTheme(t)
   announce(t)

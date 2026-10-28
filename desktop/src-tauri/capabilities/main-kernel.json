@@ -9,6 +9,8 @@
     "allow-auth-get-token",
     "allow-auth-set-token",
     "allow-auth-clear-token",
+    "allow-prefs-get",
+    "allow-prefs-save",
     "allow-enable-notifications",
     "allow-notifications-enabled",
     "allow-kernel-state",

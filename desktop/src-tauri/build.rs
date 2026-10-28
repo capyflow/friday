@@ -5,6 +5,8 @@ fn main() {
             "auth_get_token",
             "auth_set_token",
             "auth_clear_token",
+            "prefs_get",
+            "prefs_save",
             "enable_notifications",
             "notifications_enabled",
             "pick_data_dir_dialog",

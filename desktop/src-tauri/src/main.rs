@@ -225,11 +225,11 @@ fn auth_token_path(app: &tauri::AppHandle) -> std::path::PathBuf {
     app.state::<Kernel>().data_dir().join(AUTH_TOKEN_FILE)
 }
 
-fn check_auth_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
+fn check_kernel_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
     let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
     let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
     if !trusted_auth_origin(window.label(), current.as_str(), addr.as_deref()) {
-        return Err("当前窗口不能访问登录凭据".into());
+        return Err("当前窗口不能访问本地数据".into());
     }
     Ok(())
 }
@@ -240,7 +240,7 @@ fn auth_get_token(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<Option<String>, String> {
-    check_auth_window(&app, &window)?;
+    check_kernel_window(&app, &window)?;
     match std::fs::read_to_string(auth_token_path(&app)) {
         Ok(raw) => {
             let token = raw.trim();
@@ -258,7 +258,7 @@ fn auth_set_token(
     window: tauri::WebviewWindow,
     token: String,
 ) -> Result<(), String> {
-    check_auth_window(&app, &window)?;
+    check_kernel_window(&app, &window)?;
     let token = token.trim();
     if !looks_like_session_token(token) {
         return Err("登录凭据格式不正确".into());
@@ -285,12 +285,86 @@ fn auth_clear_token(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    check_auth_window(&app, &window)?;
+    check_kernel_window(&app, &window)?;
     match std::fs::remove_file(auth_token_path(&app)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("清除登录凭据失败：{e}")),
     }
+}
+
+// ---------- 前端本地偏好的原生持久化（主题/通知开关/通知去重） ----------
+//
+// 这些是前端自己的数据，只是借壳的磁盘跨 origin 保存：localStorage 按 origin
+// 隔离，端口回退随机时会整片丢失；桌面端把快照写数据目录，启动时由
+// prefs.js hydratePrefs 补齐。浏览器直访没有这层，退化为纯 localStorage。
+
+const PREFS_FILE: &str = "desktop-prefs.json";
+const PREFS_MAX_KEYS: usize = 64;
+const PREFS_KEY_MAX: usize = 64;
+const PREFS_VALUE_MAX: usize = 8 * 1024;
+
+/// 偏好键白名单：只收前端自有的 friday- 前缀键；token 有独立通道，不走这里。
+const AUTH_TOKEN_FILE_KEY: &str = "friday.authToken";
+
+fn valid_pref_key(key: &str) -> bool {
+    key.starts_with("friday-") && key != AUTH_TOKEN_FILE_KEY && key.len() <= PREFS_KEY_MAX
+}
+
+fn prefs_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.state::<Kernel>().data_dir().join(PREFS_FILE)
+}
+
+/// 读回偏好快照；文件不存在（从未写过）返回空表。
+#[tauri::command]
+fn prefs_get(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    check_kernel_window(&app, &window)?;
+    match std::fs::read(prefs_path(&app)) {
+        Ok(raw) => serde_json::from_slice(&raw).map_err(|e| format!("偏好文件损坏：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::collections::HashMap::new())
+        }
+        Err(e) => Err(format!("读取偏好失败：{e}")),
+    }
+}
+
+/// 整表落盘偏好快照：白名单 + 尺寸上限校验后原子写（同目录 tmp + rename，0600）。
+#[tauri::command]
+fn prefs_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    prefs: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    check_kernel_window(&app, &window)?;
+    if prefs.len() > PREFS_MAX_KEYS {
+        return Err("偏好项过多".into());
+    }
+    for (key, value) in &prefs {
+        if !valid_pref_key(key) {
+            return Err(format!("不支持的偏好键：{key}"));
+        }
+        if value.len() > PREFS_VALUE_MAX {
+            return Err(format!("偏好值过大：{key}"));
+        }
+    }
+    let path = prefs_path(&app);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建数据目录失败：{e}"))?;
+    }
+    let data = serde_json::to_vec(&prefs).map_err(|e| format!("编码偏好失败：{e}"))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data).map_err(|e| format!("写入偏好失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置偏好文件权限失败：{e}"))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("保存偏好失败：{e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -653,8 +727,10 @@ fn kernel_path() -> PathBuf {
         .join(name)
 }
 
-/// 内核首选监听端口：固定 origin 让网页登录态（localStorage 里的 JWT）、主题等
-/// 跨重启保留。端口被占用时退回系统分配（0），本次登录态只在本次运行有效。
+/// 内核首选监听端口：固定 origin 让 localStorage 保持稳定（省一次回填），
+/// 主题/偏好与登录态另有原生冷备兜底。端口被占用时退回系统分配（0）——
+/// 新 origin 的 localStorage 是空的，但前端启动时从 desktop-auth-token /
+/// desktop-prefs.json 回填，功能不受影响。
 const PREFERRED_PORT: u16 = 47831;
 
 fn desktop_port() -> u16 {
@@ -664,7 +740,7 @@ fn desktop_port() -> u16 {
             PREFERRED_PORT
         }
         Err(_) => {
-            eprintln!("[外壳] 端口 {PREFERRED_PORT} 被占用，本次改用系统分配端口（登录态不跨重启保留）");
+            eprintln!("[外壳] 端口 {PREFERRED_PORT} 被占用，本次改用系统分配端口（登录态与偏好由原生冷备回填）");
             0
         }
     }
@@ -756,6 +832,8 @@ fn main() {
             auth_get_token,
             auth_set_token,
             auth_clear_token,
+            prefs_get,
+            prefs_save,
             enable_notifications,
             notifications_enabled,
             pick_data_dir_dialog,
@@ -843,8 +921,8 @@ fn spawn_kernel(app: tauri::AppHandle) {
     let envs = read_env_file(&data_dir.join("friday.env"));
 
     let data_arg = data_dir.to_string_lossy().to_string();
-    // 固定首选端口：网页 origin 稳定，登录 JWT 存在 localStorage 里才能跨重启
-    // 保留（随机端口每次重启都是新 origin）。端口被占用（开发实例等）时退回 0。
+    // 固定首选端口：origin 稳定时 localStorage 直接可用，省掉一次原生回填；
+    // 端口被占用（开发实例等）退回 0，由 token/偏好冷备接管。
     let port_arg = desktop_port().to_string();
     let spawned = app
         .shell()
