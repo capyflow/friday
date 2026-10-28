@@ -2,6 +2,9 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "kernel_state",
+            "auth_get_token",
+            "auth_set_token",
+            "auth_clear_token",
             "enable_notifications",
             "notifications_enabled",
             "pick_data_dir_dialog",
