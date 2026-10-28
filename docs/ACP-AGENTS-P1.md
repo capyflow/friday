@@ -90,6 +90,9 @@ client ：approval.Queue 入队 → 网页现有审批卡出卡（字段模板�
 ### 5.3 取消
 
 `POST /api/acp/threads/:id/stop` → 显式 `session/cancel` → 读 `stopReason`（C8，"cancelled" 不判失败）。
+取消只是通知，agent 可能不执行（实测有 agent 收到 cancel 后继续跑工具）：宽限 8s 仍未收尾就强杀
+整个进程组；若宽限内已正常收尾则不动进程。整轮超时（含浏览器断开）则直接回收进程组——
+客户端已放弃这一轮，不让 agent 继续在后台写文件/跑命令；下一条消息按 `session/load` 重接。
 **没有 PausedTurn 机制**：部分回答已在 agent 自己的 session 里，cancel 后用户直接发下一句即可续聊——
 比主聊天（internal/web/chat.go 的暂停/继续）少一整套现场保存，这是独立会话的简化红利。
 

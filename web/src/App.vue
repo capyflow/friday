@@ -37,6 +37,11 @@ const userInitial = ref('U')
 watch(() => store.username, v => { userInitial.value = (v || 'U').charAt(0).toUpperCase() }, { immediate: true })
 const host = ref(location.host)
 
+/* 智能体页懒挂载、挂载后常驻（v-show）：首次进入才拉配置/建会话；之后切到
+   别的导航也不卸载，进行中的 SSE、滚动位置与选中的 thread 都保留。 */
+const agentReady = ref(false)
+watch(() => store.view, v => { if (v === 'agent') agentReady.value = true }, { immediate: true })
+
 function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
   if (userPopOpen.value && !e.target.closest('.side-foot') && !e.target.closest('.user-pop')) {
@@ -193,7 +198,7 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
-      <Transition name="view"><AgentView v-if="store.view === 'agent'" /></Transition>
+      <Transition name="view"><AgentView v-if="agentReady" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>

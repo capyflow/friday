@@ -186,3 +186,70 @@ describe('智能体对话空间', () => {
     expect(wrapper.text()).toContain('上次会话被中断')
   })
 })
+
+describe('智能体会话滚动位置', () => {
+  it('打开会话默认滚到最底部，不沿用上一个 thread 的位置', async () => {
+    const second = {
+      id: 'th2', agent: 'codex', workspace: '/home/u/proj', title: '第二件事',
+      state: 'idle', degraded: false,
+      messages: [
+        { role: 'user', text: '第二个问题' },
+        { role: 'assistant', text: '第二个回答', in: 1, out: 1, ms: 10, stopped: 'end_turn' },
+      ],
+    }
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/threads') return { threads: [thread, second], acp: config }
+      if (method === 'GET' && url === '/api/acp/threads/th1') return { thread }
+      if (method === 'GET' && url === '/api/acp/threads/th2') return { thread: second }
+      return {}
+    })
+    const { store } = await import('../src/store.js')
+    store.view = 'agent' // 真机上本组件只在智能体视图可见
+    await show()
+    const el = wrapper.get('.ag-scroller').element
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: 2000 })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: 500 })
+    el.scrollTop = 0 // 上一个会话停在顶部
+    await wrapper.findAll('.ag-item')[1].trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(el.scrollTop).toBe(2000)
+    store.view = 'chat'
+  })
+})
+
+describe('智能体页加载态', () => {
+  it('首次加载完成前显示加载态，不把“还没拉到”误报成功能未开启', async () => {
+    let finish
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/threads')
+        return new Promise(resolve => { finish = resolve })
+      return {}
+    })
+    wrapper = mount(AgentView, { global: { stubs: { teleport: true } } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('正在加载智能体…')
+    expect(wrapper.text()).not.toContain('智能体功能未开启')
+    finish({ threads: [thread], acp: config })
+    await flushPromises()
+    expect(wrapper.text()).toContain('第一件事')
+  })
+
+  it('首次加载失败给出重试入口，恢复后正常显示', async () => {
+    let fail = true
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/threads') {
+        if (fail) throw new Error('网络断了')
+        return { threads: [thread], acp: config }
+      }
+      if (method === 'GET' && url === '/api/acp/threads/th1') return { thread }
+      return {}
+    })
+    await show()
+    expect(wrapper.text()).toContain('加载失败')
+    fail = false
+    await wrapper.findAll('button').find(b => b.text() === '重试').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('第一件事')
+  })
+})

@@ -330,6 +330,22 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.find('.cursor').exists()).toBe(false)
   })
 
+  it('工具调用只有名字（无结果）时也能展开查看，而不是禁用', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'run' } },
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'ok' } },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('跑一下')
+    const tool = wrapper.get('.tool')
+    expect(tool.find('.tool-head .think-chev').exists()).toBe(true)
+    expect(tool.get('.tool-head').attributes('disabled')).toBeUndefined()
+    await tool.get('.tool-head').trigger('click')
+    expect(tool.get('.tool-call .step-name').text()).toBe('Bash')
+    expect(tool.find('.tool-out').exists()).toBe(false)
+  })
+
   it('结束帧兜底：结果事件丢失的工具块就地收掉，不再转圈', async () => {
     let controller
     fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
