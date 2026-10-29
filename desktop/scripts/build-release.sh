@@ -11,7 +11,9 @@
 #   desktop/scripts/build-release.sh --bundles dmg      # 覆盖产物类型（默认按系统：mac=dmg / linux=deb,appimage / win=nsis）
 #
 # 产物位置（macOS 为例）：
-#   desktop/src-tauri/target/release/bundle/dmg/Friday_<ver>_<arch>.dmg
+#   desktop/src-tauri/target/release/bundle/dmg/Friday_<ver>_<arch>.dmg   # 分发/归档用
+#   desktop/src-tauri/target/release/bundle/macos/Friday.app              # 本机更新就换这个
+#   （外壳与内核在同一份 .app 里，本机更新不需要 dmg；见 desktop/README.md「更新本机版本」）
 #
 # 前置依赖：Go 1.25+、Rust（rustup）、Node/npx（跑 Tauri CLI）、Python3（占位图标）。
 # Windows 需在 Git Bash / MSYS 下运行，且已装 MSVC 工具链与 WebView2。
@@ -56,9 +58,18 @@ TAURI_CLI=(npx -y @tauri-apps/cli@^2)
 echo "go $(go version | awk '{print $3}') / rust $(rustc --version | awk '{print $2}') / tauri-cli ${TAURI_CLI[*]}"
 
 # ---- 1. 版本号 ----
+# 缺省取 desktop-v* tag 或 git 短哈希；工作区有未提交改动时补 -dirty——否则装着
+# 改动的包标着上一个提交的哈希，事后无法区分（本机迭代最常踩的歧义）。
+# 显式 --version 时不加后缀（那串就是要发出去的版本），并把同一串同步给 tauri，
+# 让内核版本、Info.plist 与 dmg 文件名三处一致。
 if [ -z "$VERSION" ]; then
   VERSION="$(git -C "$REPO_ROOT" describe --tags --match 'desktop-v*' --abbrev=7 2>/dev/null \
     || echo "dev-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo none)")"
+  # 只看已跟踪文件的差异：未跟踪的用户数据（acp-threads.json 等）不该算"脏"。
+  # 后缀带构建时刻：同一 HEAD 上连打两个脏包，光看 -dirty 分不出装的是哪个。
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    VERSION="$VERSION-dirty.$(date +%y%m%d%H%M)"
+  fi
 fi
 step "版本：${VERSION}（注入 Go 内核 main.version）"
 
@@ -135,3 +146,20 @@ step "打包完成，产物："
 find "$BUNDLE_ROOT" -type f \( -name '*.dmg' -o -name '*.app' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
   -exec ls -lh {} \; | awk '{print "  " $5 "  " $9}'
 [ -d "$BUNDLE_ROOT" ] || die "未找到产物目录 $BUNDLE_ROOT"
+if [ "$OS" = "Darwin" ]; then
+  # 本机更新只认一个东西：外壳与内核在同一个 .app 里（一体包），dmg 只是它的压缩外壳。
+  # 每次把这段贴出来，避免"装哪个包/怎么确认装上了"再问一遍。
+  APP="$BUNDLE_ROOT/macos/Friday.app"
+  DMG_FOUND="$(find "$BUNDLE_ROOT/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+  step "本机更新（一个包：替换 .app 即可，数据目录不动）"
+  echo "  1. 退出运行中的 Friday（托盘菜单「退出 Friday」，不是关窗口）"
+  echo "  2. ditto '$APP' /Applications/Friday.app"
+  echo "  3. 验版本：'/Applications/Friday.app/Contents/MacOS/friday' --version   # 应输出 ${VERSION}"
+  echo "     或看数据目录日志的新行：grep '\\[启动\\] Friday' ~/Library/Application\\ Support/Friday/friday-kernel.log | tail -1"
+  echo "     （Info.plist 的版本串只在显式 --version 时才跟着变，别拿它判断新旧）"
+  if [ -n "$DMG_FOUND" ]; then
+    echo "  分发/归档用 dmg：$DMG_FOUND（内容与上面的 .app 逐文件相同，只多一个 Applications 快捷方式）"
+  else
+    echo "  本次只出了 .app（--bundles app）：分发时要 dmg 就补一句 --bundles dmg"
+  fi
+fi

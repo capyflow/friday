@@ -55,6 +55,51 @@ desktop/scripts/build-release.sh --bundles dmg      # 覆盖产物类型
 产物（macOS）：`desktop/src-tauri/target/release/bundle/dmg/Friday_<ver>_<arch>.dmg`；
 Windows 为 NSIS `.exe`；Linux 为 `.deb` / `.AppImage`。
 
+## 更新本机版本（一个包，别在两个产物间犹豫）
+
+外壳与内核在同一个 `Friday.app` 里（一体包，2026-10-28 起内核随包分发、不再往数据目录
+`bin/` 播种），所以**本机更新只需要一个东西：替换 `/Applications/Friday.app`**。
+`bundle/dmg/*.dmg` 是同一个 app 的压缩分发壳——挂载后里面除 `Friday.app` 只多一个
+`Applications` 快捷方式，逐文件比对与 `bundle/macos/Friday.app` 无差异。发给别人、放
+Release 才用 dmg；本机直接 `ditto` app 目录更快，也不会带上从网络下载产生的
+`com.apple.quarantine`（那是首次打开被 Gatekeeper 拦的根源，本地构建 ad-hoc 签名本就不过公证）。
+
+```bash
+# 1) 退出运行中的 Friday（托盘菜单「退出 Friday」；只关窗口是驻留，二进制仍被占着）
+pgrep -x friday-desktop && osascript -e 'quit app "Friday"' && sleep 2
+# 2) 留一份可回退的旧包（放 /Applications 之外）
+cp -R /Applications/Friday.app /tmp/Friday.prev.app
+# 3) 替换（ditto 保留权限与符号链接）
+ditto desktop/src-tauri/target/release/bundle/macos/Friday.app /Applications/Friday.app
+# 4) 启动，然后验版本（应等于打包日志里的"版本：…"）
+open /Applications/Friday.app
+/Applications/Friday.app/Contents/MacOS/friday --version
+```
+
+回滚：`ditto /tmp/Friday.prev.app /Applications/Friday.app`。只替换 app 不动数据目录
+（`~/Library/Application Support/Friday`），要干净重装才按 [docs/DESKTOP.md](../docs/DESKTOP.md) 的清单删数据。
+
+**版本口径（三处数字长得不一样，别拿错地方判断新旧）**：
+
+| 在哪里看 | 是什么 | 能判断装的是哪次构建吗 |
+|---|---|---|
+| `Contents/MacOS/friday --version` | Go 内核 `main.version`（打包时 ldflags 注入） | ✅ 唯一准绳 |
+| 数据目录 `friday-kernel.log` 里 `[启动] Friday <ver>` | 同上，每次内核启动一行 | ✅ 不必命令行，也能看到"上一次真正跑起来的是哪个版本" |
+| dmg 文件名 `Friday_<ver>_<arch>.dmg` | 显式 `--version` 时才是那串；缺省构建是 tauri.conf 的 `0.1.0` | ⚠️ 半可信 |
+| `Info.plist` 的 `CFBundleShortVersionString` | tauri.conf 的 version | ❌ 只有显式传 `--version` 才跟着变 |
+
+缺省（不传 `--version`）时内核版本是 `desktop-v*` tag 或 `dev-<git 短哈希>`，**工作区有未提交
+改动还会补 `-dirty.<构建时刻>`**（例如 `dev-df1f4c0-dirty.2610291340`）：装着改动的包光标上个
+提交的哈希，同一哈希连打两个包就分不出装的是哪个，所以把时刻也带进版本串。要一个能对外的版本
+号就显式传 `--version`（同时同步 plist 与 dmg 文件名，三处一致，且不加 dirty 后缀）：
+
+```bash
+desktop/scripts/build-release.sh --version v0.1.0-ws.1
+```
+
+带连字符的 prerelease 形态（`0.1.0-ws.1`）在 macOS 上 plist 结构与挂载校验都正常；要严格 A.B.C
+数字段就用 `0.1.1`。
+
 ## 本地开发
 
 ```bash
