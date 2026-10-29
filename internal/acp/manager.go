@@ -45,6 +45,11 @@ const (
 // 就强杀进程组（取消只是通知，agent 可能不执行）。测试会临时改小。
 var stopKillGrace = 8 * time.Second
 
+// timeoutKillGrace 是单轮超时后的强杀宽限：先 session/cancel，留一点时间让 agent
+// 自己停下；一条连接承载多个会话（M-6），不该为了一轮立刻把同组别的会话一起打断。
+// 宽限到点仍脏（且没有别的轮次在跑）才回收连接；否则拖到下次使用/空闲回收。测试会改小。
+var timeoutKillGrace = 10 * time.Second
+
 // Entry 是投影对话记录里的一条消息。
 type Entry struct {
 	Role    string    `json:"role"` // user | assistant | note
@@ -145,7 +150,11 @@ type live struct {
 	sink      *turnSink    // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
 	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
 	stopTimer *time.Timer   // 用户停止后的强杀兜底
+	graceTimer *time.Timer  // 超时后的强杀宽限（先 cancel，仍不收尾才杀）
 	stopping  atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
+	// dirty 表示"agent 可能还在跑上一轮"（超时后取消只是通知）。下轮开始前若
+	// 还是脏的就回收这条连接，保证同一 session 不会有两轮并发（C3）。
+	dirty atomic.Bool
 }
 
 // 会话级能力缓存：会话响应、config_options_update 推送、切换响应都会刷新它。
@@ -268,6 +277,19 @@ func (ps *procState) dropThread(threadID string) int {
 }
 
 func procKey(agent, cwd string) string { return agent + "\x00" + cwd }
+
+// procHasActiveTurn 报告这条连接上是否还有轮次在跑（宽限强杀前用：
+// 别为了一个超时的会话把同连接上别的会话一起打断）。
+func (m *Manager) procHasActiveTurn(ps *procState) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, lv := range m.live {
+		if lv.ps == ps && lv.takeSink() != nil {
+			return true
+		}
+	}
+	return false
+}
 
 // Manager 管理全部工作区、thread 与存活进程。
 type Manager struct {
@@ -700,6 +722,9 @@ func (m *Manager) releaseProc(ps *procState, reason string) {
 			if lv.stopTimer != nil {
 				lv.stopTimer.Stop()
 			}
+			if lv.graceTimer != nil {
+				lv.graceTimer.Stop()
+			}
 			delete(m.live, thID)
 		}
 	}
@@ -1056,6 +1081,15 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	if err != nil {
 		return TurnResult{}, err
 	}
+	// 上一轮超时了、agent 当时可能还在跑：宽度过了也没停的话，这条连接是脏的，
+	// 不能直接在上面再发一轮（同一 session 两轮并发违背 C3）——先回收再重接。
+	if lv.dirty.Load() {
+		m.killLive(id, "上一轮超时后仍未收尾，重接前回收")
+		lv, degraded, err = m.ensureLive(ctx, th, agentCfg, hooks)
+		if err != nil {
+			return TurnResult{}, err
+		}
+	}
 	if !lv.proc.alive() {
 		return TurnResult{}, errors.New("agent 连接已断开，请重试")
 	}
@@ -1104,10 +1138,20 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	sink := newTurnSink(hooks)
 	lv.setSink(sink)
 
+	// 快到单轮上限时先给 UI 一条状态帧：让用户知道不是卡死，而是马上会被中止
+	warnAfter := turnTimeout - 5*time.Second
+	if warnAfter < time.Second {
+		warnAfter = time.Second
+	}
+	warnTimer := time.AfterFunc(warnAfter, func() {
+		hooks.status(fmt.Sprintf("已接近单轮上限（%d 秒），本轮即将被中止；中止后可以发「继续」接着做。",
+			int(turnTimeout/time.Second)))
+	})
 	started := time.Now()
 	res, promptErr := lv.proc.conn.Prompt(turnCtx, acp.PromptRequest{
 		SessionId: lv.sessionID, Prompt: blocks,
 	})
+	warnTimer.Stop()
 	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
 	close(turnDone)
 	sink.finish()
@@ -1126,17 +1170,51 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		m.mu.Unlock()
 	}
 
-	// 超时/断开时 agent 可能仍在跑：显式取消（C8，读 stopReason 而非猜）。
-	// 取消只是通知，agent 不一定执行（实测有 agent 超时后继续跑工具），
-	// 客户端已经放弃这一轮，直接回收进程组保证它真的停下；下轮按
-	// session/load 重接上下文。
-	aborted := turnCtx.Err() != nil
+	// 中止原因分开记：DeadlineExceeded 才是"超时"，Canceled 是用户停止或客户端断开。
+	// 取消只是通知，agent 不一定执行（实测有 agent 超时后继续跑工具）——
+	// 超时的处理是"先 cancel + 标记脏 + 宽限后（且同组无其它轮次）才回收进程"，
+	// 不再为了一轮立刻杀掉整条连接（M-6 后连接是共享的）。
+	ctxErr := turnCtx.Err()
+	aborted := ctxErr != nil
 	stopped := lv.stopping.Load()
+	cause := ""
+	if aborted {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			cause = "timeout"
+		} else {
+			cause = "cancelled"
+		}
+	}
 	if aborted && promptErr != nil {
 		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
-		m.killLive(id, "本轮超时/断开，回收进程")
+		if cause == "timeout" {
+			lv.dirty.Store(true)
+			ps := lv.ps
+			lv.graceTimer = time.AfterFunc(timeoutKillGrace, func() {
+				if !lv.dirty.Load() || ps == nil {
+					return
+				}
+				// 同一条连接上还有别的轮次在跑就先不动，等空闲回收/下次使用再收
+				if m.procHasActiveTurn(ps) {
+					return
+				}
+				m.killProc(ps.key, "超时后仍未收尾，回收连接")
+			})
+		} else {
+			m.killLive(id, "本轮被中止，回收进程") // 客户端已放弃这一轮，没人接收结果
+		}
 	}
 	interrupted := aborted || (stopped && promptErr != nil)
+	abortNote := ""
+	switch {
+	case !interrupted:
+	case cause == "timeout":
+		abortNote = "超时（已中止本轮 agent 执行；上下文仍在，可以发「继续」接着做）"
+	case stopped:
+		abortNote = "被用户停止"
+	default:
+		abortNote = "连接已断开（页面关闭或网络中断），本轮结果不会回到本对话"
+	}
 
 	m.mu.Lock()
 	if lv.stopTimer != nil {
@@ -1166,7 +1244,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		result.StopReason = string(res.StopReason) // cancelled 不判失败（C8）
 	case aborted:
 		result.Answer = sink.allText()
-		result.StopReason = "timeout"
+		result.StopReason = cause // timeout | cancelled（客户端断开/用户停止）
 	case stopped:
 		// 停止指令未生效、兜底强杀：按用户取消收尾，不算崩溃。
 		result.Answer = sink.allText()
@@ -1185,7 +1263,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 				files = append(files, img.ID)
 			}
 		}
-		m.appendTurnLocked(current, text, files, result, degraded, interrupted, promptErr != nil && !interrupted, errText)
+		m.appendTurnLocked(current, text, files, result, degraded, abortNote, promptErr != nil && !interrupted, errText)
 		if used, size, cost, _ := sink.context(); size > 0 {
 			current.ContextUsed = used
 			current.ContextSize = size
@@ -1204,13 +1282,15 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		In: result.In, Out: result.Out,
 	})
 
+	log.Printf("[智能体] 轮次结束 thread=%s agent=%s 用时=%s 原因=%s tokens=%d/%d",
+		id, th.Agent, elapsed.Round(time.Second), result.StopReason, result.In, result.Out)
 	m.armIdle(procKey(th.Agent, th.Cwd))
 	return result, runErr
 }
 
 // appendTurnLocked 把本轮问答追加进投影（调用方须持 m.mu）。
 // degraded 为真说明本轮跑在新会话里（旧上下文丢失），插入显式标注。
-func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, r TurnResult, degraded, aborted, crashed bool, errText string) {
+func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, r TurnResult, degraded bool, abortNote string, crashed bool, errText string) {
 	if degraded && len(th.Messages) > 0 {
 		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
 			Text: "agent 进程已重建，旧会话无法恢复，上下文已重置（历史记录仍可见）"})
@@ -1224,13 +1304,9 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 		entry.Text = "（本轮没有产出文本）"
 	}
 	th.Messages = append(th.Messages, entry)
-	if aborted {
-		reason := "超时（已中止本轮 agent 执行，结果不会回到本对话）"
-		if r.StopReason == "cancelled" {
-			reason = "被用户停止"
-		}
+	if abortNote != "" {
 		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
-			Text: "本轮对话在完成前中断：" + reason})
+			Text: "本轮对话在完成前中断：" + abortNote})
 	}
 	if crashed {
 		text := "本轮失败：" + truncateRunes(errText, 160)
