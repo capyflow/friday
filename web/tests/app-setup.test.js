@@ -74,18 +74,29 @@ describe('App 首次设置路由和通知接线', () => {
     expect(store.loggedIn).toBe(true)
   })
 
-  it('智能体页首次进入才挂载，切走导航后常驻（进行中的一轮不被打断）', async () => {
+  it('工作区页首次进入才挂载，切走导航后常驻（进行中的一轮不被打断）', async () => {
     session = { authenticated: true, username: 'owner' }
     await showApp()
-    expect(wrapper.findComponent({ name: 'AgentView' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'WorkspaceView' }).exists()).toBe(false)
     store.view = 'agent'
     await flushPromises()
-    expect(wrapper.findComponent({ name: 'AgentView' }).exists()).toBe(true)
-    expect(wrapper.find('#agentView').element.style.display).toBe('')
+    expect(wrapper.findComponent({ name: 'WorkspaceView' }).exists()).toBe(true)
+    expect(wrapper.find('#workspaceView').element.style.display).toBe('')
     store.view = 'chat'
     await flushPromises()
-    expect(wrapper.findComponent({ name: 'AgentView' }).exists()).toBe(true)
-    expect(wrapper.find('#agentView').element.style.display).toBe('none')
+    expect(wrapper.findComponent({ name: 'WorkspaceView' }).exists()).toBe(true)
+    expect(wrapper.find('#workspaceView').element.style.display).toBe('none')
+  })
+
+  it('应用内全屏给 #app 挂 focus-mode（隐藏左侧全局导航）', async () => {
+    session = { authenticated: true, username: 'owner' }
+    const { store } = await import('../src/store.js')
+    await showApp()
+    expect(wrapper.get('#app').classes()).not.toContain('focus-mode')
+    store.fullscreen = true
+    await flushPromises()
+    expect(wrapper.get('#app').classes()).toContain('focus-mode')
+    store.fullscreen = false
   })
 
   it('侧栏设置按钮弹出设置弹窗，关闭事件复位开关', async () => {

@@ -11,12 +11,16 @@ const props = defineProps({
   ariaLabel: { type: String, required: true },
   // busy=回复进行中：输入禁用、发送键显示停止图标并发 stop 事件
   busy: { type: Boolean, default: false },
+  // queueOn=busy 时仍允许输入（父组件把"发送"解释为"加入队列"）：
+  // 输入框不再禁用、Enter 照样触发 primary、主按钮回到发送形态。
+  // 「停止本轮」由父组件另给一个控件，不占这个键。
+  queueOn: { type: Boolean, default: false },
   // disabled=整条输入栏禁用（如清空历史中），优先于 busy
   disabled: { type: Boolean, default: false },
   sendLabel: { type: String, default: '发送' },
   sendDisabled: { type: Boolean, default: false },
 })
-const emit = defineEmits(['update:modelValue', 'primary', 'paste'])
+const emit = defineEmits(['update:modelValue', 'primary', 'pause', 'stop', 'paste'])
 
 const inputEl = ref(null)
 function autoGrow() {
@@ -31,10 +35,36 @@ function onInput(e) {
   emit('update:modelValue', e.target.value)
   autoGrow()
 }
+
+/* 中文/日文输入法组字期间的 Enter 是在"上屏"，不是发送。
+   isComposing 在 Chrome/WKWebView 里通常为真，但 Safari 与部分输入法会先
+   compositionend 再发这一次 keydown（此时 isComposing 已是 false），所以再维护
+   一个组字标志，并延迟到下一个宏任务才清——刚结束组字的那一下回车仍然吞掉。 */
+let composing = false
+function onCompositionStart() { composing = true }
+function onCompositionEnd() {
+  // 用 0ms 定时器而不是直接置 false：Safari 把 compositionend 排在 keydown 之前，
+  // 同步清掉会把"上屏那次回车"放过去
+  setTimeout(() => { composing = false }, 0)
+}
+function isImeKey(e) {
+  return composing || e.isComposing || e.keyCode === 229
+}
+
 function onKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Esc：正在回答时中断本轮（有弹层时由父组件的文档级处理先收弹层）
+  if (e.key === 'Escape') {
+    if (props.busy) {
+      e.preventDefault()
+      emit('stop')
+    }
+    return
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    if (isImeKey(e)) return // 组字中/上屏回车：交给输入法，别发送
     e.preventDefault()
-    if (!props.busy) emit('primary') // busy 时 Enter 不动作（停止只走按钮，语义由父组件定）
+    // busy 时 Enter 默认不动作（停止只走按钮/Esc）；父组件开了排队就照常触发
+    if (!props.busy || props.queueOn) emit('primary')
   }
 }
 function focus() { inputEl.value && inputEl.value.focus() }
@@ -86,8 +116,9 @@ onBeforeUnmount(() => { barRO && barRO.disconnect(); barMO && barMO.disconnect()
     <slot name="previews"></slot>
     <!-- 第一行：输入区独占整行并自动增高；操作键全部落到第二行 -->
     <textarea ref="inputEl" rows="1" :value="modelValue" :placeholder="placeholder"
-              :aria-label="ariaLabel" :disabled="disabled || busy"
-              @keydown="onKeydown" @input="onInput" @paste="$emit('paste', $event)"></textarea>
+              :aria-label="ariaLabel" :disabled="disabled || (busy && !queueOn)"
+              @keydown="onKeydown" @input="onInput" @paste="$emit('paste', $event)"
+              @compositionstart="onCompositionStart" @compositionend="onCompositionEnd"></textarea>
     <!-- 第二行：左=各页自己的 chips（插槽），右=快捷键提示与主按钮 -->
     <div class="composer-bar">
       <div ref="barEl" class="bar-left"
@@ -96,12 +127,13 @@ onBeforeUnmount(() => { barRO && barRO.disconnect(); barMO && barMO.disconnect()
         <slot name="left"></slot>
       </div>
       <div class="bar-right">
-        <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
+        <span class="kbd-hint" aria-hidden="true">{{ (busy && queueOn ? '⏎ 加入队列 · ⇧⏎ 换行' : '⏎ 发送 · ⇧⏎ 换行') + (busy ? ' · Esc 停止' : '') }}</span>
         <button class="ib-btn send-btn"
-                :class="{ 'halt-btn': busy, 'resume-btn': sendLabel === '继续上次任务' }"
+                :class="{ 'halt-btn': busy && !queueOn, 'queue-btn': busy && queueOn, 'resume-btn': sendLabel === '继续上次任务' }"
                 :aria-label="sendLabel" :title="sendLabel" :disabled="sendDisabled"
                 @click="$emit('primary')">
-          <svg v-if="busy" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+          <svg v-if="busy && !queueOn" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+          <svg v-else-if="busy && queueOn" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v9M8.5 11 12 14.5 15.5 11"/><path d="M5 19h14"/></svg>
           <svg v-else-if="sendLabel === '继续上次任务'" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.6v12.8c0 .9 1 1.5 1.8 1L20 13a1.2 1.2 0 0 0 0-2L9.8 4.6C9 4.1 8 4.7 8 5.6Z"/></svg>
           <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
         </button>

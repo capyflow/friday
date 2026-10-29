@@ -67,39 +67,173 @@ func (s *Server) handleAcpConfigSet(ctx *vhttp.Context) error {
 	})
 }
 
-// handleAcpThreads 返回 thread 列表（元数据，不含消息）与当前配置。
+// handleAcpThreads 返回会话列表（元数据，不含消息）、工作区列表与当前配置。
+// 一个请求把页面骨架拉齐：左侧「工作区 → 会话」两级栏靠这一份数据渲染。
+// 工作区回带 missingDirs（已被删除/移动的目录）——UI 要能明说哪个源文件夹没了。
 func (s *Server) handleAcpThreads(ctx *vhttp.Context) error {
 	cfg := config.AcpConfig{}
 	if s.cfg != nil {
 		cfg = s.cfg.Snapshot().Acp.Normalized()
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"threads": s.acp.List(),
-		"acp":     cfg,
+		"workspaces": s.acp.WorkspaceList(),
+		"threads":    s.acp.List(),
+		"acp":        cfg,
 	})
 }
 
-// handleAcpThreadGet 返回单个 thread（含投影消息）。
-func (s *Server) handleAcpThreadGet(ctx *vhttp.Context) error {
-	th, ok := s.acp.Get(ctx.GinContext().Param("id"))
-	if !ok {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到该对话"})
-	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"thread": th})
-}
-
-// handleAcpThreadCreate 新建 thread：{"agent":"codex","workspace":"~/proj","title":"可选"}。
-// agent 与工作目录在此刻绑定，之后不可切换（拍板 D1）。
-func (s *Server) handleAcpThreadCreate(ctx *vhttp.Context) error {
+// handleAcpWorkspacesCreate 新建工作区：{"name":"proj-a","dirs":["~/code/a","~/shared"]}。
+// dirs 一个都不给就回退到数据目录下的临时工作区目录（acp-sessions/<工作区ID>）。
+func (s *Server) handleAcpWorkspacesCreate(ctx *vhttp.Context) error {
 	var req struct {
-		Agent     string `json:"agent"`
-		Workspace string `json:"workspace"`
-		Title     string `json:"title"`
+		Name string   `json:"name"`
+		Dirs []string `json:"dirs"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
-	th, err := s.acp.Create(strings.TrimSpace(req.Agent), req.Workspace, req.Title)
+	ws, err := s.acp.CreateWorkspace(req.Name, req.Dirs)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"workspace": ws})
+}
+
+// handleAcpWorkspacesUpdate 改工作区的展示属性：POST /api/acp/workspaces/:id，
+// 三个字段都可选、给哪个改哪个（缺省即不动，避免"改名字顺手把置顶洗掉"）：
+//   {"name":"…"}          改名（留空回落主目录名）
+//   {"pinned":true}       置顶/取消置顶
+//   {"primaryPath":"…"}   把工作区里的某个目录提为主目录（必须是已有目录之一）
+func (s *Server) handleAcpWorkspacesUpdate(ctx *vhttp.Context) error {
+	var req struct {
+		Name        *string `json:"name"`
+		Pinned      *bool   `json:"pinned"`
+		PrimaryPath *string `json:"primaryPath"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	id := ctx.GinContext().Param("id")
+	if req.Name == nil && req.Pinned == nil && req.PrimaryPath == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": `至少给一个字段：{"name": "..."}、{"pinned": true} 或 {"primaryPath": "目录"}`})
+	}
+	if req.Pinned != nil {
+		if err := s.acp.SetPinned(id, *req.Pinned); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+	}
+	if req.PrimaryPath != nil {
+		if _, err := s.acp.SetPrimaryDir(id, *req.PrimaryPath); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+	}
+	if req.Name != nil {
+		if err := s.acp.RenameWorkspace(id, *req.Name); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+	}
+	ws, _ := s.acp.GetWorkspace(id)
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"workspace": ws})
+}
+
+// handleAcpWorkspaceDirAdd 往工作区追加一个目录：{"path":"~/ref/b"}。
+func (s *Server) handleAcpWorkspaceDirAdd(ctx *vhttp.Context) error {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.Path) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"path": "目录绝对路径"}`})
+	}
+	ws, err := s.acp.AddWorkspaceDir(ctx.GinContext().Param("id"), req.Path)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"workspace": ws})
+}
+
+// handleAcpWorkspaceDirRemove 从工作区移出一个目录（DELETE ?path=…）：只解除分组，
+// 磁盘上的目录与文件不动；锚在它上面的会话继续用自己的主目录。
+func (s *Server) handleAcpWorkspaceDirRemove(ctx *vhttp.Context) error {
+	path := strings.TrimSpace(ctx.GinContext().Query("path"))
+	if path == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少参数 path"})
+	}
+	ws, err := s.acp.RemoveWorkspaceDir(ctx.GinContext().Param("id"), path)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"workspace": ws})
+}
+
+// handleAcpWorkspaceDelete 删除工作区（连带它的会话；磁盘目录不动）。
+// 回带被删掉的会话 id，前端好收起各自的缓冲与在途请求。
+func (s *Server) handleAcpWorkspaceDelete(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	ids := s.acp.ThreadsInWorkspace(id)
+	if !s.acp.DeleteWorkspace(id) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到该工作区"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"message": "已删除该工作区及其会话", "threadIds": ids,
+	})
+}
+
+// handleAcpThreadGet 返回单个 thread（含投影消息与该会话的目录视图）。
+func (s *Server) handleAcpThreadGet(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	th, ok := s.acp.Get(id)
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到该对话"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"thread": th, "session": sessionDirs(s.acp, id),
+	})
+}
+
+// sessionDirs 把 Manager.SessionDirs 折成前端要的 JSON 形状：主目录、工作区全部
+// 目录、实际下发的扩展根，以及 agent 是否声明吃 additionalDirectories
+// （known=false 表示进程不在场、能力未知，前端不下结论）。
+func sessionDirs(m *acp.Manager, id string) map[string]any {
+	cwd, dirs, extra, known, supported := m.SessionDirs(id)
+	return map[string]any{"cwd": cwd, "dirs": dirs, "extra": extra,
+		"known": known, "additionalDirectories": supported}
+}
+
+// handleAcpThreadRename 改会话标题：POST /api/acp/threads/:id {"title":"…"}。
+// 手动标题优先；留空 = 回到自动（下一轮若仍为空会按那时的消息重新派生）。
+func (s *Server) handleAcpThreadRename(ctx *vhttp.Context) error {
+	var req struct {
+		Title *string `json:"title"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || req.Title == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": `请求体须为 {"title": "新标题"}（留空字符串 = 回到自动标题）`})
+	}
+	th, err := s.acp.RenameThread(ctx.GinContext().Param("id"), *req.Title)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"thread": th})
+}
+
+// handleAcpThreadCreate 新建会话：{"workspaceId":"…","agent":"codex","cwd":"可选（默认主目录）","title":"可选"}。
+// agent 与主目录在此刻绑定，之后不可切换（D1）；换 = 再建一个会话。
+func (s *Server) handleAcpThreadCreate(ctx *vhttp.Context) error {
+	var req struct {
+		WorkspaceID string `json:"workspaceId"`
+		Agent       string `json:"agent"`
+		Cwd         string `json:"cwd"`
+		Title       string `json:"title"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if strings.TrimSpace(req.WorkspaceID) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": "请先选一个工作区（左侧「工作区」里新建或点选）"})
+	}
+	th, err := s.acp.CreateSession(strings.TrimSpace(req.Agent), req.WorkspaceID, req.Cwd, req.Title)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
@@ -128,11 +262,15 @@ func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
 // 据此隐藏对应 chip。会话不在时后端会拉起 agent 建会话——清单是 agent 侧的
 // 静态配置，进程随后照常空闲回收。
 func (s *Server) handleAcpOptionsGet(ctx *vhttp.Context) error {
-	caps, err := s.acp.Capabilities(ctx.GinContext().Param("id"))
+	id := ctx.GinContext().Param("id")
+	caps, err := s.acp.Capabilities(id)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"capabilities": caps})
+	// 清单这条路径必然已经拉起过进程：顺带回带目录生效情况（扩展根有没有被吃）。
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"capabilities": caps, "session": sessionDirs(s.acp, id),
+	})
 }
 
 // handleAcpOptionsSet 切换某项能力的取值（POST /api/acp/threads/:id/options，

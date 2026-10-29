@@ -29,22 +29,16 @@ import (
 
 // agentProc 是一个存活中的 agent 进程与它的连接。
 type agentProc struct {
-	agent     string // 配置名
-	workspace string // 绝对路径
+	agent string // 配置名
+	cwd   string // 绝对路径（会话的主目录，进程的工作目录）
 
 	conn        *acp.ClientSideConnection
 	events      chan acp.SessionNotification // bridge 出口（见 bridge.go 的线程纪律）
 	loadSession bool                         // agent 是否声明 loadSession 能力
-	bridge      *bridge
-
-	// 会话配置项缓存（模型/模式/推理档位下拉）：ensureSession 从会话响应捕获，
-	// turn 中的 config_options_update 与 set_config_option 的响应刷新。进程级
-	// 而非 thread 级——进程回收重接后由新会话的响应重新填充。models/modeState
-	// 是协议原生的模型/模式状态（部分 agent 只报这两样，如 cc）。
-	optMu      sync.Mutex
-	opts       []acp.SessionConfigOption
-	models     *acp.SessionModelState
-	modeState  *acp.SessionModeState
+	// extraRoots 是 agent 声明支持 `additionalDirectories`（多目录工作区的扩展根）。
+	// 没声明就只传 cwd——多出的目录不发给它，也不假装生效（前端会明说"只用主目录"）。
+	extraRoots bool
+	bridge     *bridge
 
 	stderrMu   sync.Mutex
 	stderrMemo string // kill 时缓存的 stderr 尾部（文件随即删除，报错仍可引用）
@@ -94,7 +88,7 @@ func sanitizeLog(s string) string {
 
 // spawnAgent 拉起 agent 子进程并完成 initialize 握手。onExit 在对端断开时被
 // 调用一次（进程崩溃或 kill 之后）。onPermission 为权限请求钩子（可 nil）。
-func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout time.Duration,
+func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Duration,
 	onPermission permissionHook, onExit func()) (*agentProc, error) {
 
 	command := strings.TrimSpace(cfg.Command)
@@ -112,7 +106,7 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 	}
 
 	cmd := exec.Command(bin, cfg.Args...)
-	cmd.Dir = workspace
+	cmd.Dir = cwd
 	// env 合并而非追加：同名 key 以配置为准。直接 append 会产生重复 key，
 	// libc 的 getenv 取第一个匹配——覆盖对 node 系 agent 会静默失效。
 	cmd.Env = buildEnv(os.Environ(), cfg.Env)
@@ -144,7 +138,7 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 
 	p := &agentProc{
 		agent:      cfg.Name,
-		workspace:  workspace,
+		cwd:        cwd,
 		events:     nil, // 在 bridge 创建后填充
 		stderrFile: stderrFile,
 	}
@@ -205,7 +199,11 @@ func spawnAgent(cfg config.AcpAgentConfig, workspace string, handshakeTimeout ti
 			cfg.Name, initRes.ProtocolVersion, acp.ProtocolVersionNumber)
 	}
 	p.loadSession = initRes.AgentCapabilities.LoadSession
-	log.Printf("[智能体] %s 已就绪（workspace=%s，loadSession=%v）", cfg.Name, workspace, p.loadSession)
+	// sessionCapabilities.additionalDirectories：'{}' 即表示吃这个字段（协议里
+	// 没有取值，声明本身是唯一信息）。多目录工作区靠它决定要不要传扩展根。
+	p.extraRoots = initRes.AgentCapabilities.SessionCapabilities.AdditionalDirectories != nil
+	log.Printf("[智能体] %s 已就绪（cwd=%s，loadSession=%v，additionalDirectories=%v）",
+		cfg.Name, cwd, p.loadSession, p.extraRoots)
 	return p, nil
 }
 
@@ -366,78 +364,5 @@ func (p *agentProc) alive() bool {
 		return false
 	default:
 		return true
-	}
-}
-
-// setOptions 记录会话最近一次回报的配置项（会话响应或 config_options_update）。
-func (p *agentProc) setOptions(opts []acp.SessionConfigOption) {
-	p.optMu.Lock()
-	p.opts = opts
-	p.optMu.Unlock()
-}
-
-// getOptions 返回缓存的配置项（agent 未回报时为 nil）。
-func (p *agentProc) getOptions() []acp.SessionConfigOption {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	return p.opts
-}
-
-// setModelState 记录会话最近一次回报的模型状态（协议原生 models 字段）。
-func (p *agentProc) setModelState(ms *acp.SessionModelState) {
-	p.optMu.Lock()
-	p.models = ms
-	p.optMu.Unlock()
-}
-
-// getModelState 返回缓存的模型状态（agent 未回报时为 nil）。
-func (p *agentProc) getModelState() *acp.SessionModelState {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	return p.models
-}
-
-// setCurrentModel 兜底更新当前模型：set_model 的响应不带状态回执，仅保 UI 一致性。
-func (p *agentProc) setCurrentModel(value string) {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	if p.models != nil {
-		p.models.CurrentModelId = acp.SessionModelId(value)
-	}
-}
-
-// setModeState 记录会话最近一次回报的模式状态（协议原生 modes 字段）。
-func (p *agentProc) setModeState(ms *acp.SessionModeState) {
-	p.optMu.Lock()
-	p.modeState = ms
-	p.optMu.Unlock()
-}
-
-// getModeState 返回缓存的模式状态（agent 未回报时为 nil）。
-func (p *agentProc) getModeState() *acp.SessionModeState {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	return p.modeState
-}
-
-// setCurrentMode 兜底更新当前模式：set_mode 的响应为空，真值靠 current-mode
-// 推送刷新，这里仅保切换后的即时 UI 一致性。
-func (p *agentProc) setCurrentMode(value string) {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	if p.modeState != nil {
-		p.modeState.CurrentModeId = acp.SessionModeId(value)
-	}
-}
-
-// setCurrent 兜底更新某配置项的当前值：agent 在 set_config_option 的响应里
-// 没回带全量 options 时，仅保 UI 一致性用。
-func (p *agentProc) setCurrent(configID, value string) {
-	p.optMu.Lock()
-	defer p.optMu.Unlock()
-	for _, o := range p.opts {
-		if o.Select != nil && string(o.Select.Id) == configID {
-			o.Select.CurrentValue = acp.SessionConfigValueId(value)
-		}
 	}
 }

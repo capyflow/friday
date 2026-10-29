@@ -1,4 +1,4 @@
-// blocks.js 是聊天时间线内容块（zcode 风）的纯函数操作集，ChatView 与 AgentView
+// blocks.js 是聊天时间线内容块（zcode 风）的纯函数操作集，ChatView 与 WorkspaceView
 // 共用：消息对象上的 blocks 数组按到达顺序存放思考/工具调用/正文块，分片交错
 // 到达也不会把回答切成碎块（轮次由 round 事件与工具调用推进）。
 //

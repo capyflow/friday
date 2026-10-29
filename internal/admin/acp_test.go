@@ -140,3 +140,186 @@ func TestAcpDirsListsSubdirectoriesOnly(t *testing.T) {
 		t.Fatalf("文件路径应报 400，实际 %d", code)
 	}
 }
+
+// acpCall 发一次带 JSON 体的 ACP 请求，回状态码与 { body: ... } 信封。
+func acpCall(t *testing.T, handler http.Handler, token, method, path string, body any) (int, map[string]any) {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		if raw, err = json.Marshal(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := setupTestRequest(handler, method, path, raw, "127.0.0.1:1234", "localhost", "", token)
+	var envelope struct {
+		Body map[string]any `json:"body"`
+	}
+	if len(rec.Body.Bytes()) > 0 {
+		_ = json.Unmarshal(rec.Body.Bytes(), &envelope)
+	}
+	return rec.Code, envelope.Body
+}
+
+func firstString(v any) string {
+	list, ok := v.([]any)
+	if !ok || len(list) == 0 {
+		return ""
+	}
+	s, _ := list[0].(string)
+	return s
+}
+
+// TestAcpWorkspaceAndSessionEndpoints 覆盖「工作区 → 会话」两层的 REST 面：
+// 建工作区、加/移目录、改名、在工作区里建会话、列表与详情回带目录视图、
+// 删工作区连带会话。
+func TestAcpWorkspaceAndSessionEndpoints(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	cfg := config.AcpConfig{Enabled: true,
+		Agents: []config.AcpAgentConfig{{Name: "fake", Command: "fake-bin"}}}
+	m := acp.NewManager(func() config.AcpConfig { return cfg }, nil, filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	t.Cleanup(m.Close)
+	handler := s.Handler()
+
+	dirA, dirB := t.TempDir(), t.TempDir()
+	code, body := acpCall(t, handler, token, "POST", "/api/acp/workspaces",
+		map[string]any{"name": "proj-a", "dirs": []string{dirA}})
+	if code != http.StatusOK {
+		t.Fatalf("建工作区应 200，实际 %d: %v", code, body)
+	}
+	ws, _ := body["workspace"].(map[string]any)
+	wsID, _ := ws["id"].(string)
+	if wsID == "" || ws["name"] != "proj-a" || firstString(ws["dirs"]) != dirA {
+		t.Fatalf("工作区回包不符: %v", body)
+	}
+
+	// 加目录
+	code, body = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID+"/dirs",
+		map[string]any{"path": dirB})
+	ws, _ = body["workspace"].(map[string]any)
+	dirs, _ := ws["dirs"].([]any)
+	if code != http.StatusOK || len(dirs) != 2 {
+		t.Fatalf("加目录后应 2 个目录，实际 %d / %v", code, ws)
+	}
+
+	// 在工作区里建会话：不给 cwd 就用主目录
+	code, body = acpCall(t, handler, token, "POST", "/api/acp/threads",
+		map[string]any{"workspaceId": wsID, "agent": "fake"})
+	th, _ := body["thread"].(map[string]any)
+	thID, _ := th["id"].(string)
+	if code != http.StatusOK || thID == "" {
+		t.Fatalf("建会话应 200，实际 %d: %v", code, body)
+	}
+	if th["workspaceId"] != wsID || th["cwd"] != dirA {
+		t.Fatalf("会话应锚定工作区与主目录: %v", th)
+	}
+
+	// 缺 workspaceId → 400 并给下一步
+	code, body = acpCall(t, handler, token, "POST", "/api/acp/threads",
+		map[string]any{"agent": "fake"})
+	errText, _ := body["error"].(string)
+	if code != http.StatusBadRequest || errText == "" {
+		t.Fatalf("缺 workspaceId 应 400 并说明下一步，实际 %d: %v", code, body)
+	}
+
+	// 列表一次拉齐骨架
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/threads", nil)
+	if code != http.StatusOK {
+		t.Fatalf("列表应 200，实际 %d", code)
+	}
+	if list, _ := body["workspaces"].([]any); len(list) != 1 {
+		t.Fatalf("应回带 1 个工作区，实际 %v", body["workspaces"])
+	}
+	if list, _ := body["threads"].([]any); len(list) != 1 {
+		t.Fatalf("应回带 1 个会话，实际 %v", body["threads"])
+	}
+
+	// 详情带目录视图（进程不在场 → known=false，不宣称扩展根生效）
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/threads/"+thID, nil)
+	sess, _ := body["session"].(map[string]any)
+	if code != http.StatusOK || sess == nil {
+		t.Fatalf("详情应 200 且带 session，实际 %d: %v", code, body)
+	}
+	if sess["cwd"] != dirA || sess["known"] != false {
+		t.Fatalf("session 视图不符: %v", sess)
+	}
+	if got, _ := sess["dirs"].([]any); len(got) != 2 {
+		t.Fatalf("session.dirs 应是工作区全部目录，实际 %v", sess["dirs"])
+	}
+
+	// 改名
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID,
+		map[string]any{"name": "改名后的项目"}); code != http.StatusOK {
+		t.Fatalf("改名应 200，实际 %d", code)
+	}
+	if ws, ok := m.GetWorkspace(wsID); !ok || ws.Name != "改名后的项目" {
+		t.Fatalf("改名未生效: %+v", ws)
+	}
+
+	// 三个字段都可选、给哪个改哪个：空对象应报错而不是"全清空"
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID, map[string]any{}); code != http.StatusBadRequest {
+		t.Fatalf("空请求体应 400，实际 %d", code)
+	}
+	// 置顶不该顺手改名字
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID, map[string]any{"pinned": true}); code != http.StatusOK {
+		t.Fatalf("置顶应 200，实际 %d", code)
+	}
+	if ws, ok := m.GetWorkspace(wsID); !ok || !ws.Pinned || ws.Name != "改名后的项目" {
+		t.Fatalf("置顶后名字该保住: %+v", ws)
+	}
+	// 换主目录：目录挪到首位，会话仍锚在自己的 cwd
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID,
+		map[string]any{"primaryPath": dirB}); code != http.StatusOK {
+		t.Fatalf("换主目录应 200，实际 %d", code)
+	}
+	wsNow, _ := m.GetWorkspace(wsID)
+	if wsNow.Dirs[0] != dirB {
+		t.Fatalf("主目录应变成 %s，实际 %v", dirB, wsNow.Dirs)
+	}
+	if th, ok := m.Get(thID); !ok || th.Cwd != dirA {
+		t.Fatalf("换主目录不该动既有会话的 cwd: %+v", th)
+	}
+	// 不存在的工作区 → 400（不是静默成功）
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/nope", map[string]any{"pinned": true}); code != http.StatusBadRequest {
+		t.Fatalf("不存在的工作区应 400，实际 %d", code)
+	}
+	// 列表回包带 missingDirs（用户在别处删了目录时 UI 能明说）
+	if _, err := os.Stat(dirA); err == nil {
+		code, body = acpCall(t, handler, token, "GET", "/api/acp/threads", nil)
+		list, _ := body["workspaces"].([]any)
+		if code != http.StatusOK || len(list) != 1 {
+			t.Fatalf("列表应回带 1 个工作区: %d %v", code, body["workspaces"])
+		}
+		item, _ := list[0].(map[string]any)
+		if item["pinned"] != true {
+			t.Fatalf("列表应带上置顶状态: %v", item)
+		}
+		if _, ok := item["missingDirs"]; ok {
+			t.Fatalf("目录都在时不该有 missingDirs: %v", item)
+		}
+	}
+
+	// 移目录：移掉扩展目录可以，移掉最后一个目录要报错
+	if code, body = acpCall(t, handler, token, "DELETE",
+		"/api/acp/workspaces/"+wsID+"/dirs?path="+url.QueryEscape(dirB), nil); code != http.StatusOK {
+		t.Fatalf("移目录应 200，实际 %d: %v", code, body)
+	}
+	if code, _ = acpCall(t, handler, token, "DELETE",
+		"/api/acp/workspaces/"+wsID+"/dirs?path="+url.QueryEscape(dirA), nil); code == http.StatusOK {
+		t.Fatal("移掉最后一个目录应报错")
+	}
+
+	// 删工作区：连带会话，并回带会话 id 让前端收起缓冲
+	code, body = acpCall(t, handler, token, "DELETE", "/api/acp/workspaces/"+wsID, nil)
+	ids, _ := body["threadIds"].([]any)
+	if code != http.StatusOK || len(ids) != 1 || ids[0] != thID {
+		t.Fatalf("删工作区应回带被删会话，实际 %d: %v", code, body)
+	}
+	if _, ok := m.Get(thID); ok {
+		t.Fatal("工作区删除后会话应已移除")
+	}
+	if _, ok := m.GetWorkspace(wsID); ok {
+		t.Fatal("工作区应已移除")
+	}
+}

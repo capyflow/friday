@@ -7,7 +7,7 @@ import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
-import AgentView from './components/AgentView.vue'
+import WorkspaceView from './components/WorkspaceView.vue'
 import AutoView from './components/AutoView.vue'
 import BlinkoView from './components/BlinkoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
@@ -20,7 +20,7 @@ import { desktopInvoke, openExternal } from './open-url.js'
 // 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
-  { id: 'agent', icon: 'i-acp', label: '智能体' },
+  { id: 'agent', icon: 'i-acp', label: '工作区' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
   { id: 'blinko', icon: 'i-blinko', label: '闪念' },
   { id: 'notifications', icon: 'i-bell', label: '通知' },
@@ -37,10 +37,11 @@ const userInitial = ref('U')
 watch(() => store.username, v => { userInitial.value = (v || 'U').charAt(0).toUpperCase() }, { immediate: true })
 const host = ref(location.host)
 
-/* 智能体页懒挂载、挂载后常驻（v-show）：首次进入才拉配置/建会话；之后切到
-   别的导航也不卸载，进行中的 SSE、滚动位置与选中的 thread 都保留。 */
-const agentReady = ref(false)
-watch(() => store.view, v => { if (v === 'agent') agentReady.value = true }, { immediate: true })
+/* 工作区页懒挂载、挂载后常驻（v-show）：首次进入才拉配置/建会话；之后切到
+   别的导航也不卸载，进行中的 SSE、滚动位置与选中的会话都保留。
+   导航 id 仍是 'agent'（设置页的「智能体」同一口径），只是展示名改成「工作区」。 */
+const workspaceReady = ref(false)
+watch(() => store.view, v => { if (v === 'agent') workspaceReady.value = true }, { immediate: true })
 
 function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
@@ -144,7 +145,7 @@ async function logout() {
   <SetupView v-if="store.setupStatus?.accountRequired" :status="store.setupStatus" @account-created="refreshSetup" />
   <LoginView v-else-if="!store.loggedIn" />
 
-  <div v-else id="app">
+  <div v-else id="app" :class="{ 'focus-mode': store.fullscreen }">
     <aside id="sidebar">
       <div class="brand"><div class="avatar">五</div><b>小五</b></div>
       <nav id="nav" aria-label="主导航">
@@ -198,7 +199,7 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
-      <Transition name="view"><AgentView v-if="agentReady" /></Transition>
+      <Transition name="view"><WorkspaceView v-if="workspaceReady" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>

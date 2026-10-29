@@ -15,7 +15,7 @@
 | `internal/acp`：SDK 封装 + 进程管理（一期已按 thread 形状落地） | 连接与 session 句柄直接复用；作业维度在其上加 Job 记录 |
 | `internal/acp/aggregate.go` 聚合器 | 新增 `tool_call`（来自门面的调用）事件类型 |
 | 审批接入：`request_permission` → `approval.Queue`（一期 P1-D） | 门面写类工具的两拍审批复用同一 Queue，句柄语义一致 |
-| thread 的 turn 串行（一 thread 一进程一连接，C3 结构性满足） | 作业与唤醒轮的排队语义建立在同一纪律上 |
+| thread 的 turn 串行（C3 结构性满足；连接按 agent+主目录共享、一连接多会话，261029 起） | 作业与唤醒轮的排队语义建立在同一纪律上 |
 | MCP 门面（`facade.go` + `token.go`） | **随作业模型自建**（一期无门面），token over Headers 实测（原 P1-E）在本文开工时首要验证 |
 
 ## 一、实测硬约束（设计必须满足，不可协商）

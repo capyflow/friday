@@ -740,9 +740,26 @@ function onDocClick(e) {
   if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
   if (modelOpen.value && modelWrap.value && !modelWrap.value.contains(e.target)) modelOpen.value = false
 }
+/* Esc：先收弹层；都没有且焦点在对话区、正在回答时中断本轮（输入框自己的 keydown
+   会先处理并 preventDefault，这里不重复）。 */
 function onKeydown(e) {
-  if (e.key === 'Escape') {
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  const hasLayer = menuOpen.value || popOpen.value || permOpen.value || ctxOpen.value || modelOpen.value
+  if (hasLayer) {
+    e.preventDefault()
     menuOpen.value = false; setPop(false); permOpen.value = false; ctxOpen.value = false; modelOpen.value = false
+    return
+  }
+  if (phase.value === 'streaming' && e.target && typeof e.target.closest === 'function' &&
+      e.target.closest('#chatFoot, #msgList, .inputbar')) {
+    e.preventDefault()
+    onSendClick() // 流式期间这个入口就是"停止"
+    return
+  }
+  // 没在跑：Esc 收起应用内全屏（普通窗口布局下什么都不做）
+  if (store.fullscreen) {
+    e.preventDefault()
+    store.fullscreen = false
   }
 }
 onMounted(() => {
@@ -791,6 +808,15 @@ async function clearContext() {
   <section id="view-chat" class="view">
     <div id="chatHead">
       <div class="title">小五</div>
+      <button class="btn icon" :class="{ active: store.fullscreen }"
+              :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
+              :title="store.fullscreen ? '退出全屏（Esc）' : '全屏对话（Esc 退出）'"
+              @click="store.fullscreen = !store.fullscreen">
+        <svg v-if="store.fullscreen" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></svg>
+        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>
       <div ref="moreWrap" class="more-wrap">
         <button class="btn icon" aria-label="更多操作" aria-haspopup="true" @click.stop="menuOpen = !menuOpen">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="#i-more"/></svg>
@@ -891,7 +917,7 @@ async function clearContext() {
       <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
                     :busy="phase === 'streaming'" :disabled="clearing"
                     :send-label="sendLabel" :send-disabled="sendDisabled"
-                    @primary="onSendClick" @paste="onPaste">
+                    @primary="onSendClick" @stop="onSendClick" @paste="onPaste">
         <template #previews>
           <!-- 图片附件在输入容器内部：有图时撑起整个输入框 -->
           <div v-if="pendingImages.length" id="attachPreviews">

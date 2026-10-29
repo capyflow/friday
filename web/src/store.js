@@ -10,6 +10,9 @@ export const store = reactive({
   setupStatus: null,
   unread: 0,
   traceFilter: '',   // 调用轨迹的会话过滤（如 goal-<id> / plan-<id>，从自动化页跳转带入）
+  // 应用内全屏（专注对话）：隐藏左侧全局导航、页面吃满窗口，Esc 由我们自己处理。
+  // 不持久化——每次启动都从普通布局开始，免得忘了自己处在哪种模式。
+  fullscreen: false,
 })
 
 export const toastState = reactive({ text: '', err: false, show: false })

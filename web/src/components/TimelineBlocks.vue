@@ -1,5 +1,5 @@
 <script setup>
-// TimelineBlocks 是聊天时间线内容块的共享渲染组件（ChatView 与 AgentView 共用，
+// TimelineBlocks 是聊天时间线内容块的共享渲染组件（ChatView 与 WorkspaceView 共用，
 // 样式在全局 style.css）：思考块（可折叠，流式一行预览）、工具调用块（一行，
 // 可展开结果）与正文块（markdown）按到达顺序排列。
 // 块对象是父组件的 reactive 数组元素，这里的 open 切换直接改写它们。

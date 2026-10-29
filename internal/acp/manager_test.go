@@ -87,15 +87,26 @@ type fakeConn struct {
 type fakeAgent struct {
 	loadSession bool // initialize 里声明 loadSession 能力
 	loadOK      bool // session/load 成功？
+	// resetOnSession=true 模拟"agent 不把选项存进会话"：每次 session/new、load
+	// 都把 configOptions / models 的当前值打回初始默认，等客户端重新设。
+	resetOnSession bool
+	extraRoots  bool // initialize 里声明 sessionCapabilities.additionalDirectories
 
 	configOptions []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
 	models        map[string]any   // 协议原生 models 状态（nil = agent 不回报）
 	modes         map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
 
-	mu       sync.Mutex
-	methods  []string
-	sessions []string
-	cur      string
+	mu         sync.Mutex
+	methods    []string
+	sessions   []string
+	cur        string
+	setCalls   []string          // "config:model=builtin/b" / "model:m2" / "mode:plan"
+	spawns     int               // 进程拉起次数（验证 M-6 的复用）
+	prompts    [][]string        // 每次 session/prompt 的文本块（按顺序）
+	optDefault map[string]string // 首次建会话时记下的初始值（供 resetOnSession 回滚）
+	modelDefault string
+	newReq   map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
+	loadReq  map[string]any // 最近一次 session/load 的 params
 
 	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
@@ -106,6 +117,94 @@ func (f *fakeAgent) recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.methods...)
+}
+
+// resetOptions 在 resetOnSession 时把选项打回初始默认；另外首次调用时记下默认值。
+func (f *fakeAgent) resetOptions() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.optDefault == nil {
+		f.optDefault = map[string]string{}
+		for _, o := range f.configOptions {
+			if id, ok := o["id"].(string); ok {
+				if cur, ok := o["currentValue"].(string); ok {
+					f.optDefault[id] = cur
+				}
+			}
+		}
+		if f.models != nil {
+			if cur, ok := f.models["currentModelId"].(string); ok {
+				f.modelDefault = cur
+			}
+		}
+	}
+	if !f.resetOnSession {
+		return
+	}
+	for _, o := range f.configOptions {
+		if id, ok := o["id"].(string); ok {
+			if def, ok := f.optDefault[id]; ok {
+				o["currentValue"] = def
+			}
+		}
+	}
+	if f.models != nil && f.modelDefault != "" {
+		f.models["currentModelId"] = f.modelDefault
+	}
+}
+
+// knownSession 校验 set_* 请求带的 sessionId 是这条连接上真实存在的会话。
+func (f *fakeAgent) knownSession(sid string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.sessions {
+		if s == sid {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeAgent) spawnCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spawns
+}
+
+func (f *fakeAgent) promptBlocks() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.prompts))
+	copy(out, f.prompts)
+	return out
+}
+
+func (f *fakeAgent) setRecorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.setCalls...)
+}
+
+// record 存下 session/new / session/load 的 params（用例据此核对 cwd 与扩展根）。
+func (f *fakeAgent) record(dst *map[string]any, raw json.RawMessage) {
+	var p map[string]any
+	_ = json.Unmarshal(raw, &p)
+	f.mu.Lock()
+	*dst = p
+	f.mu.Unlock()
+}
+
+// sessionNewParams / sessionLoadParams 返回最近一次对应请求的 params。
+func (f *fakeAgent) sessionNewParams() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.newReq
+}
+
+func (f *fakeAgent) sessionLoadParams() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loadReq
 }
 
 func (f *fakeAgent) currentSession() string {
@@ -151,12 +250,18 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 		f.mu.Unlock()
 		switch msg.Method {
 		case "initialize":
+			caps := map[string]any{"loadSession": f.loadSession}
+			if f.extraRoots {
+				caps["sessionCapabilities"] = map[string]any{"additionalDirectories": map[string]any{}}
+			}
 			fc.w.respond(msg.ID, map[string]any{
 				"protocolVersion":   1,
-				"agentCapabilities": map[string]any{"loadSession": f.loadSession},
+				"agentCapabilities": caps,
 				"authMethods":       []any{},
 			})
 		case "session/new":
+			f.record(&f.newReq, msg.Params)
+			f.resetOptions()
 			resp := map[string]any{"sessionId": f.newSessionID()}
 			if f.configOptions != nil {
 				resp["configOptions"] = f.configOptions
@@ -169,6 +274,8 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			}
 			fc.w.respond(msg.ID, resp)
 		case "session/load":
+			f.record(&f.loadReq, msg.Params)
+			f.resetOptions()
 			if f.loadOK {
 				// N2：重放两条历史再回空结果（Manager 端应丢弃，不进时间线）。
 				sid := f.currentSession()
@@ -192,11 +299,17 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			}
 		case "session/set_config_option":
 			var p struct {
-				ConfigId string `json:"configId"`
-				Value    string `json:"value"`
+				ConfigId  string `json:"configId"`
+				Value     string `json:"value"`
+				SessionId string `json:"sessionId"`
 			}
 			_ = json.Unmarshal(msg.Params, &p)
+			if !f.knownSession(p.SessionId) {
+				fc.w.respondErr(msg.ID, "unknown session: "+p.SessionId)
+				break
+			}
 			f.mu.Lock()
+			f.setCalls = append(f.setCalls, "config:"+p.ConfigId+"="+p.Value)
 			for _, o := range f.configOptions {
 				if o["id"] == p.ConfigId {
 					o["currentValue"] = p.Value
@@ -207,10 +320,16 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			fc.w.respond(msg.ID, map[string]any{"configOptions": out})
 		case "session/set_model":
 			var p struct {
-				ModelId string `json:"modelId"`
+				ModelId   string `json:"modelId"`
+				SessionId string `json:"sessionId"`
 			}
 			_ = json.Unmarshal(msg.Params, &p)
+			if !f.knownSession(p.SessionId) {
+				fc.w.respondErr(msg.ID, "unknown session: "+p.SessionId)
+				break
+			}
 			f.mu.Lock()
+			f.setCalls = append(f.setCalls, "model:"+p.ModelId)
 			if f.models != nil {
 				f.models["currentModelId"] = p.ModelId
 			}
@@ -218,10 +337,16 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			fc.w.respond(msg.ID, map[string]any{})
 		case "session/set_mode":
 			var p struct {
-				ModeId string `json:"modeId"`
+				ModeId    string `json:"modeId"`
+				SessionId string `json:"sessionId"`
 			}
 			_ = json.Unmarshal(msg.Params, &p)
+			if !f.knownSession(p.SessionId) {
+				fc.w.respondErr(msg.ID, "unknown session: "+p.SessionId)
+				break
+			}
 			f.mu.Lock()
+			f.setCalls = append(f.setCalls, "mode:"+p.ModeId)
 			if f.modes != nil {
 				f.modes["currentModeId"] = p.ModeId
 			}
@@ -230,6 +355,22 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 		case "session/prompt":
 			sid := f.currentSession()
 			promptID := msg.ID
+			var pp struct {
+				Prompt []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"prompt"`
+			}
+			_ = json.Unmarshal(msg.Params, &pp)
+			f.mu.Lock()
+			var texts []string
+			for _, b := range pp.Prompt {
+				if b.Type == "text" {
+					texts = append(texts, b.Text)
+				}
+			}
+			f.prompts = append(f.prompts, texts)
+			f.mu.Unlock()
 			// 脚本在独立 goroutine 执行：脚本可能阻塞等取消信号，
 			// 而 cancel 通知要靠这个 decode 循环才能收到。
 			go func() {
@@ -296,8 +437,11 @@ func (fc *fakeConn) sendPermissionRequest(sid, title string) {
 // spawnFake 用 os.Pipe 对接 fake agent，替换 Manager.spawn（每次调用新建一对管道，
 // 支持崩溃后重新拉起）。
 func spawnFake(f *fakeAgent) func(config.AcpAgentConfig, string, time.Duration, permissionHook, func()) (*agentProc, error) {
-	return func(cfg config.AcpAgentConfig, workspace string, handshake time.Duration,
+	return func(cfg config.AcpAgentConfig, cwd string, handshake time.Duration,
 		onPermission permissionHook, onExit func()) (*agentProc, error) {
+		f.mu.Lock()
+		f.spawns++
+		f.mu.Unlock()
 
 		toAgentR, toAgentW, err := os.Pipe() // client → agent
 		if err != nil {
@@ -327,7 +471,7 @@ func spawnFake(f *fakeAgent) func(config.AcpAgentConfig, string, time.Duration, 
 		}()
 
 		p := &agentProc{
-			agent: cfg.Name, workspace: workspace,
+			agent: cfg.Name, cwd: cwd,
 			conn: conn, events: b.events, bridge: b,
 			done: conn.Done(), kill: kill,
 		}
@@ -342,6 +486,7 @@ func spawnFake(f *fakeAgent) func(config.AcpAgentConfig, string, time.Duration, 
 			return nil, err
 		}
 		p.loadSession = initRes.AgentCapabilities.LoadSession
+		p.extraRoots = initRes.AgentCapabilities.SessionCapabilities.AdditionalDirectories != nil
 		go func() {
 			<-p.done
 			kill()
@@ -377,11 +522,30 @@ func newTestManager(t *testing.T, cfg *config.AcpConfig, approver *approval.Queu
 	return m
 }
 
+// mustWorkspace 建一个工作区（不传目录就用一个新的临时目录）。
+func mustWorkspace(t *testing.T, m *Manager, dirs ...string) Workspace {
+	t.Helper()
+	if len(dirs) == 0 {
+		dirs = []string{t.TempDir()}
+	}
+	ws, err := m.CreateWorkspace("", dirs)
+	if err != nil {
+		t.Fatalf("创建工作区失败: %v", err)
+	}
+	return ws
+}
+
 func mustThread(t *testing.T, m *Manager) Thread {
 	t.Helper()
-	th, err := m.Create("fake", t.TempDir(), "")
+	return mustThreadIn(t, m, mustWorkspace(t, m))
+}
+
+// mustThreadIn 在指定工作区里建会话（cwd 留空 → 工作区主目录）。
+func mustThreadIn(t *testing.T, m *Manager, ws Workspace) Thread {
+	t.Helper()
+	th, err := m.CreateSession("fake", ws.ID, "", "")
 	if err != nil {
-		t.Fatalf("创建 thread 失败: %v", err)
+		t.Fatalf("创建会话失败: %v", err)
 	}
 	return th
 }
@@ -810,10 +974,15 @@ func TestConcurrencySlotFull(t *testing.T) {
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel2()
-	if _, err := m.Send(ctx2, th2.ID, "后", nil, TurnHooks{}); err == nil {
+	c := &collector{}
+	if _, err := m.Send(ctx2, th2.ID, "后", nil, c.hooks()); err == nil {
 		t.Fatal("槽位满时应随 ctx 超时失败")
 	} else if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "并发已满") {
 		t.Fatalf("错误应为取消/并发满: %v", err)
+	}
+	// 排队不是静默等待：等槽位期间要先投一条状态占位，前端气泡才有话说。
+	if len(c.stats) == 0 || !strings.Contains(c.stats[0], "跑满") {
+		t.Fatalf("槽位满时应先投排队状态: %v", c.stats)
 	}
 	<-done1
 }
@@ -821,7 +990,8 @@ func TestConcurrencySlotFull(t *testing.T) {
 func TestRestartMarksInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threads.json")
-	// 预置一个 running 态的 thread 文件（模拟重启前崩溃）。
+	// 预置一个 running 态的 thread 文件（模拟重启前崩溃）。这是 261029 之前的旧
+	// 投影形态：会话直接带 workspace 目录、没有 workspaceId。
 	body := `{"threads":[{"id":"t1","agent":"fake","workspace":"/tmp","title":"x","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","state":"running","messages":[]}]}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -835,6 +1005,31 @@ func TestRestartMarksInterrupted(t *testing.T) {
 	}
 	if got.State != StateInterrupted {
 		t.Fatalf("running 应转 interrupted，实际 %q", got.State)
+	}
+	if got.Cwd != "/tmp" {
+		t.Fatalf("旧键 workspace 的目录应迁进 cwd，实际 %q", got.Cwd)
+	}
+	// 旧 thread 自动归入一个同目录工作区，并把迁移结果写回投影文件
+	if got.WorkspaceID == "" {
+		t.Fatal("应已归属工作区")
+	}
+	ws, ok := m.GetWorkspace(got.WorkspaceID)
+	if !ok {
+		t.Fatalf("工作区 %s 未建出", got.WorkspaceID)
+	}
+	if len(ws.Dirs) != 1 || ws.Dirs[0] != "/tmp" || ws.Name != "tmp" {
+		t.Fatalf("迁移出的工作区不符: %+v", ws)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved threadFile
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("迁移后的投影应可解析: %v", err)
+	}
+	if len(saved.Workspaces) != 1 || len(saved.Threads) != 1 || saved.Threads[0].WorkspaceID != ws.ID {
+		t.Fatalf("迁移结果未落盘: %s", data)
 	}
 }
 
@@ -877,8 +1072,8 @@ func TestOrphanedStateComputed(t *testing.T) {
 	}
 }
 
-// 未选目录时回退到临时会话目录（<数据目录>/acp-sessions/<threadID>，测试里替换根），
-// 显式指定的目录仍然优先。
+// 工作区一个目录都不给时回退到临时会话目录（<数据目录>/acp-sessions/<工作区ID>，
+// 测试里替换根）；给了目录就以目录为准。会话的主目录始终取自工作区。
 func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
 	base := t.TempDir()
 	old := sessionsBaseDirFn
@@ -888,25 +1083,42 @@ func TestCreateFallsBackToTempSessionsDir(t *testing.T) {
 	cfg := testConfig(t)
 	m := newTestManager(t, &cfg, nil, nil)
 
-	th, err := m.Create("fake", "", "")
+	ws, err := m.CreateWorkspace("", nil)
 	if err != nil {
-		t.Fatalf("不选目录应能创建（回退临时目录）: %v", err)
+		t.Fatalf("不加目录也应能建工作区（回退临时目录）: %v", err)
 	}
-	want := filepath.Join(base, th.ID)
-	if th.Workspace != want {
-		t.Fatalf("应回退到 %s，实际 %s", want, th.Workspace)
+	want := filepath.Join(base, ws.ID)
+	if len(ws.Dirs) != 1 || ws.Dirs[0] != want {
+		t.Fatalf("应回退到 %s，实际 %v", want, ws.Dirs)
 	}
 	if info, err := os.Stat(want); err != nil || !info.IsDir() {
 		t.Fatalf("回退目录应已创建: %v", err)
 	}
+	if ws.Name != filepath.Base(want) {
+		t.Fatalf("没起名应回落到目录名，实际 %q", ws.Name)
+	}
+	th, err := m.CreateSession("fake", ws.ID, "", "")
+	if err != nil {
+		t.Fatalf("在回退工作区里建会话失败: %v", err)
+	}
+	if th.Cwd != want {
+		t.Fatalf("会话主目录应是工作区主目录，实际 %s", th.Cwd)
+	}
 
 	explicit := filepath.Join(t.TempDir(), "chosen")
-	th2, err := m.Create("fake", explicit, "")
+	ws2, err := m.CreateWorkspace("我的项目", []string{explicit})
 	if err != nil {
 		t.Fatalf("显式目录创建失败: %v", err)
 	}
-	if th2.Workspace != explicit {
-		t.Fatalf("显式目录应优先，实际 %s", th2.Workspace)
+	if ws2.Dirs[0] != explicit {
+		t.Fatalf("显式目录应优先，实际 %v", ws2.Dirs)
+	}
+	if ws2.Name != "我的项目" {
+		t.Fatalf("名字应照用户给的，实际 %q", ws2.Name)
+	}
+	// 目录还不存在也要能用（建出来），与旧版选目录的行为一致
+	if info, err := os.Stat(explicit); err != nil || !info.IsDir() {
+		t.Fatalf("显式目录应自动创建: %v", err)
 	}
 }
 
@@ -1215,5 +1427,398 @@ func TestStopKillsUnresponsiveAgent(t *testing.T) {
 	m.mu.Unlock()
 	if alive != nil {
 		t.Fatal("停止后 agent 进程必须被回收")
+	}
+}
+
+// 手动标题：覆盖首条消息派生的标题；清空后下一轮按那时的消息重新派生。
+func TestRenameThread(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	if _, err := m.Send(context.Background(), th.ID, "## 帮我看看登录跳转\n细节在下面", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Get(th.ID); got.Title != "帮我看看登录跳转" {
+		t.Fatalf("首轮应派生标题，实际 %q", got.Title)
+	}
+
+	renamed, err := m.RenameThread(th.ID, "  手动   标题  ")
+	if err != nil {
+		t.Fatalf("改名失败: %v", err)
+	}
+	if renamed.Title != "手动 标题" {
+		t.Fatalf("应折叠空白，实际 %q", renamed.Title)
+	}
+	if got, _ := m.Get(th.ID); got.Title != "手动 标题" {
+		t.Fatalf("改名应落盘可读回，实际 %q", got.Title)
+	}
+
+	long := strings.Repeat("标", 80)
+	if got, _ := m.RenameThread(th.ID, long); len([]rune(got.Title)) != 61 || !strings.HasSuffix(got.Title, "…") {
+		t.Fatalf("过长标题应截到 60 个 rune 加省略号，实际 %q", got.Title)
+	}
+
+	// 清空 = 回到自动：下一轮按那时的消息重新取标题
+	if _, err := m.RenameThread(th.ID, "  "); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Get(th.ID); got.Title != "" {
+		t.Fatalf("清空后标题应为空，实际 %q", got.Title)
+	}
+	if _, err := m.Send(context.Background(), th.ID, "再来一轮的要点", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Get(th.ID); got.Title != "再来一轮的要点" {
+		t.Fatalf("清空后下一轮应重新派生，实际 %q", got.Title)
+	}
+
+	if _, err := m.RenameThread("nope", "x"); err == nil {
+		t.Fatal("不存在的会话改名应报错")
+	}
+}
+
+// 用户手动选的能力要能扛过重开：agent 不把选项存进会话（resetOnSession 模拟），
+// 重接/新开会话后 Friday 按投影里记的那份意图把它重放回去。
+func TestCapabilityChoiceSurvivesReconnect(t *testing.T) {
+	f := &fakeAgent{loadSession: true, loadOK: true, resetOnSession: true,
+		configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "开工", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetCapability(th.ID, CapKindModel, "builtin/b"); err != nil {
+		t.Fatalf("切模型失败: %v", err)
+	}
+
+	// 杀掉进程 = 杀掉 app 重开 / 空闲回收：下次打开会 session/load，agent 回默认
+	m.killLive(th.ID, "测试：模拟重开")
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatalf("重开后取能力失败: %v", err)
+	}
+	calls := f.setRecorded()
+	if len(calls) < 2 || calls[0] != "config:model=builtin/b" || calls[1] != "config:model=builtin/b" {
+		t.Fatalf("重连后应把选择重放一次，实际调用: %v", calls)
+	}
+	got := ""
+	for _, c := range caps {
+		if c.ID == CapKindModel {
+			got = c.CurrentValue
+		}
+	}
+	if got != "builtin/b" {
+		t.Fatalf("重开后模型应仍是 builtin/b，实际 %q", got)
+	}
+
+	// 选择也进了投影：文件里能读回 capChoices
+	data, err := os.ReadFile(m.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved threadFile
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Threads) != 1 || saved.Threads[0].CapChoices[CapKindModel] != "builtin/b" {
+		t.Fatalf("能力选择应写进投影，实际 %+v", saved.Threads[0].CapChoices)
+	}
+}
+
+// 协议原生 models 来源的能力同样要扛过重开（cc 这类只报 models/modes 的 agent）。
+func TestSessionModelChoiceSurvivesReconnect(t *testing.T) {
+	f := &fakeAgent{loadSession: true, loadOK: true, resetOnSession: true,
+		models: sessionModels("m1"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "开工", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetCapability(th.ID, CapKindModel, "m2"); err != nil {
+		t.Fatalf("切模型失败: %v", err)
+	}
+	m.killLive(th.ID, "测试：模拟重开")
+	caps, err := m.Capabilities(th.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.setRecorded(); len(calls) < 2 || calls[1] != "model:m2" {
+		t.Fatalf("重连后应按记录重放 set_session_model，实际 %v", calls)
+	}
+	for _, c := range caps {
+		if c.ID == CapKindModel && c.CurrentValue != "m2" {
+			t.Fatalf("重开后模型应仍是 m2，实际 %q", c.CurrentValue)
+		}
+	}
+}
+
+// 记录里有一项新版 agent 不再提供：跳过它，别让会话建不起来。
+func TestUnknownRecordedChoiceIsSkipped(t *testing.T) {
+	f := &fakeAgent{loadSession: true, loadOK: true, resetOnSession: true,
+		configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "开工", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	th2 := m.threads[th.ID]
+	th2.CapChoices = map[string]string{"other:gone": "x", CapKindModel: "builtin/b"}
+	_ = m.saveLocked()
+	m.mu.Unlock()
+	m.killLive(th.ID, "测试：模拟重开")
+	if _, err := m.Capabilities(th.ID); err != nil {
+		t.Fatalf("未知能力项应跳过而不是报错: %v", err)
+	}
+	// 这条用例没走过手动切换，重放应恰好一次；未知的 other:gone 不应发出任何调用
+	if calls := f.setRecorded(); len(calls) != 1 || calls[0] != "config:model=builtin/b" {
+		t.Fatalf("已知能力项应重放一次、未知项跳过，实际 %v", calls)
+	}
+}
+
+// 工作区说明：agent 看不到"工作区"概念，每个（新/重开的）会话首轮带一次说明，
+// 同会话后续轮次不再重复；目录清单变了会重新交代。说明不进投影时间线。
+func TestWorkspaceBriefInjectedPerSession(t *testing.T) {
+	dirA, dirB := t.TempDir(), t.TempDir()
+	f := &fakeAgent{extraRoots: true, promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m, dirA, dirB)
+	th := mustThreadIn(t, m, ws)
+
+	if _, err := m.Send(context.Background(), th.ID, "第一句", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) != 1 || len(blocks[0]) != 2 {
+		t.Fatalf("首轮应是 [工作区说明, 用户消息] 两个文本块，实际 %+v", blocks)
+	}
+	brief := blocks[0][0]
+	for _, want := range []string{"工作区「", dirA, "主目录", dirB, "扩展目录"} {
+		if !strings.Contains(brief, want) {
+			t.Fatalf("说明里应包含 %q，实际: %s", want, brief)
+		}
+	}
+	if !strings.Contains(brief, "以这份列表为准") && !strings.Contains(brief, "以上面这份列表为准") {
+		t.Fatalf("说明应明确「以列表为准、别扫上级」，实际: %s", brief)
+	}
+
+	// 同一会话的第二轮：不再重复注入
+	if _, err := m.Send(context.Background(), th.ID, "第二句", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.promptBlocks(); len(got) != 2 || len(got[1]) != 1 || got[1][0] != "第二句" {
+		t.Fatalf("同会话后续轮次不该再带说明，实际 %+v", got)
+	}
+
+	// 投影里只有用户原文，说明不进时间线
+	if got, _ := m.Get(th.ID); got.Messages[0].Text != "第一句" {
+		t.Fatalf("投影第一条应是用户原文，实际 %q", got.Messages[0].Text)
+	}
+
+	// 进程回收后重开：新会话（对 agent 而言上下文重来）要重新交代
+	m.killLive(th.ID, "测试：模拟重开")
+	if _, err := m.Send(context.Background(), th.ID, "重开后的第一句", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	got := f.promptBlocks()
+	if len(got) != 3 || len(got[2]) != 2 {
+		t.Fatalf("重开后首轮应重新带说明，实际 %+v", got)
+	}
+}
+
+// 目录清单变了（工作区加了文件夹）：同一会话的下一轮也要重新交代。
+func TestWorkspaceBriefRefreshOnFolderChange(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	f := &fakeAgent{extraRoots: true, promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m, dirA)
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "开始", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWorkspaceDir(ws.ID, dirB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), th.ID, "加了目录之后", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) != 2 || len(blocks[1]) != 2 {
+		t.Fatalf("目录变化后应重新交代，实际 %+v", blocks)
+	}
+	if !strings.Contains(blocks[1][0], dirB) {
+		t.Fatalf("重新交代应包含新目录，实际: %s", blocks[1][0])
+	}
+}
+
+// agent 不支持多目录：说明里要写明那些文件夹没下发，别让 agent 以为能访问。
+func TestWorkspaceBriefNotesUnsupportedMultiDir(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript} // extraRoots=false
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m, t.TempDir(), t.TempDir())
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "开始", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	brief := f.promptBlocks()[0][0]
+	if !strings.Contains(brief, "未下发") || !strings.Contains(brief, "不要尝试访问") {
+		t.Fatalf("不支持多目录时说明应写明未下发，实际: %s", brief)
+	}
+}
+
+// M-6：同 agent、同主目录的多个会话共享一个进程（一条连接承载多个 session），
+// 各自的事件按 sessionId 分流，互不串台。
+func TestSharedProcessAcrossThreads(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m, t.TempDir()) // 同 cwd
+	th1 := mustThreadIn(t, m, ws)
+	th2 := mustThreadIn(t, m, ws)
+
+	if _, err := m.Send(context.Background(), th1.ID, "会话一说", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("第一个会话应拉起 1 个进程，实际 %d", got)
+	}
+	if _, err := m.Send(context.Background(), th2.ID, "会话二说", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("同 agent+目录的第二个会话应复用进程，实际拉起 %d 次", got)
+	}
+	// 每次 session/new 各建一个会话：两条 thread 的 sessionId 不应相同
+	// （mustThreadIn 返回的是创建时的副本，运行后要重新取）
+	a1, _ := m.Get(th1.ID)
+	a2, _ := m.Get(th2.ID)
+	if a1.SessionID == "" || a2.SessionID == "" || a1.SessionID == a2.SessionID {
+		t.Fatalf("两个会话应有各自的 sessionId: %q / %q", a1.SessionID, a2.SessionID)
+	}
+	// 能力缓存是会话级的：各自都能读到清单
+	for _, id := range []string{th1.ID, th2.ID} {
+		if _, err := m.Capabilities(id); err != nil {
+			t.Fatalf("会话 %s 取能力失败: %v", id, err)
+		}
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("取能力不该再拉进程，实际 %d 次", got)
+	}
+}
+
+// 目录不同就不共用：复用键是 agent + 主目录（进程的 cwd 与工具范围都是进程级的）。
+func TestDifferentCwdUsesDifferentProcess(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 2
+	m := newTestManager(t, &cfg, nil, f)
+	wsA := mustWorkspace(t, m, t.TempDir())
+	wsB := mustWorkspace(t, m, t.TempDir())
+	thA := mustThreadIn(t, m, wsA)
+	thB := mustThreadIn(t, m, wsB)
+	if _, err := m.Send(context.Background(), thA.ID, "A", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), thB.ID, "B", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.spawnCount(); got != 2 {
+		t.Fatalf("不同主目录应各起一个进程，实际 %d", got)
+	}
+}
+
+// 并发上限按"进程数"计：上限 1 时，同一工作区的两个会话照样能对话（复用一条连接）。
+func TestConcurrencyCountsProcessesNotThreads(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 1
+	m := newTestManager(t, &cfg, nil, f)
+	ws := mustWorkspace(t, m, t.TempDir())
+	th1 := mustThreadIn(t, m, ws)
+	th2 := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th1.ID, "一", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), th2.ID, "二", nil, TurnHooks{}); err != nil {
+		t.Fatalf("同连接上的第二个会话不该因为上限 1 被挡: %v", err)
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("应只有 1 条连接，实际 %d", got)
+	}
+}
+
+// 删会话只摘 session：同连接上还有别的会话时进程留着；删到最后一个才回收。
+func TestDeleteOneSessionKeepsSharedProcess(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m, t.TempDir())
+	th1 := mustThreadIn(t, m, ws)
+	th2 := mustThreadIn(t, m, ws)
+	for _, th := range []Thread{th1, th2} {
+		if _, err := m.Send(context.Background(), th.ID, "hi", nil, TurnHooks{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !m.Delete(th1.ID) {
+		t.Fatal("删除失败")
+	}
+	if m.procOf(procKey("fake", th1.Cwd)) == nil {
+		t.Fatal("还有其它会话在用时不该回收进程")
+	}
+	if _, err := m.Send(context.Background(), th2.ID, "还在", nil, TurnHooks{}); err != nil {
+		t.Fatalf("同连接上的会话应继续可用: %v", err)
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("删掉一个会话后仍应复用原连接，实际拉起 %d 次", got)
+	}
+	if !m.Delete(th2.ID) {
+		t.Fatal("删除失败")
+	}
+	if ps := m.procOf(procKey("fake", th1.Cwd)); ps != nil {
+		t.Fatal("最后一个会话删掉后应回收进程")
+	}
+}
+
+// 权限请求按 sessionId 路由：同一条连接上的两个会话，谁请求就进谁的审批卡。
+func TestPermissionRoutedBySession(t *testing.T) {
+	approver := approval.New("off", nil, time.Second)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	n := 0
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		n++
+		if n == 1 {
+			return "end_turn" // 第一轮只为把会话建起来，不弹权限
+		}
+		fc.sendPermissionRequest(sid, "执行 rm")
+		f.permSent <- struct{}{}
+		time.Sleep(300 * time.Millisecond) // 等测试 goroutine 点卡
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("已获授权。")}))
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	ws := mustWorkspace(t, m, t.TempDir())
+	th1 := mustThreadIn(t, m, ws)
+	th2 := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th1.ID, "先建会话", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "审批入队", func() bool { return len(approver.Pending()) == 1 })
+		approver.Decide(approver.Pending()[0].ID, true)
+	}()
+	res, err := m.Send(context.Background(), th2.ID, "需要授权的活", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if res.Answer != "已获授权。" {
+		t.Fatalf("回答不符: %q", res.Answer)
+	}
+	if got := f.spawnCount(); got != 1 {
+		t.Fatalf("两个会话应共用一条连接，实际拉起 %d 次", got)
 	}
 }

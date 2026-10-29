@@ -37,10 +37,16 @@
 //	GET    /api/session       会话状态（公开）
 //	GET    /api/acp/config    智能体配置（全局参数 + agent 清单，需登录）
 //	POST   /api/acp/config    保存智能体配置（写回 config.yaml 并热生效，需登录）
-//	GET    /api/acp/threads   智能体对话 thread 列表（需登录）
-//	POST   /api/acp/threads   新建 thread（绑定 agent 与工作目录，需登录）
-//	GET    /api/acp/threads/:id      thread 详情含投影消息（需登录）
-//	DELETE /api/acp/threads/:id      删除 thread（需登录）
+//	GET    /api/acp/threads   工作区列表 + 会话列表 + 配置（需登录）
+//	POST   /api/acp/threads   新建会话（在工作区里绑定 agent 与主目录，需登录）
+//	POST   /api/acp/workspaces       新建工作区（名字 + 目录列表，需登录）
+//	POST   /api/acp/workspaces/:id   工作区改名/置顶/换主目录（字段可选，需登录）
+//	POST   /api/acp/workspaces/:id/dirs 工作区加目录 {"path"}（需登录）
+//	DELETE /api/acp/workspaces/:id/dirs?path= 工作区移目录（需登录）
+//	DELETE /api/acp/workspaces/:id   删工作区连带其会话（需登录）
+//	GET    /api/acp/threads/:id      会话详情含投影消息与目录视图（需登录）
+//	POST   /api/acp/threads/:id      改会话标题 {"title"}（留空回到自动，需登录）
+//	DELETE /api/acp/threads/:id      删除会话（需登录）
 //	POST   /api/acp/threads/:id/chat 智能体对话（SSE 流式，帧协议同 /api/chat，需登录）
 //	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
 //	GET    /api/acp/threads/:id/options 会话配置项（模型/模式/推理档位下拉，需登录）
@@ -330,13 +336,20 @@ func (s *Server) Handler() http.Handler {
 	}
 	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
 	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
-	// 智能体（ACP）对话空间：thread CRUD、SSE 对话流、停止、配置与握手诊断。
+	// 智能体（ACP）工作区与对话：工作区 CRUD、会话 CRUD、SSE 对话流、停止、
+	// 配置与握手诊断。
 	if s.acp != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/config", s.wrap(s.handleAcpConfigGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/config", s.wrap(s.handleAcpConfigSet))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads", s.wrap(s.handleAcpThreads))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads", s.wrap(s.handleAcpThreadCreate))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces", s.wrap(s.handleAcpWorkspacesCreate))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspacesUpdate))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspaceDelete))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirAdd))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirRemove))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadRename))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadDelete))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/chat", s.wrap(s.handleAcpChat))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))

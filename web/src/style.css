@@ -295,6 +295,8 @@ html[data-theme="dark"] .auth-box {
 
 /* ---------- 应用外壳 ---------- */
 #app { display: flex; height: 100vh; }
+/* 应用内全屏（专注对话）：全局导航收起，内容吃满窗口；Esc 归页面自己处理 */
+#app.focus-mode #sidebar { display: none; }
 #sidebar { width: 220px; flex: none; background: var(--sidebar); border-right: 1px solid var(--border);
            display: flex; flex-direction: column; padding: 14px 12px 12px; position: relative; }
 html[data-theme="dark"] #sidebar {
@@ -1111,13 +1113,110 @@ html[data-theme="dark"] .selbox-pop {
   .dlg-body { padding: 16px; }
 }
 
-/* ---------- 智能体（ACP）对话空间 ---------- */
-#agentView { display: flex; flex-direction: row; padding: 0; overflow: hidden; }
-.ag-rail { width: 250px; flex: none; display: flex; flex-direction: column;
+/* ---------- 工作区（ACP）：目录组 + 会话 + 对话 ---------- */
+#workspaceView { display: flex; flex-direction: row; padding: 0; overflow: hidden; }
+.ag-rail { width: 292px; flex: none; display: flex; flex-direction: column;
            border-right: 1px solid var(--border); background: var(--card); }
 .ag-rail-head { display: flex; align-items: center; justify-content: space-between;
                 padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .ag-rail-head b { font-size: 14px; }
+.ag-rail-acts { display: flex; align-items: center; gap: 2px; }
+/* 视图切换（按工作区 / 最近更新）：分段控件，选中态用描边而不是纯填充 */
+.ws-seg { display: flex; gap: 4px; margin: 10px 12px 2px; padding: 3px;
+          background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 9px; }
+.ws-seg button { flex: 1; padding: 5px 6px; font: inherit; font-size: 12px; color: var(--muted-fg);
+                 background: transparent; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
+.ws-seg button:hover { color: var(--fg); }
+.ws-seg button.on { color: var(--fg); background: var(--card); border-color: var(--border-strong); font-weight: 550; }
+/* 工作区行：折叠标题（名字 + 目录数/会话数 + 生成中）与展开体（目录 + 会话 + 新建） */
+/* 每组是一张卡片：展开时抬起一层底色 + 描边；组头与子项之间靠缩进和一条
+   竖向引导线分出层级，不靠字号堆叠 */
+.ws-item { display: flex; flex-direction: column; border-radius: 12px; padding: 2px;
+           border: 1px solid transparent; transition: background .12s ease, border-color .12s ease; }
+.ws-item + .ws-item { margin-top: 2px; }
+.ws-item.active { background: var(--bg-subtle); border-color: var(--border); }
+.ws-head { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+           min-height: 46px; padding: 8px 7px 8px 8px; border: none; border-radius: 10px;
+           background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
+.ws-head:hover { background: rgba(127, 127, 127, .06); }
+.ws-head .ag-title { font-size: 13.5px; font-weight: 600; }
+.ws-head .meta { font-size: 11.5px; color: var(--muted-fg); }
+/* 行内两个图标动作（新建会话 / 更多）：比正文小一档，悬停才有底色 */
+.ws-icon { width: 26px; height: 26px; flex: none; color: var(--muted-fg); }
+.ws-icon:hover, .ws-icon.active { color: var(--fg); background: rgba(127, 127, 127, .12); }
+/* 「…」菜单：编辑工作区 / 置顶 / 删除（删除标红，附一行说明它到底删什么） */
+.ws-menu-wrap { position: relative; flex: none; }
+.ws-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; width: 186px;
+           display: flex; flex-direction: column; gap: 2px; padding: 6px;
+           background: rgba(255, 255, 255, .97); border: 1px solid var(--border-strong);
+           border-radius: 12px; box-shadow: var(--shadow-overlay);
+           backdrop-filter: blur(24px) saturate(1.4); -webkit-backdrop-filter: blur(24px) saturate(1.4); }
+/* 暗色下 --card 只是 4.5% 白（一层提亮），弹层必须自己给实底——与 .popover / .dlg 同一套 */
+html[data-theme="dark"] .ws-menu {
+  background: rgba(24, 24, 24, .94); border-color: rgba(255, 255, 255, .1); }
+.ws-menu button { display: flex; align-items: center; gap: 8px; padding: 8px 9px; font: inherit; font-size: 13px;
+                  text-align: left; color: var(--fg); background: transparent; border: none;
+                  border-radius: 8px; cursor: pointer; }
+.ws-menu button:hover { background: rgba(127, 127, 127, .1); }
+.ws-menu button.danger { color: #DC2626; }
+.ws-menu button.danger:hover { background: rgba(239, 68, 68, .1); }
+.ws-menu-note { margin: 2px 9px 4px; font-size: 11px; line-height: 1.5; color: var(--faint-fg); }
+.ws-caret { flex: none; opacity: .55; transition: transform .15s ease; }
+.ws-caret.open { transform: rotate(90deg); }
+/* 子项只做缩进，不画引导线：层级靠留白与卡片底色表达，界面更干净 */
+.ws-body { display: flex; flex-direction: column; gap: 8px;
+           margin: 0 2px 4px 10px; padding: 2px 0 2px 2px; }
+/* 展开体里分两节：源文件夹（含主目录与缺失标注）与会话 */
+.ws-sec { display: flex; flex-direction: column; gap: 3px; }
+.ws-sec-title { font-size: 11px; letter-spacing: .04em; color: var(--faint-fg); padding-left: 2px; }
+.ws-dirs { list-style: none; margin: 0; padding: 0; display: flex;
+           flex-direction: column; gap: 1px; }
+.ws-dir { display: flex; align-items: center; gap: 6px; font-size: 11.5px;
+          color: var(--muted-fg); padding: 2px 4px; border-radius: 6px; }
+.ws-dir:hover { background: rgba(127, 127, 127, .07); }
+.ws-dir.primary { color: var(--fg); }
+.ws-dir.primary .ws-dir-txt { font-weight: 550; }
+.ws-dir.missing { color: #B45309; }
+html[data-theme="dark"] .ws-dir.missing { color: #FBBF24; }
+.ws-dir-txt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws-tag { flex: none; font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 5px;
+          color: var(--muted-fg); background: var(--bg-muted); }
+.ws-link { flex: none; font-size: 10.5px; color: var(--muted-fg); cursor: pointer;
+           padding: 3px 5px; border-radius: 5px; }
+.ws-link:hover { color: var(--fg); background: rgba(127, 127, 127, .1); }
+.ws-missing { flex: none; font-size: 10.5px; color: #B45309; }
+html[data-theme="dark"] .ws-missing { color: #FBBF24; }
+.ws-act { display: flex; align-items: center; gap: 5px; align-self: flex-start;
+          margin: 2px 4px; padding: 4px 8px; font-size: 12px; font-family: inherit;
+          color: var(--muted-fg); background: transparent; border: 1px dashed var(--border-strong);
+          border-radius: 8px; cursor: pointer; }
+.ws-act:hover { color: var(--fg); background: rgba(127, 127, 127, .08); }
+.ws-act.primary-act { border-style: solid; }
+.ws-none { padding: 6px 4px; font-size: 12px; }
+.ws-session-form { border: none; border-top: 1px solid var(--border); padding: 8px 4px 2px; }
+.ws-rename { width: 100%; font-size: 13px; font-family: inherit; padding: 3px 6px;
+             border: 1px solid var(--border-strong); border-radius: 6px;
+             background: var(--bg); color: var(--fg); }
+.ws-cwd-one { margin: 0; padding: 6px 8px; font-size: 12px; word-break: break-all;
+              border: 1px solid var(--border); border-radius: 8px; }
+/* 编辑工作区弹窗里的源文件夹小节（列表里不铺路径，改这里改） */
+.ws-dlg-sec { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; }
+.ws-dlg-sec .ws-dirs { border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+.ws-dlg-sec .ws-dir { padding: 6px 8px; font-size: 12.5px; }
+.ws-dlg-empty { padding: 8px 10px; }
+.ws-dlg-hint { margin: 0; font-size: 11.5px; line-height: 1.6; }
+.ws-dlg-state { flex: 1; min-width: 0; }
+/* 新建会话表单里的主目录提示与行内改标题 */
+.ws-session-hint { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; word-break: break-all; }
+.ag-title-edit { width: 100%; font: inherit; font-size: 13px; font-weight: 550; padding: 1px 5px;
+                 border: 1px solid var(--border-strong); border-radius: 6px;
+                 background: var(--bg); color: var(--fg); }
+/* 会话行右侧的「…」：平时淡出，悬停/选中/菜单开着才显形，别让每行都挂一个图标 */
+.ag-menu-wrap { position: relative; flex: none; }
+.ag-menu-wrap .ws-icon { width: 22px; height: 22px; opacity: 0; transition: opacity .12s ease; }
+.ag-item:hover .ag-menu-wrap .ws-icon,
+.ag-item.active .ag-menu-wrap .ws-icon,
+.ag-menu-wrap .ws-icon.active { opacity: 1; }
 .ag-form { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px;
            border-bottom: 1px solid var(--border); }
 .ag-form input, .ag-form select { width: 100%; font-size: 13px; padding: 7px 9px;
@@ -1154,25 +1253,63 @@ html[data-theme="dark"] .ag-dir-show.active { background: rgba(255, 255, 255, .0
 .ag-list { flex: 1; overflow-y: auto; padding: 8px; display: flex;
            flex-direction: column; gap: 4px; }
 .ag-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-           padding: 8px 10px; border-radius: 10px; border: none; background: transparent;
-           cursor: pointer; color: var(--fg); font: inherit; }
-.ag-item:hover { background: rgba(127, 127, 127, .08); }
-.ag-item.active { background: rgba(127, 127, 127, .13); }
+           padding: 7px 8px 7px 9px; border-radius: 9px; border: none; background: transparent;
+           cursor: pointer; color: var(--fg); font: inherit; position: relative; }
+.ag-item:hover { background: rgba(127, 127, 127, .07); }
+/* 选中：淡淡的主色底 + 左侧强调条（比纯灰块更能标出"现在看的是这条"） */
+.ag-item.active { background: rgba(99, 102, 241, .12); }
+.ag-item .ag-title { font-size: 13px; }
+.ag-item .meta { font-size: 11.5px; }
 .ag-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ag-title { font-size: 13px; font-weight: 550; white-space: nowrap;
             overflow: hidden; text-overflow: ellipsis; }
 .ag-item .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--faint-fg); }
-.ag-dot.st-running { background: #16A34A; box-shadow: 0 0 0 3px rgba(22, 163, 74, .12); }
-.ag-dot.st-interrupted { background: #F59E0B; }
-.ag-dot.st-orphaned { background: #EF4444; }
+/* 会话状态：只有"已中断/不可用"这类异常才出现在标题后面，正常态不加任何标记 */
+.ag-state { flex: none; font-size: 10.5px; line-height: 1; margin-left: 4px; padding: 2px 4px;
+            border-radius: 5px; font-weight: 500; }
+.ag-state.warn { color: #B45309; background: rgba(245, 158, 11, .12); }
+html[data-theme="dark"] .ag-state.warn { color: #FBBF24; }
+.ag-state.bad { color: #DC2626; background: rgba(239, 68, 68, .1); }
+/* 后台生成中的会话标记（切到别的对话不打断它，回来看实时输出） */
+.ag-gen { flex: none; font-size: 11px; line-height: 1; color: #16A34A;
+          background: rgba(22, 163, 74, .1); padding: 4px 7px; border-radius: 999px;
+          animation: cap-pulse 1.6s ease-in-out infinite; }
+/* 未读：上次打开之后这条（组）会话又有新动静 */
+.ws-unread { flex: none; font-size: 11px; line-height: 1; color: #2563EB;
+             background: rgba(37, 99, 235, .1); padding: 4px 7px; border-radius: 999px; }
+/* 缺目录告警（源文件夹被删除或移动）与工作区置顶标记 */
+.ws-warn { flex: none; font-size: 11px; line-height: 1; color: #B45309;
+           background: rgba(245, 158, 11, .14); padding: 4px 6px; border-radius: 999px; }
+html[data-theme="dark"] .ws-warn { color: #FBBF24; }
+.ws-pin-mark { font-size: 11px; margin-right: 3px; color: var(--muted-fg); }
+/* 排队条：回答进行中排下的消息，本轮跑完依次发出 */
+.qbar { display: flex; flex-direction: column; gap: 3px; margin: 0 0 8px; padding: 7px 9px;
+        border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }
+.qbar-head { display: flex; align-items: center; gap: 6px; }
+.qbar-head .meta { flex: 1; min-width: 0; }
+.qbar-head .ib-btn.sm, .qrow .ib-btn.sm { width: auto; height: auto; padding: 2px 7px;
+        font-size: 11.5px; font-family: inherit; border: 1px solid var(--border);
+        border-radius: 7px; background: var(--card); color: var(--muted-fg); }
+.qbar-head .ib-btn.sm:hover, .qrow .ib-btn.sm:hover { color: var(--fg); border-color: var(--border-strong); }
+.qbar-head .ib-btn.sm[aria-pressed="true"] { color: #B45309; border-color: rgba(245, 158, 11, .5); }
+html[data-theme="dark"] .qbar-head .ib-btn.sm[aria-pressed="true"] { color: #FBBF24; }
+.qlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.qrow { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg); }
+.qidx { flex: none; width: 15px; text-align: right; font-size: 11px; color: var(--faint-fg); }
+.qtext { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qimg { flex: none; font-size: 11px; color: var(--muted-fg); }
+/* 排队中的主键：还是"发出去"的形状，但用描边提示这条会先排队 */
+.send-btn.queue-btn { color: var(--muted-fg); }
+.send-btn.queue-btn:hover { color: var(--fg); }
+
 .ag-del { color: var(--faint-fg); font-size: 12px; padding: 2px 6px; border-radius: 6px; }
 .ag-del:hover { color: #EF4444; background: rgba(239, 68, 68, .08); }
 .ag-empty { padding: 14px; line-height: 1.7; }
 .ag-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.ag-head { display: flex; align-items: center; padding: 12px 22px;
+.ag-head { display: flex; align-items: center; gap: 10px; padding: 12px 22px;
            border-bottom: 1px solid var(--border); background: var(--card); }
-.ag-head-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ag-head-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ag-full { flex: none; }
 .ag-head-txt b { font-size: 14px; }
 .ag-head-txt .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ag-hint { margin: 10px 22px 0; padding: 8px 12px; border-radius: 10px;
@@ -1187,7 +1324,7 @@ html[data-theme="dark"] .ag-dir-show.active { background: rgba(255, 255, 255, .0
 .ag-blank-logo { width: 56px; height: 56px; border-radius: 16px; display: flex;
   align-items: center; justify-content: center; font-size: 24px; font-weight: 650;
   color: #fff; background: linear-gradient(135deg, #6366F1, #8B5CF6); }
-@media (max-width: 760px) { .ag-rail { width: 200px; } }
+@media (max-width: 760px) { .ag-rail { width: 236px; } }
 
 /* ===== 文件路径 chip 与侧边预览抽屉 ===== */
 /* 时间线正文行内代码里的本机文件路径：渲染成可点 chip（md.js fileChips 开关） */
