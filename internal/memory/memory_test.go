@@ -241,3 +241,62 @@ func TestLegacyMissingOrCorrupt(t *testing.T) {
 		t.Fatal("旧文件不存在应空启动")
 	}
 }
+
+// 记忆速览：按更新时间倒序、正文压成一行并截断、总长受 maxChars 约束；
+// 空仓库返回空串（调用方据此不注入）。
+func TestWikiStoreDigest(t *testing.T) {
+	s := NewWikiStore(t.TempDir(), "")
+	if got := s.Digest(0, 0); got != "" {
+		t.Fatalf("空仓库不该产出速览，实际 %q", got)
+	}
+	if _, _, err := s.Save("", "旧页", "旧内容", "user"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond) // 更新时间倒序依赖 Save 的时间戳
+	if _, _, err := s.Save("", "用户偏好", strings.Repeat("偏", 300), "user"); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Digest(0, 0)
+	if !strings.HasPrefix(got, "- 用户偏好：") {
+		t.Fatalf("应按更新时间倒序且首行为最新页，实际 %q", got)
+	}
+	if !strings.Contains(got, "…") || !strings.Contains(got, "旧页：旧内容") {
+		t.Fatalf("超长正文应截断、其余页仍要列出，实际 %q", got)
+	}
+	if strings.Contains(got, "\n\n") {
+		t.Fatalf("每页应压成单行，实际 %q", got)
+	}
+	if short := s.Digest(1, 40); len([]rune(short)) > 40 {
+		t.Fatalf("maxChars 应生效，实际 %q", short)
+	}
+}
+
+// 关键词按空格拆开、任意命中即算：模型爱把查询写成「用户 称呼 名字」，
+// 整串匹配会什么也找不到（实测就是"记忆里有、recall 说没有"）。
+func TestSearchSplitsKeywords(t *testing.T) {
+	s := NewWikiStore(t.TempDir(), "")
+	if _, _, err := s.Save("", "用户偏好", "称呼：用户希望被称作「陛下」；沟通风格简洁。", "user"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if _, _, err := s.Save("", "家庭与重要的人", "用户有一个妹妹。", "user"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.Search("用户 称呼 名字") // 「名字」并不存在，其余两个词应命中
+	if len(got) != 2 {
+		t.Fatalf("任意词命中就应返回两页，实际 %+v", got)
+	}
+	if got[0].Title != "用户偏好" {
+		t.Fatalf("命中词多的页应排前，实际 %q", got[0].Title)
+	}
+	if !strings.Contains(got[0].Snippet, "称呼") {
+		t.Fatalf("片段应取正文里最早的命中（称呼），实际 %q", got[0].Snippet)
+	}
+	if hit := s.Search("称呼"); len(hit) != 1 || hit[0].Title != "用户偏好" {
+		t.Fatalf("单词查询行为不变，实际 %+v", hit)
+	}
+	if all := s.Search("   "); len(all) != 2 {
+		t.Fatalf("空关键词应列出全部页面，实际 %d 页", len(all))
+	}
+}

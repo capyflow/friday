@@ -63,8 +63,9 @@ func (t *RecallTool) Name() string { return "recall" }
 
 func (t *RecallTool) Description() string {
 	return "回忆关于用户的长期记忆（按主题分页）。回答需要用户背景信息（习惯、偏好、家人等），" +
-		"或用户问“还记得我…”“我是不是说过…”时使用。两步用法：先 q 填关键词搜索主题页" +
-		"（返回页面列表与命中片段），需要完整内容再用 id 参数读取整页正文；q 与 id 都留空返回全部页面列表。"
+		"或用户问“还记得我…”“我是不是说过…”时使用。这是按主题分页的 wiki，用法是" +
+		"「先看目录、再读整页」：不确定主题名时先不带参数列目录；有把握就 q 填关键词（空格分隔、任意命中即算），" +
+		"命中唯一一页会直接给出正文，多页时返回列表与片段、再用 id 读取整页。搜不到时会自动把目录给你。"
 }
 
 func (t *RecallTool) Schema() map[string]any {
@@ -90,7 +91,20 @@ func (t *RecallTool) Call(_ context.Context, args map[string]any) (string, error
 	q, _ := args["q"].(string)
 	ms := t.Memory.Search(q)
 	if len(ms) == 0 {
-		return "还没有找到相关记忆页。", nil
+		// wiki 的兜底不是"没有就算了"，而是把目录摊开：让模型按标题自己挑页面。
+		if all := t.Memory.Pages(); len(all) == 0 {
+			return "长期记忆里还没有任何页面（用户还没交代过值得长期记住的事，或已被清空）。", nil
+		} else {
+			return fmt.Sprintf("没有命中「%s」的页面（关键词按空格拆开、任意命中即算）。下面是全部记忆页目录，"+
+				"按标题挑一页用 id 读全文，或换个更短的词再搜：\n%s", strings.TrimSpace(q), pageIndex(all, 20)), nil
+		}
+	}
+	// 只命中一页：wiki 里这通常就是要找的那页，直接把正文给出，省一次往返。
+	if len(ms) == 1 {
+		if page, ok := t.Memory.Read(ms[0].ID); ok && len([]rune(page.Body)) <= 4000 {
+			return fmt.Sprintf("命中记忆页 #%s《%s》（%s 更新 · %s）：\n%s",
+				page.ID, page.Title, page.UpdatedAt.Format("2006-01-02"), memorySourceLabel(page.Source), page.Body), nil
+		}
 	}
 	if len(ms) > 20 {
 		ms = ms[:20]
@@ -106,6 +120,19 @@ func (t *RecallTool) Call(_ context.Context, args map[string]any) (string, error
 	}
 	out += "需要完整内容时用 id 参数读取对应页面。"
 	return out, nil
+}
+
+// pageIndex 列页面目录（标题 + 更新时间），最多 max 条；搜不到与无参数列目录共用。
+func pageIndex(pages []memory.PageMeta, max int) string {
+	if len(pages) > max {
+		pages = pages[:max]
+	}
+	var b strings.Builder
+	for _, m := range pages {
+		fmt.Fprintf(&b, "- #%s《%s》（%s 更新 · %s）\n",
+			m.ID, m.Title, m.UpdatedAt.Format("2006-01-02"), memorySourceLabel(m.Source))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // ForgetTool 让 agent 删除一页长期记忆（整个主题页）。

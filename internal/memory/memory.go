@@ -285,34 +285,114 @@ func (s *WikiStore) Delete(id string) bool {
 	return true
 }
 
+// Digest 生成"记忆速览"：按最近更新取前 maxPages 页，每页一行（标题 + 正文前
+// 140 个 rune，空白压成单空格），总长不超过 maxChars。没有页面返回空串——
+// 调用方据此决定"要不要注入"，别拿一段空标题冒充已有记忆。
+func (s *WikiStore) Digest(maxPages, maxChars int) string {
+	if maxPages <= 0 {
+		maxPages = 6
+	}
+	if maxChars <= 0 {
+		maxChars = 800
+	}
+	metas := s.Pages() // 已按更新时间倒序
+	var b strings.Builder
+	used := 0
+	for _, m := range metas {
+		if maxPages <= 0 {
+			break
+		}
+		s.mu.Lock()
+		page := s.pages[m.ID]
+		body := ""
+		if page != nil {
+			body = collapseSpace(page.Body)
+		}
+		s.mu.Unlock()
+		if body == "" {
+			continue
+		}
+		line := "- " + m.Title + "：" + truncateRunes(body, 140)
+		if used+len([]rune(line))+1 > maxChars {
+			break
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+		used += len([]rune(line)) + 1
+		maxPages--
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// collapseSpace 把正文压成一行（记忆页是多行 markdown，速览里只取要点）。
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// truncateRunes 截到 n 个 rune（超长补省略号）。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // Pages 返回全部页面元数据，按更新时间倒序。
 func (s *WikiStore) Pages() []PageMeta {
 	return s.Search("")
 }
 
-// Search 按关键词匹配标题与正文（不区分大小写）；keyword 为空返回全部。
-// 命中正文时附上下文片段。
+// Search 按关键词匹配标题与正文（不区分大小写）；keyword 为空返回全部页面。
+// 关键词按空格分词，任意一个词命中即算（标题命中权重更高），命中越多排得越前。
+// 分词是必须的：模型很自然把查询写成「用户 称呼 名字」，整串 Contains 永远不命中，
+// 结果就是"记忆里明明有，recall 却说没有"。
 func (s *WikiStore) Search(keyword string) []PageMeta {
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	tokens := strings.Fields(strings.ToLower(strings.TrimSpace(keyword)))
+	type scored struct {
+		meta  PageMeta
+		score int
+	}
 	s.mu.Lock()
-	out := make([]PageMeta, 0, len(s.pages))
+	hits := make([]scored, 0, len(s.pages))
 	for _, p := range s.pages {
-		if keyword != "" {
-			if strings.Contains(strings.ToLower(p.Title), keyword) {
-				out = append(out, metaOf(p, ""))
-				continue
+		title := strings.ToLower(p.Title)
+		body := strings.ToLower(p.Body)
+		score, snipAt, snipLen := 0, -1, 0
+		if len(tokens) == 0 {
+			score = 1 // 空关键词 = 列出全部
+		}
+		for _, tok := range tokens {
+			if strings.Contains(title, tok) {
+				score += 2
 			}
-			i := strings.Index(strings.ToLower(p.Body), keyword)
-			if i < 0 {
-				continue
+			if i := strings.Index(body, tok); i >= 0 {
+				score++
+				if snipAt < 0 || i < snipAt { // 片段取正文里最早出现的那个命中词
+					snipAt, snipLen = i, len(tok)
+				}
 			}
-			out = append(out, metaOf(p, snippet(p.Body, i, len(keyword))))
+		}
+		if score == 0 {
 			continue
 		}
-		out = append(out, metaOf(p, ""))
+		snip := ""
+		if snipAt >= 0 {
+			snip = snippet(p.Body, snipAt, snipLen)
+		}
+		hits = append(hits, scored{meta: metaOf(p, snip), score: score})
 	}
 	s.mu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].meta.UpdatedAt.After(hits[j].meta.UpdatedAt)
+	})
+	out := make([]PageMeta, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.meta)
+	}
 	return out
 }
 

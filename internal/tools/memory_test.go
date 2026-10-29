@@ -25,13 +25,16 @@ func TestRememberAndRecall(t *testing.T) {
 		t.Fatalf("remember: %v", err)
 	}
 
-	// 关键词搜索：返回页面列表与片段。
+	// 关键词只命中一页：wiki 里这通常就是要找的那页，直接给正文（省一次往返）。
 	res, err := qt.Call(context.Background(), map[string]any{"q": "花粉"})
 	if err != nil {
 		t.Fatalf("recall: %v", err)
 	}
 	if !strings.Contains(res, "花粉过敏") || !strings.Contains(res, "#m") || !strings.Contains(res, "健康状况") {
 		t.Fatalf("recall 应命中页面并带 ID，got %q", res)
+	}
+	if strings.Contains(res, "相关记忆页：") {
+		t.Fatalf("唯一命中应直接给正文，实际还是列表: %q", res)
 	}
 
 	// 按 id 读整页正文。
@@ -53,10 +56,20 @@ func TestRememberAndRecall(t *testing.T) {
 		t.Fatalf("recall(空) 应列出全部页面，got %q", res)
 	}
 
-	// 未命中。
+	// 未命中：不是"没有就算了"，而是把目录摊开让模型自己挑页面。
 	res, _ = qt.Call(context.Background(), map[string]any{"q": "不存在"})
-	if !strings.Contains(res, "没有找到") {
-		t.Fatalf("未命中应友好提示，got %q", res)
+	if !strings.Contains(res, "没有命中") || !strings.Contains(res, "目录") {
+		t.Fatalf("未命中应说明并回给目录，got %q", res)
+	}
+	if !strings.Contains(res, "《用户偏好》") || !strings.Contains(res, "《健康状况》") {
+		t.Fatalf("未命中时应列出全部页面标题，got %q", res)
+	}
+
+	// 空仓库：明确说"还没有页面"，不编造。
+	empty := &RecallTool{Memory: memory.NewWikiStore("", "")}
+	res, _ = empty.Call(context.Background(), map[string]any{"q": "称呼"})
+	if !strings.Contains(res, "还没有任何页面") {
+		t.Fatalf("空仓库应明说还没有记忆，got %q", res)
 	}
 	// 不存在的 id。
 	res, _ = qt.Call(context.Background(), map[string]any{"id": "m404"})

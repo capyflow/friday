@@ -391,6 +391,7 @@ func main() {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
 	brain = robotagent.NewBrain(ag, pool, ctxMgr)
+	brain.SetMemory(memStore) // 会话开始时注入长期记忆速览（清上下文后仍有"印象"）
 	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
 	if n := len(cfg.Custom.Commands); n > 0 {
 		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)

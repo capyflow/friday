@@ -222,7 +222,14 @@ func (s *Server) handleChatHistory(ctx *vhttp.Context) error {
 	}
 	key := strings.TrimSpace(ctx.GinContext().Query("session"))
 	msgs := s.chat.Brain().Pool().History(ctx.Context(), key)
-	out := historyItems(msgs)
+	// 系统消息（会话开始时注入的长期记忆速览）只给模型看，不往对话历史里回显
+	shown := make([]llm.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role != llm.RoleSystem {
+			shown = append(shown, m)
+		}
+	}
+	out := historyItems(shown)
 	if len(out) > chatHistoryMax {
 		out = out[len(out)-chatHistoryMax:]
 	}

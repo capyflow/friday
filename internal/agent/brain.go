@@ -16,6 +16,7 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/trace"
 )
@@ -35,6 +36,9 @@ type Brain struct {
 	skillMu   sync.RWMutex      // 保护技能仓库指针与匹配开关（SetSkills 可运行期替换）
 	skills    *skill.Store      // 技能仓库（可为 nil：不启用技能）
 	skillAuto skill.MatchConfig // 自动匹配开关与阈值
+
+	memMu  sync.RWMutex      // 保护长期记忆仓库指针
+	memory *memory.WikiStore // 长期记忆（可为 nil：不注入速览）
 }
 
 // NewBrain 创建对话大脑。pool 为会话池（含持久化存储），ctx 为上下文引擎
@@ -46,6 +50,33 @@ func NewBrain(ag *vxagent.Agent, pool *SessionPool, ctx *ContextManager) *Brain 
 
 // CtxMgr 返回上下文引擎管理器（热更新路径重建引擎用，可为 nil）。
 func (b *Brain) CtxMgr() *ContextManager { return b.ctx }
+
+// SetMemory 注入长期记忆仓库（启动时调用一次）：每个会话开始时注入一份
+// 「记忆速览」，让 agent 一开口就知道用户是谁、有哪些已知偏好——清掉上下文之后
+// 也不必让用户再提醒"去看看记忆"。
+func (b *Brain) SetMemory(store *memory.WikiStore) {
+	b.memMu.Lock()
+	b.memory = store
+	b.memMu.Unlock()
+}
+
+// memoryWarmup 生成会话开始时注入的记忆速览（没有记忆页面时返回空串，不注入）。
+func (b *Brain) memoryWarmup() string {
+	b.memMu.RLock()
+	store := b.memory
+	b.memMu.RUnlock()
+	if store == nil {
+		return ""
+	}
+	digest := store.Digest(0, 0)
+	if digest == "" {
+		return ""
+	}
+	return "【长期记忆速览｜会话开始时自动注入，不是用户说的话】\n" +
+		"以下是长期记忆里已经记下的要点，直接当作已知背景（比如用户希望的称谓、偏好、重要的人和事）：\n" +
+		digest + "\n" +
+		"需要细节或原文时调用 recall 查整页；不要在回复里复述这一段，也不必声明「我看了记忆」。"
+}
 
 // SetSkills 注入技能仓库与自动匹配配置（启动时调用一次）。技能是按次生效的，
 // 后台增删改只需 Store.Reload，不需要重建 Agent。
@@ -172,6 +203,13 @@ func (b *Brain) AskWith(ctx context.Context, text string, imgs []llm.Content, on
 	}
 
 	sess := b.pool.Get(ctx, key)
+	// 新会话或刚清过上下文（历史为空）：先把长期记忆的速览垫进去。写在会话里而
+	// 不是每轮拼进提问，避免每轮重复计费，也不会污染用户看到的问题文本。
+	if len(sess.Messages()) == 0 {
+		if warm := b.memoryWarmup(); warm != "" {
+			sess.Add(llm.NewTextMessage(llm.RoleSystem, warm))
+		}
+	}
 	defer func() {
 		if saveErr := b.pool.Save(context.WithoutCancel(ctx), sess); saveErr != nil {
 			err = errors.Join(err, fmt.Errorf("保存对话失败: %w", saveErr))

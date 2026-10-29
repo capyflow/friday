@@ -20,6 +20,14 @@ type fakeProvider struct {
 	responses []string
 	calls     int
 	block     chan struct{}
+	lastMsgs  []llm.Message // 最近一次请求带的 messages（验证注入用）
+}
+
+// messages 返回最近一次请求的 messages 副本。
+func (f *fakeProvider) messages() []llm.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]llm.Message{}, f.lastMsgs...)
 }
 
 func (f *fakeProvider) Name() string       { return "fake" }
@@ -37,6 +45,9 @@ func (f *fakeProvider) responseText() string {
 func (f *fakeProvider) Chat(ctx context.Context, req *llm.ChatRequest, onDelta func(llm.Delta) error) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.calls++
+	if req != nil {
+		f.lastMsgs = append([]llm.Message{}, req.Messages...)
+	}
 	block := f.block
 	f.mu.Unlock()
 	if block != nil {
