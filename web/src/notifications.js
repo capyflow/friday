@@ -1,6 +1,8 @@
 import { reactive, watch } from 'vue'
 import { api } from './api.js'
 import { store } from './store.js'
+import { desktopInvoke } from './open-url.js'
+import { getPref, setPref } from './prefs.js'
 
 export const notificationSettings = reactive({ status: '未开启', busy: false })
 let timer = null
@@ -19,8 +21,6 @@ watch(() => [store.loggedIn, store.username], () => {
   polling = false
 }, { flush:'sync' })
 
-function desktopInvoke() { return window.__TAURI__?.core?.invoke }
-
 export async function enableSystemNotifications() {
   if (notificationSettings.busy) return
   notificationSettings.busy = true
@@ -35,7 +35,7 @@ export async function enableSystemNotifications() {
     const permission = await window.Notification.requestPermission()
     enabled = permission === 'granted'
     notificationSettings.status = enabled ? '系统通知已开启' : '系统未授权，请使用通知中心'
-    try { localStorage.setItem('friday-notifications-enabled', enabled ? '1' : '0') } catch { /* 通知中心始终可用 */ }
+    setPref('friday-notifications-enabled', enabled ? '1' : '0')
   } catch { notificationSettings.status = '系统通知暂不可用，请使用通知中心' }
   finally { notificationSettings.busy = false }
 }
@@ -52,7 +52,7 @@ export async function pollNotifications() {
     store.unread = result.unread || 0
     if (currentUser !== user) {
       currentUser = user
-      try { seen = new Set(JSON.parse(localStorage.getItem('friday-notices-' + user) || '[]')) } catch { seen = new Set() }
+      try { seen = new Set(JSON.parse(getPref('friday-notices-' + user) || '[]')) } catch { seen = new Set() }
     }
     const notifications = (result.notifications || []).filter(n => n.prepared && n.push && !n.readAt)
     const invoke = desktopInvoke()
@@ -65,14 +65,14 @@ export async function pollNotifications() {
         seen.add(notice.id)
       } catch { notificationSettings.status = '系统通知暂不可用，请使用通知中心' }
     }
-    try { localStorage.setItem('friday-notices-' + user, JSON.stringify([...seen].slice(-500))) } catch { /* 仅影响提示去重 */ }
+    setPref('friday-notices-' + user, JSON.stringify([...seen].slice(-500)))
   } catch { /* 通知页会显示加载失败；全局轮询避免重复弹出错误 */ }
   finally { if (generation === epoch) polling = false }
 }
 
 export function startNotifications() {
   stopNotifications()
-  try { enabled = localStorage.getItem('friday-notifications-enabled') === '1' } catch { enabled = false }
+  enabled = getPref('friday-notifications-enabled') === '1'
   if (enabled) notificationSettings.status = '系统通知已开启'
   const invoke = desktopInvoke()
   const epoch = lifecycle

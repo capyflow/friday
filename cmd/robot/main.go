@@ -50,6 +50,7 @@ import (
 	"github.com/capyflow/vortexagent/agent/sessionstore"
 	"github.com/capyflow/vortexagent/llm"
 
+	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/admin"
 	robotagent "github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
@@ -91,8 +92,10 @@ func main() {
 		return
 	}
 
-	// 桌面模式：先落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
+	// 桌面模式：先补用户 PATH（Finder/launchd 只有系统目录，npm/npx/uv 会 127），
+	// 再落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
 	if *desktop {
+		ensureUserPath()
 		dir := strings.TrimSpace(*dataDir)
 		if dir == "" {
 			base, err := os.UserConfigDir()
@@ -308,6 +311,9 @@ func main() {
 	// MCP 管理器先于 Agent 首建创建（mcp_edit 工具依赖它），onChange 触发 rebuild；
 	// rebuild 在下方赋值，首次 Apply 发生在 brain 就绪之后，不会提前触发。
 	mcpMgr = mcp.NewManager(func() { rebuild("MCP 工具清单变化") })
+	// 远程 MCP 的 OAuth 会话落在数据目录里（0600：含 refresh_token 与
+	// client_secret）。桌面模式下进程已切到数据目录，相对名即落在该目录。
+	mcpMgr.EnableOAuth("mcp-oauth.json")
 	memStore := memory.NewWikiStore(cfg.Memory.Dir, cfg.Memory.File)
 	log.Printf("[记忆] wiki 页面目录：%s", cfg.Memory.Dir)
 
@@ -394,7 +400,7 @@ func main() {
 	// 后台"设置 → 技能"增删改即时生效——技能是按次注入的，不需要重建 Agent。
 	var skillStore *skill.Store
 	if cfg.Skills.EnabledOrDefault() {
-		skillStore = skill.NewStore(cfg.Skills.Dir)
+		skillStore = skill.NewStore(cfg.Skills.Dir, skill.UserScopeDir)
 		brain.SetSkills(skillStore, cfg.Skills.AutoTriggerEnabled())
 		list := skillStore.List()
 		broken := 0
@@ -426,16 +432,23 @@ func main() {
 	if len(cfg.Mcp.Servers) > 0 {
 		servers := make([]mcp.ServerConfig, 0, len(cfg.Mcp.Servers))
 		for _, s := range cfg.Mcp.Servers {
-			servers = append(servers, mcp.ServerConfig{
-				Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env,
-				URL: s.URL, Headers: s.Headers,
-			})
+			servers = append(servers, mcp.ServerConfig(s))
 		}
 		if err := mcpMgr.Apply(ctx, servers); err != nil {
 			log.Printf("[MCP] 部分服务器连接失败（不影响其余功能）: %v", err)
 		}
 	}
 	defer mcpMgr.Close()
+
+	// 智能体（ACP）对话空间：独立于 Brain 的平行入口，thread 投影落盘
+	// （重启不失历史），进程空闲回收、session/load 重接。默认关闭
+	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
+	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
+	defer acpMgr.Close()
+	if cfg.Acp.Enabled {
+		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",
+			len(cfg.Acp.Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+	}
 
 	// 成本闸门：价格表（默认 pricing.json，后台可编辑、热加载）+ 软限额判定。
 	// 没有价格表不影响使用——预算按 token 判定，金额留空并在后台提示补价。
@@ -545,6 +558,7 @@ func main() {
 			Host:          cfg.Admin.Host,
 			Port:          cfg.Admin.Port,
 			Accounts:      accounts,
+			AuthKeyFile:   filepath.Join(filepath.Dir(cfg.Admin.AccountFile), "auth-key"),
 			Engine:        eng,
 			Todos:         todos,
 			Memory:        deps.Memory,
@@ -555,6 +569,7 @@ func main() {
 			Registry:      regFn,
 			Approver:      approver,
 			Mcp:           mcpMgr,
+			Acp:           acpMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
 			Notifications: notices,
 			Pricer:        pricer,

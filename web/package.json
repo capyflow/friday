@@ -6,7 +6,7 @@
   "description": "Friday（小五）网页前端：Vue 3 + Vite。构建产物内联为单文件 HTML，嵌入 Go 二进制。",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.palette.config.js",
+    "build": "vite build && vite build --config vite.palette.config.js && vite build --config vite.wizard.config.js",
     "lint": "eslint src tests *.config.js",
     "test": "vitest run",
     "check": "npm run lint && npm run test",

@@ -109,7 +109,4 @@ onMounted(() => load())
     <button v-if="showDelete" class="btn danger" type="button" @click="remove">删除自定义</button>
   </div>
   <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-  <div class="set-note">人设只改变小五的性格与语气，能力和工具规则不受影响；所有人设都保留
-    <b>人文关怀</b>底线（深夜关怀、天气添衣带伞、低落时的安慰）。应用后立即热生效（无需重启，
-    对话上下文保持连续）并写回 config.yaml。内置人设的提示词改动会保存为同名自定义覆盖，可一键恢复内置。</div>
 </template>

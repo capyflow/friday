@@ -151,13 +151,98 @@ func (q *Queue) Request(tool, summary, detail string) error {
 // 批准返回 remember（用户选择了"批准并记住"），拒绝/超时返回 ErrDenied；
 // auto 模式直接放行；off 模式返回 ErrDisabled。
 func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, err error) {
+	_, remember, err = q.request(tool, summary, detail, 0, true)
+	return remember, err
+}
+
+// RequestAlways 无视队列模式强制入队一次审批，使用自定义超时（<=0 用默认）。
+// 智能体权限请求专用：无论全局权限模式如何，子 agent 的敏感操作一律人工把关
+// ——这是对话空间的独立闸门，不随 exec 审批模式联动；超时也远长于 exec
+// 审批（人可能不在屏幕前）。批准返回 true；拒绝/超时返回 ErrDenied。
+func (q *Queue) RequestAlways(tool, summary, detail string, timeout time.Duration) (bool, error) {
+	allow, _, err := q.request(tool, summary, detail, timeout, false)
+	return allow, err
+}
+
+// Pending 是一次进行中的审批句柄：入队立即返回，不阻塞调用方。Wait 阻塞等
+// 结果；Cancel 供业务侧放弃等待（典型场景：智能体 turn 已结束/超时/被停止，
+// 卡面向的会话已不存在，继续等用户点卡没有意义）——Cancel 把卡从待审批列表
+// 移除并按拒绝结算，迟到的用户决定落空。Wait 只可调用一次。
+type Pending struct {
+	q       *Queue
+	req     *request
+	timeout time.Duration
+	cancel  chan struct{}
+	once    sync.Once
+	done    chan struct{}
+	doneOne sync.Once
+}
+
+// RequestCancelable 入队一次审批并立即返回句柄（不阻塞）。timeout<=0 用队列
+// 默认。与 RequestAlways 同一语义（无视模式强制入队），只是把「等结果」拆成
+// 了独立步骤，让调用方能在等待期间按业务事件撤卡。
+func (q *Queue) RequestCancelable(tool, summary, detail string, timeout time.Duration) *Pending {
 	q.mu.Lock()
-	if q.mode != ModeConfirm {
+	if timeout <= 0 {
+		timeout = q.timeout
+	}
+	q.seq++
+	req := &request{
+		item: Item{ID: q.seq, Tool: tool, Summary: summary, Detail: detail, CreatedAt: time.Now()},
+		ch:   make(chan decision, 1),
+	}
+	q.pending[req.item.ID] = req
+	q.mu.Unlock()
+	return &Pending{
+		q:       q,
+		req:     req,
+		timeout: timeout,
+		cancel:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+// Done 返回结算信号：Wait 返回前关闭（无论批准、拒绝、超时还是 Cancel）。
+func (p *Pending) Done() <-chan struct{} { return p.done }
+
+// Wait 阻塞等待审批结果：批准返回 (true, nil)；拒绝、超时或被 Cancel 返回
+// (false, ErrDenied)。
+func (p *Pending) Wait() (bool, error) {
+	defer p.doneOne.Do(func() { close(p.done) })
+	timer := time.NewTimer(p.timeout)
+	defer timer.Stop()
+	select {
+	case d := <-p.req.ch:
+		p.q.remove(p.req.item.ID)
+		if !d.allow {
+			return false, ErrDenied
+		}
+		return true, nil
+	case <-p.cancel:
+		p.q.remove(p.req.item.ID)
+		return false, ErrDenied
+	case <-timer.C:
+		p.q.remove(p.req.item.ID)
+		return false, ErrDenied
+	}
+}
+
+// Cancel 业务侧放弃等待：幂等；已结算（含已超时）的审批无操作。
+func (p *Pending) Cancel() { p.once.Do(func() { close(p.cancel) }) }
+
+// request 是审批入队的内部实现：respectMode=false 时无视模式强制入队。
+// 返回 (是否批准, 是否"批准并记住", 错误)。
+func (q *Queue) request(tool, summary, detail string, timeout time.Duration, respectMode bool) (allow bool, remember bool, err error) {
+	q.mu.Lock()
+	if respectMode && q.mode != ModeConfirm {
 		q.mu.Unlock()
 		if q.mode == ModeOff {
-			return false, ErrDisabled
+			return false, false, ErrDisabled
 		}
-		return false, nil // auto：直接放行
+		return true, false, nil // auto：直接放行
+	}
+	if timeout <= 0 {
+		timeout = q.timeout
 	}
 	q.seq++
 	req := &request{
@@ -171,12 +256,12 @@ func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, er
 	case d := <-req.ch:
 		q.remove(req.item.ID)
 		if !d.allow {
-			return false, ErrDenied
+			return false, false, ErrDenied
 		}
-		return d.remember, nil
-	case <-time.After(q.timeout):
+		return true, d.remember, nil
+	case <-time.After(timeout):
 		q.remove(req.item.ID)
-		return false, ErrDenied
+		return false, false, ErrDenied
 	}
 }
 

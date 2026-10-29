@@ -6,6 +6,7 @@ import { store } from '../store.js'
 import ModelSection from './settings/ModelSection.vue'
 import PersonaSection from './settings/PersonaSection.vue'
 import McpSection from './settings/McpSection.vue'
+import AcpSection from './settings/AcpSection.vue'
 import SkillsSection from './settings/SkillsSection.vue'
 import PermissionSection from './settings/PermissionSection.vue'
 import CostSection from './settings/CostSection.vue'
@@ -23,25 +24,26 @@ const emit = defineEmits(['close', 'logout'])
 // 避免 Vue 把多余的 logout 监听落到各自的 fragment 根上。
 const GROUPS = [
   { label: '模型与人格', items: [
-    { id: 'model', icon: 'i-model', label: '模型服务', desc: '模型库：多模型的地址、密钥、上下文窗口与输入格式，保存后热生效', comp: markRaw(ModelSection) },
-    { id: 'persona', icon: 'i-persona', label: '人设提示词', desc: '小五的性格与语气，应用后热生效', comp: markRaw(PersonaSection) },
+    { id: 'model', icon: 'i-model', label: '模型服务', comp: markRaw(ModelSection) },
+    { id: 'persona', icon: 'i-persona', label: '人设提示词', comp: markRaw(PersonaSection) },
   ]},
   { label: '能力与行为', items: [
-    { id: 'mcp', icon: 'i-mcp', label: 'MCP 服务器', desc: '本地命令或远程 URL 接入外部工具，保存后热生效', comp: markRaw(McpSection) },
-    { id: 'skills', icon: 'i-skill', label: '技能', desc: 'SKILL.md 定义的做事套路，编辑保存即生效', comp: markRaw(SkillsSection) },
-    { id: 'permissions', icon: 'i-shield', label: '权限模式', desc: '危险操作的把关力度，切换后立即生效', comp: markRaw(PermissionSection) },
-    { id: 'cost', icon: 'i-coin', label: '成本与预算', desc: 'Token 用量热力图与预算额度，超线只停主动任务', comp: markRaw(CostSection) },
-    { id: 'heartbeat', icon: 'i-heart', label: '心跳清单', desc: '定时交给小五自主检查的事项', comp: markRaw(HeartbeatSection) },
+    { id: 'mcp', icon: 'i-mcp', label: 'MCP 服务器', comp: markRaw(McpSection) },
+    { id: 'agent', icon: 'i-acp', label: '智能体', comp: markRaw(AcpSection) },
+    { id: 'skills', icon: 'i-skill', label: '技能', comp: markRaw(SkillsSection) },
+    { id: 'permissions', icon: 'i-shield', label: '权限模式', comp: markRaw(PermissionSection) },
+    { id: 'cost', icon: 'i-coin', label: '成本与预算', comp: markRaw(CostSection) },
+    { id: 'heartbeat', icon: 'i-heart', label: '心跳清单', comp: markRaw(HeartbeatSection) },
   ]},
   { label: '运行观测', items: [
-    { id: 'status', icon: 'i-status', label: '运行状态', desc: '服务状态与 Token 用量账本，可按模型/来源/会话/运行拆分', comp: markRaw(StatusSection), wide: true },
-    { id: 'trace', icon: 'i-trace', label: '调用轨迹', desc: '全局一条调用流，跟随对话历史（清除上下文时一并清除）', comp: markRaw(TraceSection), wide: true },
+    { id: 'status', icon: 'i-status', label: '运行状态', comp: markRaw(StatusSection), wide: true },
+    { id: 'trace', icon: 'i-trace', label: '调用轨迹', comp: markRaw(TraceSection), wide: true },
   ]},
   { label: '数据与系统', items: [
-    { id: 'appearance', icon: 'i-sun', label: '外观', desc: '浅色 / 深色 / 跟随系统，只存本机浏览器', comp: markRaw(AppearanceSection) },
-    { id: 'wiki', icon: 'i-mem', label: '记忆', desc: '记忆 Wiki：小五的长期知识，可搜索、新建与编辑', comp: markRaw(WikiSection), wide: true },
-    { id: 'sessions', icon: 'i-chat', label: '会话管理', desc: '各入口的会话上下文，可单条清除', comp: markRaw(SessionSection) },
-    { id: 'about', icon: 'i-info', label: '关于与配置', desc: '运行时生效的配置快照',
+    { id: 'appearance', icon: 'i-sun', label: '外观', comp: markRaw(AppearanceSection) },
+    { id: 'wiki', icon: 'i-mem', label: '记忆', comp: markRaw(WikiSection), wide: true },
+    { id: 'sessions', icon: 'i-chat', label: '会话管理', comp: markRaw(SessionSection) },
+    { id: 'about', icon: 'i-info', label: '关于与配置',
       comp: markRaw(AboutSection), on: { logout: () => emit('logout') } },
   ]},
 ]
@@ -102,7 +104,6 @@ onBeforeUnmount(() => {
           <header class="set-head">
             <div class="set-head-txt">
               <h2 id="setDialogTitle">{{ cur.label }}</h2>
-              <p class="meta">{{ cur.desc }}</p>
             </div>
             <button type="button" class="set-close" aria-label="关闭设置" @click="close">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"

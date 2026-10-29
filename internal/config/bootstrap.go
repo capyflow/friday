@@ -23,7 +23,9 @@ func EnsureInitial(path string) error {
 	if err != nil {
 		return fmt.Errorf("创建初始配置失败: %w", err)
 	}
-	const initial = "provider:\n  name: openai\n  baseURL: https://api.example.com/v1\n  model: 请填模型名\n  apiKeyEnv: FRIDAY_API_KEY\nadmin:\n  host: 127.0.0.1\n  port: 8080\n"
+	const initial = "provider:\n  name: openai\n  baseURL: " + PlaceholderBaseURL +
+		"\n  model: " + PlaceholderModel +
+		"\n  apiKeyEnv: FRIDAY_API_KEY\nadmin:\n  host: 127.0.0.1\n  port: 8080\n"
 	_, err = f.WriteString(initial)
 	if err == nil {
 		err = f.Sync()

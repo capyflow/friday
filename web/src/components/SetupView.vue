@@ -35,7 +35,7 @@ async function createAccount() {
       <h1>欢迎使用小五</h1>
       <p class="sub">先创建你的管理员账号</p>
       <form v-if="status.localSetupAllowed" class="form-col" @submit.prevent="createAccount">
-        <label>用户名<input v-model="username" name="username" autocomplete="username" maxlength="32" :disabled="busy" required></label>
+        <label>用户名<input v-model="username" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="32" :disabled="busy" required></label>
         <label>密码<input v-model="password" name="password" type="password" autocomplete="new-password" minlength="6" :disabled="busy" required></label>
         <label>确认密码<input v-model="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" :disabled="busy" required></label>
         <p class="set-note">使用至少 6 个字符的独立密码。账号仅在成功保存后创建。</p>

@@ -47,12 +47,12 @@
 
 ## 新增接口
 
-响应与现有接口一致使用 `body` 包装，除设置状态及受控初始化外需要登录 Cookie。
+响应与现有接口一致使用 `body` 包装，除设置状态及受控初始化外需要登录（Bearer token）。
 
 | 方法与路径 | 行为 |
 |---|---|
 | `GET /api/setup/status` | 首次账号/模型要求、本机初始化是否允许；不返回凭据 |
-| `POST /api/setup` | 受控本机一次性初始化，成功建立登录 Cookie |
+| `POST /api/setup` | 受控本机一次性初始化，成功签发登录 token |
 | `POST /api/provider/test` | 文本与可选图片输入诊断，不保存配置 |
 | `PUT /api/tasks/:id` | 完整替换未来任务定义，参数同创建任务：触发方式 `in`/`when`/`delayMinutes`/`every`/`scheduleRule` 五选一（互斥，冲突时返回点名双方的错误） |
 | `POST /api/tasks/:id/pause`、`resume` | 暂停/恢复未来触发 |

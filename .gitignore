@@ -58,3 +58,15 @@ logs/
 .DS_Store
 /.mimosa/
 /.workbuddy/
+
+# ACP 探测报文（含用户 skill 全表与本机路径，不入库）
+evidence/
+
+# 前端构建产物（go:embed 输入，不入库；本地先 cd web && npm run build，Docker 构建自动包含）
+/internal/admin/webdist/index.html
+/internal/admin/webdist/palette.html
+/internal/admin/webdist/wizard.html
+
+# 本地构建二进制与配置备份（含密钥，永不入库）
+/friday
+/config.yaml.bak

@@ -2,8 +2,16 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "kernel_state",
+            "auth_get_token",
+            "auth_set_token",
+            "auth_clear_token",
+            "prefs_get",
+            "prefs_save",
             "enable_notifications",
             "notifications_enabled",
+            "pick_data_dir_dialog",
+            "apply_data_dir",
+            "open_url",
         ]),
     ))
     .expect("无法生成桌面权限清单");

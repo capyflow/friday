@@ -2,10 +2,12 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { store, hideModal, toast, toastState, modalState } from './store.js'
 import { api } from './api.js'
+import { setToken, hydrateToken } from './auth.js'
 import { initTheme, setTheme } from './theme.js'
 import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
+import WorkspaceView from './components/WorkspaceView.vue'
 import AutoView from './components/AutoView.vue'
 import BlinkoView from './components/BlinkoView.vue'
 import NotificationsView from './components/NotificationsView.vue'
@@ -13,10 +15,12 @@ import SettingsModal from './components/SettingsModal.vue'
 import ApprovalCards from './components/ApprovalCards.vue'
 import SetupView from './components/SetupView.vue'
 import { startNotifications, stopNotifications } from './notifications.js'
+import { desktopInvoke, openExternal } from './open-url.js'
 
 // 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天' },
+  { id: 'agent', icon: 'i-acp', label: '工作区' },
   { id: 'auto', icon: 'i-auto', label: '自动化' },
   { id: 'blinko', icon: 'i-blinko', label: '闪念' },
   { id: 'notifications', icon: 'i-bell', label: '通知' },
@@ -33,10 +37,26 @@ const userInitial = ref('U')
 watch(() => store.username, v => { userInitial.value = (v || 'U').charAt(0).toUpperCase() }, { immediate: true })
 const host = ref(location.host)
 
+/* 工作区页懒挂载、挂载后常驻（v-show）：首次进入才拉配置/建会话；之后切到
+   别的导航也不卸载，进行中的 SSE、滚动位置与选中的会话都保留。
+   导航 id 仍是 'agent'（设置页的「智能体」同一口径），只是展示名改成「工作区」。 */
+const workspaceReady = ref(false)
+watch(() => store.view, v => { if (v === 'agent') workspaceReady.value = true }, { immediate: true })
+
 function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
   if (userPopOpen.value && !e.target.closest('.side-foot') && !e.target.closest('.user-pop')) {
     userPopOpen.value = false
+  }
+  // 桌面外壳里 window.open / target=_blank 都不会开窗（WebView 拒新窗口）：正文外链
+  // 统一交给系统浏览器。浏览器直连时保持原生行为（不拦，避免破坏中键/右键习惯）。
+  const a = e.target?.closest?.('a[target="_blank"]')
+  if (a && desktopInvoke()) {
+    const href = a.getAttribute('href') || ''
+    if (/^https?:\/\//i.test(href)) {
+      e.preventDefault()
+      openExternal(href)
+    }
   }
 }
 function onKeydown(e) {
@@ -62,10 +82,12 @@ onMounted(refreshSetup)
 
 async function refreshSetup() {
   try {
+    await hydrateToken() // 桌面端先回填原生冷备的 token（端口回退/WebView 数据被清时兜底）
     store.setupStatus = await api('GET', '/api/setup/status')
     const s = await api('GET', '/api/session')
     store.loggedIn = !!s.authenticated
     store.username = s.username || ''
+    if (!s.authenticated) setToken('') // token 缺失/过期：清掉本地残留
   } catch { /* 服务器暂不可达时保留当前界面 */ }
 }
 
@@ -76,6 +98,7 @@ watch(() => store.loggedIn, async ok => {
 
 async function logout() {
   try { await api('POST', '/api/logout', {}) } catch (e) {}
+  setToken('')
   userPopOpen.value = false
   store.settingsOpen = false
   store.loggedIn = false
@@ -111,6 +134,7 @@ async function logout() {
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6.3a5 5 0 1 1 7.5 6.3z"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
     <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4a1.75 1.75 0 0 1 0 3.5h-3a1.75 1.75 0 0 0 0 3.5h4"/></symbol>
+    <symbol id="i-acp" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9 17h6"/></symbol>
     <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
   </svg>
 
@@ -121,7 +145,7 @@ async function logout() {
   <SetupView v-if="store.setupStatus?.accountRequired" :status="store.setupStatus" @account-created="refreshSetup" />
   <LoginView v-else-if="!store.loggedIn" />
 
-  <div v-else id="app">
+  <div v-else id="app" :class="{ 'focus-mode': store.fullscreen }">
     <aside id="sidebar">
       <div class="brand"><div class="avatar">五</div><b>小五</b></div>
       <nav id="nav" aria-label="主导航">
@@ -175,6 +199,7 @@ async function logout() {
       <!-- 聊天常驻（切页不打断流式回复），其余视图按需挂载；
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
+      <Transition name="view"><WorkspaceView v-if="workspaceReady" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>
       <Transition name="view"><NotificationsView v-if="store.view === 'notifications'" /></Transition>

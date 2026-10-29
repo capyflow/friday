@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderMD } from '../src/md.js'
+import { looksLikeFilePath, renderMD } from '../src/md.js'
 
 function render(source) {
   const container = document.createElement('div')
@@ -66,4 +66,50 @@ describe('不可信 Markdown', () => {
     expect(container.querySelector('pre code').textContent).toContain('<img onerror="x">')
     expectSafe(container)
   })
+})
+
+describe('文件路径 chip', () => {
+  it.each([
+    '/Users/aaron/com.capyflow/friday/减脂计划.md',
+    '/tmp/out.json',
+    '/var/log/app.log',
+    '/home/u/my file notes.txt',
+  ])('识别文件路径：%s', path => {
+    expect(looksLikeFilePath(path)).toBe(true)
+  })
+
+  it.each([
+    '', '相对/路径.txt', '//protocol-like', '/api/chat', '/admin',
+    '/usr/local/go', '/etc/hosts', 'https://x.com/a.png', '/has`tick.png', '/new\nline.png',
+  ])('不误伤非文件路径：%s', path => {
+    expect(looksLikeFilePath(path)).toBe(false)
+  })
+
+  it('fileChips 开启时行内代码路径变可点 chip，未开启时保持原样', () => {
+    const src = '文件在 `/tmp/a.md`，代码里 `<div>/tmp/a.md</div>` 不算。'
+    const withChip = render(src, true)
+    const chip = withChip.querySelector('.file-chip')
+    expect(chip).not.toBeNull()
+    expect(chip.dataset.path).toBe('/tmp/a.md')
+    expect(chip.textContent).toBe('/tmp/a.md')
+    const plain = render(src, false)
+    expect(plain.querySelector('.file-chip')).toBeNull()
+    expect(plain.querySelector('code').textContent).toBe('/tmp/a.md')
+  })
+
+  it('代码块内的路径不转 chip；含引号的路径安全落进 dataset', () => {
+    const block = render('```text\n/tmp/in-block.md\n```', true)
+    expect(block.querySelector('pre .file-chip')).toBeNull()
+    expect(block.querySelector('pre code').textContent).toContain('/tmp/in-block.md')
+    const quoted = render('`/tmp/" onclick="x".md`', true)
+    const chip = quoted.querySelector('.file-chip')
+    expect(chip.dataset.path).toBe('/tmp/" onclick="x".md')
+    expectSafe(quoted)
+  })
+
+  function render(source, fileChips) {
+    const container = document.createElement('div')
+    container.innerHTML = renderMD(source, { fileChips })
+    return container
+  }
 })

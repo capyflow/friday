@@ -21,6 +21,20 @@ function stream(events) {
   }), { headers: { 'Content-Type': 'text/event-stream' } })
 }
 
+// holdStream 开一条不主动收尾的 SSE：测试自己 push/关闭，用来观察"流式进行中"的界面。
+function holdStream() {
+  let controller
+  const enc = new TextEncoder()
+  const response = new Response(new ReadableStream({
+    start(c) { controller = c },
+  }), { headers: { 'Content-Type': 'text/event-stream' } })
+  return {
+    response,
+    push(event) { controller.enqueue(enc.encode(`data: ${JSON.stringify(event)}\n\n`)) },
+    close() { controller.close() },
+  }
+}
+
 async function mountChat() {
   wrapper = mount(ChatView)
   await flushPromises()
@@ -86,7 +100,7 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.get('textarea').element.value).toBe('')
     expect(wrapper.get('[aria-label="发送"]').element.disabled).toBe(true)
     expect(wrapper.find('.mrow.user').text()).toBe(expected)
-    expect(wrapper.find('.mrow.bot').text()).toBe('回复')
+    expect(wrapper.find('.mrow.bot .turn-text').text()).toBe('回复')
   })
 
   it('纯图片发送保留消息 URL，清除消息时才释放', async () => {
@@ -316,6 +330,43 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.find('.cursor').exists()).toBe(false)
   })
 
+  it('工具调用只有名字（无结果）时也能展开查看，而不是禁用', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'run' } },
+      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'ok' } },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('跑一下')
+    const tool = wrapper.get('.tool')
+    expect(tool.find('.tool-head .think-chev').exists()).toBe(true)
+    expect(tool.get('.tool-head').attributes('disabled')).toBeUndefined()
+    await tool.get('.tool-head').trigger('click')
+    expect(tool.get('.tool-call .step-name').text()).toBe('Bash')
+    expect(tool.find('.tool-out').exists()).toBe(false)
+  })
+
+  it('结束帧兜底：结果事件丢失的工具块就地收掉，不再转圈', async () => {
+    let controller
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
+    const enc = new TextEncoder()
+    wrapper = mount(ChatView)
+    await flushPromises()
+    await send('查天气')
+    const push = async ev => {
+      controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
+      await flushPromises()
+    }
+    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
+    expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
+    // ok/fail 帧被丢（过程事件是非阻塞发布，可能半路丢弃）：done 一到，
+    // 残留的运行中块要收掉，不能永远转圈
+    await push({ delta: '今天晴' })
+    await push({ done: true })
+    expect(wrapper.find('.tool .step-ico .spin').exists()).toBe(false)
+    expect(wrapper.get('.tool .step-ico').classes()).toContain('ok')
+  })
+
   it('思考与正文分片交错到达时各并回一块，回答不碎成两字一行', async () => {
     // StepFun 这类网关会在正文已经吐了几个字之后补发思考分片：
     // 按"最后一块类型"分块会把回答切成「我是」「小五，…」这样的碎块。
@@ -348,7 +399,7 @@ describe('聊天发送和失败恢复', () => {
     await mountChat()
     await send('查天气')
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
-    expect(rows).toEqual(['think', 'turn-text'])
+    expect(rows).toEqual(['think', 'turn-text', 'turn-foot'])
     expect(wrapper.get('.turn-text').text()).toBe('今天晴')
   })
 
@@ -365,8 +416,27 @@ describe('聊天发送和失败恢复', () => {
     await mountChat()
     await send('查天气')
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
-    expect(rows).toEqual(['think', 'tool', 'think', 'turn-text'])
+    expect(rows).toEqual(['think', 'tool', 'think', 'turn-text', 'turn-foot'])
     expect(wrapper.findAll('.think-text').map(b => b.text())).toEqual(['要查天气', '拿到结果了'])
+  })
+
+  it('提问发出后立即可复制，回答要等本轮结束才给复制', async () => {
+    const held = holdStream()
+    fetchMock.mockResolvedValueOnce(held.response)
+    await mountChat()
+    await send('查天气')
+    held.push({ delta: '今天' })
+    await flushPromises()
+    // 自己发出去的话不依赖回复：发出即有复制按钮
+    expect(wrapper.findAll('.mrow.user .copy-btn')).toHaveLength(1)
+    // 回复还在流式生成：正文已出一块，但轮末操作行还不存在（防止复制到半截答案）
+    expect(wrapper.get('.turn-text').text()).toBe('今天')
+    expect(wrapper.find('.turn-foot').exists()).toBe(false)
+
+    held.push({ done: true })
+    held.close()
+    await flushPromises()
+    expect(wrapper.find('.turn-foot .copy-btn').exists()).toBe(true)
   })
 
   it('刷新后从历史接口恢复思考块与工具调用块', async () => {
@@ -446,6 +516,33 @@ describe('composer 两行布局', () => {
     await wrapper.get('.mode-chip button').trigger('click')
     expect(wrapper.get('.mode-chip').classes()).not.toContain('show')
   })
+
+  it('chip 装不下时滚轮横向滚动，到头把滚轮让回页面', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 300 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const wheel = deltaY => {
+      const ev = new window.WheelEvent('wheel', { deltaY, cancelable: true, bubbles: true })
+      bar.dispatchEvent(ev)
+      return ev
+    }
+    expect(wheel(40).defaultPrevented).toBe(true)
+    expect(bar.scrollLeft).toBe(40)
+    bar.scrollLeft = 200 // 已到最右
+    expect(wheel(40).defaultPrevented).toBe(false)
+    expect(bar.scrollLeft).toBe(200)
+  })
+
+  it('chip 放得下时滚轮不拦截页面滚动', async () => {
+    await mountChat()
+    const bar = wrapper.get('.bar-left').element
+    Object.defineProperty(bar, 'scrollWidth', { configurable: true, value: 100 })
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, value: 100 })
+    const ev = new window.WheelEvent('wheel', { deltaY: 40, cancelable: true, bubbles: true })
+    bar.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false)
+  })
 })
 
 describe('粘贴附件', () => {
@@ -466,7 +563,8 @@ describe('粘贴附件', () => {
   it('非图片文件给出可读提示且不落附件', async () => {
     await mountChat()
     await pasteFiles([new File(['doc'], 'a.pdf', { type: 'application/pdf' })])
-    expect(toast).toHaveBeenCalledWith('仅支持图片文件', true)
+    // 1f28026 起粘贴只认图片：非图片按数量给出明确忽略提示，而不是笼统的“仅支持图片文件”。
+    expect(toast).toHaveBeenCalledWith('剪贴板里有 1 个非图片文件，已忽略（目前只支持图片）', true)
     expect(wrapper.find('#attachPreviews img').exists()).toBe(false)
   })
 
@@ -676,6 +774,20 @@ describe('模型快捷切换', () => {
     expect(items.map(b => b.find('.pl').text())).toEqual(['step-5', 'ds-chat', '管理模型库…'])
     expect(items[1].text()).toContain('仅文本')
     expect(items[0].classes()).toContain('selected')
+  })
+
+  it('未配置模型：chip 明说未配置，弹层给提示，发送被拦下', async () => {
+    api.mockImplementation(modelsApi([], ''))
+    await mountChat()
+    const chip = wrapper.find('[aria-label="当前模型"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain('未配置模型')
+    await chip.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#modelPopover').text()).toContain('还没有配置模型')
+    await send('你好')
+    expect(toast).toHaveBeenCalledWith('还没有配置模型，请先在「设置 → 模型服务」添加', true)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('点选另一模型发 activate，切换后刷新库与上下文占比', async () => {

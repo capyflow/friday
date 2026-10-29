@@ -39,10 +39,10 @@ func (t *ScheduleTaskTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"text":      map[string]any{"type": "string", "description": "任务内容或智能任务的指令，如：该敷面膜了"},
-			"in":        map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
-			"when":      map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
-			"every":     map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
+			"text":  map[string]any{"type": "string", "description": "任务内容或智能任务的指令，如：该敷面膜了"},
+			"in":    map[string]any{"type": "string", "description": "相对时长，如 10分钟 / 2小时 / 90s / 1天。单次任务用 in 或 when 之一"},
+			"when":  map[string]any{"type": "string", "description": "绝对触发时间（RFC3339，含时区），如 2026-09-01T20:00:00+08:00"},
+			"every": map[string]any{"type": "string", "description": "循环规则：自然语言“每天早上8点”“每周一三五9:30”，或 cron 表达式“0 8 * * *”"},
 			// delayMinutes / scheduleRule 是管理后台表单用的形态（界面把语义算成确定值再提交）；
 			// 你按自然语言安排时继续用 in / when / every。
 			"delayMinutes": map[string]any{"type": "integer", "description": "多少分钟后触发一次（1-525600），与 in/when/every/scheduleRule 互斥；管理后台表单用，你优先用 in"},
@@ -251,7 +251,7 @@ func triggerCarrier(in, ws, ev string, delayMinutes int, rule *task.ScheduleRule
 	}
 	switch strings.Join(present, "+") {
 	case "delayMinutes+in":
-		return "", fmt.Errorf("delayMinutes（N 分钟后）和 in（多久之后）是同一件事的两种写法，保留一个即可："+
+		return "", fmt.Errorf("delayMinutes（N 分钟后）和 in（多久之后）是同一件事的两种写法，保留一个即可：" +
 			"界面用 delayMinutes，让小五说“10分钟后”时它用 in")
 	case "delayMinutes+when", "in+when":
 		return "", fmt.Errorf("一次性任务的时间点只能给一个：相对延迟（delayMinutes / in）与绝对时刻（when）同时给了无法判断以哪个为准")

@@ -14,6 +14,7 @@ import (
 // Step 是一条中间过程事件。
 type Step struct {
 	Kind   string `json:"kind"`             // round（LLM 轮次）| tool（工具调用）
+	ID     string `json:"id,omitempty"`     // 调用标识（ACP toolCallId；主会话工具无 id）
 	Name   string `json:"name,omitempty"`   // 工具名（kind=tool）
 	Detail string `json:"detail,omitempty"` // 摘要（命令/参数/结果片段）
 	Status string `json:"status,omitempty"` // run | ok | fail（kind=tool）

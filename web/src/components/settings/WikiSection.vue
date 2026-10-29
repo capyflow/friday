@@ -147,7 +147,6 @@ onMounted(loadWiki)
               <button class="btn" type="button" @click="cancelEdit">取消</button>
             </div>
           </form>
-          <div class="set-note">保存会整体替换页面正文；小五把页面内容当作该主题的长期记忆。</div>
         </div>
       </div>
     </div>

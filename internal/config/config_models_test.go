@@ -82,6 +82,26 @@ memory:
 	}
 }
 
+// TestPlaceholderModelPair 首次启动种子里的示例值必须能被识别为「未配置」，
+// 且不能误伤用户自己的真实模型（两项必须成对匹配）。
+func TestPlaceholderModelPair(t *testing.T) {
+	if !(ModelProfile{BaseURL: PlaceholderBaseURL, Model: PlaceholderModel}).IsPlaceholder() {
+		t.Fatal("初始占位应识别为未配置")
+	}
+	if !(ModelProfile{BaseURL: " " + PlaceholderBaseURL + "/ ", Model: " 请填模型名 "}).IsPlaceholder() {
+		t.Fatal("占位识别应忽略空白与末尾斜杠")
+	}
+	for _, m := range []ModelProfile{
+		{BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat"},
+		{BaseURL: "https://api.deepseek.com/v1", Model: PlaceholderModel},
+		{BaseURL: PlaceholderBaseURL, Model: "deepseek-chat"},
+	} {
+		if m.IsPlaceholder() {
+			t.Fatalf("真实配置被误判为占位: %+v", m)
+		}
+	}
+}
+
 // TestValidateModels 校验模型库规则：name 唯一非空、baseURL/model 非空、inputs
 // 枚举合法、active 必须命中；空库不受约束。
 func TestValidateModels(t *testing.T) {

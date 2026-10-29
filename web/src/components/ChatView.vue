@@ -6,10 +6,15 @@
 // 本组件在登录期间常驻（App 里 v-show），切到别的视图不会打断进行中的回复。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
-import { api } from '../api.js'
+import { api, authFailed } from '../api.js'
+import { authHeaders, mediaURL } from '../auth.js'
 import { fmtTokens } from '../format.js'
-import { renderMD } from '../md.js'
+import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { store, toast } from '../store.js'
+import TimelineBlocks from './TimelineBlocks.vue'
+import CopyMessageButton from './CopyMessageButton.vue'
+import ChatComposer from './ChatComposer.vue'
+import FilePreviewDrawer from './FilePreviewDrawer.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -21,6 +26,7 @@ import { store, toast } from '../store.js'
 // bot 的 turn 是本轮问答的 token 汇总 { in, out, ms? }，done 帧带来、历史接口同样回带。
 const messages = reactive([])
 const input = ref('')
+const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 const phase = ref('idle')          // 对话阶段：idle（空闲）| streaming（回复中）| paused（已暂停可继续）
 const pausedTurn = ref(null)       // 暂停现场镜像 { question, partial }（服务端为准）
 const busy = computed(() => phase.value === 'streaming')
@@ -29,7 +35,7 @@ const menuOpen = ref(false)
 const popOpen = ref(false)
 const mode = ref(null)             // null | 'plan' | 'goal'
 const scroller = ref(null)
-const inputEl = ref(null)
+const composerEl = ref(null)
 const fileInput = ref(null)
 const moreWrap = ref(null)
 const popWrap = ref(null)
@@ -249,12 +255,16 @@ function onFilesPicked(ev) {
   addImageFiles(files)
 }
 
-// 剪贴板里有文件才接管：纯文本粘贴保持浏览器默认行为。
+// 剪贴板里有文件才接管：只认图片（上传链路仅 png/jpeg/webp），非图片文件明确忽略；
+// 纯文本粘贴保持浏览器默认行为。
 function onPaste(ev) {
   const files = Array.from(ev.clipboardData?.files || [])
   if (!files.length) return
   ev.preventDefault()
-  addImageFiles(files)
+  const imgs = files.filter(f => f.type.startsWith('image/'))
+  const skipped = files.length - imgs.length
+  if (skipped) toast(`剪贴板里有 ${skipped} 个非图片文件，已忽略（目前只支持图片）`, true)
+  if (imgs.length) addImageFiles(imgs)
 }
 
 async function uploadImages(images, signal) {
@@ -262,10 +272,9 @@ async function uploadImages(images, signal) {
   for (const p of images) {
     const fd = new FormData()
     fd.append('file', p.file)
-    const res = await fetch('/api/upload', { method: 'POST', body: fd, signal })
-    if (res.status === 401) {
-      toast('登录已过期，请重新登录', true)
-      store.loggedIn = false
+    const res = await fetch('/api/upload', { method: 'POST', headers: authHeaders(), body: fd, signal })
+    if (res.status === 403) {
+      authFailed()
       throw new Error('登录已过期，请重新登录')
     }
     const data = await res.json()
@@ -294,7 +303,7 @@ function setMode(m) {
 function fill(text) {
   if (busy.value || clearing.value) return
   input.value = text
-  nextTick(() => { inputEl.value && inputEl.value.focus(); autoGrow() })
+  nextTick(() => composerEl.value && composerEl.value.focus())
 }
 
 /* ---------- 权限模式（参照 zcode：chip 常驻输入框，弹层切换，全局热生效） ---------- */
@@ -382,6 +391,9 @@ const modelBusy = ref(false)
 const modelWrap = ref(null)
 const activeModel = computed(() => modelLib.value?.models?.find(m => m.name === modelLib.value.active) || null)
 const modelShort = computed(() => activeModel.value?.name || '')
+// 模型库明确为空（首次安装）才算「未配置」；加载失败/旧响应缺字段时仍按未知处理。
+const noModels = computed(() => Array.isArray(modelLib.value?.models) && modelLib.value.models.length === 0)
+const modelChipLabel = computed(() => modelShort.value || (noModels.value ? '未配置模型' : '模型'))
 // 未建库（合成条目无 inputs 声明）时视为全支持，向后兼容老配置
 const imageSupported = computed(() => !activeModel.value || (activeModel.value.inputs || []).includes('image'))
 
@@ -428,18 +440,6 @@ async function compactCtx() {
 }
 
 /* ---------- 发送（SSE 流式）：发送 / 暂停 / 继续 ---------- */
-function autoGrow() {
-  const el = inputEl.value
-  if (!el) return
-  el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
-}
-function onInputKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault()
-    if (phase.value !== 'streaming') sendChat()
-  }
-}
 // 主按钮一位三态：回复中=暂停；暂停且无输入=继续；其余=发送（暂停时输入新问题
 // 即丢弃上次任务、开启新对话）。
 function onSendClick() {
@@ -459,106 +459,9 @@ function newBot() {
   return reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
 }
 
-/* ---------- 时间线块（zcode 风）：思考 / 工具调用 / 正文按轮次分开 ---------- */
-// 一轮 LLM 调用里，思考与正文各只占一块。分片是可能交错的（StepFun 这类网关会在
-// 正文已经吐了几个字之后补发思考分片），若按"最后一块是什么类型"决定并入还是新起，
-// 回答会被切成一串只有一两个字的碎块。轮次由 round 事件与工具调用推进。
-function blockIndex(m, kind) {
-  for (let i = m.blocks.length - 1; i >= 0; i--) {
-    const b = m.blocks[i]
-    if (b.round !== m.round) break
-    if (b.kind === kind) return i
-  }
-  return -1
-}
-
-// 思考预览行：收起时只显示一行，取思考文本最新非空行的尾部，随增量不断更新。
-const THINK_LINE_MAX = 120
-function thinkPreview(text) {
-  const lines = (text || '').split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const s = lines[i].trim()
-    if (!s) continue
-    return s.length > THINK_LINE_MAX ? '…' + s.slice(-THINK_LINE_MAX) : s
-  }
-  return ''
-}
-
-// 正在写的思考块（本轮那一块且轮次未定稿）：标题实时一行预览、灯泡呼吸。
-function liveThink(m, bi, b) {
-  return m.streaming && !m.paused && !b.meta && bi === blockIndex(m, 'think')
-}
-function thinkTitle(m, b, bi) {
-  if (liveThink(m, bi, b)) return thinkPreview(b.text) || '思考中…'
-  return b.meta ? '思考 · ' + b.meta : '思考'
-}
-// 工具调用折叠行的可访问标题：出错时把状态说在前面，运行中没有可展开的内容故留空。
-function toolTitle(b) {
-  if (b.status === 'fail') {
-    if (!b.out) return '工具执行出错'
-    return b.open ? '收起出错详情' : '工具执行出错，展开详情'
-  }
-  if (!b.out) return ''
-  return b.open ? '收起详情' : '展开详情'
-}
-// 轮末汇总文案：token 走 k/百万缩写；耗时缺失（被暂停的现场没有结束时刻）就不写。
-function turnTotalText(t) {
-  if (!t) return ''
-  const s = `本轮 · ${fmtTokens(t.in || 0)}+${fmtTokens(t.out || 0)} tokens`
-  return t.ms ? `${s} · 耗时 ${(t.ms / 1000).toFixed(1)}s` : s
-}
-// 光标跟着本轮正在写的正文走（思考分片插进来时不该跑到思考行下面）。
-function cursorOn(m, bi) {
-  return m.streaming && bi === blockIndex(m, 'text')
-}
-
-// 思考增量并入本轮的思考块；本轮还没有就新起一块，并插在正文块前面
-// （网关把思考分片发在正文之后，时间线上仍按"先思考后回答"读）。
-function pushThinking(m, delta) {
-  const ti = blockIndex(m, 'think')
-  if (ti >= 0) { m.blocks[ti].text += delta; return }
-  const block = { kind: 'think', text: delta, meta: '', open: false, round: m.round }
-  const xi = blockIndex(m, 'text')
-  if (xi >= 0) m.blocks.splice(xi, 0, block)
-  else m.blocks.push(block)
-}
-
-// 轮次结束事件（耗时）：挂到本轮的思考块上，收起时即"思考 · 耗时…"，
-// 然后推进轮次——之后的思考与正文另起一块。
-function finishRound(m, detail) {
-  const ti = blockIndex(m, 'think')
-  if (ti >= 0 && !m.blocks[ti].meta) m.blocks[ti].meta = detail || ''
-  m.round++
-}
-
-// 工具调用事件：run 新起一行并推进轮次（工具调用是轮次边界）；
-// ok/fail 回填最近的同名运行中块。
-function pushToolStep(m, s) {
-  const name = s.name || ''
-  if (s.status === 'run') {
-    m.blocks.push({ kind: 'tool', name, text: s.detail || '', out: '',
-      status: 'run', open: false, round: m.round })
-    m.round++
-    return
-  }
-  for (let i = m.blocks.length - 1; i >= 0; i--) {
-    const b = m.blocks[i]
-    if (b.kind === 'tool' && b.status === 'run' && b.name === name) {
-      b.out = s.detail || ''
-      b.status = s.status === 'fail' ? 'fail' : 'ok'
-      return
-    }
-  }
-}
-
-// 回答增量并入本轮的正文块；工具调用之后的新一轮回答另起一块。
-function pushText(m, delta) {
-  m.text += delta
-  const xi = blockIndex(m, 'text')
-  if (xi >= 0) m.blocks[xi].text += delta
-  else m.blocks.push({ kind: 'text', text: delta, round: m.round })
-}
-
+/* ---------- 时间线块（zcode 风） ---------- */
+// 块的构造/推进与渲染已抽到 ../blocks.js 与 TimelineBlocks.vue（与智能体页共用）；
+// 这里只保留 SSE 帧到块的搬运。
 // streamTurn 跑一次 SSE 对话（发送与继续共用）：userMsg 为乐观插入的用户气泡
 //（继续时为 null）；prepare 在建立连接前上传图片返回附件 ID；出错时按 draft
 // 恢复输入现场（继续失败则回到"已暂停"状态）。
@@ -587,13 +490,12 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
     nextTick(() => stick(true))
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: controller.signal,
     })
-    if (res.status === 401) {
-      store.loggedIn = false
-      toast('登录已过期，请重新登录', true)
+    if (res.status === 403) {
+      authFailed()
       return
     }
     if (!res.ok || !res.body) {
@@ -696,7 +598,7 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       input.value = draft.text
       mode.value = draft.mode
       pendingImages.push(...draft.images)
-      nextTick(autoGrow)
+      composerEl.value && composerEl.value.focus()
     } else {
       phase.value = 'paused' // 继续失败：回到可继续状态
     }
@@ -715,10 +617,14 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
       reader.releaseLock()
     }
     removeTyping()
-    if (bot && phase.value !== 'paused') bot.streaming = false
+    if (bot && phase.value !== 'paused') {
+      // 本轮已了结（完成或出错断流）：漏收尾的工具块不会再有结果事件了，就地收掉
+      bot.streaming = false
+      closeRunningTools(bot)
+    }
     if (request === controller) request = null
     if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
-    if (!disposed) nextTick(() => inputEl.value && inputEl.value.focus())
+    if (!disposed) nextTick(() => composerEl.value && composerEl.value.focus())
   }
 }
 
@@ -731,6 +637,11 @@ async function sendChat(presetText) {
   }
   const text = draft.text.trim()
   if (!text && !draft.images.length) return
+  // 首次安装是「未配置模型」：先明确拦住并指路，别拿占位地址发请求。
+  if (noModels.value) {
+    toast('还没有配置模型，请先在「设置 → 模型服务」添加', true)
+    return
+  }
   // 计划与目标都走后端 mode 字段：计划=可审阅清单 + 确认后逐步执行；
   // 目标=登记成后台多轮推进的即时目标。不再往消息里拼 【计划】/【目标】 前缀。
   const reqMode = draft.mode === 'plan' || draft.mode === 'goal' ? draft.mode : undefined
@@ -744,7 +655,6 @@ async function sendChat(presetText) {
   input.value = ''
   // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
   pendingImages.splice(0, pendingImages.length)
-  autoGrow()
   const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   await streamTurn({
     url: '/api/chat',
@@ -830,9 +740,26 @@ function onDocClick(e) {
   if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
   if (modelOpen.value && modelWrap.value && !modelWrap.value.contains(e.target)) modelOpen.value = false
 }
+/* Esc：先收弹层；都没有且焦点在对话区、正在回答时中断本轮（输入框自己的 keydown
+   会先处理并 preventDefault，这里不重复）。 */
 function onKeydown(e) {
-  if (e.key === 'Escape') {
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  const hasLayer = menuOpen.value || popOpen.value || permOpen.value || ctxOpen.value || modelOpen.value
+  if (hasLayer) {
+    e.preventDefault()
     menuOpen.value = false; setPop(false); permOpen.value = false; ctxOpen.value = false; modelOpen.value = false
+    return
+  }
+  if (phase.value === 'streaming' && e.target && typeof e.target.closest === 'function' &&
+      e.target.closest('#chatFoot, #msgList, .inputbar')) {
+    e.preventDefault()
+    onSendClick() // 流式期间这个入口就是"停止"
+    return
+  }
+  // 没在跑：Esc 收起应用内全屏（普通窗口布局下什么都不做）
+  if (store.fullscreen) {
+    e.preventDefault()
+    store.fullscreen = false
   }
 }
 onMounted(() => {
@@ -881,6 +808,15 @@ async function clearContext() {
   <section id="view-chat" class="view">
     <div id="chatHead">
       <div class="title">小五</div>
+      <button class="btn icon" :class="{ active: store.fullscreen }"
+              :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
+              :title="store.fullscreen ? '退出全屏（Esc）' : '全屏对话（Esc 退出）'"
+              @click="store.fullscreen = !store.fullscreen">
+        <svg v-if="store.fullscreen" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></svg>
+        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>
       <div ref="moreWrap" class="more-wrap">
         <button class="btn icon" aria-label="更多操作" aria-haspopup="true" @click.stop="menuOpen = !menuOpen">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="#i-more"/></svg>
@@ -914,45 +850,8 @@ async function clearContext() {
           </div>
           <!-- bot：zcode 风时间线——思考 / 工具调用 / 正文按到达顺序分开成块 -->
           <div v-else-if="m.role === 'bot'" class="turn">
-            <template v-for="(b, bi) in m.blocks" :key="bi">
-              <!-- 思考块：收起时一行实时预览（流式）或轮次摘要，点击展开全文 -->
-              <div v-if="b.kind === 'think'" class="think" :class="{ open: b.open }">
-                <button class="think-head" type="button" :title="b.open ? '收起思考' : '展开思考'"
-                        @click="b.open = !b.open">
-                  <span class="step-ico think-ico" :class="{ live: liveThink(m, bi, b) }" aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
-                  </span>
-                  <span class="think-title">{{ thinkTitle(m, b, bi) }}</span>
-                  <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div v-show="b.open" class="think-body">
-                  <div class="think-text">{{ b.text }}</div>
-                </div>
-              </div>
-              <!-- 工具调用块：收起只报"工具调用"，工具名与参数、结果都收进展开区 -->
-              <div v-else-if="b.kind === 'tool'" class="tool"
-                   :class="{ open: b.open, 'is-fail': b.status === 'fail' }">
-                <button class="tool-head" type="button" :disabled="!b.out" :title="toolTitle(b)"
-                        @click="b.open = b.out ? !b.open : false">
-                  <span class="step-ico" :class="b.status" aria-hidden="true">
-                    <i v-if="b.status === 'run'" class="spin step-ring"></i>
-                    <svg v-else-if="b.status === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                  </span>
-                  <span class="step-name">工具调用</span>
-                  <svg v-if="b.out" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div v-show="b.open" class="tool-body">
-                  <div class="tool-call">
-                    <span class="step-name">{{ b.name }}</span>
-                    <span class="step-detail">{{ b.text }}</span>
-                  </div>
-                  <div class="tool-out">{{ b.out }}</div>
-                </div>
-              </div>
-              <!-- 正文块 -->
-              <div v-else class="turn-text chat-md"><span v-html="renderMD(b.text)"></span><span v-if="cursorOn(m, bi)" class="cursor"></span></div>
-            </template>
+            <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
+                            @preview="path => fileDrawer.open(path)" />
             <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
                 <div class="pc-head">
@@ -992,80 +891,81 @@ async function clearContext() {
                   </template>
                 </div>
               </div>
-            <!-- 轮末一行汇总：本轮 token 与耗时（思考块只报每轮耗时，总量在这里收口） -->
-            <div v-if="m.turn" class="turn-total">{{ turnTotalText(m.turn) }}</div>
+            <!-- 轮末：token/耗时汇总在左，复制正文在右（回复进行中不给复制，避免复制半截答案） -->
+            <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
+              <div v-if="m.turn" class="turn-total">{{ turnTotalText(m.turn) }}</div>
+              <div v-if="!m.streaming" class="msg-acts">
+                <CopyMessageButton :blocks="m.blocks" kind="answer" />
+              </div>
+            </div>
           </div>
-          <!-- 用户 / 错误消息仍是气泡 -->
-          <div v-else class="bubble">
-            {{ m.text }}
-            <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="src" alt="">
+          <!-- 用户 / 错误消息仍是气泡（发出即可复制，不等本轮回复结束） -->
+          <div v-else class="msg-col">
+            <div class="bubble">
+              {{ m.text }}
+              <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="mediaURL(src)" alt="">
+            </div>
+            <div class="msg-acts">
+              <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />
+            </div>
           </div>
         </div>
       </div>
     </div>
 
     <div id="chatFoot">
-      <div class="inputbar" :aria-busy="busy || clearing">
-        <!-- 图片附件在输入容器内部：有图时撑起整个输入框 -->
-        <div v-if="pendingImages.length" id="attachPreviews">
-          <div v-for="p in pendingImages" :key="p.url" class="thumb">
-            <img :src="p.url" alt="">
-            <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
-          </div>
-        </div>
-        <!-- 第一行：输入区独占整行并自动增高；操作键全部落到第二行 -->
-        <textarea ref="inputEl" v-model="input" rows="1" :placeholder="placeholder" aria-label="聊天输入" :disabled="busy || clearing"
-                  @keydown="onInputKeydown" @input="autoGrow" @paste="onPaste"></textarea>
-        <!-- 第二行：左=附件与模式 chip，右=快捷键提示与主按钮 -->
-        <div class="composer-bar">
-          <div class="bar-left">
-            <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
-                    :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            </button>
-            <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
-            <button class="ib-btn perm-btn" :class="['pm-' + permMode, { active: permOpen }]"
-                    aria-label="权限模式" :title="'权限模式：' + PERM_META[permMode].label"
-                    :disabled="busy || clearing" @click.stop="togglePerm">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              <span class="perm-short">{{ PERM_META[permMode].short }}</span>
-            </button>
-            <div class="mode-chip" :class="{ show: !!mode }">
-              <span class="mode-name">{{ mode ? MODE_TEXT[mode][0] : '' }}</span>
-              <button aria-label="退出模式" @click="setMode(mode)">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-              </button>
+      <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
+                    :busy="phase === 'streaming'" :disabled="clearing"
+                    :send-label="sendLabel" :send-disabled="sendDisabled"
+                    @primary="onSendClick" @stop="onSendClick" @paste="onPaste">
+        <template #previews>
+          <!-- 图片附件在输入容器内部：有图时撑起整个输入框 -->
+          <div v-if="pendingImages.length" id="attachPreviews">
+            <div v-for="p in pendingImages" :key="p.url" class="thumb">
+              <img :src="p.url" alt="">
+              <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
             </div>
-            <!-- 上下文占用：点击查看数字与压缩入口。未启用上下文治理时后端不返回快照，chip 不出现 -->
-            <button v-if="ctxSnap" class="ib-btn ctx-btn" :class="[ctxLevel, { active: ctxOpen }]"
-                    aria-label="上下文使用率" aria-haspopup="true"
-                    :title="'上下文占用 ' + ctxPct + '%，点击查看'" :disabled="clearing"
-                    @click.stop="toggleCtx">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
-              <span class="ctx-short">{{ ctxPct }}%</span>
-            </button>
-            <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
-            <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
-                    aria-label="当前模型" aria-haspopup="true"
-                    :title="'当前模型：' + (modelShort || '未配置')" :disabled="clearing"
-                    @click.stop="toggleModel">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
-              <span class="ctx-short model-short">{{ modelShort || '模型' }}</span>
+          </div>
+        </template>
+        <template #left>
+          <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
+                  :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
+          <button class="ib-btn perm-btn" :class="['pm-' + permMode, { active: permOpen }]"
+                  aria-label="权限模式" :title="'权限模式：' + PERM_META[permMode].label"
+                  :disabled="busy || clearing" @click.stop="togglePerm">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span class="perm-short">{{ PERM_META[permMode].short }}</span>
+          </button>
+          <div class="mode-chip" :class="{ show: !!mode }">
+            <span class="mode-name">{{ mode ? MODE_TEXT[mode][0] : '' }}</span>
+            <button aria-label="退出模式" @click="setMode(mode)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
-          <div class="bar-right">
-            <span class="kbd-hint" aria-hidden="true">⏎ 发送 · ⇧⏎ 换行</span>
-            <button class="ib-btn send-btn" :class="{ 'halt-btn': phase === 'streaming', 'resume-btn': sendLabel === '继续上次任务' }"
-                    :aria-label="sendLabel" :title="sendLabel" :disabled="sendDisabled" @click="onSendClick">
-              <svg v-if="phase === 'streaming'" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
-              <svg v-else-if="sendLabel === '继续上次任务'" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.6v12.8c0 .9 1 1.5 1.8 1L20 13a1.2 1.2 0 0 0 0-2L9.8 4.6C9 4.1 8 4.7 8 5.6Z"/></svg>
-              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-send"/></svg>
-            </button>
-          </div>
-        </div>
+          <!-- 上下文占用：点击查看数字与压缩入口。未启用上下文治理时后端不返回快照，chip 不出现 -->
+          <button v-if="ctxSnap" class="ib-btn ctx-btn" :class="[ctxLevel, { active: ctxOpen }]"
+                  aria-label="上下文使用率" aria-haspopup="true"
+                  :title="'上下文占用 ' + ctxPct + '%，点击查看'" :disabled="clearing"
+                  @click.stop="toggleCtx">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 16 9 5 9-5"/><path d="m3 12 9 5 9-5"/></svg>
+            <span class="ctx-short">{{ ctxPct }}%</span>
+          </button>
+          <!-- 当前模型：点开切模型（库只有一条时是快捷入口去设置），无库不出现 -->
+          <button v-if="modelLib" class="ib-btn ctx-btn model-btn" :class="{ active: modelOpen }"
+                  aria-label="当前模型" aria-haspopup="true"
+                  :title="'当前模型：' + (modelShort || (noModels ? '未配置模型' : '未配置'))" :disabled="clearing"
+                  @click.stop="toggleModel">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+            <span class="ctx-short model-short">{{ modelChipLabel }}</span>
+          </button>
+        </template>
+      </ChatComposer>
 
         <!-- 加号弹窗 -->
         <div v-show="popOpen" ref="popWrap" class="popover" id="addPopover">
@@ -1150,7 +1050,8 @@ async function clearContext() {
         <!-- 模型弹层：点选即热切换（对话上下文保持连续），入口去设置管理模型库 -->
         <div v-if="modelLib" v-show="modelOpen" ref="modelWrap" class="popover model-popover" id="modelPopover">
           <div class="popover-title pop-anim">模型</div>
-          <button v-for="m in modelLib.models" :key="m.name" class="pop-item pop-anim"
+          <p v-if="noModels" class="pop-empty pop-anim">还没有配置模型，先添加一个再对话</p>
+          <button v-for="m in (modelLib.models || [])" :key="m.name" class="pop-item pop-anim"
                   :class="{ selected: m.name === modelLib.active }" :disabled="modelBusy" @click="setModel(m.name)">
             <span class="pi">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -1166,7 +1067,7 @@ async function clearContext() {
             <span class="pd">设置 → 模型服务</span>
           </button>
         </div>
-      </div>
     </div>
+    <FilePreviewDrawer ref="fileDrawer" />
   </section>
 </template>

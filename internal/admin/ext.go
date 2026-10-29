@@ -419,6 +419,16 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest,
 				map[string]string{"error": "服务器 " + sv.Name + " 的 url 须以 http:// 或 https:// 开头"})
 		}
+		// 鉴权方式：只认 header / oauth；OAuth 只对远程服务器有意义。
+		sv.Auth = strings.ToLower(strings.TrimSpace(sv.Auth))
+		if sv.Auth != "" && sv.Auth != mcp.AuthHeader && sv.Auth != mcp.AuthOAuth {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "服务器 " + sv.Name + " 的鉴权方式只支持 header 或 oauth"})
+		}
+		if sv.Auth == mcp.AuthOAuth && sv.URL == "" {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "服务器 " + sv.Name + "：OAuth 授权只适用于远程地址（url）"})
+		}
 		key := mcp.ToolPrefix(sv.Name)
 		if seen[key] {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest,
@@ -439,10 +449,9 @@ func (s *Server) handleMCPConfigSet(ctx *vhttp.Context) error {
 	if s.mcp != nil {
 		live := make([]mcp.ServerConfig, 0, len(req.Servers))
 		for _, sv := range req.Servers {
-			live = append(live, mcp.ServerConfig{
-				Name: sv.Name, Command: sv.Command, Args: sv.Args, Env: sv.Env,
-				URL: sv.URL, Headers: sv.Headers,
-			})
+			// 字段集与 config.McpServerConfig 一致，直接类型转换（新增字段时
+			// 靠编译报错提醒，避免悄悄丢掉 auth 这类配置）。
+			live = append(live, mcp.ServerConfig(sv))
 		}
 		applyErr = s.mcp.Apply(ctx.Context(), live)
 	}
@@ -477,6 +486,45 @@ func (s *Server) handleMCPReconnect(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已重连 " + name})
+}
+
+// handleMCPAuthorize 为声明了 OAuth 的远程 MCP 服务器发起一次浏览器授权：
+// 后台完成元数据发现与客户端注册，把授权地址返回给前端交给系统浏览器打开，
+// 用户在该页面登录服务商后回调自动落到本进程，令牌入库并自动重连。
+func (s *Server) handleMCPAuthorize(ctx *vhttp.Context) error {
+	name := ctx.GinContext().Param("name")
+	url, err := s.mcp.Authorize(ctx.Context(), name)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"url":     url,
+		"message": "请在浏览器里完成 " + name + " 的登录授权，完成后自动连接",
+	})
+}
+
+// handleMCPAuthStatus 查询一台服务器的授权状态（前端点「授权」后轮询这个接口）。
+// url 是进行中流程的授权地址：自动打开浏览器失败或页面刷新后，前端用它做「复制链接」。
+func (s *Server) handleMCPAuthStatus(ctx *vhttp.Context) error {
+	name := ctx.GinContext().Param("name")
+	state, message := s.mcp.AuthState(name)
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"state":   state,
+		"message": message,
+		"url":     s.mcp.AuthURL(name),
+	})
+}
+
+// handleMCPDisconnect 断开一台服务器的授权：向服务商撤销令牌并删除本地会话，
+// 连接随之关闭，状态回到「待授权」。
+func (s *Server) handleMCPDisconnect(ctx *vhttp.Context) error {
+	s.mcpUpdateMu.Lock()
+	defer s.mcpUpdateMu.Unlock()
+	name := ctx.GinContext().Param("name")
+	if err := s.mcp.Disconnect(ctx.Context(), name); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已断开 " + name + " 的授权"})
 }
 
 // handleGetPermissions 返回全局权限模式与相关策略（设置页展示）。
@@ -652,22 +700,32 @@ func newModelView(m config.ModelProfile, active, globalKeySet bool, flatMaxToken
 	}
 }
 
-// handleProviderModelsGet 返回模型库与当前激活条目。未配置库时用扁平字段合成
+// effectiveProviderModels 返回模型库对外展示的条目与激活名。首次启动种子里的
+// 示例占位（api.example.com / 请填模型名）不算已配置：单条占位库与扁平占位都
+// 按空库返回，前端据此显示「还没有配置模型」而不是一条假模型。
+func effectiveProviderModels(p config.ProviderConfig) (string, []config.ModelProfile) {
+	if len(p.Models) == 1 && p.Models[0].IsPlaceholder() {
+		return "", nil
+	}
+	if len(p.Models) > 0 {
+		return p.Active, p.Models
+	}
+	flat := config.ModelProfile{
+		Name: p.Model, BaseURL: p.BaseURL, Model: p.Model,
+		ContextWindow: p.ContextWindow, MaxTokens: p.MaxTokens,
+	}
+	if strings.TrimSpace(flat.BaseURL) == "" || strings.TrimSpace(flat.Model) == "" || flat.IsPlaceholder() {
+		return "", nil
+	}
+	return p.Model, []config.ModelProfile{flat}
+}
+
+// handleProviderModelsGet 返回模型库与当前激活条目。未建库时用扁平字段合成
 // 一条（name = model 名），前端无需区分两种形态；密钥不回传，只回 keySet。
+// 初始配置的示例占位按空库返回（见 effectiveProviderModels）。
 func (s *Server) handleProviderModelsGet(ctx *vhttp.Context) error {
 	cfg := s.cfg.Snapshot()
-	active := cfg.Provider.Active
-	models := cfg.Provider.Models
-	if len(models) == 0 {
-		active = cfg.Provider.Model
-		models = []config.ModelProfile{{
-			Name:          cfg.Provider.Model,
-			BaseURL:       cfg.Provider.BaseURL,
-			Model:         cfg.Provider.Model,
-			ContextWindow: cfg.Provider.ContextWindow,
-			MaxTokens:     cfg.Provider.MaxTokens,
-		}}
-	}
+	active, models := effectiveProviderModels(cfg.Provider)
 	globalKeySet := cfg.ProviderAPIKey() != ""
 	views := make([]modelView, 0, len(models))
 	for _, m := range models {

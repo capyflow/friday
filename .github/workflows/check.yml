@@ -25,15 +25,7 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Configure access to private Go dependencies
-        env:
-          MODULES_TOKEN: ${{ secrets.CAPYFLOW_MODULES_TOKEN }}
-        run: |
-          if [ -z "$MODULES_TOKEN" ]; then
-            echo "Set CAPYFLOW_MODULES_TOKEN with read access to the capyflow dependency repositories."
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${MODULES_TOKEN}@github.com/".insteadOf https://github.com/
+      # Go 依赖经仓库内 vendor/ 离线可用（go 自动 -mod=vendor），无需模块凭据
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
@@ -43,8 +35,6 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - name: Verify committed web assets match source
-        run: git diff --exit-code -- internal/admin/webdist/
       - name: Build Linux service
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/friday ./cmd/robot
       - name: Exercise first run and persistent P0 flows with a local mock model

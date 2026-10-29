@@ -42,12 +42,54 @@ async function clickSave() {
 }
 
 describe('模型库设置', () => {
+  it('首次没有模型：显示空状态并禁用保存，引导添加第一个模型', async () => {
+    api.mockImplementation((method, url) => {
+      if (method === 'GET' && url === '/api/provider/models')
+        return Promise.resolve({ active: '', globalWindowTokens: 0, models: [] })
+      return Promise.resolve({})
+    })
+    await show()
+    expect(rows()).toHaveLength(0)
+    expect(wrapper.text()).toContain('还没有配置模型')
+    const save = wrapper.findAll('button').find(b => b.text() === '保存并生效')
+    expect(save.attributes('disabled')).toBeDefined()
+    const add = wrapper.findAll('button').find(b => b.text() === '＋ 添加第一个模型')
+    expect(add).toBeTruthy()
+    await add.trigger('click')
+    await flushPromises()
+    expect(rows()).toHaveLength(1)
+    expect(wrapper.find('.pm-empty').exists()).toBe(false)
+  })
+
+  it('只有一个新模型时自动选中，填完直接保存，不需要再点 radio', async () => {
+    api.mockImplementation((method, url) => {
+      if (method === 'GET' && url === '/api/provider/models')
+        return Promise.resolve({ active: '', globalWindowTokens: 0, models: [] })
+      if (method === 'POST' && url === '/api/provider/models') return Promise.resolve({ message: '已保存' })
+      return Promise.resolve({})
+    })
+    await show()
+    await wrapper.findAll('button').find(b => b.text() === '＋ 添加第一个模型').trigger('click')
+    await flushPromises()
+    const row = rows()[0]
+    expect(inRow(row, 'input[type="radio"]').element.checked).toBe(true)
+    await inRow(row, 'input[aria-label="模型显示名"]').setValue('日常对话')
+    await inRow(row, 'input[type="url"]').setValue('https://api.stepfun.com/step_plan/v1')
+    await inRow(row, 'input[placeholder="服务商提供的模型名称"]').setValue('step-5-preview')
+    await clickSave()
+    expect(wrapper.text()).not.toContain('请选择一个要生效的模型')
+    expect(api).toHaveBeenCalledWith('POST', '/api/provider/models', {
+      active: '日常对话',
+      models: [expect.objectContaining({ name: '日常对话', model: 'step-5-preview' })],
+    })
+  })
+
   it('加载渲染条目：激活 radio 命中、生效中徽标、密钥占位按 keySet 区分', async () => {
     await show()
     expect(rows()).toHaveLength(2)
     expect(wrapper.text()).toContain('生效中')
     expect(inRow(rows()[0], 'input[type="radio"]').element.checked).toBe(true)
-    expect(inRow(rows()[0], 'input[type="radio"]').element.value).toBe('step-5')
+    expect(inRow(rows()[0], 'input[type="radio"]').element.value).toBe('0')
     expect(inRow(rows()[0], 'input[type="password"]').attributes('placeholder')).toContain('留空保留')
     expect(inRow(rows()[1], 'input[type="password"]').attributes('placeholder')).toContain('填写该服务的 API Key')
   })
@@ -61,7 +103,7 @@ describe('模型库设置', () => {
 
     api.mockClear()
     await inRow(rows()[1], 'input[type="url"]').setValue('https://api.deepseek.com/v1')
-    await inRow(rows()[1], 'input[placeholder="如 step-5-preview"]').setValue('')
+    await inRow(rows()[1], 'input[aria-label="模型显示名"]').setValue('')
     await clickSave()
     expect(api).not.toHaveBeenCalledWith('POST', '/api/provider/models', expect.anything())
     expect(wrapper.text()).toContain('每个模型都需要一个名称')

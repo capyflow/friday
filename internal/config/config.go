@@ -41,6 +41,7 @@ type Config struct {
 	Trace        TraceConfig       `yaml:"trace"`
 	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
 	Mcp          McpConfig         `yaml:"mcp"`
+	Acp          AcpConfig         `yaml:"acp"`
 	Persona      PersonaConfig     `yaml:"persona"`
 	Cost         CostConfig        `yaml:"cost"`
 	SystemPrompt string            `yaml:"systemPrompt"`
@@ -476,6 +477,9 @@ type McpServerConfig struct {
 	URL string `yaml:"url" json:"url"`
 	// Headers 远程请求头（鉴权等，如 Authorization: Bearer xxx）。
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Auth 远程服务器的鉴权方式：留空或 header 用 Headers 静态头；oauth 走
+	// MCP 标准授权（浏览器登录一次，令牌由 Friday 保存并自动刷新）。
+	Auth string `yaml:"auth" json:"auth"`
 }
 
 // 模型输入格式。text 恒隐含支持；其余值声明在 ModelProfile.Inputs 里。
@@ -490,6 +494,21 @@ const (
 // 1024 会被思考整个吃光、返回 finish_reason=length 且正文为空——表现为
 // 「模型未返回任何文本内容」。4096 够多数日常回答，长计划类请求仍可在模型库里调高。
 const DefaultMaxTokens = 4096
+
+// 首次启动种子里的示例占位。Validate 要求 baseURL/model 非空，服务才能起来；
+// 但这对值不是任何真实服务商，模型库/状态页不应把它当成已配置模型展示。
+const (
+	PlaceholderBaseURL = "https://api.example.com/v1"
+	PlaceholderModel   = "请填模型名"
+)
+
+// IsPlaceholder 报告条目是否仍是首次启动写入的示例占位（不是用户配置的模型）。
+// 两项严格成对匹配，避免误伤用户自己起名叫「请填模型名」的真实配置。
+func (m ModelProfile) IsPlaceholder() bool {
+	return strings.TrimSpace(m.Model) == PlaceholderModel &&
+		strings.EqualFold(strings.TrimRight(strings.TrimSpace(m.BaseURL), "/"),
+			strings.TrimRight(PlaceholderBaseURL, "/"))
+}
 
 // ModelProfile 是模型库（provider.models）里的一条模型档案：不同服务商各带各的
 // 地址与密钥。激活（切换）时套用到 ProviderConfig 的扁平字段并热重建。
@@ -845,8 +864,11 @@ func UpdateMcpServers(path string, servers []McpServerConfig) error {
 		}
 		strPair("name", s.Name)
 		if s.URL != "" {
-			// 远程服务器：写 url + headers。
+			// 远程服务器：写 url + auth + headers。
 			strPair("url", s.URL)
+			if auth := strings.TrimSpace(s.Auth); auth != "" && auth != "header" {
+				strPair("auth", auth)
+			}
 			if len(s.Headers) > 0 {
 				hdrMap := &yaml.Node{Kind: yaml.MappingNode}
 				keys := make([]string, 0, len(s.Headers))
@@ -1180,6 +1202,7 @@ func (c *Config) applyDefaults() {
 	if c.Trace.File == "" {
 		c.Trace.File = "traces.json"
 	}
+	c.Acp = c.Acp.Normalized()
 }
 
 // Validate 校验必填项。
@@ -1249,6 +1272,9 @@ func (c *Config) Validate() error {
 		if d < time.Minute {
 			return fmt.Errorf("config: heartbeat.interval 不得短于 1m（当前 %q）——心跳每轮都调用模型，过短会失控烧钱", interval)
 		}
+	}
+	if err := c.Acp.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

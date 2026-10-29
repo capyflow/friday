@@ -11,11 +11,31 @@
 
 启动链路：
 
-1. Tauri 启动 → 拉起 sidecar：`friday --desktop --data-dir <系统应用数据目录>/Friday --port 0`
+1. Tauri 启动 → 解析数据目录（见「数据目录与内核二进制」）→ 拉起内核：`<包内>/friday --desktop --data-dir <数据目录> --port 47831`（固定端口保登录态；被占用时退回 `--port 0`）
 2. 首次运行：外壳把随包分发的 `config.yaml.example` 播种为数据目录的 `config.yaml`（对齐 docker entrypoint 模式）；API 密钥经数据目录可选的 `friday.env`（KEY=VALUE）注入子进程环境——解决 Finder/Dock 启动拿不到 shell 环境变量的问题
-3. Go 内核 chdir 到数据目录 → 随机空闲端口起服务 → stdout 打印 `FRIDAY_ADDR=http://127.0.0.1:<port>`
+3. Go 内核 chdir 到数据目录 → 在给定端口起服务（固定端口被占用时由外壳传 0，改用随机空闲端口） → stdout 打印 `FRIDAY_ADDR=http://127.0.0.1:<port>`
 4. 外壳逐行解析 stdout，拿到地址后通知主窗口导航（此前显示启动占位页）
 5. 退出链路见「生命周期一致性」
+
+## 一·五、数据目录与内核二进制（一体包）
+
+**数据目录解析顺序**（`resolve_data_dir`）：
+
+1. `FRIDAY_DESKTOP_DATA_DIR` 环境变量（开发/测试覆盖，须绝对路径，不落指针）
+2. 指针文件 `系统配置目录/Friday.launcher.json`（`{"dataDir": "…"}`）；指针指向的目录已不存在 → 回退默认路径并重跑向导
+3. 都没有 → **首装向导模式**：内核先按默认路径拉起，主窗口进入应用内向导页 `/wizard.html`（`needs_dir_setup=true` 时占位页自动导航）——第一步创建管理员账号（已有账号则跳过），第二步确认数据目录。目录规则：空目录/不存在 → 原样使用；已有 Friday 数据（config.yaml 等）→ 原样接管；其它非空目录 → 收进其下 `Friday/` 子目录。网盘同步目录（iCloud/OneDrive/Dropbox/Google Drive）需二次确认。确认后：写指针 → 迁移本次向导产生的文件（账号/配置；目标已有数据则跳过=接管）→ 内核以新目录重启 → 跳登录页。删除指针文件即可重跑向导
+
+**内核一体包**（2026-10-28 起，替代早先的「外置内核」方案）：内核即随包分发的 sidecar，落在外壳可执行文件旁边，**卸载应用即随之删除，数据目录只存数据**——目录里没有二进制，换数据目录/换设备迁移的都是纯数据，Windows 卸载器也能顺手带走内核。内核更新随应用更新走（后续 updater 插件整包替换）；启动时尽力清理旧版外置布局遗留的 `<数据目录>/bin/friday`。壳-内核契约（`--desktop/--data-dir/--port <port>`、stdout 的 `FRIDAY_ADDR`、stdin 的 `/quit`）不变。曾选「外置内核」（数据目录/bin/friday，包内做首装种子）是为内核自更新通道留地基——通道一直未建，外置反而让每次迭代要多同步一份二进制，遂回归一体包。
+
+已知取舍：Windows 上数据目录在 `%APPDATA%`（Roaming），漫游同步只带数据不带二进制；企业部署需求出现时再拆 `%LocalAppData%`。
+
+## 一·六、登录态持久化（三层）
+
+1. **JWT（服务端）**：HS256、7 天 TTL，载荷带用户名与密码版本（改密即全量失效）；签名密钥落盘 `<数据目录>/auth-key`，内核重启后旧 token 仍可验签
+2. **固定端口（origin）**：外壳固定传 `--port 47831`，WebView origin 恒定，localStorage（`friday.authToken`，主窗口与弹窗共享）天然跨重启保留；端口被占时退回 `--port 0` 随机端口
+3. **原生冷备（兜底）**：外壳把 token 原子写入 `<数据目录>/desktop-auth-token`（Unix 0600），原生命令 `auth_get_token/auth_set_token/auth_clear_token` 仅在 origin 与内核一致的主窗口/弹窗内可用；前端 `auth.js` 启动 `hydrateToken()` 回填（native 为准，本地多出的推给 native），`setToken` 写穿同步。**端口回退随机或 WebView 数据被清时，登录态由这层兜住**。浏览器直访无 `__TAURI__`，自动降级为纯 localStorage
+
+**前端偏好同款冷备**：主题（`friday-theme`）、系统通知开关（`friday-notifications-enabled`）、通知去重（`friday-notices-<user>`）是前端自己的数据，经 `prefs.js` 写穿到 `<数据目录>/desktop-prefs.json`（键白名单 `friday-` 前缀、排除 token、单值 ≤8KB、原子写 0600），启动时 `hydratePrefs()` 在挂载前补齐缺失项（本地为准）。浏览器直访退化为纯 localStorage。
 
 ## 二、生命周期一致性（三层保证）
 
@@ -78,6 +98,7 @@ desktop/
 | 全局快捷键/弹窗 | 本方案第一个样例 | ✅ |
 | 系统托盘菜单 | tauri `tray-icon` feature | 已接入 |
 | 系统通知 | 显式授权、系统状态检查与通知中心兜底 | 已接入，跨平台系统联调待验收 |
+| 外部链接（MCP 授权 / 正文外链） | 外壳命令 `open_url` 交给系统浏览器（WebView 不允许 `window.open`）；只放行 http/https | 已接入 |
 | 开机自启 | autostart 插件 | 低 |
 | 自动更新 | updater 插件（需签名密钥对） | 中 |
 | 剪贴板/文件拖拽 | clipboard-manager 插件 / 拖放事件 → 内核文件工具 | 低 |

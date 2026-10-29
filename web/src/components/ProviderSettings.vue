@@ -11,9 +11,8 @@ const DEFAULT_MAX_TOKENS = 4096
 const emit = defineEmits(['saved'])
 
 const models = reactive([])
-const activeName = ref('')   // radio 选中的条目（保存时生效）
-const appliedName = ref('')  // 加载时已在生效的条目（「生效中」徽标）
-const globalWindow = ref(0)  // context.windowTokens 全局覆盖（0 = 未设置，优先级最高）
+const activeIdx = ref(-1)    // radio 选中的条目下标（保存时生效；用下标避免改名后丢选择）
+const appliedName = ref('')  // 加载时已在生效的条目名（「生效中」徽标）
 const busy = ref(false)
 const msg = reactive({ text: '', cls: '' })
 let msgTimer = null
@@ -41,25 +40,28 @@ async function load() {
   let data
   try { data = await api('GET', '/api/provider/models') }
   catch (e) { show('模型库加载失败：' + e.message, false); return }
-  globalWindow.value = data.globalWindowTokens || 0
   appliedName.value = data.active || ''
-  activeName.value = data.active || ''
-  models.splice(0, models.length, ...(data.models || []).map(toRow))
+  const rows = (data.models || []).map(toRow)
+  models.splice(0, models.length, ...rows)
+  activeIdx.value = rows.findIndex(r => r.name === data.active)
 }
 function addRow() {
+  const idx = models.length
   models.push({
     name: '', baseURL: '', model: '', apiKey: '', window: '', maxTokens: String(DEFAULT_MAX_TOKENS),
     image: true, keySet: false, testing: false, testMsg: null, _open: true,
   })
+  // 第一个模型默认就是生效项，填完直接保存，省一次点 radio。
+  if (activeIdx.value < 0 || activeIdx.value >= idx) activeIdx.value = idx
 }
 function hostOf(x) {
   try { return new URL(x.baseURL).host } catch { return ''
   }
 }
 function removeRow(i) {
-  const name = models[i].name
   models.splice(i, 1)
-  if (name && activeName.value === name) activeName.value = models[0]?.name || ''
+  if (activeIdx.value === i) activeIdx.value = models.length ? 0 : -1
+  else if (activeIdx.value > i) activeIdx.value--
 }
 // 收成非负整数：空/NaN/负数 → 0（由调用方决定兜底）。
 function intOf(v) {
@@ -89,7 +91,7 @@ function validate(rows) {
     } catch { return `模型 ${r.name} 的 API 地址无效` }
     if (!r.model) return `模型 ${r.name} 缺少模型名`
   }
-  if (!rows.some(r => r.name === activeName.value)) return '请选择一个要生效的模型'
+  if (activeIdx.value < 0 || activeIdx.value >= rows.length) return '请选择一个要生效的模型'
   return ''
 }
 async function save() {
@@ -99,7 +101,7 @@ async function save() {
   if (err) { show(err, false); return }
   busy.value = true
   try {
-    const r = await api('POST', '/api/provider/models', { active: activeName.value, models: rows })
+    const r = await api('POST', '/api/provider/models', { active: rows[activeIdx.value]?.name || '', models: rows })
     show(r.message || '已保存并生效', true)
     emit('saved')
     load()
@@ -133,12 +135,16 @@ onMounted(load)
 <template>
   <div class="provider-settings" :aria-busy="busy">
     <div class="pm-list">
+      <div v-if="!models.length" class="pm-empty">
+        <b>还没有配置模型</b>
+        <span class="meta">添加一个模型，填写 API 地址、模型名和密钥后即可开始对话。</span>
+      </div>
       <div v-for="(x, i) in models" :key="i" class="pm-row" :class="{ open: x._open }">
         <!-- 摘要行：默认只看这一行，点开才展开编辑（zcode 式收拢） -->
         <div class="pm-head" role="button" tabindex="0" :aria-expanded="x._open"
              :aria-label="'模型 ' + (x.name || '未命名')" @click="x._open = !x._open" @keydown.enter="x._open = !x._open">
-          <input v-model="activeName" type="radio" name="active-model" :value="x.name" class="pm-radio"
-                 :title="activeName === x.name ? '保存后此模型生效' : '设为生效模型'"
+          <input v-model="activeIdx" type="radio" name="active-model" :value="i" class="pm-radio"
+                 :title="activeIdx === i ? '保存后此模型生效' : '设为生效模型'"
                  :aria-label="'使用模型 ' + (x.name || '未命名')" @click.stop>
           <span class="pm-name" :class="{ faint: !x.name }">{{ x.name || '未命名' }}</span>
           <span class="pm-meta mono">{{ x.model || '模型名未填' }}<template v-if="hostOf(x)"> · {{ hostOf(x) }}</template></span>
@@ -161,7 +167,7 @@ onMounted(load)
           </label>
           <div class="pm-grid">
             <label class="mr-field"><span>显示名</span>
-              <input v-model="x.name" @input="x.testMsg = null" placeholder="如 step-5-preview" aria-label="模型显示名">
+              <input v-model="x.name" @input="x.testMsg = null" placeholder="如：日常对话" aria-label="模型显示名">
             </label>
             <label class="mr-field"><span>模型名</span>
               <input v-model="x.model" autocomplete="off" @input="x.testMsg = null" placeholder="服务商提供的模型名称">
@@ -194,12 +200,10 @@ onMounted(load)
       </div>
     </div>
     <div class="row pm-foot">
-      <button class="btn" type="button" :disabled="busy" @click="addRow">＋ 添加模型</button>
-      <button class="btn primary" type="button" :disabled="busy" @click="save">{{ busy ? '正在保存…' : '保存并生效' }}</button>
+      <button class="btn" type="button" :disabled="busy" @click="addRow">{{ models.length ? '＋ 添加模型' : '＋ 添加第一个模型' }}</button>
+      <button class="btn primary" type="button" :disabled="busy || !models.length" @click="save">{{ busy ? '正在保存…' : '保存并生效' }}</button>
     </div>
     <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-    <p class="set-note">点选 radio 的模型在保存后立即生效；上下文窗口留空按模型名自动识别<template v-if="globalWindow">（当前设了全局覆盖 context.windowTokens={{ globalWindow }}，优先于此处）</template>。
-      最大输出 token 留空按 {{ DEFAULT_MAX_TOKENS }} 提交：思考型模型的「思考」也计入这份预算，给小了会出现只有思考、没有正文（回复中断）。</p>
   </div>
 </template>
 
@@ -207,6 +211,11 @@ onMounted(load)
 .provider-settings label { display: block; }
 /* 行卡片与 .mcp-row 同规格但独立类名；默认收成一行摘要，展开才是表单（zcode 式收拢） */
 .pm-list { display: flex; flex-direction: column; gap: 8px; }
+.pm-empty { display: flex; flex-direction: column; gap: 6px; padding: 24px 18px;
+  border: 1px dashed var(--border); border-radius: var(--radius); text-align: center;
+  background: var(--bg-subtle); }
+.pm-empty b { font-size: 13.5px; font-weight: 500; }
+.pm-empty .meta { font-size: 12.5px; line-height: 1.6; color: var(--faint-fg); }
 .pm-row { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-subtle);
   padding: 3px 10px; }
 html[data-theme="dark"] .pm-row { background: rgba(255,255,255,.03); }

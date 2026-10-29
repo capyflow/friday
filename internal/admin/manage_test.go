@@ -15,7 +15,7 @@ import (
 	"github.com/capyflow/friday/internal/todo"
 )
 
-func manageTestServer(t *testing.T) (*Server, http.Handler, *http.Cookie, string, string) {
+func manageTestServer(t *testing.T) (*Server, http.Handler, string, string, string) {
 	t.Helper()
 	s, _, _ := setupTestServer(t)
 	dir := t.TempDir()
@@ -32,22 +32,40 @@ func manageTestServer(t *testing.T) (*Server, http.Handler, *http.Cookie, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, s.Handler(), &http.Cookie{Name: sessionCookie, Value: s.newSession()}, tasksPath, todosPath
+	return s, s.Handler(), testAuthToken(t, s), tasksPath, todosPath
+}
+
+// testAuthToken 为测试初始化管理员账号并签发一个 JWT（替代旧的会话 Cookie）。
+func testAuthToken(t *testing.T, s *Server) string {
+	t.Helper()
+	if s.accounts == nil {
+		t.Fatal("测试服务器缺少账号仓库")
+	}
+	if s.accounts.Current().SetupRequired {
+		if err := s.accounts.Initialize("owner", "test-password"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := s.issueToken(s.accounts.Current().Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 func TestTaskManagementHandlersPersistAndRejectUnownedFields(t *testing.T) {
-	s, handler, cookie, tasksPath, _ := manageTestServer(t)
+	s, handler, token, tasksPath, _ := manageTestServer(t)
 	when := time.Now().Add(time.Hour)
 	old, err := s.engine.Schedule(task.Task{ID: "task", Text: "旧内容", Kind: task.KindOnce, When: when, NotificationParentID: "parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(map[string]any{"text": "新内容", "when": when.Format(time.RFC3339Nano), "channel": "web", "status": "paused", "id": "forged", "todoId": "forged", "notificationParentId": "forged"})
-	unauth := setupTestRequest(handler, "PUT", "/api/tasks/task", body, "127.0.0.1:1234", "localhost", "", nil)
-	if unauth.Code != http.StatusUnauthorized {
+	unauth := setupTestRequest(handler, "PUT", "/api/tasks/task", body, "127.0.0.1:1234", "localhost", "", "")
+	if unauth.Code != http.StatusForbidden {
 		t.Fatalf("编辑必须授权: %d", unauth.Code)
 	}
-	response := setupTestRequest(handler, "PUT", "/api/tasks/task", body, "127.0.0.1:1234", "localhost", "", cookie)
+	response := setupTestRequest(handler, "PUT", "/api/tasks/task", body, "127.0.0.1:1234", "localhost", "", token)
 	if response.Code != http.StatusOK {
 		t.Fatalf("编辑失败: %d %s", response.Code, response.Body)
 	}
@@ -56,7 +74,7 @@ func TestTaskManagementHandlersPersistAndRejectUnownedFields(t *testing.T) {
 		t.Fatalf("HTTP编辑篡改身份或定义错误: %+v", got)
 	}
 	for _, action := range []string{"pause", "resume"} {
-		r := setupTestRequest(handler, "POST", "/api/tasks/task/"+action, []byte(`{}`), "127.0.0.1:1234", "localhost", "", cookie)
+		r := setupTestRequest(handler, "POST", "/api/tasks/task/"+action, []byte(`{}`), "127.0.0.1:1234", "localhost", "", token)
 		if r.Code != http.StatusOK {
 			t.Fatalf("%s失败: %d %s", action, r.Code, r.Body)
 		}
@@ -79,7 +97,7 @@ func TestTaskManagementHandlersPersistAndRejectUnownedFields(t *testing.T) {
 }
 
 func TestTaskManagementHandlersPersistenceFailuresDoNotClaimSuccess(t *testing.T) {
-	s, handler, cookie, path, _ := manageTestServer(t)
+	s, handler, token, path, _ := manageTestServer(t)
 	when := time.Now().Add(time.Hour)
 	old, err := s.engine.Schedule(task.Task{ID: "task", Text: "保留", Kind: task.KindOnce, When: when})
 	if err != nil {
@@ -99,7 +117,7 @@ func TestTaskManagementHandlersPersistenceFailuresDoNotClaimSuccess(t *testing.T
 	}{
 		{"PUT", "/api/tasks/task", body}, {"POST", "/api/tasks/task/pause", []byte(`{}`)},
 	} {
-		r := setupTestRequest(handler, req.method, req.path, req.body, "127.0.0.1:1234", "localhost", "", cookie)
+		r := setupTestRequest(handler, req.method, req.path, req.body, "127.0.0.1:1234", "localhost", "", token)
 		if r.Code == http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("error")) {
 			t.Fatalf("保存失败不能HTTP成功: %d %s", r.Code, r.Body)
 		}
@@ -117,14 +135,14 @@ func TestTaskManagementHandlersPersistenceFailuresDoNotClaimSuccess(t *testing.T
 }
 
 func TestTaskManagementHandlerRejectsLinkedTodoEditing(t *testing.T) {
-	s, handler, cookie, _, _ := manageTestServer(t)
+	s, handler, token, _, _ := manageTestServer(t)
 	when := time.Now().Add(time.Hour)
 	linked, err := s.engine.Schedule(task.Task{ID: "linked", TodoID: "todo", Kind: task.KindOnce, Text: "源待办", When: when})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(map[string]any{"text": "绕过待办修改", "when": when.Add(time.Hour).Format(time.RFC3339Nano)})
-	r := setupTestRequest(handler, "PUT", "/api/tasks/linked", body, "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "PUT", "/api/tasks/linked", body, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code == http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("update_todo")) {
 		t.Fatalf("关联任务应指向待办管理: %d %s", r.Code, r.Body)
 	}
@@ -135,10 +153,10 @@ func TestTaskManagementHandlerRejectsLinkedTodoEditing(t *testing.T) {
 }
 
 func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
-	s, handler, cookie, _, todosPath := manageTestServer(t)
+	s, handler, token, _, todosPath := manageTestServer(t)
 	due, remind := time.Now().Add(2*time.Hour), time.Now().Add(time.Hour)
 	body, _ := json.Marshal(map[string]any{"text": "交房租", "dueAt": due, "remindAt": remind})
-	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("创建待办失败: %d %s", r.Code, r.Body)
 	}
@@ -154,7 +172,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 		t.Fatalf("已同步提醒门卫异常: %v %v", allowed, err)
 	}
 	body, _ = json.Marshal(map[string]any{"text": "已修改", "dueAt": due, "remindAt": remind.Add(time.Minute)})
-	r = setupTestRequest(handler, "PUT", "/api/entries/"+td.ID, body, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "PUT", "/api/entries/"+td.ID, body, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("编辑待办失败: %d %s", r.Code, r.Body)
 	}
@@ -168,7 +186,7 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 	if err := os.Mkdir(todosPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code == http.StatusOK || s.todos.List()[0].Done {
 		t.Fatal("待办完成写盘失败不能成功或污染内存")
 	}
@@ -178,14 +196,14 @@ func TestTodoHandlersCreateUpdateCompleteAndReportSaveFailure(t *testing.T) {
 	if err := os.Rename(backup, todosPath); err != nil {
 		t.Fatal(err)
 	}
-	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || s.engine.Len() != 0 {
 		t.Fatalf("完成待办未取消未来提醒: %d %s", r.Code, r.Body)
 	}
 }
 
 func TestNotificationHTTPReadSnoozeAndTaskHistoryFilter(t *testing.T) {
-	s, handler, cookie, _, _ := manageTestServer(t)
+	s, handler, token, _, _ := manageTestServer(t)
 	tk := task.Task{ID: "notice-task", Kind: task.KindOnce, Text: "提醒", When: time.Now(), Next: time.Now()}
 	if err := s.notifications.Enqueue(tk); err != nil {
 		t.Fatal(err)
@@ -194,33 +212,33 @@ func TestNotificationHTTPReadSnoozeAndTaskHistoryFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := s.notifications.List()[0]
-	r := setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/read", []byte(`{}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/read", []byte(`{}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || s.notifications.Unread() != 0 {
 		t.Fatalf("已读HTTP失败: %d %s", r.Code, r.Body)
 	}
 	for _, delay := range []string{`{"minutes":0}`, `{"minutes":10081}`, `{"minutes":1.5}`} {
-		r = setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/snooze", []byte(delay), "127.0.0.1:1234", "localhost", "", cookie)
+		r = setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/snooze", []byte(delay), "127.0.0.1:1234", "localhost", "", token)
 		if r.Code == http.StatusOK || s.engine.Len() != 0 {
 			t.Fatalf("非法延后分钟数不应创建任务: %s %d", delay, r.Code)
 		}
 	}
-	r = setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/snooze", []byte(`{"minutes":60}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/notifications/"+n.ID+"/snooze", []byte(`{"minutes":60}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || s.engine.Len() != 1 {
 		t.Fatalf("延后HTTP失败: %d %s", r.Code, r.Body)
 	}
-	r = setupTestRequest(handler, "GET", "/api/notifications?taskId=other", nil, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "GET", "/api/notifications?taskId=other", nil, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || bytes.Contains(r.Body.Bytes(), []byte(`"taskId":"notice-task"`)) {
 		t.Fatalf("taskId历史过滤失败: %d %s", r.Code, r.Body)
 	}
 }
 
 func TestTodoCompleteRejectsMalformedPayloadWithoutMutation(t *testing.T) {
-	s, handler, cookie, _, _ := manageTestServer(t)
+	s, handler, token, _, _ := manageTestServer(t)
 	td, err := s.todos.Add("不能被畸形请求完成")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":`), "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/entries/"+td.ID, []byte(`{"done":`), "127.0.0.1:1234", "localhost", "", token)
 	got, _ := s.todos.Get(td.ID)
 	if r.Code == http.StatusOK || got.Done {
 		t.Fatalf("畸形请求不能完成待办: http=%d todo=%+v body=%s", r.Code, got, r.Body)
@@ -228,7 +246,7 @@ func TestTodoCompleteRejectsMalformedPayloadWithoutMutation(t *testing.T) {
 }
 
 func TestDisabledEntryManagementReturnsExplicitError(t *testing.T) {
-	s, handler, cookie, _, _ := manageTestServer(t)
+	s, handler, token, _, _ := manageTestServer(t)
 	s.todos = nil
 	for _, request := range []struct {
 		method, path string
@@ -237,7 +255,7 @@ func TestDisabledEntryManagementReturnsExplicitError(t *testing.T) {
 		{"PUT", "/api/entries/missing", []byte(`{"text":"待办"}`)},
 		{"POST", "/api/entries/reconcile", []byte(`{}`)},
 	} {
-		r := setupTestRequest(handler, request.method, request.path, request.body, "127.0.0.1:1234", "localhost", "", cookie)
+		r := setupTestRequest(handler, request.method, request.path, request.body, "127.0.0.1:1234", "localhost", "", token)
 		if r.Code != http.StatusBadRequest || !bytes.Contains(r.Body.Bytes(), []byte("闪念功能未启用")) {
 			t.Fatalf("未启用时不能panic或假报成功: %d %s", r.Code, r.Body)
 		}
@@ -245,35 +263,35 @@ func TestDisabledEntryManagementReturnsExplicitError(t *testing.T) {
 }
 
 func TestEntryHandlersNotePinAndFilters(t *testing.T) {
-	_, handler, cookie, _, _ := manageTestServer(t)
+	_, handler, token, _, _ := manageTestServer(t)
 	// 记一条笔记：kind 缺省才是 todo，笔记显式声明并自动派生标签。
 	body, _ := json.Marshal(map[string]any{"kind": "note", "text": "#工作 周报思路"})
-	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", cookie)
+	r := setupTestRequest(handler, "POST", "/api/entries", body, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte(`"kind":"note"`)) {
 		t.Fatalf("创建笔记失败: %d %s", r.Code, r.Body)
 	}
 	// 笔记不能完成。
 	noteID := jsonGet(t, r.Body.Bytes(), "body", "entry", "id")
-	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID, []byte(`{"done":true}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusBadRequest || !bytes.Contains(r.Body.Bytes(), []byte("笔记没有完成状态")) {
 		t.Fatalf("笔记完成应被拒绝: %d %s", r.Code, r.Body)
 	}
 	// 置顶。
-	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID+"/pin", []byte(`{"pinned":true}`), "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "POST", "/api/entries/"+noteID+"/pin", []byte(`{"pinned":true}`), "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte(`"pinned":true`)) {
 		t.Fatalf("置顶失败: %d %s", r.Code, r.Body)
 	}
 	// 过滤：kind 与 tag。
-	r = setupTestRequest(handler, "GET", "/api/entries?kind=note", nil, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "GET", "/api/entries?kind=note", nil, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("周报思路")) {
 		t.Fatalf("kind 过滤失败: %d %s", r.Code, r.Body)
 	}
-	r = setupTestRequest(handler, "GET", "/api/entries?tag=%E5%B7%A5%E4%BD%9C", nil, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "GET", "/api/entries?tag=%E5%B7%A5%E4%BD%9C", nil, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte("周报思路")) {
 		t.Fatalf("tag 过滤失败: %d %s", r.Code, r.Body)
 	}
 	// 删除。
-	r = setupTestRequest(handler, "DELETE", "/api/entries/"+noteID, nil, "127.0.0.1:1234", "localhost", "", cookie)
+	r = setupTestRequest(handler, "DELETE", "/api/entries/"+noteID, nil, "127.0.0.1:1234", "localhost", "", token)
 	if r.Code != http.StatusOK {
 		t.Fatalf("删除笔记失败: %d %s", r.Code, r.Body)
 	}

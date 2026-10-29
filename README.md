@@ -260,10 +260,23 @@ mcp:
     - name: filesystem                      # 方式一：本地命令（stdio）
       command: npx
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/shared"]
-    - name: remote-tools                    # 方式二：远程 URL（Streamable HTTP）
+    - name: remote-tools                    # 方式二：远程 URL（Streamable HTTP）+ 静态请求头
       url: https://mcp.example.com/mcp
       headers: {"Authorization": "Bearer xxx"}
+    - name: notion                          # 方式三：远程 URL + OAuth（浏览器登录一次）
+      url: https://mcp.notion.com/mcp
+      auth: oauth
 ```
+
+远程服务器的鉴权二选一：`headers` 里自己填 token（不过期就一直是它），或
+`auth: oauth`——按 MCP 授权规范走浏览器登录：设置页点「授权」，Friday 完成
+元数据发现与客户端注册后把授权地址交给系统浏览器，你在服务商页面登录，回调落到本机
+`127.0.0.1` 的一次性端口，令牌存进数据目录的 `mcp-oauth.json`（0600，含
+refresh token），此后自动刷新、自动重连，服务商侧登录失效时该行重新显示「待授权」。
+桌面端由外壳命令交给系统默认浏览器（WebView 里 `window.open` 打不开新窗口），
+等待回调期间行内始终有「复制授权链接」：没弹出、浏览器拦了、或刷新过设置页都能手动完成。
+服务商支持哪些鉴权方式由它自己的元数据决定，Friday 不针对任何一家写特例；
+不支持动态注册的服务商会把需要加白的回调地址显示出来，手工登记 client 后仍可用。
 
 **扩展工具**（Go 侧）：实现 `agent.Tool` 接口的 4 个方法即可注册新能力。
 

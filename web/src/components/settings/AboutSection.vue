@@ -32,8 +32,6 @@ onMounted(async () => {
       <td class="mono">{{ v == null ? '—' : v }}</td>
     </tr>
   </tbody></table>
-  <div class="set-note">管理员账号通过启动配置设置：环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD
-    或 config.yaml 的 admin.username / admin.password，修改后重启服务生效。</div>
   <div class="mt22">
     <button class="btn danger" @click="emit('logout')">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-out"/></svg>退出登录

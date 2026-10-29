@@ -9,11 +9,6 @@ const OPTIONS = [
   { value: 'acceptEdits', label: '自动接受编辑' },
   { value: 'fullAccess', label: '完全信任' },
 ]
-const DESC = {
-  confirm: '写文件、改 MCP 配置和白名单外的命令都会在网页弹卡片，批准后执行',
-  acceptEdits: '写文件、改 MCP 配置免审批直行；白名单外的命令仍需网页批准',
-  fullAccess: '全部免审批直行，仅毁灭性命令黑名单（rm -rf、shutdown 等）仍强制拦截',
-}
 
 const mode = ref('confirm')
 const msg = reactive({ text: '', cls: '' })
@@ -46,9 +41,5 @@ onMounted(load)
     <SelectBox v-model="mode" :options="OPTIONS" aria-label="权限模式" style="min-width:150px"></SelectBox>
     <button class="btn primary" type="button" @click="save">切换并热生效</button>
   </div>
-  <div class="field-desc">{{ DESC[mode] }}</div>
   <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-  <div class="set-note">参照 zcode 的多档权限设计：<b>确认</b>（默认）危险操作逐次网页批准，可"批准并记住"；
-    <b>自动接受编辑</b>日常改文件/改配置不打扰，跑命令仍把关；<b>完全信任</b>全部直行（黑名单仍拦截），
-    适合本机私人使用。切换立即热生效并写回 config.yaml。</div>
 </template>

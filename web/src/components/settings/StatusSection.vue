@@ -17,7 +17,7 @@ const cards = computed(() => {
   const st = status.value
   if (!st) return []
   return [
-    ['LLM 模型', st.provider.model + (st.apiKeyConfigured ? '' : '（未配密钥）'), 'is-orange'],
+    ['LLM 模型', (st.provider.model || '未配置模型') + (st.provider.model && !st.apiKeyConfigured ? '（未配密钥）' : ''), 'is-orange'],
     ['待触发任务', st.tasks.total, ''],
     ['待办未完成', st.todos ? st.todos.pending : 0, 'is-mint'],
     ['记忆页面', st.memories, 'is-sky'],

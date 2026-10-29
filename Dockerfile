@@ -1,5 +1,7 @@
 # friday（个人管家"小五"）镜像：
 #   构建：docker build -t friday .
+#   （三阶段：node 构建前端产物 → go 基于 vendor/ 离线编译；前端产物与 Go 依赖
+#    均随仓库/镜像走，构建过程零网络依赖，无需 SSH 凭据）
 #   运行：docker run -d --name friday \
 #           -p 8080:8080 \
 #           -v friday-data:/data \
@@ -17,25 +19,23 @@
 #     自行扩展镜像安装对应运行时（如 node/npx）。
 #   - 时区默认 Asia/Shanghai（定时任务/心跳的 cron 依赖它），可用 -e TZ 覆盖。
 
+# 前端阶段：npm 构建自包含 HTML，产物写到 /src/internal/admin/webdist/
+#（vite outDir 指向仓库内的 go:embed 目录）。产物不入库，镜像构建是唯一产物来源。
+FROM node:22-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ .
+RUN npm run build
+
 FROM golang:1.25-alpine AS build
-# 构建时需拉取 Go 依赖：capyflow/* 为私有仓库，经 GOPRIVATE 走 git+SSH 直连，
-# 因此构建镜像要传 SSH 凭据：docker build --ssh default -t friday .
-#（CI 里确保 ssh-agent 已加载密钥）。公共依赖仍走 goproxy.cn。
-RUN apk add --no-cache git openssh-client
-ENV GOPRIVATE=github.com/capyflow/* \
-    GOPROXY=https://goproxy.cn,direct
-RUN git config --global url."git@github.com:".insteadOf https://github.com/ \
-    && mkdir -p /root/.ssh \
-    && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts 2>/dev/null
+# Go 依赖经仓库内 vendor/ 离线编译（升级依赖：宿主机 go mod vendor 后重新构建），
+# 构建零网络依赖、无需任何凭据。
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=ssh \
-    go mod download
 COPY . .
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux \
+# 用前端阶段产物覆盖（.dockerignore 已排除宿主机本地副本，避免陈旧产物烤进镜像）
+COPY --from=web /src/internal/admin/webdist/ ./internal/admin/webdist/
+RUN CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=vendor \
     go build -trimpath -ldflags "-s -w" -o /out/robot ./cmd/robot
 
 FROM alpine:3.22

@@ -334,6 +334,31 @@ MCP 配置热加载（当前修改 mcp.servers 后需重启服务；连接管理
 
 ## 七、决策记录
 
+- **2026-10-19**：**动态工作流**（对标 ZCode 的「对话中生成 TS 编排脚本 → 编译期检查 → 沙箱执行 → 多子代理协作」）
+  定案四则，方案见 `docs/WORKFLOW.md`（未开工）。① 运行时：**引擎全在 Go，node 子进程只做脚本沙箱**
+  （保留 tsc 全量类型诊断），`ask`/`world.run`/`files`/`git` 回 RPC 由 Go 履约，权限与记账不旁路；
+  ② 一期范围：**最小闭环**（写脚本 → 预检 → 初次确认 → 扇出 → `report` 落盘 → 完成通知带回 `WorkflowReport` → 存为可复用流程），
+  不含续跑 journal、artifact/dashboard、`hole()`、`AmendWorkflow` 缓存重放；
+  ③ 编写契约：**一份 friday 版精简 SKILL.md**，authoring 入口在技能未加载前拒绝运行；
+  ④ 确认：**只做初次确认**（阶段图 + `world.run` 命令字面量全集 + 脚本原文一次整批批准），
+  走 `plans` 那条独立通道而非 `approval.Queue`（后者在非 confirm 档会静默放行且 5 分钟超时），无超时。
+  由此第五节的「开发板资源」与 P2 池的「技能携带 Go 工具/脚本」「多 bot 协作」不再构成本议题的否决依据；
+  node 缺失时功能整体关闭（探测失败即 `enabled=false`）。
+- **2026-10-19**：**项目定位再调整**——按「运行在正常电脑上的软件」考虑，**不再以开发板 1GB 内存与 Go 单二进制为约束**。
+  此前用以否决引入外部运行时的两条理由（保持单二进制、子进程内存水位）自本日起失效；
+  但 `docs/STABILITY.md` 的既有不变量（步骤不做事务回滚、重启不自动续跑、软限额只停主动型）继续适用。
+- **2026-10-17**：ACP 一期方向由「派活作业模型」改写为「智能体独立对话空间」（侧栏新页，形状对齐
+  Zed agent panel），7 项边界逐条经用户确认：thread 创建时绑定 agent 与**真实工作目录**、不可切换；
+  进程空闲 10 分钟回收，重开经 `session/load` 重接上下文（协议全量重放语义），resume 保真度实测不过
+  的 agent 走「上下文已重置」降级；`request_permission` 接入审批 UI（30 分钟无人处理自动拒绝，
+  有效性依赖调紧 agent 自身审批模式）；时间线自 ChatView 抽共享组件；thought 默认显示；
+  图片 v1 纳入（前置 probe 实测）；侧栏与设置节命名「智能体」。作业模型（acp_dispatch/门面/token）
+  挪「后续可选」。`homePolicy=inherit` 边界对对话空间同样适用。见 docs/ACP-AGENTS-P1.md §二
+- **2026-10-15**：ACP（Agent Client Protocol）接入定为 client 方向 + 长程作业模型；一期不含审批、
+  门面只放只读工具。`homePolicy` 默认 `inherit`（子 agent 继承用户 HOME 及其登录态、MCP server、
+  skill 表），一期**无人工闸门**已由用户认可——安全边界仅为一次性工作目录 + 门面只读 + 任务自包含，
+  不承诺拦截子 agent 在其目录内的 shell 与写操作。依据与 13 条实测硬约束见 docs/ACP-AGENTS.md，
+  一期拆解见 docs/ACP-AGENTS-P1.md；方案在未合并的 explore/acp-agents 分支，尚未开工
 - **2026-09-19（交付日）**：M4 多会话采用"ctx 注入会话 key + SessionPool per-key 锁"取代
   原 SessionRef 单会话；流式增量改用框架 `Agent.WithDelta` 按请求路由，DeltaBus 废除。
   由此 M3 的"心跳与用户对话全局互斥排队"升级为"智能任务独立会话 `task`，与用户会话天然隔离"；

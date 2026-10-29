@@ -1,8 +1,13 @@
 <script setup>
 // 全局快捷键弹窗（桌面外壳 Alt+Space 创建的透明无边框窗口加载本页）。
-// 与主窗口同源共享登录会话；Esc/失焦隐藏窗口，Enter 发送 /api/chat 流式提问。
+// 与主窗口同源共享本地保存的登录 token；Esc/失焦隐藏窗口，Enter 发送 /api/chat 流式提问。
 // 放在 Go 侧是刻意设计（docs/DESKTOP.md）：浏览器直接访问 :port/palette 亦可用。
 import { ref } from 'vue'
+import { authHeaders, hydrateToken } from './auth.js'
+
+// 弹窗可能先于主窗口打开：先把原生冷备的 token 回填到本页的 localStorage，
+// 否则第一次提问会误报"还未登录"（memoized，重复调用零成本）。
+hydrateToken()
 
 const q = ref('')
 const answer = ref('')
@@ -28,6 +33,7 @@ function onEnter(e) {
 async function ask() {
   const text = q.value.trim()
   if (!text || busy) return
+  await hydrateToken() // 兜底：极快输入时也保证 token 已回填
   busy = true
   q.value = ''
   err.value = false
@@ -36,10 +42,10 @@ async function ask() {
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ message: text }),
     })
-    if (res.status === 401) {
+    if (res.status === 403) {
       err.value = true
       answer.value = '还未登录：请先打开 Friday 主窗口登录，再回来使用。'
       status.value = ''

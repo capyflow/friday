@@ -1,0 +1,1607 @@
+// manager.go 是智能体对话空间的核心：工作区与 thread（会话）的生命周期、投影落盘、
+// agent 进程的拉起与空闲回收、session/load 重接与降级、权限审批桥接、以及
+// 一轮 turn 的编排。
+//
+// 设计要点（docs/ACP-AGENTS-P1.md §二 已拍板决策 + 261029 工作区改造）：
+//   - 页面主体是「工作区」：一组目录（第一个是主目录）+ 挂在它下面的会话；
+//   - 会话创建时绑定 agent + 主目录，之后不可切换（D1，换 = 再建一个会话）；
+//     工作区其余目录经 `additionalDirectories` 下发（agent 声明支持才生效，见 workspace.go）；
+//   - 进程空闲 10 分钟回收，上下文经 session/load 重接（D3/N2），降级显式标注；
+//   - request_permission 经 approval.Queue 强制入队人工审批，30 分钟超时（D7/N3）；
+//   - 每 thread 一进程一连接，同一 thread 的 turn 串行（C3 结构性满足）；
+//   - 投影落盘只记历史不恢复执行：重启后 running 一律转 interrupted（D3）。
+package acp
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	acp "github.com/coder/acp-go-sdk"
+
+	"github.com/capyflow/friday/internal/approval"
+	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/usage"
+)
+
+// thread 状态。orphaned 不落盘——绑定的 agent 被删除是读时计算的展示态。
+const (
+	StateIdle        = "idle"
+	StateRunning     = "running"
+	StateInterrupted = "interrupted"
+	StateOrphaned    = "orphaned"
+)
+
+// stopKillGrace 是用户点停止后等 agent 自报 cancelled 的宽限；超时仍未收尾
+// 就强杀进程组（取消只是通知，agent 可能不执行）。测试会临时改小。
+var stopKillGrace = 8 * time.Second
+
+// Entry 是投影对话记录里的一条消息。
+type Entry struct {
+	Role    string    `json:"role"` // user | assistant | note
+	Text    string    `json:"text"`
+	At      time.Time `json:"at"`
+	Images  int       `json:"images,omitempty"` // 随消息发送的图片数（旧数据只有数量）
+	Files   []string  `json:"files,omitempty"`  // 图片的上传 ID，前端经 /api/upload/:id 回显原图
+	In      int64     `json:"in,omitempty"`
+	Out     int64     `json:"out,omitempty"`
+	Ms      int64     `json:"ms,omitempty"`
+	Stopped string    `json:"stopped,omitempty"` // end_turn | cancelled | timeout | error…
+}
+
+// Thread 是工作区里的一个会话（协议层叫 thread：一个 agent 会话 + 一条投影）。
+type Thread struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspaceId,omitempty"`
+	Agent       string    `json:"agent"`
+	// Cwd 是这个会话锚定的主目录（session/new 的 cwd）：创建时从工作区的目录里
+	// 选定，之后不可切换（D1 的纪律没变）；工作区后来增删的目录只影响扩展根。
+	Cwd       string    `json:"cwd"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	// SessionID 是 agent 侧会话 ID：空闲回收/Friday 重启后经 session/load 重接的凭据。
+	SessionID string  `json:"sessionId,omitempty"`
+	State     string  `json:"state"`
+	Degraded  bool    `json:"degraded,omitempty"` // 上次重接失败过：恢复不可靠
+	Messages  []Entry `json:"messages"`
+	// 上下文水位：agent 最近一次 usage_update 的自报值（M-5）——窗口总量/当前
+	// 占用/会话累计花费。不是本轮 in/out（那是 Entry 上的字段）；cost 是 agent
+	// 自报，仅展示，不进预算闸门（C10）。
+	ContextUsed int     `json:"contextUsed,omitempty"`
+	ContextSize int     `json:"contextSize,omitempty"`
+	ContextCost float64 `json:"contextCost,omitempty"`
+	// CapChoices 记用户手动选过的能力值（capID → value：模型/思考强度/审批模式等）。
+	// agent 侧不一定把这些存进会话（重开后常回默认），所以 Friday 记一份"意图"，
+	// 每次（重）建立会话后按它重放一遍；见 reapplyChoices。
+	CapChoices map[string]string `json:"capChoices,omitempty"`
+	// BriefedSession / BriefedDirs 记"哪次会话、按哪份目录清单已经跟 agent 交代过"。
+	// ACP 没有系统提示词，agent 只能看到 cwd 与扩展根、并不知道工作区的成员是谁；
+	// 所以每个（新/重开的）会话的第一轮会随消息附带一段工作区说明，这两个字段
+	// 用来避免同一会话里重复注入、目录变了则重新交代一遍。
+	BriefedSession string `json:"briefedSession,omitempty"`
+	BriefedDirs    string `json:"briefedDirs,omitempty"`
+}
+
+// UnmarshalJSON 兼容 261029 之前的投影：那时会话直接带 `workspace`（目录路径）、
+// 没有 workspaceId。读进来把目录搬到 `cwd`，落盘时只写新结构（工作区由
+// NewManager 的迁移补齐）。
+func (t *Thread) UnmarshalJSON(b []byte) error {
+	type alias Thread
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	if a.Cwd == "" {
+		var legacy struct {
+			Workspace string `json:"workspace"`
+		}
+		if err := json.Unmarshal(b, &legacy); err == nil {
+			a.Cwd = legacy.Workspace
+		}
+	}
+	*t = Thread(a)
+	return nil
+}
+
+// Image 是随消息发送的一张图片（原始字节，发送时 base64 编码进 ContentBlock）。
+type Image struct {
+	MIME string
+	Data []byte
+	ID   string // 上传 ID（记录进 thread 历史供前端回显；仅供内部传递）
+}
+
+// TurnResult 是一轮对话的归集结果。
+type TurnResult struct {
+	Answer     string
+	In, Out    int64
+	Ms         int64
+	StopReason string
+}
+
+// live 是一个 thread 当前的会话与运行态。进程按「agent + 主目录」共享（procState）：
+// 同工作区、同 agent 的多个会话跑在同一条连接里（M-6），所以会话能力
+// （configOptions/models/modes）是**会话级**的，缓存在这里而不是进程上。
+type live struct {
+	ps        *procState
+	proc      *agentProc
+	sessionID acp.SessionId
+
+	optMu     sync.Mutex
+	opts      []acp.SessionConfigOption
+	models    *acp.SessionModelState
+	modeState *acp.SessionModeState
+
+	sinkMu    sync.Mutex
+	sink      *turnSink    // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
+	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
+	stopTimer *time.Timer   // 用户停止后的强杀兜底
+	stopping  atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
+}
+
+// 会话级能力缓存：会话响应、config_options_update 推送、切换响应都会刷新它。
+func (lv *live) setOptions(opts []acp.SessionConfigOption) {
+	lv.optMu.Lock()
+	lv.opts = opts
+	lv.optMu.Unlock()
+}
+
+func (lv *live) getOptions() []acp.SessionConfigOption {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	return lv.opts
+}
+
+func (lv *live) setModelState(ms *acp.SessionModelState) {
+	lv.optMu.Lock()
+	lv.models = ms
+	lv.optMu.Unlock()
+}
+
+func (lv *live) getModelState() *acp.SessionModelState {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	return lv.models
+}
+
+func (lv *live) setCurrentModel(value string) {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	if lv.models != nil {
+		lv.models.CurrentModelId = acp.SessionModelId(value)
+	}
+}
+
+func (lv *live) setModeState(ms *acp.SessionModeState) {
+	lv.optMu.Lock()
+	lv.modeState = ms
+	lv.optMu.Unlock()
+}
+
+func (lv *live) getModeState() *acp.SessionModeState {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	return lv.modeState
+}
+
+func (lv *live) setCurrentMode(value string) {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	if lv.modeState != nil {
+		lv.modeState.CurrentModeId = acp.SessionModeId(value)
+	}
+}
+
+// setCurrent 兜底更新某配置项的当前值：agent 在 set_config_option 的响应里
+// 没回带全量 options 时，仅保 UI 一致性用。
+func (lv *live) setCurrent(configID, value string) {
+	lv.optMu.Lock()
+	defer lv.optMu.Unlock()
+	for _, o := range lv.opts {
+		if o.Select != nil && string(o.Select.Id) == configID {
+			o.Select.CurrentValue = acp.SessionConfigValueId(value)
+		}
+	}
+}
+
+func (lv *live) setSink(sink *turnSink) {
+	lv.sinkMu.Lock()
+	lv.sink = sink
+	lv.sinkMu.Unlock()
+}
+
+func (lv *live) takeSink() *turnSink {
+	lv.sinkMu.Lock()
+	defer lv.sinkMu.Unlock()
+	return lv.sink
+}
+
+// procState 是一条 agent 连接（一个进程）与它承载的会话。复用键 = agent 名 + 主目录：
+// 进程的工作目录、MCP/skill 表与登录态都是进程级的，而会话的 cwd 必须与进程一致，
+// 所以不同目录的会话不能共用一个进程。
+type procState struct {
+	key    string
+	proc   *agentProc
+	slot   chan struct{}
+	idle   *time.Timer
+	mu     sync.Mutex
+	owners map[acp.SessionId]string // sessionId → threadID
+
+	// 事件泵的暂停/恢复握手：一轮结束时要把"已入队但还没分发"的事件排空，
+	// 否则 Prompt 返回后立刻摘接收器会丢掉结尾的文本/用量（实测会随机丢）。
+	pause  chan struct{}
+	ack    chan struct{}
+	resume chan struct{}
+}
+
+func (ps *procState) setOwner(sid acp.SessionId, threadID string) {
+	ps.mu.Lock()
+	ps.owners[sid] = threadID
+	ps.mu.Unlock()
+}
+
+func (ps *procState) owner(sid acp.SessionId) string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.owners[sid]
+}
+
+// dropThread 摘掉某 thread 的会话归属，返回这条连接上还剩几个会话。
+func (ps *procState) dropThread(threadID string) int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for sid, tid := range ps.owners {
+		if tid == threadID {
+			delete(ps.owners, sid)
+		}
+	}
+	return len(ps.owners)
+}
+
+func procKey(agent, cwd string) string { return agent + "\x00" + cwd }
+
+// Manager 管理全部工作区、thread 与存活进程。
+type Manager struct {
+	mu         sync.Mutex
+	threads    map[string]*Thread
+	order      []string
+	workspaces map[string]*Workspace
+	wsOrder    []string
+	live       map[string]*live      // threadID → 会话与运行态
+	procs      map[string]*procState // agent+cwd → 一条连接（承载多个会话）
+	spawnMu    sync.Mutex            // 进程创建串行（同一 key 不并发拉两个）
+	locks      map[string]*sync.Mutex
+	sem        chan struct{}
+	lastCfg    config.AcpConfig // Reload 的差异比较基准
+	path       string           // acp-threads.json（工作区与会话同一份投影）
+	cfgFn      func() config.AcpConfig
+	approver   *approval.Queue
+
+	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
+	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
+	// 表示只显示内置目录（基目录不可建或测试隔离）。fetchMu 串行化拉取与缓存写。
+	registryBase string
+	registryPath string
+	registryOff  bool
+	fetchMu      sync.Mutex
+
+	// spawn 可被测试替换（fake agent 注入）。
+	spawn func(cfg config.AcpAgentConfig, workspace string, handshake time.Duration,
+		onPermission permissionHook, onExit func()) (*agentProc, error)
+}
+
+// threadLock 返回该 thread 的串行锁（Send 全程持有，C3）。
+func (m *Manager) threadLock(id string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mu, ok := m.locks[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.locks[id] = mu
+	}
+	return mu
+}
+
+// ---------- thread CRUD ----------
+
+// List 返回全部 thread（含动态计算的状态）。
+func (m *Manager) List() []Thread {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Thread, 0, len(m.order))
+	for _, id := range m.order {
+		th := m.threads[id]
+		if th == nil {
+			continue
+		}
+		cp := *th
+		cp.Messages = nil
+		if _, ok := m.cfgFn().Agent(th.Agent); !ok {
+			cp.State = StateOrphaned
+		} else if cp.State == StateRunning && m.live[id] == nil {
+			cp.State = StateIdle
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
+// Get 返回单个 thread（含消息）。
+func (m *Manager) Get(id string) (Thread, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	th, ok := m.threads[id]
+	if !ok {
+		return Thread{}, false
+	}
+	cp := *th
+	cp.Messages = append([]Entry{}, th.Messages...)
+	if _, ok := m.cfgFn().Agent(th.Agent); !ok {
+		cp.State = StateOrphaned
+	}
+	return cp, true
+}
+
+// sessionsBaseDirFn 可被测试替换：没选目录时，临时工作区目录的父目录。
+var sessionsBaseDirFn = defaultSessionsDir
+
+// defaultSessionsDir 返回 <数据目录>/acp-sessions——与 acp/ 同族的专用目录，
+// 专门存放「没选目录就开聊」的临时会话（内核 chdir 到数据目录后按相对路径使用）。
+func defaultSessionsDir() (string, error) {
+	return "acp-sessions", nil
+}
+
+// CreateSession 在工作区里新建一个会话（D1 的纪律仍在：会话与 agent、主目录在此刻
+// 绑定，之后不可切换——换目录/换 agent = 再建一个会话）。cwd 留空用工作区的主目录
+// （第一个目录），指定了就必须是工作区里的某个目录。
+func (m *Manager) CreateSession(agentName, workspaceID, cwd, title string) (Thread, error) {
+	c := m.cfgFn().Normalized()
+	if !c.Enabled {
+		return Thread{}, errors.New("智能体功能未开启（设置 → 智能体）")
+	}
+	agentCfg, ok := c.Agent(agentName)
+	if !ok {
+		return Thread{}, fmt.Errorf("没有叫 %q 的智能体（可在设置 → 智能体里添加）", agentName)
+	}
+	m.mu.Lock()
+	ws := m.workspaces[workspaceID]
+	var dirs []string
+	if ws != nil {
+		dirs = append([]string{}, ws.Dirs...)
+	}
+	m.mu.Unlock()
+	if ws == nil {
+		return Thread{}, fmt.Errorf("未找到工作区 %s（先在工作区列表里新建一个）", workspaceID)
+	}
+	want := strings.TrimSpace(cwd)
+	if want == "" {
+		want = dirs[0]
+	} else if !containsStr(dirs, want) {
+		abs, err := resolveDir(want, "")
+		if err != nil {
+			return Thread{}, err
+		}
+		if !containsStr(dirs, abs) {
+			return Thread{}, fmt.Errorf("目录 %s 不在该工作区里（先用「添加目录」把它加进来）", abs)
+		}
+		want = abs
+	}
+	th := &Thread{
+		ID:          randHex(8),
+		WorkspaceID: ws.ID,
+		Agent:       agentCfg.Name,
+		Cwd:         want,
+		Title:       strings.TrimSpace(title),
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		State:       StateIdle,
+	}
+	m.mu.Lock()
+	m.threads[th.ID] = th
+	m.order = append(m.order, th.ID)
+	ws.UpdatedAt = time.Now()
+	err := m.saveLocked()
+	m.mu.Unlock()
+	if err != nil {
+		log.Printf("[智能体] thread 落盘失败: %v", err)
+	}
+	log.Printf("[智能体] 新建会话 %s（工作区=%s，agent=%s，主目录=%s）", th.ID, ws.Name, th.Agent, th.Cwd)
+	return *th, nil
+}
+
+// RenameThread 改会话标题：手动标题优先于首条消息派生。留空 = 回到自动
+// （下一轮对话时若标题仍为空，会按那时的消息重新派生）。
+func (m *Manager) RenameThread(id, title string) (Thread, error) {
+	title = strings.Join(strings.Fields(strings.TrimSpace(title)), " ")
+	title = truncateRunes(title, 60)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	th := m.threads[id]
+	if th == nil {
+		return Thread{}, fmt.Errorf("未找到会话 %s", id)
+	}
+	th.Title = title
+	th.UpdatedAt = time.Now()
+	if err := m.saveLocked(); err != nil {
+		log.Printf("[智能体] 会话改名落盘失败: %v", err)
+	}
+	cp := *th
+	cp.Messages = append([]Entry{}, th.Messages...)
+	return cp, nil
+}
+
+// Delete 删除会话：摘掉它在这条连接上的 session 归属并移除记录（含投影）。
+// 进程是共享的（M-6），只有删到这条连接上最后一个会话时才回收进程。
+func (m *Manager) Delete(id string) bool {
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	delete(m.threads, id)
+	for i, v := range m.order {
+		if v == id {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
+	delete(m.locks, id)
+	lv := m.live[id]
+	delete(m.live, id)
+	var ps *procState
+	empty := true
+	if lv != nil && lv.ps != nil {
+		ps = lv.ps
+		empty = ps.dropThread(id) == 0
+	}
+	_ = m.saveLocked()
+	m.mu.Unlock()
+	if ps != nil && empty {
+		m.killProc(ps.key, "最后一个会话已删除")
+	}
+	log.Printf("[智能体] 已删除会话 %s（agent=%s）", id, th.Agent)
+	return true
+}
+
+// NewManager 创建管理器：加载工作区与 thread 投影（重启后 running 转 interrupted，
+// D3），并把 261029 之前「thread 直接带目录」的投影迁成「工作区（1 个目录）+ 会话」。
+// cfgFn 提供运行时配置快照；approver 为全局审批队列（可为 nil：权限请求自动允许）。
+func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path string) *Manager {
+	m := &Manager{
+		threads:    map[string]*Thread{},
+		workspaces: map[string]*Workspace{},
+		live:       map[string]*live{},
+		procs:      map[string]*procState{},
+		locks:      map[string]*sync.Mutex{},
+		path:       path,
+		cfgFn:      cfgFn,
+		approver:   approver,
+	}
+	if base, err := acpBaseDirFn(); err == nil {
+		m.registryBase = base
+		m.registryPath = filepath.Join(base, "registry-cache.json")
+	} else {
+		m.registryOff = true // 无 HOME 环境只保留内置目录
+	}
+	m.spawn = spawnAgent
+	m.lastCfg = cfgFn().Normalized()
+	n := m.lastCfg.MaxConcurrent
+	if n <= 0 {
+		n = config.AcpDefaultMaxConcurrent
+	}
+	m.sem = make(chan struct{}, n)
+	if file, err := loadThreads(path); err != nil {
+		log.Printf("[智能体] %v（原文件已保留，本次运行不加载历史 thread）", err)
+	} else {
+		migrated := 0
+		for _, ws := range file.Workspaces {
+			if ws == nil || ws.ID == "" || len(ws.Dirs) == 0 {
+				continue
+			}
+			m.workspaces[ws.ID] = ws
+			m.wsOrder = append(m.wsOrder, ws.ID)
+		}
+		for _, th := range file.Threads {
+			if th == nil || th.ID == "" {
+				continue
+			}
+			if th.State == StateRunning {
+				th.State = StateInterrupted // 重启不恢复执行，历史仍可见
+			}
+			// 旧投影：会话自己带目录、没有归属 → 同目录的旧 thread 收进同一个工作区
+			if th.WorkspaceID == "" || m.workspaces[th.WorkspaceID] == nil {
+				if th.Cwd == "" {
+					log.Printf("[智能体] thread %s 没有目录也没有工作区，跳过", th.ID)
+					continue
+				}
+				ws := m.workspaceForDirLocked(th.Cwd)
+				th.WorkspaceID = ws.ID
+				migrated++
+			}
+			m.threads[th.ID] = th
+			m.order = append(m.order, th.ID)
+		}
+		if migrated > 0 {
+			m.mu.Lock()
+			err := m.saveLocked()
+			m.mu.Unlock()
+			if err != nil {
+				log.Printf("[智能体] 工作区迁移结果落盘失败: %v", err)
+			}
+			log.Printf("[智能体] 已把 %d 个旧对话归入工作区（%s）", migrated, path)
+		}
+		if n := len(m.order); n > 0 {
+			log.Printf("[智能体] 已加载 %d 个会话、%d 个工作区（%s）", n, len(m.wsOrder), path)
+		}
+	}
+	return m
+}
+
+// ---------- 进程生命周期（一 agent+目录 一进程，承载多个会话） ----------
+
+// procOf 返回 key 对应的存活进程（没有或已退出返回 nil）。
+func (m *Manager) procOf(key string) *procState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ps := m.procs[key]; ps != nil && ps.proc.alive() {
+		return ps
+	}
+	return nil
+}
+
+// liveOf 返回某 thread 当前的会话记录。
+func (m *Manager) liveOf(threadID string) *live {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.live[threadID]
+}
+
+// ensureProcess 保证该 thread 需要的（agent+目录）进程在场：先取并发槽位
+// （满了先在时间线上说一声再等），再 spawn + initialize。
+func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config.AcpAgentConfig, hooks TurnHooks) (*procState, error) {
+	key := procKey(agentCfg.Name, th.Cwd)
+	if ps := m.procOf(key); ps != nil {
+		m.touchProc(key)
+		return ps, nil
+	}
+	m.spawnMu.Lock()
+	defer m.spawnMu.Unlock()
+	if ps := m.procOf(key); ps != nil { // 双检：等锁期间别人可能已经拉起
+		m.touchProc(key)
+		return ps, nil
+	}
+	select {
+	case m.sem <- struct{}{}:
+	default:
+		hooks.status("并发的智能体进程已跑满，排队等空闲槽位（上限见设置 → 智能体）…")
+		select {
+		case m.sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, errors.New("智能体进程并发已满，等待槽位时被取消")
+		}
+	}
+	hooks.status("正在启动 agent " + agentCfg.Name + "…")
+	proc, err := m.spawn(agentCfg, th.Cwd,
+		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second,
+		m.permissionHookFor(key, agentCfg.Name),
+		func() { m.onProcExit(key) })
+	if err != nil {
+		<-m.sem
+		return nil, err
+	}
+	ps := &procState{key: key, proc: proc, slot: m.sem, owners: map[acp.SessionId]string{},
+		pause: make(chan struct{}, 1), ack: make(chan struct{}, 1), resume: make(chan struct{}, 1)}
+	m.mu.Lock()
+	m.procs[key] = ps
+	m.mu.Unlock()
+	go m.pumpProc(ps)
+	return ps, nil
+}
+
+// permissionHookFor 把权限请求按 sessionId 路由回它所属 thread 的审批卡：
+// 一条连接上可能同时挂着多个会话，不能像一进程一会话时那样固定绑一个 thread。
+func (m *Manager) permissionHookFor(key, agentName string) permissionHook {
+	return func(ctx context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+		var thID string
+		if ps := m.procOf(key); ps != nil {
+			thID = ps.owner(r.SessionId)
+		}
+		if thID == "" {
+			log.Printf("[智能体] %s 的权限请求找不到所属会话，按拒绝处理", agentName)
+			return respondPermission(r, false), nil
+		}
+		return m.handlePermission(thID, agentName)(ctx, r)
+	}
+}
+
+// pumpProc 是每个进程一条常驻事件泵（C6：SDK 的入站队列是单 goroutine，
+// 读通道必须持续进行，否则会拖死整条连接）。事件按 sessionId 分发给对应会话
+// 进行中的那一轮，同时刷新该会话的能力缓存；没有轮次接收的事件（重放、迟到
+// 通知）直接丢弃。
+func (m *Manager) pumpProc(ps *procState) {
+	for {
+		select {
+		case <-ps.pause: // 某轮收尾要排空队列：先停读，等它处理完再继续
+			ps.ack <- struct{}{}
+			<-ps.resume
+		case ev, ok := <-ps.proc.events:
+			if !ok {
+				return
+			}
+			m.routeEvent(ps, ev)
+		}
+	}
+}
+
+// routeEvent 把一条事件送到它所属会话：刷新该会话的能力缓存，再交给进行中的
+// 那一轮；没有轮次在跑就丢弃（重放、迟到通知）。
+func (m *Manager) routeEvent(ps *procState, ev acp.SessionNotification) {
+	thID := ps.owner(ev.SessionId)
+	if thID == "" {
+		return
+	}
+	lv := m.liveOf(thID)
+	if lv == nil {
+		return
+	}
+	if ev.Update.ConfigOptionUpdate != nil {
+		lv.setOptions(ev.Update.ConfigOptionUpdate.ConfigOptions)
+	}
+	if ev.Update.CurrentModeUpdate != nil {
+		lv.setCurrentMode(string(ev.Update.CurrentModeUpdate.CurrentModeId))
+	}
+	if sink := lv.takeSink(); sink != nil {
+		sink.handle(ev)
+	}
+}
+
+// settleTurn 是轮次收尾的"结界"：让事件泵暂停，把已经入队、还没分发的本轮事件
+// 全部处理掉，然后摘掉接收器并恢复泵。Prompt 返回只保证通知已入队（watermark），
+// 不保证我们的泵已经分发——少了这一步，结尾的文本与用量会随机丢失。
+func (m *Manager) settleTurn(lv *live) {
+	ps := lv.ps
+	ps.pause <- struct{}{}
+	<-ps.ack
+	for {
+		select {
+		case ev, ok := <-ps.proc.events:
+			if !ok {
+				lv.setSink(nil)
+				ps.resume <- struct{}{}
+				return
+			}
+			m.routeEvent(ps, ev)
+		default:
+			lv.setSink(nil)
+			ps.resume <- struct{}{}
+			return
+		}
+	}
+}
+
+// releaseProc 杀进程、归还槽位，并清掉挂在这条连接上的会话记录。
+func (m *Manager) releaseProc(ps *procState, reason string) {
+	if ps.idle != nil {
+		ps.idle.Stop()
+	}
+	m.mu.Lock()
+	for thID, lv := range m.live {
+		if lv.ps == ps {
+			if lv.stopTimer != nil {
+				lv.stopTimer.Stop()
+			}
+			delete(m.live, thID)
+		}
+	}
+	delete(m.procs, ps.key)
+	m.mu.Unlock()
+	ps.proc.kill()
+	if ps.slot != nil {
+		select {
+		case <-ps.slot:
+		default:
+		}
+	}
+	log.Printf("[智能体] %s 进程已回收（%s）", ps.proc.agent, reason)
+}
+
+// onProcExit 进程自己退出（崩溃）时清理连接与会话记录并归还槽位。
+func (m *Manager) onProcExit(key string) {
+	m.mu.Lock()
+	ps := m.procs[key]
+	if ps != nil {
+		for thID, lv := range m.live {
+			if lv.ps == ps {
+				delete(m.live, thID)
+			}
+		}
+		delete(m.procs, key)
+	}
+	m.mu.Unlock()
+	if ps != nil {
+		if ps.idle != nil {
+			ps.idle.Stop()
+		}
+		if ps.slot != nil {
+			select {
+			case <-ps.slot:
+			default:
+			}
+		}
+		log.Printf("[智能体] %s 进程已退出", ps.proc.agent)
+	}
+}
+
+// killProc 主动回收一条连接（空闲回收 / 配置变更 / 建会话失败）。
+func (m *Manager) killProc(key, reason string) {
+	m.mu.Lock()
+	ps := m.procs[key]
+	m.mu.Unlock()
+	if ps != nil {
+		m.releaseProc(ps, reason)
+	}
+}
+
+// killLive 回收某 thread 所在的那条连接（同一条连接上的其它会话会一起回收，
+// 下次使用按 session/load 重接——比如本轮超时/客户端断开后的强杀）。
+func (m *Manager) killLive(threadID, reason string) {
+	lv := m.liveOf(threadID)
+	if lv == nil || lv.ps == nil {
+		return
+	}
+	m.killProc(lv.ps.key, reason)
+}
+
+// touchProc 停掉空闲回收计时：进程正在被用（建会话 / 一轮对话前后）。
+func (m *Manager) touchProc(key string) {
+	m.mu.Lock()
+	ps := m.procs[key]
+	m.mu.Unlock()
+	if ps == nil {
+		return
+	}
+	ps.mu.Lock()
+	if ps.idle != nil {
+		ps.idle.Stop()
+		ps.idle = nil
+	}
+	ps.mu.Unlock()
+}
+
+// armIdle 一轮结束后武装空闲回收计时（以连接为单位：整条连接都没活了才回收）。
+func (m *Manager) armIdle(key string) {
+	idle := time.Duration(m.cfgFn().Normalized().IdleKillSeconds) * time.Second
+	if idle <= 0 {
+		return
+	}
+	m.mu.Lock()
+	ps := m.procs[key]
+	m.mu.Unlock()
+	if ps == nil {
+		return
+	}
+	ps.mu.Lock()
+	if ps.idle != nil {
+		ps.idle.Stop()
+	}
+	ps.idle = time.AfterFunc(idle, func() { m.killProc(key, "空闲回收") })
+	ps.mu.Unlock()
+}
+
+// ensureLive 保证该 thread 有进程与会话，返回会话记录与是否发生了降级。
+func (m *Manager) ensureLive(ctx context.Context, th *Thread, agentCfg config.AcpAgentConfig, hooks TurnHooks) (*live, bool, error) {
+	if lv := m.liveOf(th.ID); lv != nil && lv.proc != nil && lv.proc.alive() {
+		m.touchProc(procKey(agentCfg.Name, th.Cwd))
+		return lv, false, nil
+	}
+	ps, err := m.ensureProcess(ctx, th, agentCfg, hooks)
+	if err != nil {
+		return nil, false, err
+	}
+	lv := &live{ps: ps, proc: ps.proc}
+	sid, degraded, err := m.ensureSession(ps, th, lv, agentCfg, hooks)
+	if err != nil {
+		// 会话建不起来：这条连接上可能一个会话都没有，回收进程免得白占槽位
+		if ps.dropThread(th.ID) == 0 {
+			m.killProc(ps.key, "会话建立失败")
+		}
+		return nil, false, err
+	}
+	lv.sessionID = acp.SessionId(sid)
+	m.mu.Lock()
+	m.live[th.ID] = lv
+	// 会话 id 与降级标记写回投影：重开时靠它 session/load、Stop 也按它取消
+	th.SessionID = sid
+	th.Degraded = degraded
+	if degraded {
+		// 会话是重开的新会话：旧上下文已丢，旧水位不再适用（等 agent 下次自报）
+		th.ContextUsed, th.ContextSize, th.ContextCost = 0, 0, 0
+	}
+	if serr := m.saveLocked(); serr != nil {
+		log.Printf("[智能体] 投影落盘失败: %v", serr)
+	}
+	m.mu.Unlock()
+	m.touchProc(ps.key)
+	return lv, degraded, nil
+}
+
+// ensureSession 保证该会话在连接里有可用的 ACP session：优先 session/load 重接
+// （N2：协议要求 agent 全量重放对话；重放事件此时没有接收轮次，由事件泵丢弃），
+// 失败或不可靠（DegradeResume / agent 未声明能力）则新开并报告降级。
+func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg config.AcpAgentConfig, hooks TurnHooks) (string, bool, error) {
+	proc := ps.proc
+	handshake := time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds) * time.Second
+	// 扩展根 = 工作区里除主目录以外的目录；只在 agent 声明吃这个字段时下发。
+	extra := m.extraDirsFor(proc, th)
+	if th.SessionID != "" && proc.loadSession && !agentCfg.DegradeResume {
+		hooks.status("正在重接上次会话…")
+		lctx, lcancel := context.WithTimeout(context.Background(), handshake)
+		lres, err := proc.conn.LoadSession(lctx, acp.LoadSessionRequest{
+			SessionId: acp.SessionId(th.SessionID), Cwd: proc.cwd, McpServers: []acp.McpServer{},
+			AdditionalDirectories: extra,
+		})
+		lcancel()
+		if err == nil {
+			lv.setOptions(lres.ConfigOptions)
+			lv.setModelState(lres.Models)
+			lv.setModeState(lres.Modes)
+			lv.sessionID = acp.SessionId(th.SessionID)
+			ps.setOwner(lv.sessionID, th.ID)
+			// 重接成功也把用户手动选过的能力按回去：agent 未必把这些存进会话。
+			// 注意顺序：这里的请求带 sessionId，必须先把 id 落到 lv 上再重放。
+			m.reapplyChoices(lv, th)
+			log.Printf("[智能体] %s thread %s 已重接会话 %s", th.Agent, th.ID, th.SessionID)
+			return th.SessionID, false, nil
+		}
+		log.Printf("[智能体] %s thread %s 重接会话失败（%v），新开会话", th.Agent, th.ID, err)
+	} else if th.SessionID != "" && agentCfg.DegradeResume {
+		log.Printf("[智能体] %s 标记为 resume 不可靠，跳过重接", th.Agent)
+	}
+	nctx, ncancel := context.WithTimeout(context.Background(), handshake)
+	res, err := proc.conn.NewSession(nctx, acp.NewSessionRequest{
+		Cwd: proc.cwd, McpServers: []acp.McpServer{},
+		AdditionalDirectories: extra,
+	})
+	ncancel()
+	if err != nil {
+		return "", false, fmt.Errorf("建立会话失败: %w（常见原因：未登录；stderr: %s）",
+			err, firstLine(proc.stderrTail(6)))
+	}
+	lv.setOptions(res.ConfigOptions)
+	lv.setModelState(res.Models)
+	lv.setModeState(res.Modes)
+	lv.sessionID = res.SessionId // 先落 id，重放请求要带它
+	ps.setOwner(res.SessionId, th.ID)
+	m.reapplyChoices(lv, th) // 新开会话（含降级）同样按上次的选择重放
+	degraded := th.SessionID != "" && string(res.SessionId) != th.SessionID
+	if degraded {
+		log.Printf("[智能体] %s thread %s 上下文已重置（新会话 %s）", th.Agent, th.ID, res.SessionId)
+	}
+	return string(res.SessionId), degraded, nil
+}
+
+// ---------- 权限审批（D7） ----------
+
+// handlePermission 构造某 thread 的权限请求钩子：强制入队人工审批（无视全局
+// 权限模式——这是对话空间的独立闸门），30 分钟无人处理自动答复拒绝。
+// 批准选第一个 allow* 选项；拒绝选第一个 reject* 选项；都没有则答复 cancelled。
+// 审批等待绑定 turn 生命周期：turn 结束（完成/超时/用户停止/进程崩溃）即撤卡
+// 并按拒绝结算——卡面向的会话已不存在，留着只会得到一张对着死进程的卡。
+func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
+	return func(_ context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+		kind := ""
+		if r.ToolCall.Kind != nil {
+			kind = string(*r.ToolCall.Kind)
+		}
+		summary := ""
+		if r.ToolCall.Title != nil {
+			summary = strings.TrimSpace(*r.ToolCall.Title)
+		}
+		if summary == "" {
+			summary = "未知操作"
+		}
+		detail := fmt.Sprintf("智能体 %s 请求授权（%s）", agentName, kind)
+		if r.ToolCall.RawInput != nil {
+			if b, err := json.Marshal(r.ToolCall.RawInput); err == nil && len(b) > 0 {
+				detail += "\n" + sanitizeLog(string(b))
+			}
+		}
+		// C11：文案来自子 agent，卡片摘要照常展示但不作为授权依据。
+		log.Printf("[智能体] %s 权限请求: %s", agentName, sanitizeLog(summary))
+		if m.approver == nil {
+			log.Printf("[智能体] 未装配审批队列，自动允许（仅测试环境应出现）")
+			return respondPermission(r, true), nil
+		}
+		m.mu.Lock()
+		var turnDone chan struct{}
+		if lv := m.live[threadID]; lv != nil {
+			turnDone = lv.turnDone
+		}
+		m.mu.Unlock()
+		if turnDone == nil {
+			// 无进行中对话的权限请求（协议外时序）：按拒绝处理，不入队。
+			log.Printf("[智能体] %s 在无进行中对话时请求权限，按拒绝处理", agentName)
+			return respondPermission(r, false), nil
+		}
+		card := m.approver.RequestCancelable("智能体权限", summary, detail,
+			config.AcpPermissionTimeoutSeconds*time.Second)
+		go func() {
+			select {
+			case <-turnDone:
+				card.Cancel()
+			case <-card.Done():
+			}
+		}()
+		approved, err := card.Wait()
+		if err != nil {
+			if !errors.Is(err, approval.ErrDenied) {
+				log.Printf("[智能体] 权限审批异常（按拒绝处理）: %v", err)
+			}
+			return respondPermission(r, false), nil
+		}
+		log.Printf("[智能体] %s 权限%s: %s", agentName,
+			map[bool]string{true: "已批准", false: "已拒绝"}[approved], sanitizeLog(summary))
+		return respondPermission(r, approved), nil
+	}
+}
+
+// respondPermission 按批准与否构造答复：选中匹配选项；没有匹配项时答复
+// cancelled（agent 视为未授权）。
+func respondPermission(r acp.RequestPermissionRequest, allow bool) acp.RequestPermissionResponse {
+	if optID := pickOption(r.Options, allow); optID != "" {
+		return selectedPermission(optID)
+	}
+	return cancelledPermission()
+}
+
+// pickOption 按倾向挑选项：allow 时优先 allow_once 再任意 allow*；
+// deny 时优先任意 reject*。找不到返回空。
+func pickOption(options []acp.PermissionOption, allow bool) acp.PermissionOptionId {
+	if allow {
+		for _, o := range options {
+			if o.Kind == acp.PermissionOptionKindAllowOnce {
+				return o.OptionId
+			}
+		}
+		for _, o := range options {
+			if strings.HasPrefix(string(o.Kind), "allow") {
+				return o.OptionId
+			}
+		}
+	} else {
+		for _, o := range options {
+			if strings.HasPrefix(string(o.Kind), "reject") {
+				return o.OptionId
+			}
+		}
+	}
+	return ""
+}
+
+// ---------- turn 编排 ----------
+
+// workspaceBrief 生成随首轮消息附带的工作区说明（纯文本块，不进投影时间线），
+// 返回文本与"目录清单指纹"（用于判断是否需要重新交代）。
+// 说明只陈述事实：工作区名、主目录、扩展根；agent 不支持 additionalDirectories
+// 时明确写"其余文件夹没下发"，避免它以为能访问却在工具里报错。
+func (m *Manager) workspaceBrief(th *Thread, proc *agentProc) (string, string) {
+	dirs := m.workspaceDirs(th.WorkspaceID)
+	if len(dirs) == 0 {
+		return "", ""
+	}
+	name := th.WorkspaceID
+	m.mu.Lock()
+	if ws := m.workspaces[th.WorkspaceID]; ws != nil && ws.Name != "" {
+		name = ws.Name
+	}
+	m.mu.Unlock()
+	fp := strings.Join(dirs, "\n")
+
+	supported := proc != nil && proc.extraRoots
+	var b strings.Builder
+	b.WriteString("[Friday 工作区] 本会话属于工作区「" + name + "」，它的源文件夹是：\n")
+	for _, d := range dirs {
+		switch {
+		case d == th.Cwd:
+			b.WriteString("- " + d + "（主目录，本会话的 cwd）\n")
+		case supported:
+			b.WriteString("- " + d + "（扩展目录，已下发）\n")
+		default:
+			// 不吹牛：列出来是为了让 agent 知道"它属于本工作区但现在够不到"
+			b.WriteString("- " + d + "（属于本工作区，但当前 agent 不支持多目录，未下发——不要尝试访问）\n")
+		}
+	}
+	b.WriteString("用户问「当前工作区有哪些项目/文件夹」时以上面这份列表为准，不要去上级目录扫描推断；列表之外的不属于本会话。")
+	return b.String(), fp
+}
+
+// Send 发送一条消息并跑完一轮对话（同一 thread 串行，C3）。
+// hooks 的回调在独立 pump goroutine 上调用（SSE 写出方保证并发安全）；
+// ctx 取消（客户端断开/服务关闭）会中止本轮并向 agent 发显式取消（C8）。
+func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks TurnHooks) (TurnResult, error) {
+	c := m.cfgFn().Normalized()
+	if !c.Enabled {
+		return TurnResult{}, errors.New("智能体功能未开启（设置 → 智能体）")
+	}
+	if strings.TrimSpace(text) == "" && len(imgs) == 0 {
+		return TurnResult{}, errors.New("消息为空")
+	}
+
+	mu := m.threadLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	m.mu.Unlock()
+	if !ok {
+		return TurnResult{}, fmt.Errorf("未找到 thread %s", id)
+	}
+	agentCfg, avail := c.Agent(th.Agent)
+	if !avail {
+		return TurnResult{}, fmt.Errorf("thread 绑定的智能体 %q 已删除或停用", th.Agent)
+	}
+
+	lv, degraded, err := m.ensureLive(ctx, th, agentCfg, hooks)
+	if err != nil {
+		return TurnResult{}, err
+	}
+	if !lv.proc.alive() {
+		return TurnResult{}, errors.New("agent 连接已断开，请重试")
+	}
+
+	turnTimeout := time.Duration(c.TurnSeconds(agentCfg)) * time.Second
+	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
+	defer cancel()
+	// turn 结束信号：pump 收尾与权限审批撤卡共用（权限钩子在 SDK 的请求
+	// goroutine 上读到它，感知 turn 已结束即自动撤卡）。
+	turnDone := make(chan struct{})
+	m.mu.Lock()
+	lv.turnDone = turnDone
+	lv.stopping.Store(false)
+	if lv.stopTimer != nil {
+		lv.stopTimer.Stop()
+		lv.stopTimer = nil
+	}
+	th.State = StateRunning
+	if th.Title == "" {
+		// 首轮定标题：取第一条消息的第一个非空行，去掉列表/标题符号并折叠空白，
+		// 截到列表行放得下的长度。比整段前 40 字更像"标题"，也不需要额外模型调用。
+		th.Title = titleFromMessage(text)
+	}
+	m.mu.Unlock()
+
+	// prompt 块：图片在前、文本在后（与主聊天"图片先注入"的惯例一致）。
+	blocks := make([]acp.ContentBlock, 0, len(imgs)+1)
+	for _, img := range imgs {
+		blocks = append(blocks, acp.ImageBlock(base64.StdEncoding.EncodeToString(img.Data), img.MIME))
+	}
+	blocks = append(blocks, acp.TextBlock(text))
+
+	// 工作区说明：agent 看不到"工作区"这个概念，只会自己扫目录。每个会话（以及
+	// 目录清单变化后）第一轮带一段说明告诉它本会话到底包含哪些文件夹。
+	brief, briefFp := m.workspaceBrief(th, lv.proc)
+	m.mu.Lock()
+	injectBrief := brief != "" && (th.BriefedSession != th.SessionID || th.BriefedDirs != briefFp)
+	m.mu.Unlock()
+	if injectBrief {
+		blocks = append([]acp.ContentBlock{acp.TextBlock(brief)}, blocks...)
+	}
+	briefSession := th.SessionID
+
+	// 事件由进程级常驻泵按 sessionId 分发（M-6）：这里只登记本轮接收器，
+	// Prompt 返回后立刻摘掉——之后迟到的通知没有接收方，泵会丢弃。
+	sink := newTurnSink(hooks)
+	lv.setSink(sink)
+
+	started := time.Now()
+	res, promptErr := lv.proc.conn.Prompt(turnCtx, acp.PromptRequest{
+		SessionId: lv.sessionID, Prompt: blocks,
+	})
+	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
+	close(turnDone)
+	sink.finish()
+	elapsed := time.Since(started)
+
+	// 说明送达成功才记账：失败的那轮下次还会带
+	if injectBrief && promptErr == nil {
+		m.mu.Lock()
+		if current, ok := m.threads[id]; ok {
+			current.BriefedSession = briefSession
+			current.BriefedDirs = briefFp
+			if serr := m.saveLocked(); serr != nil {
+				log.Printf("[智能体] 工作区说明记账失败: %v", serr)
+			}
+		}
+		m.mu.Unlock()
+	}
+
+	// 超时/断开时 agent 可能仍在跑：显式取消（C8，读 stopReason 而非猜）。
+	// 取消只是通知，agent 不一定执行（实测有 agent 超时后继续跑工具），
+	// 客户端已经放弃这一轮，直接回收进程组保证它真的停下；下轮按
+	// session/load 重接上下文。
+	aborted := turnCtx.Err() != nil
+	stopped := lv.stopping.Load()
+	if aborted && promptErr != nil {
+		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
+		m.killLive(id, "本轮超时/断开，回收进程")
+	}
+	interrupted := aborted || (stopped && promptErr != nil)
+
+	m.mu.Lock()
+	if lv.stopTimer != nil {
+		lv.stopTimer.Stop()
+		lv.stopTimer = nil
+	}
+	lv.turnDone = nil
+	current, keep := m.threads[id] // turn 进行中被删除则不再写投影
+	if keep {
+		current.State = StateIdle
+		current.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
+
+	result := TurnResult{
+		Ms: elapsed.Milliseconds(),
+	}
+	if res.Usage != nil { // 错误路径下 res 为零值，Usage 为 nil
+		result.In = int64(res.Usage.InputTokens)
+		result.Out = int64(res.Usage.OutputTokens)
+	}
+	var runErr error
+	var errText string
+	switch {
+	case promptErr == nil:
+		result.Answer = sink.allText()
+		result.StopReason = string(res.StopReason) // cancelled 不判失败（C8）
+	case aborted:
+		result.Answer = sink.allText()
+		result.StopReason = "timeout"
+	case stopped:
+		// 停止指令未生效、兜底强杀：按用户取消收尾，不算崩溃。
+		result.Answer = sink.allText()
+		result.StopReason = "cancelled"
+	default:
+		runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, firstLine(lv.proc.stderrTail(4)))
+		result.StopReason = "error"
+		errText = runErr.Error()
+	}
+
+	if keep {
+		m.mu.Lock()
+		var files []string
+		for _, img := range imgs {
+			if img.ID != "" {
+				files = append(files, img.ID)
+			}
+		}
+		m.appendTurnLocked(current, text, files, result, degraded, interrupted, promptErr != nil && !interrupted, errText)
+		if used, size, cost, _ := sink.context(); size > 0 {
+			current.ContextUsed = used
+			current.ContextSize = size
+			current.ContextCost = cost
+		}
+		if serr := m.saveLocked(); serr != nil {
+			log.Printf("[智能体] 投影落盘失败: %v", serr)
+		}
+		m.mu.Unlock()
+	}
+
+	// 记账：维度 acp:<agent>。金额恒缺失（配额在对面，实测 cost.amount=0），
+	// 成本页按现有未知模型口径显示。
+	usage.Record(usage.Call{
+		Model: "acp:" + th.Agent, Session: "acp:" + id, Origin: "agent",
+		In: result.In, Out: result.Out,
+	})
+
+	m.armIdle(procKey(th.Agent, th.Cwd))
+	return result, runErr
+}
+
+// appendTurnLocked 把本轮问答追加进投影（调用方须持 m.mu）。
+// degraded 为真说明本轮跑在新会话里（旧上下文丢失），插入显式标注。
+func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, r TurnResult, degraded, aborted, crashed bool, errText string) {
+	if degraded && len(th.Messages) > 0 {
+		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
+			Text: "agent 进程已重建，旧会话无法恢复，上下文已重置（历史记录仍可见）"})
+	}
+	th.Messages = append(th.Messages, Entry{
+		Role: "user", Text: question, At: time.Now(), Images: len(files), Files: files,
+	})
+	entry := Entry{Role: "assistant", Text: r.Answer, At: time.Now(),
+		In: r.In, Out: r.Out, Ms: r.Ms, Stopped: r.StopReason}
+	if entry.Text == "" {
+		entry.Text = "（本轮没有产出文本）"
+	}
+	th.Messages = append(th.Messages, entry)
+	if aborted {
+		reason := "超时（已中止本轮 agent 执行，结果不会回到本对话）"
+		if r.StopReason == "cancelled" {
+			reason = "被用户停止"
+		}
+		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(),
+			Text: "本轮对话在完成前中断：" + reason})
+	}
+	if crashed {
+		text := "本轮失败：" + truncateRunes(errText, 160)
+		text += "。下次发消息将重新拉起进程并尝试重接会话。"
+		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(), Text: text})
+	}
+}
+
+// Stop 取消该 thread 正在进行的一轮：先显式 session/cancel（C8），Prompt 端
+// 会拿到 stopReason=cancelled 正常收尾；若 agent 不理会取消，宽限 stopKillGrace
+// 后强杀进程组，保证"停止"真的停。没有 PausedTurn 机制——agent 侧会话上下文
+// 还在，用户直接发下一句即可续聊（强杀后下轮按 session/load 重接）。
+func (m *Manager) Stop(id string) bool {
+	m.mu.Lock()
+	lv, ok := m.live[id]
+	sid := ""
+	if th, tok := m.threads[id]; tok {
+		sid = th.SessionID
+	}
+	if ok && sid != "" && lv.turnDone != nil {
+		lv.stopping.Store(true)
+		if lv.stopTimer == nil {
+			turnDone := lv.turnDone
+			lv.stopTimer = time.AfterFunc(stopKillGrace, func() {
+				select {
+				case <-turnDone:
+					return // 这一轮已自行收尾
+				default:
+				}
+				m.killLive(id, "停止指令未生效，强杀进程")
+			})
+		}
+	}
+	m.mu.Unlock()
+	if !ok || sid == "" {
+		return false
+	}
+	return lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: acp.SessionId(sid)}) == nil
+}
+
+// ensureProc 保证 thread 有存活会话并返回它（Options/SetOption 共用）。
+// 全程持 thread 串行锁：与 Send 互斥，避免和 turn 里的 ensureLive 竞争；
+// 返回的 unlock 在用完后调用（顺带停掉这条连接的空闲回收计时）。
+func (m *Manager) ensureProc(id string) (*live, *Thread, func(), error) {
+	mu := m.threadLock(id)
+	mu.Lock()
+	c := m.cfgFn().Normalized()
+	if !c.Enabled {
+		mu.Unlock()
+		return nil, nil, nil, errors.New("智能体功能未开启（设置 → 智能体）")
+	}
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	m.mu.Unlock()
+	if !ok {
+		mu.Unlock()
+		return nil, nil, nil, fmt.Errorf("未找到 thread %s", id)
+	}
+	agentCfg, avail := c.Agent(th.Agent)
+	if !avail {
+		mu.Unlock()
+		return nil, nil, nil, fmt.Errorf("thread 绑定的智能体 %q 已删除或停用", th.Agent)
+	}
+	// 槽位占满/冷启动都会在这里等待（ensureLive 随 ctx 等待），必须带超时兜底
+	// ——否则 chip 触发的 Options 请求在并发已满时无限期挂住，前端按钮永远置灰。
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(c.HandshakeTimeoutSeconds)*time.Second)
+	defer cancel()
+	lv, _, err := m.ensureLive(ctx, th, agentCfg, TurnHooks{})
+	if err != nil {
+		mu.Unlock()
+		return nil, nil, nil, err
+	}
+	return lv, th, func() { m.touchProc(procKey(th.Agent, th.Cwd)); mu.Unlock() }, nil
+}
+
+// Capabilities 返回该 thread 当前会话的统一能力清单（归一化，见 options.go）。
+// 协议里没有「未建会话先查列表」的方法，会话不在时这里会拉起 agent 建会话
+// ——列表是静态配置（agent 装好后不变），进程随后照常空闲回收。
+func (m *Manager) Capabilities(id string) ([]Capability, error) {
+	lv, _, unlock, err := m.ensureProc(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()), nil
+}
+
+// SetCapability 切换某项能力的取值（如 id=model, value=gpt-6.1-sol）：
+// 按归一化时的 source 路由到 set_config_option / set_model / set_mode。
+// 切换即时生效于会话；config-option 响应回带全量配置项，session-model /
+// session-mode 响应为空、本地兜底改当前值（真值靠 agent 推送刷新）。
+func (m *Manager) SetCapability(id, capID, value string) ([]Capability, error) {
+	lv, th, unlock, err := m.ensureProc(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := m.applyCapability(lv, th, capID, value); err != nil {
+		return nil, err
+	}
+	// 记住这次选择：agent 不保证把选项存进会话，重开时靠这份记录重放
+	m.recordChoice(th, capID, value)
+	return normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()), nil
+}
+
+// resolveCapSource 从会话缓存重建 capID → (source, 原始 configID) 的映射
+// （与 normalizeCapabilities 同规则）。
+func resolveCapSource(lv *live, capID string) (source, configID string) {
+	for _, o := range lv.getOptions() {
+		origID, cap, ok := convertConfigOption(o.Select)
+		if ok && cap.ID == capID {
+			return cap.Source, origID
+		}
+	}
+	switch capID {
+	case CapKindModel:
+		if lv.getModelState() != nil {
+			return CapSourceSessionModel, ""
+		}
+	case CapKindApprovalMode:
+		if lv.getModeState() != nil {
+			return CapSourceSessionMode, ""
+		}
+	}
+	return "", ""
+}
+
+// applyCapability 把某项能力切到 value，按 source 路由到对应协议方法。
+// 调用方须已持该 thread 的串行锁（SetCapability 走 ensureProc，重放走 ensureSession）。
+func (m *Manager) applyCapability(lv *live, th *Thread, capID, value string) error {
+	source, configID := resolveCapSource(lv, capID)
+	if source == "" {
+		return fmt.Errorf("能力项 %q 不存在或该 agent 不支持", capID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second)
+	defer cancel()
+	switch source {
+	case CapSourceConfigOption:
+		res, err := lv.proc.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				ConfigId:  acp.SessionConfigId(configID),
+				SessionId: lv.sessionID,
+				Value:     acp.SessionConfigValueId(value),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("切换失败: %w", err)
+		}
+		if len(res.ConfigOptions) > 0 {
+			lv.setOptions(res.ConfigOptions)
+		} else {
+			lv.setCurrent(configID, value)
+		}
+	case CapSourceSessionModel:
+		if _, err := lv.proc.conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+			ModelId: acp.SessionModelId(value), SessionId: lv.sessionID,
+		}); err != nil {
+			return fmt.Errorf("切换失败: %w", err)
+		}
+		lv.setCurrentModel(value)
+	case CapSourceSessionMode:
+		if _, err := lv.proc.conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
+			ModeId: acp.SessionModeId(value), SessionId: lv.sessionID,
+		}); err != nil {
+			return fmt.Errorf("切换失败: %w", err)
+		}
+		lv.setCurrentMode(value)
+	}
+	return nil
+}
+
+// recordChoice 记下用户这次的选择并落盘（只记手动选过的，不从 agent 推送反推）。
+func (m *Manager) recordChoice(th *Thread, capID, value string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if th.CapChoices == nil {
+		th.CapChoices = map[string]string{}
+	}
+	if th.CapChoices[capID] == value {
+		return
+	}
+	th.CapChoices[capID] = value
+	if err := m.saveLocked(); err != nil {
+		log.Printf("[智能体] 能力选择落盘失败: %v", err)
+	}
+}
+
+// reapplyChoices 会话（重）建立后把用户上次手动选的值按回去：很多 agent 不把
+// 这些选项存进 session，重开后回默认——Friday 侧的记录就是"别给我忘掉"的那份意图。
+// 逐项尽力而为：agent 这版不认某个能力（清单里没有）就跳过，不因此让会话建不起来。
+func (m *Manager) reapplyChoices(lv *live, th *Thread) {
+	m.mu.Lock()
+	choices := make(map[string]string, len(th.CapChoices))
+	for k, v := range th.CapChoices {
+		choices[k] = v
+	}
+	m.mu.Unlock()
+	if len(choices) == 0 {
+		return
+	}
+	for _, cap := range normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()) {
+		want, ok := choices[cap.ID]
+		if !ok || want == "" || cap.CurrentValue == want {
+			continue
+		}
+		if err := m.applyCapability(lv, th, cap.ID, want); err != nil {
+			log.Printf("[智能体] %s 重放能力选择 %s=%s 失败: %v", th.Agent, cap.ID, want, err)
+			continue
+		}
+		log.Printf("[智能体] %s 已按上次的选择重放 %s=%s", th.Agent, cap.ID, want)
+	}
+}
+
+// Test 对指定 agent 做一次握手诊断// Test 对指定 agent 做一次握手诊断（设置页「测试」按钮）：拉起进程、initialize、
+// 立即回收，报告带 stderr 尾部的错误。最常见的故障"没登录"由此变成一句话。
+func (m *Manager) Test(name string) error {
+	c := m.cfgFn().Normalized()
+	agentCfg, ok := c.Agent(name)
+	if !ok {
+		return fmt.Errorf("没有叫 %q 的智能体", name)
+	}
+	ws, err := os.MkdirTemp("", "friday-acp-test-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(ws)
+	proc, err := m.spawn(agentCfg, ws,
+		time.Duration(c.HandshakeTimeoutSeconds)*time.Second, nil, nil)
+	if err != nil {
+		return err
+	}
+	proc.kill()
+	return nil
+}
+
+// Reload 配置热更新：杀掉配置变化/被删除/被停用 agent 的存活进程（上下文由
+// session/load 在下次打开时尝试恢复），并发槽位按新值重建。
+func (m *Manager) Reload(cfg config.AcpConfig) {
+	var toKill []*procState
+	m.mu.Lock()
+	prev := m.lastCfg
+	m.lastCfg = cfg
+	// 连接按 agent+目录 共享：配置变了的 agent 名下的连接整条回收（会话下次
+	// 使用时按 session/load 重接），没变的连接不动——重载配置不该打断别人的对话。
+	for _, ps := range m.procs {
+		agentName := strings.SplitN(ps.key, "\x00", 2)[0]
+		ac, ok := cfg.Agent(agentName)
+		old, hadOld := prev.Agent(agentName)
+		if !ok || !ac.IsEnabled() || !hadOld || agentChanged(old, ac) {
+			toKill = append(toKill, ps)
+		}
+	}
+	n := cfg.Normalized().MaxConcurrent
+	m.sem = make(chan struct{}, n)
+	m.mu.Unlock()
+	for _, ps := range toKill {
+		m.releaseProc(ps, "配置变更")
+	}
+}
+
+// agentChanged 判断 agent 的启动参数是否变化（变化即需回收进程）。
+func agentChanged(a, b config.AcpAgentConfig) bool {
+	if a.Command != b.Command || a.TurnTimeoutSeconds != b.TurnTimeoutSeconds ||
+		len(a.Args) != len(b.Args) || len(a.Env) != len(b.Env) {
+		return true
+	}
+	for i := range a.Args {
+		if a.Args[i] != b.Args[i] {
+			return true
+		}
+	}
+	for k, v := range a.Env {
+		if b.Env[k] != v {
+			return true
+		}
+	}
+	return false
+}
+
+// Close 关闭全部存活进程（Friday 退出时调用）。
+func (m *Manager) Close() {
+	m.mu.Lock()
+	all := make([]*procState, 0, len(m.procs))
+	for _, ps := range m.procs {
+		all = append(all, ps)
+	}
+	m.mu.Unlock()
+	for _, ps := range all {
+		m.releaseProc(ps, "服务关闭")
+	}
+}
+
+// ---------- 持久化 ----------
+
+type threadFile struct {
+	Workspaces []*Workspace `json:"workspaces,omitempty"`
+	Threads    []*Thread    `json:"threads"`
+}
+
+func loadThreads(path string) (*threadFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &threadFile{}, nil
+		}
+		return nil, fmt.Errorf("读取 thread 文件 %s 失败: %w", path, err)
+	}
+	var f threadFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("thread 文件 %s 损坏: %w", path, err)
+	}
+	return &f, nil
+}
+
+// saveLocked 落盘（调用方须持 m.mu）。写失败不吞：工作区与会话投影是用户数据。
+func (m *Manager) saveLocked() error {
+	f := threadFile{
+		Workspaces: make([]*Workspace, 0, len(m.wsOrder)),
+		Threads:    make([]*Thread, 0, len(m.order)),
+	}
+	for _, id := range m.wsOrder {
+		if ws := m.workspaces[id]; ws != nil {
+			f.Workspaces = append(f.Workspaces, ws)
+		}
+	}
+	for _, id := range m.order {
+		if th := m.threads[id]; th != nil {
+			f.Threads = append(f.Threads, th)
+		}
+	}
+	data, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	tmp := m.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.path)
+}
+
+// ---------- 小工具 ----------
+
+// titleFromMessage 从首条消息派生会话标题：第一个非空行、去掉常见的 markdown
+// 前缀（# > - * ` 与序号）与行首装饰，折叠连续空白，截 24 个 rune（列表行宽度）。
+// 纯符号/纯空白行跳过；整条消息没有可读文本（例如只发了图片）时返回空，
+// 留给后面某一轮再定标题。
+func titleFromMessage(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, "#>-*`~+ \t")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			continue
+		}
+		return truncateRunes(line, 24)
+	}
+	return ""
+}
+
+// truncateRunes 截断到 n 个 rune。
+func truncateRunes(s string, n int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n]) + "…"
+}

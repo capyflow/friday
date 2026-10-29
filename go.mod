@@ -3,7 +3,7 @@ module github.com/capyflow/friday
 go 1.25.5
 
 require (
-	github.com/capyflow/vortexagent v0.0.0-20261014084044-66f2a578013f
+	github.com/capyflow/vortexagent v0.0.0-20261027081641-32e0de9c24fc
 	github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f
 	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	github.com/k2-fsa/sherpa-onnx-go v1.13.7
@@ -16,11 +16,13 @@ require (
 )
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.3 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.14.2 // indirect
 	github.com/bytedance/sonic/loader v0.4.0 // indirect
 	github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/coder/acp-go-sdk v0.13.5 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.11 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
 	github.com/gin-gonic/gin v1.11.0 // indirect

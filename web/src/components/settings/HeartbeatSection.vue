@@ -37,6 +37,4 @@ onMounted(load)
     <span class="meta">{{ path }}</span>
   </div>
   <div class="msg" :class="msg.cls">{{ msg.text }}</div>
-  <div class="set-note">心跳按 config.yaml 的 heartbeat.schedule/interval 定时触发；
-    agent 输出首行 [推送]/[静默] 决定是否打扰；静默时段（quietHours）内只记录不推送。</div>
 </template>

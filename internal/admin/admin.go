@@ -1,9 +1,12 @@
 // Package admin 提供Friday 管理后台：基于 vortexv3（Gin）的 REST API 与
 // 内嵌单页 Dashboard（go:embed，无外部静态文件依赖）。页面源码在仓库 web/ 目录
-// （Vue 3 + Vite），npm run build 产物内联为自包含 HTML 落在 internal/admin/webdist/，
+// （Vue 3 + Vite），npm run build 产物内联为自包含 HTML 落在 internal/admin/webdist/
+// ——产物不入库（.gitignore），新克隆先构建前端再编译（Docker 构建自动包含该步）；
 // 未构建时以占位页兜底，go build 始终可过。
 //
-// 鉴权：账号密码登录换取会话 Cookie（7 天有效）。
+// 鉴权：账号密码登录换取 JWT（HS256，7 天有效），之后请求带
+// Authorization: Bearer <token>；token 缺失/失效返回 403。token 不落库，
+// 签名密钥在数据目录（auth-key），换密码即令旧 token 失效。
 // 账号来源：启动时由配置文件（admin.username/password）或环境变量
 // （FRIDAY_ADMIN_USERNAME/FRIDAY_ADMIN_PASSWORD）预置；两者都未提供时
 // 使用默认账号 admin/admin。密码以 bcrypt 哈希落盘。
@@ -12,6 +15,7 @@
 //
 //	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
 //	GET    /palette           全局快捷键弹窗页（桌面外壳加载，公开静态；对话仍走 /api/chat）
+//	GET    /wizard            首装向导页（桌面外壳首装流程加载，公开静态；含建号表单）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
 //	POST   /api/chat/stop     暂停当前回复（需登录，已生成部分可继续）
 //	POST   /api/chat/resume   继续被暂停的对话（需登录，SSE 流式）
@@ -31,6 +35,27 @@
 //	GET    /api/traces        调用轨迹列表（鉴权）
 //	GET    /api/traces/:id    单次调用轨迹详情（鉴权）
 //	GET    /api/session       会话状态（公开）
+//	GET    /api/acp/config    智能体配置（全局参数 + agent 清单，需登录）
+//	POST   /api/acp/config    保存智能体配置（写回 config.yaml 并热生效，需登录）
+//	GET    /api/acp/threads   工作区列表 + 会话列表 + 配置（需登录）
+//	POST   /api/acp/threads   新建会话（在工作区里绑定 agent 与主目录，需登录）
+//	POST   /api/acp/workspaces       新建工作区（名字 + 目录列表，需登录）
+//	POST   /api/acp/workspaces/:id   工作区改名/置顶/换主目录（字段可选，需登录）
+//	POST   /api/acp/workspaces/:id/dirs 工作区加目录 {"path"}（需登录）
+//	DELETE /api/acp/workspaces/:id/dirs?path= 工作区移目录（需登录）
+//	DELETE /api/acp/workspaces/:id   删工作区连带其会话（需登录）
+//	GET    /api/acp/threads/:id      会话详情含投影消息与目录视图（需登录）
+//	POST   /api/acp/threads/:id      改会话标题 {"title"}（留空回到自动，需登录）
+//	DELETE /api/acp/threads/:id      删除会话（需登录）
+//	POST   /api/acp/threads/:id/chat 智能体对话（SSE 流式，帧协议同 /api/chat，需登录）
+//	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
+//	GET    /api/acp/threads/:id/options 会话配置项（模型/模式/推理档位下拉，需登录）
+//	POST   /api/acp/threads/:id/options 切换配置项取值 {"id","value"}（需登录）
+//	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
+//	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
+//	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
+//	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
+//	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -74,9 +99,7 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
-	_ "embed"
-	"encoding/hex"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +117,7 @@ import (
 	vhttp "github.com/capyflow/vortexv3/server/http"
 	"github.com/gin-gonic/gin"
 
+	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
@@ -110,16 +134,40 @@ import (
 	"github.com/capyflow/friday/internal/web"
 )
 
-//go:embed webdist/index.html
-var indexHTML []byte
+// 前端构建产物不入库（.gitignore），这里嵌入整个目录（.gitkeep 保证空目录可编译）；
+// 未构建时（新克隆直接 go build / go test）回退到下方占位页。
+//
+//go:embed all:webdist
+var webdistFS embed.FS
 
-//go:embed webdist/palette.html
-var paletteHTML []byte
+// placeholderHTML 是产物缺失时的占位页：fresh clone 不跑 npm run build 也能
+// 编译、启动，页面明确告知构建方法。
+var placeholderHTML = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday</title><body style="font-family:system-ui;max-width:560px;margin:12vh auto;padding:0 24px">
+<h2>前端尚未构建</h2>
+<p>当前二进制内没有网页产物（构建产物不入库）。在仓库根目录执行：</p>
+<pre><code>cd web && npm ci && npm run build && cd .. && go build -o friday ./cmd/robot</code></pre>
+<p>重新编译后刷新本页即可。或直接使用 Docker：<code>docker compose up -d --build</code>（自动构建前端）。</p>
+</body></html>`)
 
-const (
-	sessionCookie = "friday_admin_session"
-	sessionTTL    = 7 * 24 * time.Hour
-)
+var placeholderPalette = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday 快捷面板</title><body style="font-family:system-ui;margin:8vh auto;max-width:480px;padding:0 24px">
+<p>前端尚未构建，快捷面板不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
+</body></html>`)
+
+var placeholderWizard = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>Friday 初始设置</title><body style="font-family:system-ui;margin:8vh auto;max-width:480px;padding:0 24px">
+<p>前端尚未构建，首装向导不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
+</body></html>`)
+
+// webdistFile 读取内嵌产物，缺失（未构建）返回 false。
+func webdistFile(name string) ([]byte, bool) {
+	b, err := webdistFS.ReadFile("webdist/" + name)
+	if err != nil || len(b) == 0 {
+		return nil, false
+	}
+	return b, true
+}
 
 // Info 是由 main 注入的管家静态运行信息（展示用）。
 type Info struct {
@@ -135,8 +183,9 @@ type Server struct {
 	host          string
 	port          int
 	accounts      *AccountStore
-	sessMu        sync.Mutex
-	sessions      map[string]time.Time // 会话 token → 过期时刻（内存态，重启需重新登录）
+	authKey       []byte // JWT 签名密钥（落盘在数据目录，重启后仍有效）
+	authMu        sync.Mutex
+	revoked       map[string]time.Time // 已退出登录的 token → 过期时刻（内存态）
 	engine        *task.Engine
 	todos         *todo.Store
 	memory        *memory.WikiStore
@@ -147,7 +196,9 @@ type Server struct {
 	configPath    string                   // config.yaml 路径（热更新写回）
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
+	acp           *acp.Manager             // 智能体（ACP）管理器（可为 nil）
 	mcpUpdateMu   sync.Mutex
+	acpUpdateMu   sync.Mutex
 	skillUpdateMu sync.Mutex
 	notifications *notification.Center
 	heartbeatFile string // HEARTBEAT.md 路径
@@ -163,19 +214,22 @@ type Server struct {
 
 // Options 汇总管理后台的构建参数。
 type Options struct {
-	Host          string
-	Port          int
-	Accounts      *AccountStore
-	Engine        *task.Engine
-	Todos         *todo.Store
-	Memory        *memory.WikiStore
-	Info          Info
-	Chat          *web.Chat
-	Cfg           *config.Config
-	ConfigPath    string
-	Registry      func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
-	Approver      *approval.Queue
-	Mcp           *mcp.Manager
+	Host        string
+	Port        int
+	Accounts    *AccountStore
+	AuthKeyFile string // JWT 签名密钥文件；为空则用进程内随机密钥（测试）
+	Engine      *task.Engine
+	Todos       *todo.Store
+	Memory      *memory.WikiStore
+	Info        Info
+	Chat        *web.Chat
+	Cfg         *config.Config
+	ConfigPath  string
+	Registry    func() *vxagent.Registry // 注册表 getter（热更新/MCP 重建用）
+	Approver    *approval.Queue
+	Mcp         *mcp.Manager
+	// Acp 智能体管理器（可为 nil：不挂载 /api/acp*，侧栏入口由前端按配置隐藏）。
+	Acp           *acp.Manager
 	HeartbeatFile string
 	Notifications *notification.Center
 	// Pricer/Guard 支撑成本面板与软限额接口（可为 nil：不挂载 /api/cost*）。
@@ -201,7 +255,8 @@ func New(o Options) *Server {
 		host:          o.Host,
 		port:          o.Port,
 		accounts:      o.Accounts,
-		sessions:      make(map[string]time.Time),
+		authKey:       loadOrCreateAuthKey(o.AuthKeyFile),
+		revoked:       make(map[string]time.Time),
 		engine:        o.Engine,
 		todos:         o.Todos,
 		memory:        o.Memory,
@@ -212,6 +267,7 @@ func New(o Options) *Server {
 		configPath:    o.ConfigPath,
 		approver:      o.Approver,
 		mcp:           o.Mcp,
+		acp:           o.Acp,
 		heartbeatFile: o.HeartbeatFile,
 		info:          o.Info,
 		startedAt:     time.Now(),
@@ -232,11 +288,14 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/", s.handleIndex)
 	// 全局快捷键弹窗页（桌面外壳加载）：公开下发，对话仍走需登录的 /api/chat。
 	root.AddStaticRouter("/palette", s.handlePalette)
+	// 首装向导页（桌面外壳首装流程加载）：公开下发——向导本身就是建号入口。
+	root.AddStaticRouter("/wizard", s.handleWizard)
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
+		root.AddRouter([]string{http.MethodGet}, "/api/upload/:id", s.wrapMedia(s.handleUploadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))
 		root.AddRouter([]string{http.MethodGet}, "/api/context", s.wrap(s.handleContextUsage))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/compact", s.wrap(s.handleContextCompact))
@@ -270,6 +329,36 @@ func (s *Server) Handler() http.Handler {
 			root.AddRouter([]string{http.MethodPost}, "/api/mcp/config", s.wrap(s.handleMCPConfigSet))
 		}
 		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/reconnect", s.wrap(s.handleMCPReconnect))
+		// OAuth 鉴权：发起浏览器授权、查状态（前端轮询）、断开（撤销令牌）。
+		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/authorize", s.wrap(s.handleMCPAuthorize))
+		root.AddRouter([]string{http.MethodGet}, "/api/mcp/:name/auth", s.wrap(s.handleMCPAuthStatus))
+		root.AddRouter([]string{http.MethodPost}, "/api/mcp/:name/disconnect", s.wrap(s.handleMCPDisconnect))
+	}
+	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
+	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
+	// 智能体（ACP）工作区与对话：工作区 CRUD、会话 CRUD、SSE 对话流、停止、
+	// 配置与握手诊断。
+	if s.acp != nil {
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/config", s.wrap(s.handleAcpConfigGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/config", s.wrap(s.handleAcpConfigSet))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads", s.wrap(s.handleAcpThreads))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads", s.wrap(s.handleAcpThreadCreate))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces", s.wrap(s.handleAcpWorkspacesCreate))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspacesUpdate))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspaceDelete))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirAdd))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirRemove))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadRename))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadDelete))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/chat", s.wrap(s.handleAcpChat))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsSet))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))
 	}
 	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
 	s.registerCostRoutes(root)
@@ -353,55 +442,26 @@ func (s *Server) Start(ctx context.Context) error {
 
 // ---------- 会话 ----------
 
-// newSession 生成会话 token 并登记过期时刻。
-func (s *Server) newSession() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic("admin: 生成会话 token 失败: " + err.Error())
-	}
-	token := hex.EncodeToString(b)
-	s.sessMu.Lock()
-	s.sessions[token] = time.Now().Add(sessionTTL)
-	s.sessMu.Unlock()
-	return token
-}
-
-// validSession 校验会话 token；有效则顺带滑动续期。
-func (s *Server) validSession(token string) bool {
-	if token == "" {
-		return false
-	}
-	s.sessMu.Lock()
-	defer s.sessMu.Unlock()
-	exp, ok := s.sessions[token]
-	if !ok || time.Now().After(exp) {
-		delete(s.sessions, token)
-		return false
-	}
-	s.sessions[token] = time.Now().Add(sessionTTL)
-	return true
-}
-
-func (s *Server) dropSession(token string) {
-	s.sessMu.Lock()
-	delete(s.sessions, token)
-	s.sessMu.Unlock()
-}
-
-func (s *Server) sessionToken(ctx *vhttp.Context) string {
-	tok, err := ctx.GinContext().Cookie(sessionCookie)
-	if err != nil {
-		return ""
-	}
-	return tok
-}
-
-// wrap 要求已登录（Cookie 会话）。
+// wrap 要求已登录（Authorization: Bearer JWT）。
 func (s *Server) wrap(fn func(*vhttp.Context) error) func(*vhttp.Context) error {
 	return func(ctx *vhttp.Context) error {
-		if !s.validSession(s.sessionToken(ctx)) {
-			return ctx.JsonResponse(vhttp.Codes.Unauthorized,
-				map[string]string{"error": "未登录或会话已过期"})
+		if !s.authenticated(bearerToken(ctx.GinContext().Request)) {
+			return forbidden(ctx)
+		}
+		return fn(ctx)
+	}
+}
+
+// wrapMedia 用于 <img> 这类无法带自定义头的读取：允许 header，也允许 ?token=
+// （仅附件回读走这条路，token 只在本机页面 URL 上出现）。
+func (s *Server) wrapMedia(fn func(*vhttp.Context) error) func(*vhttp.Context) error {
+	return func(ctx *vhttp.Context) error {
+		raw := bearerToken(ctx.GinContext().Request)
+		if raw == "" {
+			raw = strings.TrimSpace(ctx.GinContext().Query("token"))
+		}
+		if !s.authenticated(raw) {
+			return forbidden(ctx)
 		}
 		return fn(ctx)
 	}
@@ -416,7 +476,7 @@ func (s *Server) wrapPublic(fn func(*vhttp.Context) error) func(*vhttp.Context) 
 
 // handleSession 返回当前登录状态，前端据此显示登录页或主界面。
 func (s *Server) handleSession(ctx *vhttp.Context) error {
-	if s.validSession(s.sessionToken(ctx)) {
+	if s.authenticated(bearerToken(ctx.GinContext().Request)) {
 		acc := s.accounts.Current()
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 			"authenticated": true, "username": acc.Username,
@@ -425,7 +485,7 @@ func (s *Server) handleSession(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"authenticated": false})
 }
 
-// handleLogin 账号密码登录。
+// handleLogin 账号密码登录：校验通过后下发 JWT，前端自行保存并随请求携带。
 func (s *Server) handleLogin(ctx *vhttp.Context) error {
 	var req struct {
 		Username string `json:"username"`
@@ -438,17 +498,19 @@ func (s *Server) handleLogin(ctx *vhttp.Context) error {
 	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.Unauthorized, map[string]string{"error": "用户名或密码错误"})
 	}
-	token := s.newSession()
-	ctx.GinContext().SetCookie(sessionCookie, token, int(sessionTTL.Seconds()), "/", "", false, true)
+	token, err := s.issueToken(acc.Username)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "签发登录凭据失败，请重试"})
+	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"username": acc.Username,
+		"token":    token,
 	})
 }
 
-// handleLogout 退出登录，销毁会话并清 Cookie。
+// handleLogout 退出登录：吊销当前 token（前端同时清掉本地保存）。
 func (s *Server) handleLogout(ctx *vhttp.Context) error {
-	s.dropSession(s.sessionToken(ctx))
-	ctx.GinContext().SetCookie(sessionCookie, "", -1, "/", "", false, true)
+	s.revokeToken(bearerToken(ctx.GinContext().Request))
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已退出"})
 }
 
@@ -457,7 +519,11 @@ func (s *Server) handleLogout(ctx *vhttp.Context) error {
 // handleIndex 返回应用外壳（登录 + 聊天/运行状态/自动化/记忆/设置）。
 func (s *Server) handleIndex(ctx *vhttp.Context) error {
 	noCache(ctx)
-	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	if b, ok := webdistFile("index.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderHTML)
+	}
 	return nil
 }
 
@@ -465,7 +531,23 @@ func (s *Server) handleIndex(ctx *vhttp.Context) error {
 // 与主窗口同源共享登录会话，浏览器直接访问 :port/palette 亦可用）。
 func (s *Server) handlePalette(ctx *vhttp.Context) error {
 	noCache(ctx)
-	ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", paletteHTML)
+	if b, ok := webdistFile("palette.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderPalette)
+	}
+	return nil
+}
+
+// handleWizard 返回首装向导页（桌面外壳首次运行时的账号创建与数据目录确认；
+// 与 /api/setup 同级公开下发——向导本身就是建号入口）。
+func (s *Server) handleWizard(ctx *vhttp.Context) error {
+	noCache(ctx)
+	if b, ok := webdistFile("wizard.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderWizard)
+	}
 	return nil
 }
 
@@ -570,6 +652,10 @@ func (s *Server) handleStatus(ctx *vhttp.Context) error {
 	if s.cfg != nil {
 		cfg := s.cfg.Snapshot()
 		model, baseURL, keyConfigured = cfg.Provider.Model, cfg.Provider.BaseURL, cfg.ProviderAPIKey() != ""
+		// 首次启动种子里的示例占位不算已配置模型：状态卡显示「未配置模型」。
+		if (config.ModelProfile{BaseURL: baseURL, Model: model}).IsPlaceholder() {
+			model, baseURL = "", ""
+		}
 	}
 	// 输入格式与窗口取激活条目（未建库时缺省全支持 + 按模型名查表）。
 	inputs := []string{config.InputText, config.InputImage}

@@ -2,9 +2,7 @@ services:
   friday:
     build:
       context: .
-      # capyflow/* 私有 Go 模块经 SSH 拉取（依赖 ~/.ssh 可访问 GitHub 的密钥）
-      ssh:
-        - default
+      # Go 依赖走仓库内 vendor/，前端产物由 node 阶段构建：零网络依赖，无需凭据
     image: friday:latest
     container_name: friday
     restart: unless-stopped
