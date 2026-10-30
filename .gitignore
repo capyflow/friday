@@ -70,3 +70,12 @@ evidence/
 # 本地构建二进制与配置备份（含密钥，永不入库）
 /friday
 /config.yaml.bak
+
+# ACP 线程注册表（本地运行时状态）
+/acp-threads.json
+
+# agent 记忆目录（运行时数据，同 memories.json）
+/memories/
+
+# token 统计写入残留临时文件
+/token-usage.json.tmp-*
