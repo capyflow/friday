@@ -97,6 +97,9 @@ type Thread struct {
 	// 用来避免同一会话里重复注入、目录变了则重新交代一遍。
 	BriefedSession string `json:"briefedSession,omitempty"`
 	BriefedDirs    string `json:"briefedDirs,omitempty"`
+	// Handoff 是上一个会话留下的交接摘要：建立下一轮时作为前置文本发给
+	// agent，送达成功后清空（失败保留，重试还能带上）。
+	Handoff string `json:"handoff,omitempty"`
 	// PolicyApplied / PolicyNote 记录工作区默认审批档位在本会话的实际落地情况：
 	// Applied 为空表示没有下发过；Note 说明为什么没下发（agent 没报审批模式等）。
 	PolicyApplied string `json:"policyApplied,omitempty"`
@@ -447,6 +450,96 @@ func (m *Manager) CreateSession(agentName, workspaceID, cwd, title string) (Thre
 	}
 	log.Printf("[智能体] 新建会话 %s（工作区=%s，agent=%s，主目录=%s）", th.ID, ws.Name, th.Agent, th.Cwd)
 	return *th, nil
+}
+
+// Handoff 从一条会话生成交接摘要，并在同一工作区/agent/主目录下新开一条
+// “续”会话。ACP 没有压缩接口，这里不假装能原地压缩：旧会话原样保留，
+// 新会话下一轮把摘要作为前置文本发给 agent（送达成功才清空）。
+func (m *Manager) Handoff(id string) (Thread, error) {
+	mu := m.threadLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	if !ok {
+		m.mu.Unlock()
+		return Thread{}, fmt.Errorf("未找到会话 %s", id)
+	}
+	if th.State == StateRunning || len(th.Messages) == 0 {
+		m.mu.Unlock()
+		if th.State == StateRunning {
+			return Thread{}, errors.New("这一轮还在跑，等它结束再交接")
+		}
+		return Thread{}, errors.New("这条会话还没有可交接的对话内容")
+	}
+	summary := handoffSummary(th.Messages)
+	title := th.Title
+	if title == "" {
+		title = "上一个会话"
+	}
+	workspaceID, agent, cwd := th.WorkspaceID, th.Agent, th.Cwd
+	choices := make(map[string]string, len(th.CapChoices))
+	for k, v := range th.CapChoices {
+		choices[k] = v
+	}
+	m.mu.Unlock()
+
+	nt, err := m.CreateSession(agent, workspaceID, cwd, title+" · 续")
+	if err != nil {
+		return Thread{}, err
+	}
+	m.mu.Lock()
+	if cur := m.threads[nt.ID]; cur != nil {
+		cur.Handoff = summary
+		if len(choices) > 0 {
+			cur.CapChoices = choices
+		}
+		cur.Messages = append(cur.Messages, Entry{Role: "note", At: time.Now(),
+			Text: "已从上一个会话交接上下文；摘要会随下一轮发给 agent。\n\n" + truncateRunes(summary, 800)})
+		if err := m.saveLocked(); err != nil {
+			log.Printf("[智能体] 交接摘要落盘失败: %v", err)
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("[智能体] 会话 %s 已交接为新会话 %s（摘要 %d 字）", id, nt.ID, len([]rune(summary)))
+	got, ok := m.Get(nt.ID)
+	if !ok {
+		return Thread{}, errors.New("续会话创建后读取失败")
+	}
+	return got, nil
+}
+
+// handoffSummary 从会话投影整理交接摘要。只使用 Friday 看得见的消息（用户原话、
+// agent 最终回答与系统备注），不做模型调用；标注“可能遗漏 agent 未上报的细节”。
+func handoffSummary(msgs []Entry) string {
+	const maxEntries = 12
+	const maxTotal = 4000
+	start := len(msgs) - maxEntries
+	if start < 0 {
+		start = 0
+	}
+	var b strings.Builder
+	b.WriteString("以下是上一个会话的交接摘要（由 Friday 从可见时间线整理，agent 未上报的细节可能遗漏）。请在此基础上继续，不要假设未列出的细节。\n")
+	for _, e := range msgs[start:] {
+		text := strings.TrimSpace(e.Text)
+		if text == "" {
+			continue
+		}
+		switch e.Role {
+		case "user":
+			b.WriteString("\n用户：" + truncateRunes(text, 500))
+		case "assistant":
+			b.WriteString("\nagent：" + truncateRunes(text, 800))
+		case "note":
+			b.WriteString("\n备注：" + truncateRunes(text, 300))
+		}
+	}
+	out := b.String()
+	if len([]rune(out)) > maxTotal {
+		out = truncateRunes(out, maxTotal)
+	}
+	return out
 }
 
 // RenameThread 改会话标题：手动标题优先于首条消息派生。留空 = 回到自动
@@ -1153,9 +1246,13 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	brief, briefFp := m.workspaceBrief(th, lv.proc)
 	m.mu.Lock()
 	injectBrief := brief != "" && (th.BriefedSession != th.SessionID || th.BriefedDirs != briefFp)
+	handoff := th.Handoff
 	m.mu.Unlock()
 	if injectBrief {
 		blocks = append([]acp.ContentBlock{acp.TextBlock(brief)}, blocks...)
+	}
+	if handoff != "" {
+		blocks = append([]acp.ContentBlock{acp.TextBlock(handoff)}, blocks...)
 	}
 	briefSession := th.SessionID
 
@@ -1206,6 +1303,17 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 			current.BriefedDirs = briefFp
 			if serr := m.saveLocked(); serr != nil {
 				log.Printf("[智能体] 工作区说明记账失败: %v", serr)
+			}
+		}
+		m.mu.Unlock()
+	}
+	// 交接摘要同样只在送达成功后清空；失败保留，下一轮还能带上。
+	if handoff != "" && promptErr == nil {
+		m.mu.Lock()
+		if current, ok := m.threads[id]; ok && current.Handoff == handoff {
+			current.Handoff = ""
+			if serr := m.saveLocked(); serr != nil {
+				log.Printf("[智能体] 交接摘要清理失败: %v", serr)
 			}
 		}
 		m.mu.Unlock()

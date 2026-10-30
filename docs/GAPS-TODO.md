@@ -39,11 +39,12 @@
   验收：同时跑 2 个 ACP 会话 + 1 个目标 + 1 个计划，看板全部列出且状态实时；从看板能停掉其中一项。
   **实施记录（2026-10-30）**：新增侧栏「运行」页与只读聚合接口 `GET /api/runs`（5 秒轮询），汇总 ACP 运行/中断会话、活跃计划、目标、近期任务、待审批与失败通知；动作复用原有 stop/pause/cancel/decide/retry 接口；ACP 会话卡片可深链回工作区；各管理器未装配时回空数组而非假数据。
 
-- [ ] **P0-6 ACP 上下文交接（总结并新开）**
+- [x] **P0-6 ACP 上下文交接（总结并新开）**
   现状：ACP 没有压缩接口，Friday 只显示水位；`session/load` 恢复保真度看 agent，差的重开即“上下文已重置”。
   做到：水位到阈值时提示；一键用 Friday 的模型把时间线总结成交接摘要 + 工作区说明，开新会话接着干；旧会话保留可查。摘要里标明“可能遗漏 agent 未上报的细节”。
   验收：水位 80% 时出现入口；新会话首轮带上摘要，agent 能接着上一轮的任务；旧会话历史不丢。
   落点：`internal/acp`、`internal/agent`（摘要）、`web/src/components/WorkspaceView.vue`。
+  **实施记录（2026-10-30）**：上下文弹层新增「总结并新开」；`Manager.Handoff` 用可见时间线整理摘要（不调用模型，明确标注可能遗漏 agent 未上报细节），在同工作区/agent/主目录建「· 续」会话并复制手动能力选择；摘要存 `Thread.Handoff`，下一轮作为前置文本下发，送达成功才清空；旧会话保留。回归 `TestHandoffCreatesContinuationThread` / `TestHandoffRejectsEmptyThread` 与前端弹层用例。
 
 ## P1（能力与体验）
 

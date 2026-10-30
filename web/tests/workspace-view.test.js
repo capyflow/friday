@@ -150,6 +150,16 @@ async function server(method, url, body) {
     data.workspaces = data.workspaces.filter(w => w.id !== wsMatch[1])
     return json({ message: '已删除该工作区及其会话', threadIds: ids })
   }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/handoff$/.test(url)) {
+    const old = data.threads.find(t => t.id === url.split('/')[4])
+    if (!old) throw new Error('未找到该会话')
+    const nt = {
+      ...old, id: 'th' + (data.threads.length + 1), title: old.title + ' · 续',
+      state: 'idle', handoff: '交接摘要', messages: [{ role: 'note', text: '已从上一个会话交接上下文' }],
+    }
+    data.threads.push(nt)
+    return json({ thread: nt, message: '已新开续会话' })
+  }
   if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+$/.test(url)) {
     const id = url.split('/').pop()
     const t = data.threads.find(x => x.id === id)
@@ -300,8 +310,21 @@ describe('工作区页：两级栏与投影', () => {
     expect(chip.text()).toContain('40%')
     await chip.trigger('click')
     expect(wrapper.get('#agCtxPopover').text()).toContain('占用约 12k / 窗口 30k tokens')
-    // 只读：弹层里没有压缩/清除动作
-    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(0)
+    // 只读 + 一个“总结并新开”入口；没有压缩/清除
+    expect(wrapper.get('#agCtxPopover').text()).toContain('总结并新开')
+    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(1)
+  })
+
+  it('上下文弹层里总结并新开：建续会话、选中并带交接说明', async () => {
+    data.threads = [{ ...thread, contextUsed: 24000, contextSize: 30000 }]
+    await show()
+    await wrapper.get('[aria-label="上下文使用率"]').trigger('click')
+    await wrapper.get('#agCtxPopover button').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/handoff', {})
+    expect(wrapper.get('.ag-head-txt b').text()).toContain('续')
+    expect(wrapper.text()).toContain('已从上一个会话交接上下文')
   })
 
   it('agent 未上报上下文时不显示水位 chip', async () => {

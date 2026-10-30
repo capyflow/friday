@@ -1977,3 +1977,57 @@ func TestPermissionRoutedBySession(t *testing.T) {
 		t.Fatalf("两个会话应共用一条连接，实际拉起 %d 次", got)
 	}
 }
+
+func TestHandoffCreatesContinuationThread(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "先看下这个项目", nil, TurnHooks{}); err != nil {
+		t.Fatalf("首轮失败: %v", err)
+	}
+
+	nt, err := m.Handoff(th.ID)
+	if err != nil {
+		t.Fatalf("交接失败: %v", err)
+	}
+	if nt.ID == th.ID || nt.WorkspaceID != th.WorkspaceID || nt.Agent != th.Agent || nt.Cwd != th.Cwd {
+		t.Fatalf("续会话应复用工作区/agent/主目录: old=%+v new=%+v", th, nt)
+	}
+	if !strings.Contains(nt.Handoff, "先看下这个项目") || !strings.Contains(nt.Handoff, "你好，这是回答。") {
+		t.Fatalf("交接摘要没带上可见对话: %q", nt.Handoff)
+	}
+	if !strings.Contains(nt.Title, "续") {
+		t.Fatalf("续会话标题应带标记: %q", nt.Title)
+	}
+	if len(nt.Messages) != 1 || nt.Messages[0].Role != "note" {
+		t.Fatalf("续会话应有交接说明 note: %+v", nt.Messages)
+	}
+	old, _ := m.Get(th.ID)
+	if len(old.Messages) != 2 || old.Handoff != "" {
+		t.Fatalf("旧会话应原样保留: %+v", old)
+	}
+
+	if _, err := m.Send(context.Background(), nt.ID, "继续", nil, TurnHooks{}); err != nil {
+		t.Fatalf("续会话首轮失败: %v", err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) < 2 {
+		t.Fatalf("应有两轮 prompt，实际 %d", len(blocks))
+	}
+	joined := strings.Join(blocks[len(blocks)-1], "\n")
+	if !strings.Contains(joined, "交接摘要") || !strings.Contains(joined, "先看下这个项目") {
+		t.Fatalf("续会话首轮没把摘要发给 agent: %q", joined)
+	}
+	got, _ := m.Get(nt.ID)
+	if got.Handoff != "" {
+		t.Fatalf("摘要送达后应清空，实际 %q", got.Handoff)
+	}
+}
+
+func TestHandoffRejectsEmptyThread(t *testing.T) {
+	m := newTestManager(t, nil, nil, &fakeAgent{promptScript: defaultScript})
+	th := mustThread(t, m)
+	if _, err := m.Handoff(th.ID); err == nil {
+		t.Fatal("空会话不应允许交接")
+	}
+}

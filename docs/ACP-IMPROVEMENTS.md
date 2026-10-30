@@ -2,7 +2,8 @@
 
 状态：**M-1/M-2/M-5/M-8 已实施（2026-10-21 上午）**；**M-3/M-4 已实施（2026-10-21 下午，
 拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
-工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-7 按推荐缓做/不排期。
+工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
+上下文交接）；M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -195,6 +196,20 @@ bug 类问题已于同日修复（附录 A）。
   `pickApprovalValue`、admin 更新接口与编辑工作区弹窗；回归 `TestPickApprovalValue` /
   `TestWorkspacePolicyDefaultsAndValidation` 与 admin 端点用例。
 
+### M-11 上下文交接（总结并新开）
+
+- **动机**：ACP 没有上下文压缩/清除接口，水位数只能看；agent 会话真的满了只能重开，重开靠
+  `session/load`，恢复不可靠的 agent 直接“上下文已重置”。
+- **方案**：上下文弹层提供「总结并新开」——Friday 从**可见时间线**整理交接摘要（不调用模型，
+  明确标注 agent 未上报的细节可能遗漏），在同一工作区/agent/主目录新开「· 续」会话；
+  摘要存新线程的 `handoff` 字段，下一轮作为前置文本发给 agent，送达成功才清空；旧会话原样保留，
+  手动选过的模型/审批等能力选择一并复制。
+- **边界**：不是原地压缩，旧会话不会变小；摘要只含用户原话、agent 最终回答与系统备注，
+  工具过程不在投影里，可能遗漏；水位低时也可手动用。
+- **实施记录（2026-10-30）**：`Manager.Handoff`/`handoffSummary`、`Thread.Handoff` 下发与清理、
+  admin `POST /api/acp/threads/:id/handoff`、上下文弹层按钮与「· 续」会话切换。回归
+  `TestHandoffCreatesContinuationThread` / `TestHandoffRejectsEmptyThread` 与前端弹层用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -205,6 +220,7 @@ bug 类问题已于同日修复（附录 A）。
 | 4 | M-3（①②③ 全量）+ M-4 | ✅ 已实施（2026-10-21，拍板：直接兼容官方 schema） |
 | 5 | M-6 | ✅ 已实施（2026-10-29，同一 agent+目录复用连接） |
 | 6 | M-9 + M-10 | ✅ 已实施（2026-10-30） |
+| 7 | M-11 | ✅ 已实施（2026-10-30） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

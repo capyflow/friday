@@ -476,6 +476,18 @@ func (s *Server) handleAcpThreadChangesRevert(ctx *vhttp.Context) error {
 	})
 }
 
+// handleAcpThreadHandoff 从当前会话生成交接摘要并新开一条同工作区/agent/主目录的
+// “续”会话：POST /api/acp/threads/:id/handoff。旧会话保留，摘要随后续首轮下发。
+func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
+	th, err := s.acp.Handoff(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"thread": th, "message": "已新开续会话：交接摘要会随下一轮发给 agent",
+	})
+}
+
 // handleAcpChat 处理一次智能体对话：POST /api/acp/threads/:id/chat，
 // 请求体 {"message":"...", "attachments":["<上传id>", ...]}，响应为 SSE 流，
 // 帧协议与 /api/chat 一致（另有 {"status":"..."} 生命周期占位帧）。

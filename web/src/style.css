@@ -1566,3 +1566,8 @@ html[data-theme="dark"] .wfd-diff-row.del { background: rgba(248,113,113,.10); }
   .run-actions .btn { flex: 1; }
   .run-card-title b { white-space: normal; }
 }
+/* 上下文弹层底部：总结并新开（ACP 无压缩接口，只能交接） */
+.ctx-handoff { margin-top: 8px; padding-top: 9px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px; }
+.ctx-handoff .btn { align-self: flex-start; }
+.ctx-handoff p { margin: 0; font-size: 11px; line-height: 1.55; }

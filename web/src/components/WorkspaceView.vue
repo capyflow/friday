@@ -197,6 +197,28 @@ function toggleCtx() {
   if (ctxOpen.value) nextTick(() => { const el = document.getElementById('agCtxPopover'); if (el) popIn(el) })
 }
 
+// 总结并新开：ACP 没有压缩接口，只能由 Friday 整理可见时间线，旧会话保留，
+// 新会话下一轮带上交接摘要。水位低时也允许手动用（agent 不报水位则入口不出现）。
+const handoffBusy = ref(false)
+async function handoffSession() {
+  if (!currentId.value || busy.value || handoffBusy.value) return
+  const owner = currentId.value
+  handoffBusy.value = true
+  ctxOpen.value = false
+  try {
+    const r = await api('POST', `/api/acp/threads/${owner}/handoff`, {})
+    await load()
+    if (r.thread?.id && currentId.value === owner) {
+      select(r.thread.id)
+      toast('已新开续会话：交接摘要随下一轮发出')
+    }
+  } catch (e) {
+    toast('交接失败：' + e.message, true)
+  } finally {
+    handoffBusy.value = false
+  }
+}
+
 const openCap = computed(() => (caps.value || []).find(c => c.id === capOpen.value) || null)
 async function loadOptions(id) {
   const st = stateOf(id)
@@ -1441,6 +1463,12 @@ function removePreview(p) {
             </p>
             <div class="perm-foot pop-anim">
               数字来自 agent 的 usage_update，上下文由 agent 的会话自己管理；ACP 协议不提供压缩或清除，重开会话会丢历史。
+            </div>
+            <div class="ctx-handoff pop-anim">
+              <button type="button" class="btn sm" :disabled="busy || handoffBusy" @click="handoffSession">
+                {{ handoffBusy ? '正在交接…' : '总结并新开' }}
+              </button>
+              <p class="meta">按可见时间线整理成交接摘要，新会话接着干；旧会话保留。建议水位高时使用。</p>
             </div>
           </div>
         </div>      </template>
