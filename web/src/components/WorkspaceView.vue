@@ -653,7 +653,7 @@ async function submitSession() {
 // 原生 API 拿不到绝对路径所以不走 showDirectoryPicker）。弹窗里可逐层点选，
 // 也可在路径栏直接粘贴回车跳转；「使用此目录」把绝对路径交给打开时登记的落点。
 const dirPicker = reactive({ open: false, path: '', parent: '', input: '', dirs: [], loading: false,
-  showHidden: false, back: [], fwd: [] })
+  showHidden: false })
 let dirPickOnPick = null
 // 点开头的隐藏目录默认不展示，弹窗内按钮切换；过滤在前端做，切换不用重新请求
 const visibleDirs = computed(() =>
@@ -668,35 +668,14 @@ async function loadDirs(path) {
     dirPicker.dirs = r.dirs || []
   } catch (e) { toast('读取目录失败：' + e.message, true) } finally { dirPicker.loading = false }
 }
-// 前往新目录并记入历史（后退/前进栈）；后退前进走 loadDirs，不重复入栈
-async function browseDirs(path) {
-  const cur = dirPicker.path
-  await loadDirs(path)
-  if (dirPicker.path && dirPicker.path !== cur) {
-    if (cur) dirPicker.back.push(cur)
-    dirPicker.fwd.length = 0
-  }
-}
-async function dirBack() {
-  if (!dirPicker.back.length || dirPicker.loading) return
-  dirPicker.fwd.push(dirPicker.path)
-  await loadDirs(dirPicker.back.pop())
-}
-async function dirForward() {
-  if (!dirPicker.fwd.length || dirPicker.loading) return
-  dirPicker.back.push(dirPicker.path)
-  await loadDirs(dirPicker.fwd.pop())
-}
 function openDirPicker(onPick, startPath) {
   dirPickOnPick = onPick
   dirPicker.open = true
   dirPicker.showHidden = false
-  dirPicker.back.length = 0
-  dirPicker.fwd.length = 0
   loadDirs(startPath || '')
 }
 function submitDirPath() {
-  if (dirPicker.input.trim()) browseDirs(dirPicker.input.trim())
+  if (dirPicker.input.trim()) loadDirs(dirPicker.input.trim())
 }
 function chooseDir() {
   const onPick = dirPickOnPick
@@ -1470,18 +1449,8 @@ function removePreview(p) {
             <div class="ag-dir-bar">
               <input v-model="dirPicker.input" aria-label="目录路径" placeholder="输入路径后回车跳转"
                      :disabled="dirPicker.loading" @keydown.enter="submitDirPath">
-              <button type="button" class="ib-btn" title="后退" aria-label="后退"
-                      :disabled="!dirPicker.back.length || dirPicker.loading" @click="dirBack">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-              </button>
-              <button type="button" class="ib-btn" title="前进" aria-label="前进"
-                      :disabled="!dirPicker.fwd.length || dirPicker.loading" @click="dirForward">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-              </button>
               <button type="button" class="ib-btn" title="上一级" aria-label="上一级"
-                      :disabled="!dirPicker.parent || dirPicker.loading" @click="browseDirs(dirPicker.parent)">
+                      :disabled="!dirPicker.parent || dirPicker.loading" @click="loadDirs(dirPicker.parent)">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
               </button>
@@ -1502,7 +1471,7 @@ function removePreview(p) {
             </div>
             <ul class="ag-dirlist" aria-label="子目录列表">
               <li v-for="d in visibleDirs" :key="d.path">
-                <button type="button" @click="browseDirs(d.path)">{{ d.name }}</button>
+                <button type="button" @click="loadDirs(d.path)">{{ d.name }}</button>
               </li>
               <li v-if="!visibleDirs.length && !dirPicker.loading" class="meta ag-dir-empty">
                 {{ dirPicker.dirs.length ? '（只有隐藏子目录，可点上方按钮显示）' : '（没有子目录）' }}
