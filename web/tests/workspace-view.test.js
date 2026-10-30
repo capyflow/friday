@@ -42,6 +42,8 @@ let wrapper
 let fetchMock
 let data // 可变的服务端替身：用例直接改它，load() 就拿到新状态
 let dirPages
+let filesByDir
+let changesByTurn
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
@@ -55,6 +57,8 @@ beforeEach(() => {
     session: {}, // thread id -> 目录视图
   }
   dirPages = {}
+  filesByDir = { '': [] }
+  changesByTurn = {}
   api.mockReset().mockImplementation(server)
   toast.mockClear()
   fetchMock = vi.fn()
@@ -84,6 +88,28 @@ async function server(method, url, body) {
     if (path.includes('nope')) throw new Error('目录不存在或不可读')
     return json(dirPages[path] || { path, parent: '/home/u', dirs: [{ name: 'proj', path: '/home/u/proj' }] })
   }
+  const filesMatch = url.match(/^\/api\/acp\/threads\/([^/]+)\/files\?path=(.*)$/)
+  if (method === 'GET' && filesMatch) {
+    const rel = decodeURIComponent(filesMatch[2] || '')
+    return json({ path: '/home/u/proj/' + rel, entries: filesByDir[rel] || [], truncated: false })
+  }
+  const changesMatch = url.match(/^\/api\/acp\/threads\/([^/]+)\/changes\?turn=(.*)$/)
+  if (method === 'GET' && changesMatch) {
+    const turn = decodeURIComponent(changesMatch[2])
+    if (!changesByTurn[turn]) throw new Error('这一轮的改动快照已清理或不存在')
+    return json({ changes: changesByTurn[turn] })
+  }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/changes\/revert$/.test(url)) {
+    const turn = body.turn
+    if (!changesByTurn[turn]) throw new Error('这一轮的改动快照已清理或不存在')
+    changesByTurn[turn].revertedAt = '2026-10-30T12:00:00Z'
+    return json({ changes: changesByTurn[turn], message: '已还原本轮改动' })
+  }
+  if (method === 'GET' && url.startsWith('/api/files/preview')) {
+    const path = decodeURIComponent(url.split('?path=')[1] || '')
+    return json({ kind: 'text', name: path.split('/').pop(), path, size: 4,
+      content: 'new\n', dataUrl: '', truncated: false, message: '' })
+  }
   if (method === 'POST' && url === '/api/acp/workspaces') {
     const id = 'ws' + (data.workspaces.length + 1)
     const dirs = body.dirs.length ? body.dirs : ['/home/u/data/acp-sessions/' + id]
@@ -101,6 +127,7 @@ async function server(method, url, body) {
       ws.dirs = [body.primaryPath, ...ws.dirs.filter(d => d !== body.primaryPath)]
     }
     if ('name' in body) ws.name = body.name || ws.dirs[0].split('/').pop()
+    if ('policy' in body) ws.policy = body.policy
     return json({ workspace: ws })
   }
   const wsDirAdd = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/dirs$/)
@@ -400,6 +427,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     api.mockClear()
     // 改名 + 移掉一个 + 加一个 + 换主目录：全在弹窗里暂存
     await dlg.get('[aria-label="工作区名字"]').setValue('改过的名字')
+    await dlg.get('[aria-label="默认审批档位"]').setValue('readonly')
     await rows[1].get('[aria-label="从工作区移出 /home/u/shared"]').trigger('click')
     await dlg.findAll('button').find(b => b.text().includes('添加源文件夹')).trigger('click')
     await flushPromises()
@@ -416,9 +444,10 @@ describe('工作区：新建、目录增删、改名、删除', () => {
       '/api/acp/workspaces/ws1/dirs?path=' + encodeURIComponent('/home/u/shared'))
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1/dirs', { path: '/home/u/proj/ref' })
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1',
-      { name: '改过的名字', primaryPath: '/home/u/proj/ref' })
+      { name: '改过的名字', primaryPath: '/home/u/proj/ref', policy: 'readonly' })
     expect(wrapper.text()).toContain('改过的名字')
     expect(data.workspaces[0].dirs[0]).toBe('/home/u/proj/ref')
+    expect(data.workspaces[0].policy).toBe('readonly')
   })
 
   it('取消弹窗就放弃这次编辑；已经在列表里的文件夹不重复加', async () => {
@@ -1035,5 +1064,49 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.findAll('.ws-head')).toHaveLength(2)
     // 折叠状态下没有选中会话时，右侧给的是"选一个工作区"的指引而不是空白
     expect(headOf('notes').text()).toContain('个文件夹')
+  })
+
+  it('工作区文件抽屉：文件树预览、本轮 diff 与还原', async () => {
+    data.threads[0].messages[2].changes = {
+      turnId: 't1', at: '2026-10-30T11:00:00Z', snapshot: true,
+      files: [{ path: 'src/app.js', status: 'modified', additions: 1, deletions: 1 }],
+      additions: 1, deletions: 1,
+    }
+    filesByDir = {
+      '': [{ name: 'src', path: 'src', dir: true }, { name: 'README.md', path: 'README.md', dir: false, size: 12 }],
+      src: [{ name: 'app.js', path: 'src/app.js', dir: false, size: 20 }],
+    }
+    changesByTurn.t1 = {
+      turnId: 't1', at: '2026-10-30T11:00:00Z', vcs: 'git', snapshot: true,
+      files: [{ path: 'src/app.js', status: 'modified', additions: 1, deletions: 1,
+        diff: '@@ -1,2 +1,2 @@\n-old\n+new\n same' }],
+      additions: 1, deletions: 1,
+    }
+    await show()
+
+    await wrapper.get('[aria-label="工作区文件与改动"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.wfd-panel').exists()).toBe(true)
+    expect(wrapper.findAll('.wfd-row')).toHaveLength(2)
+
+    await wrapper.findAll('.wfd-row').find(r => r.text().includes('src')).trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.wfd-row')).toHaveLength(3)
+    await wrapper.findAll('.wfd-row').find(r => r.text().includes('app.js')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-code').text()).toContain('new')
+
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('本轮改动')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-diff').text()).toContain('old')
+    expect(wrapper.find('.wfd-diff-row.add').text()).toContain('new')
+
+    const revert = wrapper.findAll('.wfd-revert button')[0]
+    await revert.trigger('click')
+    expect(revert.text()).toContain('确认还原 1 个文件')
+    await revert.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/changes/revert', { turn: 't1' })
+    expect(wrapper.text()).toContain('本轮已还原')
   })
 })

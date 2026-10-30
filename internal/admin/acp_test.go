@@ -253,6 +253,43 @@ func TestAcpWorkspaceAndSessionEndpoints(t *testing.T) {
 		map[string]any{"name": "改名后的项目"}); code != http.StatusOK {
 		t.Fatalf("改名应 200，实际 %d", code)
 	}
+
+	// 默认审批档位：新建就是 ask，可改成 readonly，非法值 400
+	if ws["policy"] != "ask" {
+		t.Fatalf("新工作区默认档位应为 ask: %v", ws)
+	}
+	code, body = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID,
+		map[string]any{"policy": "readonly"})
+	ws, _ = body["workspace"].(map[string]any)
+	if code != http.StatusOK || ws["policy"] != "readonly" {
+		t.Fatalf("改档位应 200 且回 readonly，实际 %d: %v", code, body)
+	}
+	if code, _ = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID,
+		map[string]any{"policy": "yolo"}); code != http.StatusBadRequest {
+		t.Fatalf("非法档位应 400，实际 %d", code)
+	}
+
+	// 工作区文件树：只列直接子项，路径越界 400
+	if err := os.WriteFile(filepath.Join(dirA, "notes.md"), []byte("# hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dirA, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/threads/"+thID+"/files", nil)
+	files, _ := body["entries"].([]any)
+	if code != http.StatusOK || len(files) != 2 {
+		t.Fatalf("文件树应列 2 项，实际 %d: %v", code, body)
+	}
+	if files[0].(map[string]any)["name"] != "src" {
+		t.Fatalf("目录应排在文件前: %v", files)
+	}
+	if code, _ = acpCall(t, handler, token, "GET", "/api/acp/threads/"+thID+"/files?path=../", nil); code != http.StatusBadRequest {
+		t.Fatalf("越界路径应 400，实际 %d", code)
+	}
+	if code, _ = acpCall(t, handler, token, "GET", "/api/acp/threads/"+thID+"/changes?turn=../x", nil); code != http.StatusBadRequest {
+		t.Fatalf("非法 turn 应 400，实际 %d", code)
+	}
 	if ws, ok := m.GetWorkspace(wsID); !ok || ws.Name != "改名后的项目" {
 		t.Fatalf("改名未生效: %+v", ws)
 	}

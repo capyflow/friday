@@ -61,13 +61,15 @@ type Entry struct {
 	Out     int64     `json:"out,omitempty"`
 	Ms      int64     `json:"ms,omitempty"`
 	Stopped string    `json:"stopped,omitempty"` // end_turn | cancelled | timeout | error…
+	// Changes 是这一轮的改动摘要（不含逐文件 diff；详情按 turnId 单独取）。
+	Changes *TurnChanges `json:"changes,omitempty"`
 }
 
 // Thread 是工作区里的一个会话（协议层叫 thread：一个 agent 会话 + 一条投影）。
 type Thread struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspaceId,omitempty"`
-	Agent       string    `json:"agent"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspaceId,omitempty"`
+	Agent       string `json:"agent"`
 	// Cwd 是这个会话锚定的主目录（session/new 的 cwd）：创建时从工作区的目录里
 	// 选定，之后不可切换（D1 的纪律没变）；工作区后来增删的目录只影响扩展根。
 	Cwd       string    `json:"cwd"`
@@ -95,6 +97,10 @@ type Thread struct {
 	// 用来避免同一会话里重复注入、目录变了则重新交代一遍。
 	BriefedSession string `json:"briefedSession,omitempty"`
 	BriefedDirs    string `json:"briefedDirs,omitempty"`
+	// PolicyApplied / PolicyNote 记录工作区默认审批档位在本会话的实际落地情况：
+	// Applied 为空表示没有下发过；Note 说明为什么没下发（agent 没报审批模式等）。
+	PolicyApplied string `json:"policyApplied,omitempty"`
+	PolicyNote    string `json:"policyNote,omitempty"`
 }
 
 // UnmarshalJSON 兼容 261029 之前的投影：那时会话直接带 `workspace`（目录路径）、
@@ -131,6 +137,7 @@ type TurnResult struct {
 	In, Out    int64
 	Ms         int64
 	StopReason string
+	Changes    *TurnChanges
 }
 
 // live 是一个 thread 当前的会话与运行态。进程按「agent + 主目录」共享（procState）：
@@ -146,12 +153,12 @@ type live struct {
 	models    *acp.SessionModelState
 	modeState *acp.SessionModeState
 
-	sinkMu    sync.Mutex
-	sink      *turnSink    // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
-	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
-	stopTimer *time.Timer   // 用户停止后的强杀兜底
-	graceTimer *time.Timer  // 超时后的强杀宽限（先 cancel，仍不收尾才杀）
-	stopping  atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
+	sinkMu     sync.Mutex
+	sink       *turnSink     // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
+	turnDone   chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
+	stopTimer  *time.Timer   // 用户停止后的强杀兜底
+	graceTimer *time.Timer   // 超时后的强杀宽限（先 cancel，仍不收尾才杀）
+	stopping   atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
 	// dirty 表示"agent 可能还在跑上一轮"（超时后取消只是通知）。下轮开始前若
 	// 还是脏的就回收这条连接，保证同一 session 不会有两轮并发（C3）。
 	dirty atomic.Bool
@@ -490,6 +497,9 @@ func (m *Manager) Delete(id string) bool {
 	m.mu.Unlock()
 	if ps != nil && empty {
 		m.killProc(ps.key, "最后一个会话已删除")
+	}
+	if base := m.snapshotBase(); base != "" {
+		_ = os.RemoveAll(filepath.Join(base, id))
 	}
 	log.Printf("[智能体] 已删除会话 %s（agent=%s）", id, th.Agent)
 	return true
@@ -884,6 +894,8 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 			ps.setOwner(lv.sessionID, th.ID)
 			// 重接成功也把用户手动选过的能力按回去：agent 未必把这些存进会话。
 			// 注意顺序：这里的请求带 sessionId，必须先把 id 落到 lv 上再重放。
+			// 工作区默认档位先下发，手动选择随后覆盖它。
+			m.applyWorkspacePolicy(lv, th)
 			m.reapplyChoices(lv, th)
 			log.Printf("[智能体] %s thread %s 已重接会话 %s", th.Agent, th.ID, th.SessionID)
 			return th.SessionID, false, nil
@@ -907,7 +919,8 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 	lv.setModeState(res.Modes)
 	lv.sessionID = res.SessionId // 先落 id，重放请求要带它
 	ps.setOwner(res.SessionId, th.ID)
-	m.reapplyChoices(lv, th) // 新开会话（含降级）同样按上次的选择重放
+	m.applyWorkspacePolicy(lv, th) // 工作区默认档位先下发
+	m.reapplyChoices(lv, th)       // 新开会话（含降级）同样按上次的选择重放
 	degraded := th.SessionID != "" && string(res.SessionId) != th.SessionID
 	if degraded {
 		log.Printf("[智能体] %s thread %s 上下文已重置（新会话 %s）", th.Agent, th.ID, res.SessionId)
@@ -1094,6 +1107,16 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		return TurnResult{}, errors.New("agent 连接已断开，请重试")
 	}
 
+	// 轮前快照：git 仓库用无侵入基线，非 git 目录退化为副本。快照失败不阻塞
+	// 本轮，只把“为什么不能还原”写进改动摘要（UI 明说，不假装成功）。
+	turnID := fmt.Sprintf("t%d", time.Now().UnixNano())
+	snap, snapErr := beginTurnSnapshot(th.Cwd, m.snapshotBase(), id, turnID)
+	if snapErr != nil {
+		log.Printf("[智能体] thread %s 轮前快照失败: %v", id, snapErr)
+	} else if m.workspaceBusy(th.Cwd) {
+		snap.meta.Note = joinNote(snap.meta.Note, "同一目录还有别的会话在跑，本次改动的归属可能混在一起")
+	}
+
 	turnTimeout := time.Duration(c.TurnSeconds(agentCfg)) * time.Second
 	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
@@ -1156,6 +1179,21 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	close(turnDone)
 	sink.finish()
 	elapsed := time.Since(started)
+
+	// 轮末算改动：即使本轮失败/中止也算（agent 可能已经改了盘）。
+	var turnChanges *TurnChanges
+	if snap != nil {
+		turnChanges = snap.Finish()
+		m.pruneSnapshots(id, 30)
+	} else {
+		note := "本轮没有快照"
+		if snapErr != nil {
+			note += "：" + snapErr.Error()
+		}
+		turnChanges = &TurnChanges{
+			TurnID: turnID, At: time.Now(), Snapshot: false, Note: note,
+		}
+	}
 
 	// 说明送达成功才记账：失败的那轮下次还会带
 	if injectBrief && promptErr == nil {
@@ -1230,7 +1268,8 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	m.mu.Unlock()
 
 	result := TurnResult{
-		Ms: elapsed.Milliseconds(),
+		Ms:      elapsed.Milliseconds(),
+		Changes: turnChanges.Summary(),
 	}
 	if res.Usage != nil { // 错误路径下 res 为零值，Usage 为 nil
 		result.In = int64(res.Usage.InputTokens)
@@ -1299,7 +1338,7 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 		Role: "user", Text: question, At: time.Now(), Images: len(files), Files: files,
 	})
 	entry := Entry{Role: "assistant", Text: r.Answer, At: time.Now(),
-		In: r.In, Out: r.Out, Ms: r.Ms, Stopped: r.StopReason}
+		In: r.In, Out: r.Out, Ms: r.Ms, Stopped: r.StopReason, Changes: r.Changes}
 	if entry.Text == "" {
 		entry.Text = "（本轮没有产出文本）"
 	}
@@ -1520,6 +1559,96 @@ func (m *Manager) reapplyChoices(lv *live, th *Thread) {
 		}
 		log.Printf("[智能体] %s 已按上次的选择重放 %s=%s", th.Agent, cap.ID, want)
 	}
+}
+
+// applyWorkspacePolicy 把工作区默认审批档位下发给会话。它只做“能映射就映射”：
+// agent 没报 approval_mode（或取值对不上）时明确记录原因，绝不假装已经只读；
+// 手动在 chips 里改过的选择由 reapplyChoices 随后覆盖，工作区档位只是默认值。
+func (m *Manager) applyWorkspacePolicy(lv *live, th *Thread) {
+	m.mu.Lock()
+	policy := WorkspacePolicyAsk
+	if ws := m.workspaces[th.WorkspaceID]; ws != nil {
+		policy = NormalizeWorkspacePolicy(ws.Policy)
+	}
+	m.mu.Unlock()
+
+	var approval *Capability
+	for _, cap := range normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()) {
+		if cap.Kind == CapKindApprovalMode {
+			c := cap
+			approval = &c
+			break
+		}
+	}
+	if approval == nil {
+		m.setPolicyState(th, "", "该 agent 没有上报审批模式，工作区默认档位无法下发；改动仍会记录并可还原")
+		return
+	}
+	want := pickApprovalValue(policy, approval.Values)
+	if want == "" {
+		m.setPolicyState(th, "", "该 agent 的审批模式没有与「"+policyLabel(policy)+"」对应的取值；未改它的设置，改动仍会记录并可还原")
+		return
+	}
+	if approval.CurrentValue == want {
+		m.setPolicyState(th, policy, "")
+		return
+	}
+	if err := m.applyCapability(lv, th, approval.ID, want); err != nil {
+		log.Printf("[智能体] %s 应用工作区默认档位 %s 失败: %v", th.Agent, policy, err)
+		m.setPolicyState(th, "", "工作区默认档位下发失败："+err.Error()+"；改动仍会记录并可还原")
+		return
+	}
+	m.setPolicyState(th, policy, "")
+}
+
+func (m *Manager) setPolicyState(th *Thread, applied, note string) {
+	m.mu.Lock()
+	th.PolicyApplied, th.PolicyNote = applied, note
+	m.mu.Unlock()
+}
+
+func policyLabel(policy string) string {
+	switch policy {
+	case WorkspacePolicyReadOnly:
+		return "只读"
+	case WorkspacePolicyAuto:
+		return "自动"
+	default:
+		return "每次都问"
+	}
+}
+
+// pickApprovalValue 把工作区档位映射到 agent 自己报的审批模式取值。
+// 各 agent 词汇不同（ask/default/manual、read-only/plan、auto/accept/full），
+// 这里按语义关键词挑一个；挑不到就返回空，由调用方明说“没下发”。
+func pickApprovalValue(policy string, vals []SelectValue) string {
+	for _, v := range vals {
+		s := strings.ToLower(v.Value + " " + v.Name)
+		switch policy {
+		case WorkspacePolicyReadOnly:
+			if containsAny(s, "read-only", "readonly", "read only", "read_only", "只读", "plan", "计划") {
+				return v.Value
+			}
+		case WorkspacePolicyAuto:
+			if containsAny(s, "auto", "自动", "accept", "full", "yolo", "bypass", "免审批") {
+				return v.Value
+			}
+		default:
+			if containsAny(s, "ask", "询问", "每次", "default", "manual", "suggest", "建议") {
+				return v.Value
+			}
+		}
+	}
+	return ""
+}
+
+func containsAny(s string, want ...string) bool {
+	for _, w := range want {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // Test 对指定 agent 做一次握手诊断// Test 对指定 agent 做一次握手诊断（设置页「测试」按钮）：拉起进程、initialize、

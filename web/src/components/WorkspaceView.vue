@@ -24,6 +24,7 @@ import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
+import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
 
 const threads = ref([])
 const workspaces = ref([])     // 工作区（一组目录 + 挂在它下面的会话）
@@ -79,6 +80,7 @@ const confirmWsId = ref('')    // 二次确认删除的工作区 id
 const confirmId = ref('')      // 二次确认删除的 thread id
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
+const filesDrawer = ref(null)      // 工作区文件/本轮改动抽屉（文件树 + diff + 还原）
 
 /* 每个 thread 一份前端态：消息缓冲、进行中的一轮、能力清单、上下文水位、输入草稿、
    待发的图片。currentId 只是"现在显示哪一份"——切换 thread 不打断别的 thread 正在
@@ -117,6 +119,22 @@ function dropState(id) {
 
 const cur = computed(() => stateOf(currentId.value))
 const messages = computed(() => (cur.value ? cur.value.messages : []))
+// 工作区文件/改动抽屉：文件树常驻入口；时间线里的“本轮改动”直接落到对应轮次。
+function openWorkspaceFiles() {
+  if (!current.value) return
+  filesDrawer.value?.open('files')
+}
+function openTurnChanges(turnId) {
+  if (!current.value) return
+  filesDrawer.value?.open('changes', turnId)
+}
+function onChangesReverted(turnId) {
+  for (const m of messages.value) {
+    if (m.role === 'bot' && m.changes && m.changes.turnId === turnId) {
+      m.changes.revertedAt = new Date().toISOString()
+    }
+  }
+}
 const phase = computed(() => (cur.value ? cur.value.phase : 'idle'))
 const busy = computed(() => phase.value === 'streaming')
 const caps = computed(() => (cur.value ? cur.value.caps : null))
@@ -427,6 +445,7 @@ async function select(id) {
           } else {
             st.messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
               blocks: [{ kind: 'text', text: e.text, round: 0 }],
+              changes: e.changes || null,
               turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
           }
         }
@@ -549,7 +568,7 @@ async function commitRenameThread() {
 /* 编辑工作区弹窗：改名 + 源文件夹的增删与主目录，都在这里改。
    列表里默认不铺路径（一组一行只有名字和计数），要看/要改路径是这件明确的事。
    弹窗内是暂存编辑：点保存才按差异落到后端（改主目录要等目录先加进来）。 */
-const wsDlg = reactive({ open: false, id: '', name: '', dirs: [], missing: [], saving: false })
+const wsDlg = reactive({ open: false, id: '', name: '', dirs: [], missing: [], policy: 'ask', saving: false })
 function openWsDialog(ws) {
   closeWsMenu()
   wsDlg.open = true
@@ -557,6 +576,7 @@ function openWsDialog(ws) {
   wsDlg.name = ws.name
   wsDlg.dirs = [...(ws.dirs || [])]
   wsDlg.missing = [...(ws.missingDirs || [])]
+  wsDlg.policy = ws.policy || 'ask'
 }
 function closeWsDialog() { wsDlg.open = false }
 function dlgAddDir() {
@@ -591,6 +611,7 @@ async function saveWsDialog() {
     const body = {}
     if ((ws.name || '') !== wsDlg.name.trim()) body.name = wsDlg.name.trim()
     if (want[0] !== (ws.dirs || [])[0]) body.primaryPath = want[0]
+    if ((ws.policy || 'ask') !== wsDlg.policy) body.policy = wsDlg.policy
     if (Object.keys(body).length) await api('POST', '/api/acp/workspaces/' + ws.id, body)
     await load()
     wsDlg.open = false
@@ -725,8 +746,12 @@ function stick(force) {
 // 切走时记住是否停在底部（或正在流式），切回来按需落到最新一条。
 let backToBottom = false
 watch(() => store.view, (v, prev) => {
-  if (prev === 'agent' && v !== 'agent') backToBottom = nearBottom() || busy.value
-  else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
+  if (prev === 'agent' && v !== 'agent') {
+    backToBottom = nearBottom() || busy.value
+    // v-show 只藏主视图，抽屉是 fixed 兄弟节点；切走时主动收起，别盖到别的页上
+    filesDrawer.value?.close()
+    fileDrawer.value?.close()
+  } else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
 })
 
 /* ---------- 发送与排队 ----------
@@ -828,7 +853,7 @@ async function startTurn(owner, text, shots) {
   const ensureBot = () => {
     removeTyping()
     if (!bot) {
-      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
+      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0, changes: null })
       st.messages.push(bot)
     }
     return bot
@@ -874,6 +899,7 @@ async function startTurn(owner, text, shots) {
           turnTotal.contextSize = data.context.size || 0
         }
         if (data.context) syncCtx(owner, data.context.used, data.context.size)
+        if (data.changes && bot) bot.changes = data.changes
         if (data.error) errMsg = data.error
       }
     }
@@ -1219,8 +1245,18 @@ function removePreview(p) {
               · {{ stateLabel[current.state] || current.state }}
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
+              <template v-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
+          <!-- 工作区文件与改动：文件树、diff 与本轮还原都收在这个抽屉里 -->
+          <button class="ib-btn ag-files" aria-label="工作区文件与改动"
+                  title="工作区文件与改动（看 diff、还原本轮）" @click="openWorkspaceFiles">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              <path d="M8 13h8M8 17h5"/>
+            </svg>
+          </button>
           <!-- 应用内全屏：收起左侧全局导航、对话吃满窗口；Esc 归页面处理（先停本轮，空闲时退出） -->
           <button class="ib-btn ag-full" :class="{ active: store.fullscreen }"
                   :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
@@ -1245,6 +1281,21 @@ function removePreview(p) {
                 <div v-else-if="m.role === 'bot'" class="turn">
                   <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
                                   @preview="path => fileDrawer.open(path)" />
+                  <button v-if="m.changes && m.changes.files.length && !m.streaming"
+                          type="button" class="turn-changes" :class="{ reverted: m.changes.revertedAt }"
+                          :aria-label="'查看本轮改动的 ' + m.changes.files.length + ' 个文件'"
+                          @click="openTurnChanges(m.changes.turnId)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M4 6h7M4 12h5M4 18h7"/><path d="M14 6h6M14 12h6M14 18h6"/>
+                    </svg>
+                    <span>本轮改动 {{ m.changes.files.length }} 个文件</span>
+                    <span class="tc-stat">
+                      <b v-if="m.changes.additions">+{{ m.changes.additions }}</b>
+                      <i v-if="m.changes.deletions">-{{ m.changes.deletions }}</i>
+                    </span>
+                    <span class="tc-more">{{ m.changes.revertedAt ? '已还原 · 查看' : '查看' }}</span>
+                  </button>
                   <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
                     <div v-if="m.turn" class="turn-total">
                       {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
@@ -1383,6 +1434,8 @@ function removePreview(p) {
     </section>
   </div>
   <FilePreviewDrawer ref="fileDrawer" />
+  <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
+                        @reverted="onChangesReverted" />
   <!-- 编辑工作区弹窗：改名 + 源文件夹的增删与主目录（列表里不铺路径，要改来这里改）。
        弹窗内是暂存编辑，点「保存」才按差异落后端；Esc/点遮罩 = 放弃这次编辑。 -->
   <Teleport to="body">
@@ -1399,6 +1452,15 @@ function removePreview(p) {
           <div class="dlg-body">
             <label class="meta" for="wsDlgName">名字（留空回落到主文件夹名）</label>
             <input id="wsDlgName" v-model="wsDlg.name" aria-label="工作区名字" placeholder="比如 proj-a">
+            <div class="ws-dlg-sec">
+              <label class="meta" for="wsDlgPolicy">默认审批档位</label>
+              <select id="wsDlgPolicy" v-model="wsDlg.policy" aria-label="默认审批档位">
+                <option value="ask">每次都问（推荐）</option>
+                <option value="readonly">只读</option>
+                <option value="auto">自动放行</option>
+              </select>
+              <p class="meta ws-dlg-hint">新会话或重连时尝试下发给 agent；agent 不支持时会明说，不会假装已经生效。本会话里手动选过的审批模式优先。</p>
+            </div>
             <div class="ws-dlg-sec">
               <span class="meta">源文件夹（第一个是会话的主目录，其余作为扩展根下发）</span>
               <ul class="ws-dirs">

@@ -51,6 +51,9 @@
 //	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
 //	GET    /api/acp/threads/:id/options 会话配置项（模型/模式/推理档位下拉，需登录）
 //	POST   /api/acp/threads/:id/options 切换配置项取值 {"id","value"}（需登录）
+//	GET    /api/acp/threads/:id/files   工作区文件树（?path=相对路径，需登录）
+//	GET    /api/acp/threads/:id/changes 某轮改动详情（?turn=，含逐文件 diff，需登录）
+//	POST   /api/acp/threads/:id/changes/revert 还原本轮改动 {"turn"}（需登录）
 //	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
@@ -355,6 +358,9 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsSet))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/files", s.wrap(s.handleAcpThreadFiles))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/changes", s.wrap(s.handleAcpThreadChanges))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/changes/revert", s.wrap(s.handleAcpThreadChangesRevert))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))

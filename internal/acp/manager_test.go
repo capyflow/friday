@@ -91,23 +91,23 @@ type fakeAgent struct {
 	// resetOnSession=true 模拟"agent 不把选项存进会话"：每次 session/new、load
 	// 都把 configOptions / models 的当前值打回初始默认，等客户端重新设。
 	resetOnSession bool
-	extraRoots  bool // initialize 里声明 sessionCapabilities.additionalDirectories
+	extraRoots     bool // initialize 里声明 sessionCapabilities.additionalDirectories
 
 	configOptions []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
 	models        map[string]any   // 协议原生 models 状态（nil = agent 不回报）
 	modes         map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
 
-	mu         sync.Mutex
-	methods    []string
-	sessions   []string
-	cur        string
-	setCalls   []string          // "config:model=builtin/b" / "model:m2" / "mode:plan"
-	spawns     int               // 进程拉起次数（验证 M-6 的复用）
-	prompts    [][]string        // 每次 session/prompt 的文本块（按顺序）
-	optDefault map[string]string // 首次建会话时记下的初始值（供 resetOnSession 回滚）
+	mu           sync.Mutex
+	methods      []string
+	sessions     []string
+	cur          string
+	setCalls     []string          // "config:model=builtin/b" / "model:m2" / "mode:plan"
+	spawns       int               // 进程拉起次数（验证 M-6 的复用）
+	prompts      [][]string        // 每次 session/prompt 的文本块（按顺序）
+	optDefault   map[string]string // 首次建会话时记下的初始值（供 resetOnSession 回滚）
 	modelDefault string
-	newReq   map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
-	loadReq  map[string]any // 最近一次 session/load 的 params
+	newReq       map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
+	loadReq      map[string]any // 最近一次 session/load 的 params
 
 	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
@@ -628,6 +628,51 @@ func TestSendBasicTurn(t *testing.T) {
 	}
 	if got.Title == "" {
 		t.Fatal("标题未从首条消息生成")
+	}
+}
+
+func TestSendRecordsWorkspaceChanges(t *testing.T) {
+	f := &fakeAgent{}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	th := mustThreadIn(t, m, ws)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if err := os.WriteFile(filepath.Join(ws.Dirs[0], "note.txt"), []byte("from agent\n"), 0o600); err != nil {
+			t.Errorf("写测试文件失败: %v", err)
+		}
+		return defaultScript(fc, sid)
+	}
+
+	res, err := m.Send(context.Background(), th.ID, "写个文件", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if res.Changes == nil || !res.Changes.Snapshot {
+		t.Fatalf("本轮应有快照: %+v", res.Changes)
+	}
+	if len(res.Changes.Files) != 1 || res.Changes.Files[0].Path != "note.txt" || res.Changes.Files[0].Status != "added" {
+		t.Fatalf("改动清单不符: %+v", res.Changes.Files)
+	}
+	got, _ := m.Get(th.ID)
+	if len(got.Messages) < 2 || got.Messages[1].Changes == nil || got.Messages[1].Changes.TurnID != res.Changes.TurnID {
+		t.Fatalf("投影没有带上改动摘要: %+v", got.Messages)
+	}
+	full, err := m.Changes(th.ID, res.Changes.TurnID)
+	if err != nil {
+		t.Fatalf("读取改动详情失败: %v", err)
+	}
+	if len(full.Files) != 1 || !strings.Contains(full.Files[0].Diff, "+from agent") {
+		t.Fatalf("改动详情缺 diff: %+v", full.Files)
+	}
+	if _, err := m.Revert(th.ID, res.Changes.TurnID); err != nil {
+		t.Fatalf("还原失败: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws.Dirs[0], "note.txt")); !os.IsNotExist(err) {
+		t.Fatalf("还原后文件仍存在: %v", err)
+	}
+	got, _ = m.Get(th.ID)
+	if got.Messages[1].Changes == nil || got.Messages[1].Changes.RevertedAt == nil {
+		t.Fatalf("投影未标记已还原: %+v", got.Messages[1].Changes)
 	}
 }
 

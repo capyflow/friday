@@ -301,6 +301,7 @@ func TestWorkspaceListMarksMissingDirs(t *testing.T) {
 		t.Fatal("missingDirs 不该落盘")
 	}
 }
+
 // 会话必须落在工作区的目录里：既不在列表也不是可解析路径时报错并给下一步。
 func TestSessionCwdMustBelongToWorkspace(t *testing.T) {
 	inside, outside := t.TempDir(), t.TempDir()
@@ -361,5 +362,34 @@ func TestTitleFromMessage(t *testing.T) {
 	got := titleFromMessage(long)
 	if n := len([]rune(got)); n != 25 { // 24 个字符 + 省略号
 		t.Fatalf("超长标题应截到 24 个 rune（带省略号），实际 %d: %q", n, got)
+	}
+}
+
+func TestPickApprovalValue(t *testing.T) {
+	cases := []struct {
+		policy string
+		values []SelectValue
+		want   string
+	}{
+		{WorkspacePolicyAsk, []SelectValue{{"default", "默认"}, {"auto", "自动"}}, "default"},
+		{WorkspacePolicyAsk, []SelectValue{{"ask", "每次询问"}}, "ask"},
+		{WorkspacePolicyReadOnly, []SelectValue{{"accept", "接受编辑"}, {"read-only", "只读"}}, "read-only"},
+		{WorkspacePolicyReadOnly, []SelectValue{{"plan", "计划模式"}}, "plan"},
+		{WorkspacePolicyAuto, []SelectValue{{"ask", "询问"}, {"yolo", "完全放行"}}, "yolo"},
+		{WorkspacePolicyAuto, []SelectValue{{"model", "模型"}}, ""},
+	}
+	for _, c := range cases {
+		if got := pickApprovalValue(c.policy, c.values); got != c.want {
+			t.Fatalf("pickApprovalValue(%s, %+v) = %q，期望 %q", c.policy, c.values, got, c.want)
+		}
+	}
+}
+
+func TestWorkspacePolicyDefaultsAndValidation(t *testing.T) {
+	if got := NormalizeWorkspacePolicy(""); got != WorkspacePolicyAsk {
+		t.Fatalf("空档位应归一为 ask，实际 %q", got)
+	}
+	if !validWorkspacePolicy("readonly") || validWorkspacePolicy("yolo") {
+		t.Fatal("档位校验不符")
 	}
 }

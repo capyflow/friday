@@ -1,7 +1,8 @@
 # ACP 接入改进清单
 
 状态：**M-1/M-2/M-5/M-8 已实施（2026-10-21 上午）**；**M-3/M-4 已实施（2026-10-21 下午，
-拍板：兼容官方 registry.json schema，直接同源）**；M-6/M-7 按推荐缓做/不排期。
+拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
+工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -164,6 +165,36 @@ bug 类问题已于同日修复（附录 A）。
   对齐——剩余缺口只是回归保护。新增 `web/tests/approval-cards.test.js`：成功路径
   （移除+提示）与失效路径（toast 失效原因、卡保留）两用例。
 
+### M-9 工作区改动追踪与还原
+
+- **动机**：agent 直接改盘，时间线只有文字和工具行；用户看不到“这一轮改了什么”，也没有退路。
+  对标 ZCode 的编辑历史/撤销，但 Friday 的重点是**把改动落成可核对的文件清单与 diff**，
+  而不是做一个完整 IDE。
+- **方案**：每轮开始前做轮前快照——git 仓库用 `git stash create` 生成不碰工作区的 dangling
+  commit（未跟踪文件另存副本），非 git 目录用带体积/数量上限的副本；轮末按 git diff /
+  文件指纹生成改动清单与逐行 diff，落 `acp/snapshots/<thread>/<turn>/changes.json`。
+  工作区抽屉展示文件树、预览、本轮 diff 与“还原本轮”；还原前整轮预检，本轮后被改过/删除/重建
+  的文件拒绝还原，避免覆盖用户后续编辑。
+- **边界**：单轮 2 万文件 / 100MB / 单文件 5MB，保留最近 30 轮；超出或快照失败时明说
+  “只能看不能还原”，不假装成功；暂存区状态不承诺恢复；不提供 IDE 级文件编辑与终端。
+- **实施记录（2026-10-30）**：`internal/acp/changes.go`（快照/扫描/逐行 diff/还原）、
+  `manager.Send` 接入与 `Thread.Entry.changes` 投影、admin `files/changes/revert` 接口、
+  `WorkspaceFilesDrawer.vue` 与时间线“本轮改动”摘要。回归：`changes_test.go` 覆盖 git/非 git
+  的检测、diff、还原与“本轮后又被改过拒绝还原”；`TestSendRecordsWorkspaceChanges` 覆盖
+  Send → 投影 → 详情 → 还原全链路；前端 `workspace-view.test.js` 覆盖文件树/预览/diff/还原。
+
+### M-10 工作区默认审批档位
+
+- **动机**：ACP 审批卡弹不弹取决于各 agent 自己的审批模式，Friday 没有统一的“只读/每次都问/自动”。
+- **方案**：工作区保存 `policy`（默认 `ask`）；新会话/重连时按语义关键词映射到 agent 的
+  `approval_mode` 能力，映射不到就在线程上写 `policyNote` 并在会话头部标“审批档位未下发”。
+  它只是默认值：同一会话手动选过的审批模式由 `capChoices` 随后重放并覆盖。
+- **边界**：没有沙箱，不能把不支持审批模式的 agent 强行变成只读；这类情况靠轮前快照兜底，
+  文案明确说“只能事后还原、不能事前拦截”，不假装已经生效。
+- **实施记录（2026-10-30）**：`Workspace.Policy` + `SetPolicy`、`applyWorkspacePolicy` 与
+  `pickApprovalValue`、admin 更新接口与编辑工作区弹窗；回归 `TestPickApprovalValue` /
+  `TestWorkspacePolicyDefaultsAndValidation` 与 admin 端点用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -172,7 +203,8 @@ bug 类问题已于同日修复（附录 A）。
 | 2 | M-8 | ✅ 已实施（2026-10-21） |
 | 3 | M-5 | ✅ 已实施（2026-10-21，口径修正后） |
 | 4 | M-3（①②③ 全量）+ M-4 | ✅ 已实施（2026-10-21，拍板：直接兼容官方 schema） |
-| 5 | M-6 | ⏸ 缓做，等 MaxConcurrent 真实瓶颈信号 |
+| 5 | M-6 | ✅ 已实施（2026-10-29，同一 agent+目录复用连接） |
+| 6 | M-9 + M-10 | ✅ 已实施（2026-10-30） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

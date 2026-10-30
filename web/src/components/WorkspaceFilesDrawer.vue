@@ -1,0 +1,472 @@
+<script setup>
+// WorkspaceFilesDrawer 是工作区的文件/改动抽屉：
+//   - 文件：按目录懒加载的文件树 + 只读预览（复用 /api/files/preview）；
+//   - 本轮改动：按轮列出 agent 改过的文件、逐文件 diff 与“还原本轮”。
+// 只读优先：没有快照时明说“不能还原”，不把“看得到”伪装成“退得回”。
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { api } from '../api.js'
+import { renderMD } from '../md.js'
+
+const props = defineProps({
+  thread: { type: Object, default: null },
+  messages: { type: Array, default: () => [] },
+})
+const emit = defineEmits(['reverted'])
+
+const openState = ref(false)
+const tab = ref('files')
+const closeBtn = ref(null)
+let lastFocus = null
+
+const root = ref('')
+const nodes = reactive({})
+let treeGen = 0
+const selected = ref(null)
+const preview = reactive({ loading: false, error: '', kind: '', name: '', path: '', size: 0,
+  modTime: '', content: '', dataUrl: '', truncated: false, message: '' })
+
+const changeTurns = computed(() => {
+  const out = []
+  for (const m of props.messages || []) {
+    if (m.role === 'bot' && m.changes && m.changes.turnId) out.push(m.changes)
+  }
+  return out.reverse()
+})
+const latestChangeCount = computed(() => changeTurns.value[0]?.files?.length || 0)
+const activeTurnId = ref('')
+const changeLoading = ref(false)
+const changeError = ref('')
+const changeDetail = ref(null)
+const currentFile = ref('')
+const revertArm = ref(false)
+const reverting = ref(false)
+let revertTimer = null
+
+const selectedChange = computed(() =>
+  (changeDetail.value?.files || []).find(f => f.path === currentFile.value) || null)
+
+const diffRows = computed(() => parseDiff(selectedChange.value?.diff || ''))
+
+const rows = computed(() => {
+  const out = []
+  const walk = (rel, depth) => {
+    const st = nodes[rel]
+    if (!st) return
+    for (const e of st.entries || []) {
+      out.push({ entry: e, depth, expanded: !!nodes[e.path]?.expanded })
+      if (e.dir && nodes[e.path]?.expanded) walk(e.path, depth + 1)
+    }
+  }
+  walk('', 0)
+  return out
+})
+
+function open(which = 'files', turnId = '') {
+  if (!props.thread) return
+  lastFocus = document.activeElement
+  openState.value = true
+  tab.value = which === 'changes' ? 'changes' : 'files'
+  if (props.thread) {
+    if (root.value !== props.thread.cwd) resetTree()
+    else if (tab.value === 'files' && !nodes['']) loadDir('')
+  }
+  if (tab.value === 'changes') loadChanges(turnId)
+  nextTick(() => closeBtn.value?.focus())
+}
+
+function close() {
+  openState.value = false
+  revertArm.value = false
+  if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus()
+}
+
+function switchTab(which) {
+  tab.value = which
+  if (which === 'files') {
+    if (!nodes['']) loadDir('')
+  } else if (!changeDetail.value || changeDetail.value.turnId !== activeTurnId.value) {
+    loadChanges(activeTurnId.value || '')
+  }
+}
+
+function resetTree() {
+  treeGen++
+  for (const k of Object.keys(nodes)) delete nodes[k]
+  root.value = props.thread?.cwd || ''
+  selected.value = null
+  Object.assign(preview, { loading: false, error: '', kind: '', name: '', path: '', size: 0,
+    modTime: '', content: '', dataUrl: '', truncated: false, message: '' })
+  if (root.value) loadDir('')
+}
+
+async function loadDir(rel) {
+  const th = props.thread
+  if (!th) return
+  const gen = treeGen
+  if (!nodes[rel]) nodes[rel] = { entries: [], loading: false, error: '', expanded: true, truncated: false }
+  const st = nodes[rel]
+  st.loading = true
+  st.error = ''
+  try {
+    const r = await api('GET', `/api/acp/threads/${th.id}/files?path=${encodeURIComponent(rel)}`)
+    if (gen !== treeGen) return
+    st.entries = r.entries || []
+    st.truncated = !!r.truncated
+  } catch (e) {
+    if (gen === treeGen) st.error = e.message || String(e)
+  } finally {
+    if (gen === treeGen) st.loading = false
+  }
+}
+
+function onRow(row) {
+  const e = row.entry
+  if (e.dir) {
+    const st = nodes[e.path]
+    if (!st) {
+      nodes[e.path] = { entries: [], loading: false, error: '', expanded: true, truncated: false }
+      loadDir(e.path)
+    } else {
+      st.expanded = !st.expanded
+      if (st.expanded && !st.entries.length && !st.loading) loadDir(e.path)
+    }
+    selected.value = null
+    return
+  }
+  selected.value = e
+  loadPreview(e)
+}
+
+async function loadPreview(e) {
+  const abs = joinPath(root.value, e.path)
+  Object.assign(preview, { loading: true, error: '', kind: '', name: e.name, path: abs,
+    size: e.size || 0, modTime: e.modTime || '', content: '', dataUrl: '', truncated: false, message: '' })
+  try {
+    const r = await api('GET', '/api/files/preview?path=' + encodeURIComponent(abs))
+    Object.assign(preview, r)
+  } catch (err) {
+    preview.error = err.message || String(err)
+  } finally {
+    preview.loading = false
+  }
+}
+
+async function loadChanges(turnId) {
+  const th = props.thread
+  if (!th) return
+  changeError.value = ''
+  changeLoading.value = true
+  revertArm.value = false
+  try {
+    const id = turnId || activeTurnId.value || changeTurns.value[0]?.turnId || ''
+    if (!id) {
+      changeDetail.value = null
+      activeTurnId.value = ''
+      currentFile.value = ''
+      return
+    }
+    activeTurnId.value = id
+    const r = await api('GET', `/api/acp/threads/${th.id}/changes?turn=${encodeURIComponent(id)}`)
+    changeDetail.value = r.changes || null
+    const files = changeDetail.value?.files || []
+    const first = files.find(f => !f.binary && f.diff) || files[0]
+    currentFile.value = first?.path || ''
+  } catch (e) {
+    changeDetail.value = null
+    changeError.value = e.message || String(e)
+  } finally {
+    changeLoading.value = false
+  }
+}
+
+function selectTurn() {
+  loadChanges(activeTurnId.value)
+}
+
+function selectChangeFile(f) {
+  currentFile.value = f.path
+}
+
+function armRevert() {
+  if (reverting.value || changeDetail.value?.revertedAt || changeDetail.value?.snapshot === false) return
+  if (!revertArm.value) {
+    revertArm.value = true
+    clearTimeout(revertTimer)
+    revertTimer = setTimeout(() => { revertArm.value = false }, 5000)
+    return
+  }
+  doRevert()
+}
+
+async function doRevert() {
+  const th = props.thread
+  const turn = changeDetail.value?.turnId
+  if (!th || !turn) return
+  reverting.value = true
+  changeError.value = ''
+  try {
+    const r = await api('POST', `/api/acp/threads/${th.id}/changes/revert`, { turn })
+    if (changeDetail.value) {
+      changeDetail.value.revertedAt = r.changes?.revertedAt || new Date().toISOString()
+    }
+    revertArm.value = false
+    emit('reverted', turn)
+  } catch (e) {
+    changeError.value = e.message || String(e)
+    revertArm.value = false
+  } finally {
+    reverting.value = false
+  }
+}
+
+function statusLetter(s) {
+  return s === 'added' ? 'A' : s === 'deleted' ? 'D' : 'M'
+}
+function statusLabel(s) {
+  return s === 'added' ? '新增' : s === 'deleted' ? '删除' : '修改'
+}
+function fmtSize(n) {
+  if (!Number.isFinite(n) || n <= 0) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1048576).toFixed(1) + ' MB'
+}
+function joinPath(base, rel) {
+  if (!base) return rel
+  return base.replace(/\/+$/, '') + '/' + rel
+}
+function shortPath(p) {
+  if (!p) return ''
+  const parts = p.split('/').filter(Boolean)
+  return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : p
+}
+function turnLabel(c, idx) {
+  const when = c.at ? new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+  const files = c.files?.length || 0
+  const which = idx === 0 ? '最近一轮' : '第 ' + (idx + 1) + ' 轮'
+  return `${which} · ${files} 个文件${when ? ' · ' + when : ''}`
+}
+
+function parseDiff(diff) {
+  if (!diff) return []
+  const out = []
+  let oldNo = 0
+  let newNo = 0
+  for (const line of diff.split('\n')) {
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (hunk) {
+      oldNo = Number(hunk[1])
+      newNo = Number(hunk[2])
+      out.push({ kind: 'hunk', text: line })
+      continue
+    }
+    if (line.startsWith('+++') || line.startsWith('---')) continue
+    if (line.startsWith('\\')) { out.push({ kind: 'meta', text: line }); continue }
+    if (line.startsWith('+')) {
+      out.push({ kind: 'add', old: '', new: newNo++, text: line.slice(1) })
+    } else if (line.startsWith('-')) {
+      out.push({ kind: 'del', old: oldNo++, new: '', text: line.slice(1) })
+    } else {
+      out.push({ kind: 'ctx', old: oldNo++, new: newNo++, text: line.startsWith(' ') ? line.slice(1) : line })
+    }
+  }
+  return out
+}
+
+function onKeydown(e) {
+  if (!openState.value) return
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    close()
+  }
+}
+
+onMounted(() => document.addEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeydown)
+  clearTimeout(revertTimer)
+})
+
+watch(() => props.thread?.id, () => {
+  if (!openState.value) return
+  if (!props.thread) { close(); return }
+  resetTree()
+  changeDetail.value = null
+  activeTurnId.value = ''
+  currentFile.value = ''
+  if (tab.value === 'changes') loadChanges('')
+})
+
+defineExpose({ open, close })
+</script>
+
+<template>
+  <div v-if="openState">
+    <div class="wfd-mask" @click="close"></div>
+    <aside class="wfd-panel" role="dialog" aria-modal="true" aria-label="工作区文件与改动">
+      <header class="wfd-head">
+        <div class="wfd-title">
+          <span class="wfd-name">工作区</span>
+          <span class="wfd-meta" :title="thread?.cwd || ''">
+            {{ thread?.agent || '' }} · {{ shortPath(thread?.cwd) }}
+          </span>
+        </div>
+        <div class="wfd-tabs" role="tablist" aria-label="工作区视图">
+          <button type="button" role="tab" :aria-selected="tab === 'files'"
+                  :class="{ on: tab === 'files' }" @click="switchTab('files')">文件</button>
+          <button type="button" role="tab" :aria-selected="tab === 'changes'"
+                  :class="{ on: tab === 'changes' }" @click="switchTab('changes')">
+            本轮改动
+            <span v-if="latestChangeCount" class="wfd-tab-n">{{ latestChangeCount }}</span>
+          </button>
+        </div>
+        <button ref="closeBtn" class="btn icon wfd-close" type="button" aria-label="关闭工作区文件"
+                title="关闭（Esc）" @click="close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </header>
+
+      <div v-if="tab === 'files'" class="wfd-body wfd-files">
+        <div class="wfd-tree" aria-label="工作区文件树">
+          <div class="wfd-root" :title="root">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <span>{{ root.split('/').filter(Boolean).pop() || '工作区' }}</span>
+          </div>
+          <div v-if="nodes['']?.loading && !nodes['']?.entries.length" class="wfd-status">读取中…</div>
+          <div v-else-if="nodes['']?.error" class="wfd-status is-error">{{ nodes[''].error }}</div>
+          <template v-else>
+            <button v-for="row in rows" :key="row.entry.path" type="button"
+                    class="wfd-row" :class="{ dir: row.entry.dir, active: selected?.path === row.entry.path }"
+                    :style="{ paddingLeft: (12 + row.depth * 14) + 'px' }"
+                    :aria-expanded="row.entry.dir ? row.expanded : undefined"
+                    @click="onRow(row)">
+              <svg v-if="row.entry.dir" class="wfd-chev" :class="{ open: row.expanded }" width="12" height="12"
+                   viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+              <svg v-else class="wfd-file-ico" width="13" height="13" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
+              </svg>
+              <span class="wfd-row-name">{{ row.entry.name }}</span>
+              <span v-if="!row.entry.dir" class="wfd-size">{{ fmtSize(row.entry.size) }}</span>
+            </button>
+            <div v-if="!rows.length" class="wfd-status">这个目录是空的。</div>
+            <div v-if="nodes['']?.truncated" class="wfd-status">目录项过多，只显示前 1000 个。</div>
+          </template>
+          <div v-if="nodes['']?.entries.length" class="wfd-tree-note">点文件查看内容；点目录展开。</div>
+        </div>
+
+        <div class="wfd-detail">
+          <div v-if="!selected" class="wfd-empty">
+            <div class="wfd-empty-art" aria-hidden="true">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+            </div>
+            <b>选择左侧文件查看内容</b>
+            <p class="meta">agent 改了什么，去「本轮改动」看 diff 并还原。</p>
+          </div>
+          <template v-else>
+            <div class="wfd-detail-head">
+              <div class="wfd-detail-title">
+                <b :title="preview.path">{{ preview.name || selected.name }}</b>
+                <span class="meta">{{ fmtSize(preview.size) }}<template v-if="preview.modTime"> · {{ new Date(preview.modTime).toLocaleString() }}</template></span>
+              </div>
+            </div>
+            <div v-if="preview.loading" class="wfd-status">读取中…</div>
+            <div v-else-if="preview.error" class="wfd-status is-error">{{ preview.error }}</div>
+            <div v-else-if="preview.kind === 'image'" class="wfd-preview-body">
+              <img class="wfd-img" :src="preview.dataUrl" :alt="preview.name">
+            </div>
+            <div v-else-if="preview.kind === 'text'" class="wfd-preview-body">
+              <div v-if="preview.truncated" class="wfd-notice">文件较大，仅显示前 512 KB</div>
+              <div v-if="/\.(md|markdown)$/i.test(preview.name)" class="wfd-md chat-md" v-html="renderMD(preview.content)"></div>
+              <pre v-else class="wfd-code">{{ preview.content }}</pre>
+            </div>
+            <div v-else class="wfd-status">{{ preview.message || '暂不支持预览' }}</div>
+          </template>
+        </div>
+      </div>
+
+      <div v-else class="wfd-body wfd-changes">
+        <div class="wfd-change-list">
+          <div class="wfd-change-top">
+            <select v-if="changeTurns.length > 1" v-model="activeTurnId" class="wfd-turn-select"
+                    aria-label="选择轮次" @change="selectTurn">
+              <option v-for="(c, i) in changeTurns" :key="c.turnId" :value="c.turnId">{{ turnLabel(c, i) }}</option>
+            </select>
+            <span v-else class="wfd-turn-label">{{ changeTurns.length ? turnLabel(changeTurns[0], 0) : '本轮改动' }}</span>
+            <span v-if="changeDetail?.revertedAt" class="wfd-reverted">已还原</span>
+          </div>
+          <div v-if="changeLoading" class="wfd-status">读取改动…</div>
+          <div v-else-if="changeError" class="wfd-status is-error">{{ changeError }}</div>
+          <div v-else-if="!changeDetail" class="wfd-empty wfd-change-empty">
+            <b>还没有可查看的改动</b>
+            <p class="meta">agent 跑完一轮后，这里会列出它改过的文件。</p>
+          </div>
+          <template v-else>
+            <div v-if="changeDetail.note" class="wfd-notice">{{ changeDetail.note }}</div>
+            <div v-if="!changeDetail.files.length" class="wfd-status">本轮没有改动文件。</div>
+            <button v-for="f in changeDetail.files" :key="f.path" type="button"
+                    class="wfd-change-row" :class="{ active: currentFile === f.path }" @click="selectChangeFile(f)">
+              <span class="wfd-status-dot" :class="f.status" :aria-label="statusLabel(f.status)">{{ statusLetter(f.status) }}</span>
+              <span class="wfd-change-path" :title="f.path">{{ f.path }}</span>
+              <span class="wfd-change-stat"><b v-if="f.additions">+{{ f.additions }}</b><i v-if="f.deletions">-{{ f.deletions }}</i></span>
+            </button>
+            <div class="wfd-revert">
+              <button type="button" class="btn sm" :class="{ danger: revertArm }"
+                      :disabled="reverting || !!changeDetail.revertedAt || changeDetail.snapshot === false"
+                      @click="armRevert">
+                {{ changeDetail.revertedAt ? '本轮已还原' : reverting ? '还原中…' : revertArm ? '确认还原 ' + changeDetail.files.length + ' 个文件' : '还原本轮改动' }}
+              </button>
+              <p class="wfd-hint">
+                <template v-if="changeDetail.revertedAt">文件已恢复到本轮开始前；之后的新改动不受影响。</template>
+                <template v-else-if="changeDetail.snapshot === false">本轮没有可用快照，只能查看不能还原。</template>
+                <template v-else>只恢复本轮改过的文件；文件在本轮后又被改过会拒绝还原。</template>
+              </p>
+            </div>
+          </template>
+        </div>
+
+        <div class="wfd-detail wfd-diff-pane">
+          <div v-if="!selectedChange" class="wfd-empty">
+            <b>选择左侧文件查看 diff</b>
+            <p class="meta">绿色是新增，红色是删除；行号左边是旧文件，右边是新文件。</p>
+          </div>
+          <template v-else>
+            <div class="wfd-detail-head">
+              <div class="wfd-detail-title">
+                <b :title="selectedChange.path">{{ selectedChange.path }}</b>
+                <span class="wfd-diff-meta">
+                  <span class="wfd-status-text" :class="selectedChange.status">{{ statusLabel(selectedChange.status) }}</span>
+                  <b v-if="selectedChange.additions" class="add">+{{ selectedChange.additions }}</b>
+                  <i v-if="selectedChange.deletions" class="del">-{{ selectedChange.deletions }}</i>
+                  <span v-if="selectedChange.binary" class="meta">二进制</span>
+                </span>
+              </div>
+            </div>
+            <div v-if="selectedChange.error && !diffRows.length" class="wfd-status">{{ selectedChange.error }}</div>
+            <div v-else-if="!diffRows.length" class="wfd-status">这个文件没有文本 diff。</div>
+            <div v-else class="wfd-diff" role="region" :aria-label="selectedChange.path + ' 的差异'">
+              <div v-for="(row, i) in diffRows" :key="i" class="wfd-diff-row" :class="row.kind">
+                <template v-if="row.kind === 'hunk'">
+                  <span class="wfd-diff-hunk">{{ row.text }}</span>
+                </template>
+                <template v-else-if="row.kind === 'meta'">
+                  <span class="wfd-diff-hunk">{{ row.text }}</span>
+                </template>
+                <template v-else>
+                  <span class="wfd-ln">{{ row.old }}</span>
+                  <span class="wfd-ln">{{ row.new }}</span>
+                  <span class="wfd-diff-code">{{ row.text }}</span>
+                </template>
+              </div>
+            </div>
+            <div v-if="selectedChange.truncated" class="wfd-notice">diff 过长，已截断；还原仍会处理完整文件。</div>
+          </template>
+        </div>
+      </div>
+    </aside>
+  </div>
+</template>
