@@ -101,6 +101,8 @@ type Thread struct {
 	// Applied 为空表示没有下发过；Note 说明为什么没下发（agent 没报审批模式等）。
 	PolicyApplied string `json:"policyApplied,omitempty"`
 	PolicyNote    string `json:"policyNote,omitempty"`
+	// TurnStartedAt 是当前这一轮的开始时刻（运行看板用；空闲/结束时清零）。
+	TurnStartedAt time.Time `json:"turnStartedAt,omitempty"`
 }
 
 // UnmarshalJSON 兼容 261029 之前的投影：那时会话直接带 `workspace`（目录路径）、
@@ -1131,6 +1133,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		lv.stopTimer = nil
 	}
 	th.State = StateRunning
+	th.TurnStartedAt = time.Now()
 	if th.Title == "" {
 		// 首轮定标题：取第一条消息的第一个非空行，去掉列表/标题符号并折叠空白，
 		// 截到列表行放得下的长度。比整段前 40 字更像"标题"，也不需要额外模型调用。
@@ -1263,6 +1266,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	current, keep := m.threads[id] // turn 进行中被删除则不再写投影
 	if keep {
 		current.State = StateIdle
+		current.TurnStartedAt = time.Time{}
 		current.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()

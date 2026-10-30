@@ -49,6 +49,7 @@ beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
   // 否则上一条把视图切到「最近更新」，后面几条就都在摊平列表里找分组行了
   try { localStorage.clear() } catch { /* 环境没给 localStorage 也不拦用例 */ }
+  store.acpOpenThread = ''
   data = {
     workspaces: [copy(wsA)],
     threads: [copy(thread)],
@@ -1064,6 +1065,14 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.findAll('.ws-head')).toHaveLength(2)
     // 折叠状态下没有选中会话时，右侧给的是"选一个工作区"的指引而不是空白
     expect(headOf('notes').text()).toContain('个文件夹')
+  })
+
+  it('运行看板带目标会话时，加载完直接选中它', async () => {
+    data.threads = [copy(thread), copy(second)]
+    store.acpOpenThread = 'th2'
+    await show()
+    expect(wrapper.get('.ag-head-txt b').text()).toBe('第二件事')
+    expect(store.acpOpenThread).toBe('')
   })
 
   it('工作区文件抽屉：文件树预览、本轮 diff 与还原', async () => {

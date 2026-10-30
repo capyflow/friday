@@ -407,6 +407,12 @@ async function load() {
     // 一个会话都没有时也要摊开一个工作区：否则左栏全是折叠行，"新建会话"没有落点
     else if (!currentWsId.value && workspaces.value.length) currentWsId.value = workspaces.value[0].id
     refreshDirsView()
+    // 运行看板 →「打开」：等列表拉齐再选中目标会话；目标已被删就留在当前页。
+    if (store.acpOpenThread) {
+      const target = store.acpOpenThread
+      store.acpOpenThread = ''
+      if (threads.value.some(t => t.id === target)) select(target)
+    }
   } catch (e) {
     // 已经加载过（轮末刷新失败）就保留现有界面；首次加载失败给可重试的说明。
     if (!loaded.value) loadError.value = e.message || String(e)
@@ -752,6 +758,13 @@ watch(() => store.view, (v, prev) => {
     filesDrawer.value?.close()
     fileDrawer.value?.close()
   } else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
+})
+
+watch(() => store.acpOpenThread, id => {
+  if (!id || !loaded.value) return
+  store.acpOpenThread = ''
+  if (threads.value.some(t => t.id === id)) select(id)
+  else toast('这条会话已经不存在了', true)
 })
 
 /* ---------- 发送与排队 ----------

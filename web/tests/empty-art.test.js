@@ -28,7 +28,7 @@ describe('空状态插画', () => {
     const frames = readFileSync(`${SRC}/components/art/EmptyState.vue`, 'utf8')
     const used = vueFiles(SRC).flatMap((f) =>
       [...readFileSync(f, 'utf8').matchAll(/<EmptyState\b[^>]*kind="(\w+)"/g)].map((m) => m[1]))
-    expect(used).toHaveLength(11)
+    expect(used).toHaveLength(12)
     expect(used.filter((k) => !KINDS.includes(k))).toEqual([])
     used.forEach((k) => expect(frames).toContain(`  ${k}: `))
   })
