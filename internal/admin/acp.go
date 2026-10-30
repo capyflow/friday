@@ -488,6 +488,80 @@ func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
 	})
 }
 
+// handleAcpWorkspaceMemoryList 列出工作区项目记忆页（不含正文）。
+func (s *Server) handleAcpWorkspaceMemoryList(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"pages": s.memory.PagesScoped(scope)})
+}
+
+// handleAcpWorkspaceMemoryGet 读取一页项目记忆正文。
+func (s *Server) handleAcpWorkspaceMemoryGet(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	p, ok := s.memory.ReadScoped(scope, ctx.GinContext().Param("page"))
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到这页项目记忆"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p})
+}
+
+// handleAcpWorkspaceMemorySave 新建或更新一页项目记忆：
+// POST /api/acp/workspaces/:id/memory {"id?","title","body"}。
+func (s *Server) handleAcpWorkspaceMemorySave(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	var req struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"title":"…","body":"…"}`})
+	}
+	p, created, err := s.memory.SaveScoped(scope, req.ID, req.Title, req.Body, "admin")
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	msg := "项目记忆已更新"
+	if created {
+		msg = "已新建项目记忆"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p, "created": created, "message": msg})
+}
+
+// handleAcpWorkspaceMemoryDelete 删除一页项目记忆。
+func (s *Server) handleAcpWorkspaceMemoryDelete(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	if !s.memory.DeleteScoped(scope, ctx.GinContext().Param("page")) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到这页项目记忆"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "项目记忆已删除"})
+}
+
+// workspaceMemoryScope 校验工作区存在且记忆仓库可用，返回 scope（工作区 id）。
+func (s *Server) workspaceMemoryScope(workspaceID string) (string, error) {
+	if s.acp == nil {
+		return "", fmt.Errorf("智能体功能未启用")
+	}
+	if s.memory == nil {
+		return "", fmt.Errorf("长期记忆未启用")
+	}
+	if _, ok := s.acp.GetWorkspace(workspaceID); !ok {
+		return "", fmt.Errorf("未找到工作区 %s", workspaceID)
+	}
+	return workspaceID, nil
+}
+
 // handleAcpChat 处理一次智能体对话：POST /api/acp/threads/:id/chat，
 // 请求体 {"message":"...", "attachments":["<上传id>", ...]}，响应为 SSE 流，
 // 帧协议与 /api/chat 一致（另有 {"status":"..."} 生命周期占位帧）。

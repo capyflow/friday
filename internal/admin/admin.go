@@ -43,6 +43,10 @@
 //	POST   /api/acp/workspaces/:id   工作区改名/置顶/换主目录（字段可选，需登录）
 //	POST   /api/acp/workspaces/:id/dirs 工作区加目录 {"path"}（需登录）
 //	DELETE /api/acp/workspaces/:id/dirs?path= 工作区移目录（需登录）
+//	GET    /api/acp/workspaces/:id/memory 工作区项目记忆列表（需登录）
+//	POST   /api/acp/workspaces/:id/memory 新建/更新项目记忆 {"id?","title","body"}（需登录）
+//	GET    /api/acp/workspaces/:id/memory/:page 读取一页项目记忆（需登录）
+//	DELETE /api/acp/workspaces/:id/memory/:page 删除一页项目记忆（需登录）
 //	DELETE /api/acp/workspaces/:id   删工作区连带其会话（需登录）
 //	GET    /api/acp/threads/:id      会话详情含投影消息与目录视图（需登录）
 //	POST   /api/acp/threads/:id      改会话标题 {"title"}（留空回到自动，需登录）
@@ -353,6 +357,10 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspaceDelete))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirAdd))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirRemove))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/workspaces/:id/memory", s.wrap(s.handleAcpWorkspaceMemoryList))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/memory", s.wrap(s.handleAcpWorkspaceMemorySave))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/workspaces/:id/memory/:page", s.wrap(s.handleAcpWorkspaceMemoryGet))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/memory/:page", s.wrap(s.handleAcpWorkspaceMemoryDelete))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadRename))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadDelete))

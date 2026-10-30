@@ -7,11 +7,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 )
 
 // dirsBody 发一次 GET /api/acp/dirs 并解出 { body: ... } 信封。
@@ -358,5 +360,57 @@ func TestAcpWorkspaceAndSessionEndpoints(t *testing.T) {
 	}
 	if _, ok := m.GetWorkspace(wsID); ok {
 		t.Fatal("工作区应已移除")
+	}
+}
+
+func TestAcpWorkspaceMemoryEndpoints(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	cfg := config.AcpConfig{Enabled: true,
+		Agents: []config.AcpAgentConfig{{Name: "fake", Command: "fake-bin"}}}
+	m := acp.NewManager(func() config.AcpConfig { return cfg }, nil, filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	s.memory = memory.NewWikiStore("", "")
+	t.Cleanup(m.Close)
+	handler := s.Handler()
+
+	code, body := acpCall(t, handler, token, "POST", "/api/acp/workspaces",
+		map[string]any{"name": "proj-a", "dirs": []string{t.TempDir()}})
+	if code != http.StatusOK {
+		t.Fatalf("建工作区失败: %d %v", code, body)
+	}
+	ws := body["workspace"].(map[string]any)
+	wsID := ws["id"].(string)
+
+	code, body = acpCall(t, handler, token, "POST", "/api/acp/workspaces/"+wsID+"/memory",
+		map[string]any{"title": "项目约定", "body": "这个仓库用 pnpm，不要用 npm"})
+	if code != http.StatusOK {
+		t.Fatalf("保存项目记忆失败: %d %v", code, body)
+	}
+	page := body["page"].(map[string]any)
+	pageID := page["id"].(string)
+	if page["scope"] != wsID {
+		t.Fatalf("页面 scope 应为工作区 id: %v", page)
+	}
+	if global := s.memory.Pages(); len(global) != 0 {
+		t.Fatalf("项目记忆不应混进全局记忆列表: %+v", global)
+	}
+
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/workspaces/"+wsID+"/memory", nil)
+	pages := body["pages"].([]any)
+	if code != http.StatusOK || len(pages) != 1 {
+		t.Fatalf("项目记忆列表不符: %d %v", code, body)
+	}
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/workspaces/"+wsID+"/memory/"+pageID, nil)
+	page = body["page"].(map[string]any)
+	if code != http.StatusOK || !strings.Contains(page["body"].(string), "pnpm") {
+		t.Fatalf("读取项目记忆失败: %d %v", code, body)
+	}
+	code, _ = acpCall(t, handler, token, "DELETE", "/api/acp/workspaces/"+wsID+"/memory/"+pageID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("删除项目记忆失败: %d", code)
+	}
+	code, body = acpCall(t, handler, token, "GET", "/api/acp/workspaces/"+wsID+"/memory", nil)
+	if code != http.StatusOK || len(body["pages"].([]any)) != 0 {
+		t.Fatalf("删除后列表应为空: %d %v", code, body)
 	}
 }

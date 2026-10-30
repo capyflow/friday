@@ -1,7 +1,8 @@
 <script setup>
-// WorkspaceFilesDrawer 是工作区的文件/改动抽屉：
+// WorkspaceFilesDrawer 是工作区的文件/改动/项目记忆抽屉：
 //   - 文件：按目录懒加载的文件树 + 只读预览（复用 /api/files/preview）；
-//   - 本轮改动：按轮列出 agent 改过的文件、逐文件 diff 与“还原本轮”。
+//   - 本轮改动：按轮列出 agent 改过的文件、逐文件 diff 与“还原本轮”；
+//   - 项目记忆：同一工作区共享的 wiki 页，下一轮/重连时随工作区说明注入给 agent。
 // 只读优先：没有快照时明说“不能还原”，不把“看得到”伪装成“退得回”。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
@@ -10,6 +11,7 @@ import { renderMD } from '../md.js'
 const props = defineProps({
   thread: { type: Object, default: null },
   messages: { type: Array, default: () => [] },
+  workspaceId: { type: String, default: '' },
 })
 const emit = defineEmits(['reverted'])
 
@@ -42,6 +44,11 @@ const revertArm = ref(false)
 const reverting = ref(false)
 let revertTimer = null
 
+const mem = reactive({ pages: [], loading: false, error: '', saved: '', editing: null,
+  draft: { id: '', title: '', body: '' }, saving: false, confirmDelete: '' })
+let memGen = 0
+let deleteTimer = null
+
 const selectedChange = computed(() =>
   (changeDetail.value?.files || []).find(f => f.path === currentFile.value) || null)
 
@@ -65,13 +72,20 @@ function open(which = 'files', turnId = '') {
   if (!props.thread) return
   lastFocus = document.activeElement
   openState.value = true
-  tab.value = which === 'changes' ? 'changes' : 'files'
+  tab.value = which === 'changes' ? 'changes' : which === 'memory' ? 'memory' : 'files'
   if (props.thread) {
     if (root.value !== props.thread.cwd) resetTree()
     else if (tab.value === 'files' && !nodes['']) loadDir('')
   }
   if (tab.value === 'changes') loadChanges(turnId)
+  if (tab.value === 'memory') loadMemory()
   nextTick(() => closeBtn.value?.focus())
+}
+
+function openMemory(draft = {}) {
+  mem.draft = { id: '', title: draft.title || '项目约定', body: draft.body || '' }
+  mem.editing = 'new'
+  open('memory')
 }
 
 function close() {
@@ -84,12 +98,103 @@ function switchTab(which) {
   tab.value = which
   if (which === 'files') {
     if (!nodes['']) loadDir('')
+  } else if (which === 'memory') {
+    loadMemory()
   } else if (!changeDetail.value || changeDetail.value.turnId !== activeTurnId.value) {
     loadChanges(activeTurnId.value || '')
   }
 }
 
+async function loadMemory() {
+  if (!props.workspaceId) {
+    mem.pages = []
+    mem.error = '这条会话还没有工作区，项目记忆暂不可用。'
+    return
+  }
+  const gen = ++memGen
+  mem.loading = true
+  mem.error = ''
+  try {
+    const r = await api('GET', `/api/acp/workspaces/${props.workspaceId}/memory`)
+    if (gen !== memGen) return
+    mem.pages = r.pages || []
+  } catch (e) {
+    if (gen === memGen) mem.error = e.message || String(e)
+  } finally {
+    if (gen === memGen) mem.loading = false
+  }
+}
+
+async function editMemory(page) {
+  mem.error = ''
+  mem.saved = ''
+  try {
+    const r = await api('GET', `/api/acp/workspaces/${props.workspaceId}/memory/${encodeURIComponent(page.id)}`)
+    mem.editing = page.id
+    mem.draft = { id: page.id, title: r.page.title, body: r.page.body }
+  } catch (e) {
+    mem.error = e.message || String(e)
+  }
+}
+
+function newMemory() {
+  mem.editing = 'new'
+  mem.saved = ''
+  mem.error = ''
+  mem.draft = { id: '', title: '', body: '' }
+}
+
+function cancelMemory() {
+  mem.editing = null
+  mem.draft = { id: '', title: '', body: '' }
+  mem.saved = ''
+}
+
+async function saveMemory() {
+  if (!props.workspaceId || mem.saving) return
+  mem.saving = true
+  mem.error = ''
+  mem.saved = ''
+  try {
+    const r = await api('POST', `/api/acp/workspaces/${props.workspaceId}/memory`, {
+      id: mem.draft.id || undefined, title: mem.draft.title, body: mem.draft.body,
+    })
+    mem.saved = r.message || '项目记忆已保存'
+    mem.editing = r.page?.id || mem.editing
+    mem.draft.id = r.page?.id || mem.draft.id
+    await loadMemory()
+  } catch (e) {
+    mem.error = e.message || String(e)
+  } finally {
+    mem.saving = false
+  }
+}
+
+function armDeleteMemory(page) {
+  if (mem.confirmDelete !== page.id) {
+    mem.confirmDelete = page.id
+    clearTimeout(deleteTimer)
+    deleteTimer = setTimeout(() => { mem.confirmDelete = '' }, 5000)
+    return
+  }
+  mem.confirmDelete = ''
+  deleteMemory(page.id)
+}
+
+async function deleteMemory(id) {
+  if (!props.workspaceId) return
+  mem.error = ''
+  try {
+    await api('DELETE', `/api/acp/workspaces/${props.workspaceId}/memory/${encodeURIComponent(id)}`)
+    if (mem.editing === id) cancelMemory()
+    await loadMemory()
+  } catch (e) {
+    mem.error = e.message || String(e)
+  }
+}
+
 function resetTree() {
+  memGen++
   treeGen++
   for (const k of Object.keys(nodes)) delete nodes[k]
   root.value = props.thread?.cwd || ''
@@ -285,19 +390,23 @@ onMounted(() => document.addEventListener('keydown', onKeydown))
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   clearTimeout(revertTimer)
+  clearTimeout(deleteTimer)
 })
 
-watch(() => props.thread?.id, () => {
+watch(() => [props.thread?.id, props.workspaceId], () => {
   if (!openState.value) return
   if (!props.thread) { close(); return }
   resetTree()
   changeDetail.value = null
   activeTurnId.value = ''
   currentFile.value = ''
+  mem.editing = null
+  mem.saved = ''
   if (tab.value === 'changes') loadChanges('')
+  if (tab.value === 'memory') loadMemory()
 })
 
-defineExpose({ open, close })
+defineExpose({ open, close, openMemory })
 </script>
 
 <template>
@@ -318,6 +427,11 @@ defineExpose({ open, close })
                   :class="{ on: tab === 'changes' }" @click="switchTab('changes')">
             本轮改动
             <span v-if="latestChangeCount" class="wfd-tab-n">{{ latestChangeCount }}</span>
+          </button>
+          <button type="button" role="tab" :aria-selected="tab === 'memory'"
+                  :class="{ on: tab === 'memory' }" @click="switchTab('memory')">
+            项目记忆
+            <span v-if="mem.pages.length" class="wfd-tab-n">{{ mem.pages.length }}</span>
           </button>
         </div>
         <button ref="closeBtn" class="btn icon wfd-close" type="button" aria-label="关闭工作区文件"
@@ -389,7 +503,7 @@ defineExpose({ open, close })
         </div>
       </div>
 
-      <div v-else class="wfd-body wfd-changes">
+      <div v-else-if="tab === 'changes'" class="wfd-body wfd-changes">
         <div class="wfd-change-list">
           <div class="wfd-change-top">
             <select v-if="changeTurns.length > 1" v-model="activeTurnId" class="wfd-turn-select"
@@ -464,6 +578,57 @@ defineExpose({ open, close })
               </div>
             </div>
             <div v-if="selectedChange.truncated" class="wfd-notice">diff 过长，已截断；还原仍会处理完整文件。</div>
+          </template>
+        </div>
+      </div>
+
+      <div v-else class="wfd-body wfd-memory">
+        <div class="wfd-memory-list">
+          <div class="wfd-change-top">
+            <span class="wfd-turn-label">项目记忆 {{ mem.pages.length ? mem.pages.length + ' 页' : '' }}</span>
+            <button class="btn sm" type="button" @click="newMemory">新建</button>
+          </div>
+          <div v-if="mem.loading" class="wfd-status">读取中…</div>
+          <div v-else-if="mem.error && !mem.pages.length" class="wfd-status is-error">{{ mem.error }}</div>
+          <div v-else-if="!mem.pages.length" class="wfd-empty wfd-change-empty">
+            <b>还没有项目记忆</b>
+            <p class="meta">把约定、目录结构、验收口径记在这里；同一工作区的 agent 下一轮都会读到。</p>
+          </div>
+          <button v-for="page in mem.pages" :key="page.id" type="button"
+                  class="wfd-change-row" :class="{ active: mem.editing === page.id }" @click="editMemory(page)">
+            <span class="wfd-change-path" :title="page.title">{{ page.title }}</span>
+            <span class="wfd-change-stat meta">{{ new Date(page.updatedAt).toLocaleDateString() }}</span>
+          </button>
+        </div>
+        <div class="wfd-detail wfd-memory-detail">
+          <div v-if="!mem.editing" class="wfd-empty">
+            <b>选择一页项目记忆</b>
+            <p class="meta">或点「新建」写一条约定。项目记忆按工作区共享，不写进用户仓库。</p>
+          </div>
+          <template v-else>
+            <div class="wfd-detail-head">
+              <div class="wfd-detail-title">
+                <b>{{ mem.draft.id ? '编辑项目记忆' : '新建项目记忆' }}</b>
+                <span class="meta">下一轮或重连时注入给 agent</span>
+              </div>
+            </div>
+            <div class="wfd-memory-form">
+              <label class="meta" for="memTitle">标题</label>
+              <input id="memTitle" v-model="mem.draft.title" aria-label="项目记忆标题" placeholder="如：项目约定">
+              <label class="meta" for="memBody">正文（markdown）</label>
+              <textarea id="memBody" v-model="mem.draft.body" aria-label="项目记忆正文" rows="12"
+                        placeholder="这个仓库用 pnpm，不要用 npm；验收要跑 npm run check。"></textarea>
+              <p v-if="mem.error" class="wfd-status is-error" role="alert">{{ mem.error }}</p>
+              <p v-if="mem.saved" class="wfd-status" role="status">{{ mem.saved }}</p>
+              <div class="wfd-memory-actions">
+                <button class="btn sm primary" type="button" :disabled="mem.saving || !mem.draft.title.trim() || !mem.draft.body.trim()"
+                        @click="saveMemory">{{ mem.saving ? '保存中…' : '保存' }}</button>
+                <button v-if="mem.draft.id" class="btn sm danger" type="button" @click="armDeleteMemory({ id: mem.draft.id })">
+                  {{ mem.confirmDelete === mem.draft.id ? '确认删除' : '删除' }}
+                </button>
+                <button class="btn sm" type="button" @click="cancelMemory">关闭</button>
+              </div>
+            </div>
           </template>
         </div>
       </div>

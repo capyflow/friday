@@ -1571,3 +1571,23 @@ html[data-theme="dark"] .wfd-diff-row.del { background: rgba(248,113,113,.10); }
   display: flex; flex-direction: column; gap: 5px; }
 .ctx-handoff .btn { align-self: flex-start; }
 .ctx-handoff p { margin: 0; font-size: 11px; line-height: 1.55; }
+
+/* 工作区抽屉：项目记忆 */
+.wfd-memory { grid-template-columns: 260px minmax(0, 1fr); }
+.wfd-memory-list { min-height: 0; overflow-y: auto; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 8px; gap: 2px; }
+.wfd-memory-detail { background: var(--bg); }
+html[data-theme="dark"] .wfd-memory-detail { background: rgba(0,0,0,.10); }
+.wfd-memory-form { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 18px;
+  display: flex; flex-direction: column; gap: 7px; }
+.wfd-memory-form input, .wfd-memory-form textarea { width: 100%; min-width: 0; font: inherit;
+  font-size: 13px; padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--card); color: var(--fg); }
+.wfd-memory-form textarea { font-family: ui-monospace, Menlo, Consolas, monospace; line-height: 1.55;
+  resize: vertical; min-height: 220px; }
+.wfd-memory-form .meta { margin-top: 4px; }
+.wfd-memory-actions { display: flex; gap: 7px; margin-top: 8px; }
+@media (max-width: 900px) {
+  .wfd-memory { grid-template-columns: 1fr; grid-template-rows: minmax(0, 35%) minmax(0, 65%); }
+  .wfd-memory-list { border-right: none; border-bottom: 1px solid var(--border); }
+}

@@ -128,6 +128,12 @@ function openTurnChanges(turnId) {
   if (!current.value) return
   filesDrawer.value?.open('changes', turnId)
 }
+function rememberMessage(m) {
+  const body = m.text || answerText(m.blocks || [])
+  if (!body) return
+  filesDrawer.value?.openMemory({ title: current.value?.title || '项目约定', body })
+}
+
 function onChangesReverted(turnId) {
   for (const m of messages.value) {
     if (m.role === 'bot' && m.changes && m.changes.turnId === turnId) {
@@ -1336,6 +1342,13 @@ function removePreview(p) {
                       {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
                     </div>
                     <div v-if="!m.streaming" class="msg-acts">
+                      <button class="copy-btn" type="button" title="记到项目记忆"
+                              aria-label="记到项目记忆" @click.stop="rememberMessage(m)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                        </svg>
+                      </button>
                       <CopyMessageButton :blocks="m.blocks" kind="answer" />
                     </div>
                   </div>
@@ -1476,7 +1489,7 @@ function removePreview(p) {
   </div>
   <FilePreviewDrawer ref="fileDrawer" />
   <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
-                        @reverted="onChangesReverted" />
+                        :workspace-id="current?.workspaceId || ''" @reverted="onChangesReverted" />
   <!-- 编辑工作区弹窗：改名 + 源文件夹的增删与主目录（列表里不铺路径，要改来这里改）。
        弹窗内是暂存编辑，点「保存」才按差异落后端；Esc/点遮罩 = 放弃这次编辑。 -->
   <Teleport to="body">

@@ -3,7 +3,7 @@
 状态：**M-1/M-2/M-5/M-8 已实施（2026-10-21 上午）**；**M-3/M-4 已实施（2026-10-21 下午，
 拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
 工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
-上下文交接）；M-7 按推荐缓做/不排期。
+上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -210,6 +210,21 @@ bug 类问题已于同日修复（附录 A）。
   admin `POST /api/acp/threads/:id/handoff`、上下文弹层按钮与「· 续」会话切换。回归
   `TestHandoffCreatesContinuationThread` / `TestHandoffRejectsEmptyThread` 与前端弹层用例。
 
+### M-12 工作区项目记忆
+
+- **动机**：长期记忆原本是全局用户 wiki，工作区说明只告诉 agent 目录清单；项目约定、验收口径
+  和上一次做出的决定没有地方沉淀，换 agent 还要重新交代。
+- **方案**：`memory.Page` 增加 `Scope`（空=全局用户记忆，工作区 id=项目记忆），全局读写默认
+  只看全局页；工作区抽屉新增「项目记忆」标签，回答行可一键把结论填成草稿。`Manager.SetMemory`
+  后，工作区首轮说明附带该工作区的项目记忆速览，并把摘要纳入注入指纹——记忆变了下一轮/重连
+  才重新交代，不每轮刷屏。
+- **边界**：不写用户仓库（默认不生成 `AGENTS.md`），不混进全局记忆；项目记忆只注入速览，
+  细节仍需要用户或 agent 主动确认。
+- **实施记录（2026-10-30）**：`internal/memory` scoped API、admin `workspaces/:id/memory` CRUD、
+  `WorkspaceFilesDrawer` 项目记忆页、`WorkspaceView` 回答行「记到项目记忆」。回归
+  `TestScopedMemoryIsolatedAndPersisted`、`TestWorkspaceBriefIncludesProjectMemory`、
+  `TestAcpWorkspaceMemoryEndpoints` 与前端抽屉用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -221,6 +236,7 @@ bug 类问题已于同日修复（附录 A）。
 | 5 | M-6 | ✅ 已实施（2026-10-29，同一 agent+目录复用连接） |
 | 6 | M-9 + M-10 | ✅ 已实施（2026-10-30） |
 | 7 | M-11 | ✅ 已实施（2026-10-30） |
+| 8 | M-12 | ✅ 已实施（2026-10-30） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

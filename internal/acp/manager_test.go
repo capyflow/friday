@@ -23,6 +23,7 @@ import (
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 )
 
 // ---------- fake agent 侧 ----------
@@ -2029,5 +2030,39 @@ func TestHandoffRejectsEmptyThread(t *testing.T) {
 	th := mustThread(t, m)
 	if _, err := m.Handoff(th.ID); err == nil {
 		t.Fatal("空会话不应允许交接")
+	}
+}
+
+func TestWorkspaceBriefIncludesProjectMemory(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	store := memory.NewWikiStore("", "")
+	if _, _, err := store.SaveScoped(ws.ID, "", "项目约定", "这个仓库用 pnpm，不要用 npm", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	m.SetMemory(store)
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "开始干活", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) == 0 {
+		t.Fatal("没有记录 prompt")
+	}
+	joined := strings.Join(blocks[0], "\n")
+	if !strings.Contains(joined, "项目记忆") || !strings.Contains(joined, "pnpm") {
+		t.Fatalf("首轮没有注入项目记忆: %q", joined)
+	}
+	if _, _, err := store.SaveScoped(ws.ID, "", "项目约定", "这个仓库用 pnpm；Node 版本 22", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), th.ID, "继续", nil, TurnHooks{}); err != nil {
+		t.Fatalf("第二轮失败: %v", err)
+	}
+	blocks = f.promptBlocks()
+	joined = strings.Join(blocks[len(blocks)-1], "\n")
+	if !strings.Contains(joined, "Node 版本 22") {
+		t.Fatalf("项目记忆更新后下一轮应重新交代: %q", joined)
 	}
 }

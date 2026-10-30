@@ -300,3 +300,53 @@ func TestSearchSplitsKeywords(t *testing.T) {
 		t.Fatalf("空关键词应列出全部页面，实际 %d 页", len(all))
 	}
 }
+
+func TestScopedMemoryIsolatedAndPersisted(t *testing.T) {
+	dir := t.TempDir()
+	s := NewWikiStore(dir, "")
+	global := mustSave(t, s, "用户偏好", "- 喜欢黑咖啡", "user")
+	w1, _, err := s.SaveScoped("ws-a", "", "项目约定", "这个仓库用 pnpm，不要用 npm", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, _, err := s.SaveScoped("ws-b", "", "项目约定", "这个仓库用 yarn", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w1.ID == w2.ID {
+		t.Fatal("不同工作区的同名页面不应合并")
+	}
+	if len(s.Pages()) != 1 || s.Pages()[0].ID != global.ID {
+		t.Fatalf("全局 Pages 只应看到全局页: %+v", s.Pages())
+	}
+	if got := s.PagesScoped("ws-a"); len(got) != 1 || !strings.Contains(got[0].Title, "项目约定") {
+		t.Fatalf("工作区 A 页面不符: %+v", got)
+	}
+	if len(s.SearchScoped("ws-a", "yarn")) != 0 {
+		t.Fatal("不应搜到其他工作区的页面")
+	}
+	if _, ok := s.ReadScoped("ws-a", w2.ID); ok {
+		t.Fatal("跨作用域读取应失败")
+	}
+	if s.DeleteScoped("ws-b", w1.ID) {
+		t.Fatal("跨作用域删除应失败")
+	}
+	if d := s.DigestScoped("ws-a", 4, 500); !strings.Contains(d, "pnpm") || strings.Contains(d, "yarn") {
+		t.Fatalf("项目速览内容不符: %q", d)
+	}
+
+	// 重开仓库：scope 必须从 frontmatter 恢复，不能退化成全局页。
+	reopened := NewWikiStore(dir, "")
+	if got := reopened.PagesScoped("ws-a"); len(got) != 1 {
+		t.Fatalf("重开后项目页丢失: %+v", got)
+	}
+	if page, ok := reopened.ReadScoped("ws-a", w1.ID); !ok || !strings.Contains(page.Body, "pnpm") {
+		t.Fatalf("重开后项目页正文丢失: %+v", page)
+	}
+	if len(reopened.Pages()) != 1 {
+		t.Fatalf("重开后全局 Pages 应仍只有 1 页，实际 %+v", reopened.Pages())
+	}
+	if _, ok := reopened.Read(w1.ID); ok {
+		t.Fatal("工作区页不应当成全局页读出")
+	}
+}

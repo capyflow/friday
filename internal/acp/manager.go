@@ -30,6 +30,7 @@ import (
 
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/usage"
 )
 
@@ -319,6 +320,7 @@ type Manager struct {
 	path       string           // acp-threads.json（工作区与会话同一份投影）
 	cfgFn      func() config.AcpConfig
 	approver   *approval.Queue
+	memory     *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 
 	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
@@ -1137,6 +1139,7 @@ func (m *Manager) workspaceBrief(th *Thread, proc *agentProc) (string, string) {
 	if ws := m.workspaces[th.WorkspaceID]; ws != nil && ws.Name != "" {
 		name = ws.Name
 	}
+	store := m.memory
 	m.mu.Unlock()
 	fp := strings.Join(dirs, "\n")
 
@@ -1155,7 +1158,23 @@ func (m *Manager) workspaceBrief(th *Thread, proc *agentProc) (string, string) {
 		}
 	}
 	b.WriteString("用户问「当前工作区有哪些项目/文件夹」时以上面这份列表为准，不要去上级目录扫描推断；列表之外的不属于本会话。")
+	if store != nil {
+		if digest := store.DigestScoped(th.WorkspaceID, 4, 1200); digest != "" {
+			b.WriteString("\n\n[Friday 项目记忆] 本工作区已记下的背景（来自用户或之前的会话）：\n")
+			b.WriteString(digest)
+			b.WriteString("\n这些是背景事实，不必逐条复述；需要细节时按用户要求确认。")
+			fp += "\n--memory--\n" + digest
+		}
+	}
 	return b.String(), fp
+}
+
+// SetMemory 注入长期记忆仓库（启动时调用一次）：工作区首轮说明会附带该
+// 工作区的项目记忆速览，所有 agent 共用同一份，避免每个 agent 各记一套。
+func (m *Manager) SetMemory(store *memory.WikiStore) {
+	m.mu.Lock()
+	m.memory = store
+	m.mu.Unlock()
 }
 
 // Send 发送一条消息并跑完一轮对话（同一 thread 串行，C3）。

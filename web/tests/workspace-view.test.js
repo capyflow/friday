@@ -44,6 +44,7 @@ let data // 可变的服务端替身：用例直接改它，load() 就拿到新�
 let dirPages
 let filesByDir
 let changesByTurn
+let workspaceMemory
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
@@ -60,6 +61,7 @@ beforeEach(() => {
   dirPages = {}
   filesByDir = { '': [] }
   changesByTurn = {}
+  workspaceMemory = {}
   api.mockReset().mockImplementation(server)
   toast.mockClear()
   fetchMock = vi.fn()
@@ -88,6 +90,35 @@ async function server(method, url, body) {
     const path = decodeURIComponent(url.split('?path=')[1] || '')
     if (path.includes('nope')) throw new Error('目录不存在或不可读')
     return json(dirPages[path] || { path, parent: '/home/u', dirs: [{ name: 'proj', path: '/home/u/proj' }] })
+  }
+  const memList = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/memory$/)
+  if (method === 'GET' && memList) {
+    return json({ pages: workspaceMemory[memList[1]] || [] })
+  }
+  if (method === 'POST' && memList) {
+    const list = workspaceMemory[memList[1]] || []
+    let page = body.id ? list.find(x => x.id === body.id) : list.find(x => x.title === body.title)
+    if (page) {
+      page.title = body.title
+      page.body = body.body
+      page.updatedAt = new Date().toISOString()
+    } else {
+      page = { id: 'm' + (list.length + 1), title: body.title, body: body.body,
+        scope: memList[1], updatedAt: new Date().toISOString() }
+      list.push(page)
+    }
+    workspaceMemory[memList[1]] = list
+    return json({ page, created: true, message: '已保存' })
+  }
+  const memPage = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/memory\/([^/]+)$/)
+  if (method === 'GET' && memPage) {
+    const page = (workspaceMemory[memPage[1]] || []).find(x => x.id === memPage[2])
+    if (!page) throw new Error('未找到这页项目记忆')
+    return json({ page })
+  }
+  if (method === 'DELETE' && memPage) {
+    workspaceMemory[memPage[1]] = (workspaceMemory[memPage[1]] || []).filter(x => x.id !== memPage[2])
+    return json({ message: '已删除' })
   }
   const filesMatch = url.match(/^\/api\/acp\/threads\/([^/]+)\/files\?path=(.*)$/)
   if (method === 'GET' && filesMatch) {
@@ -1088,6 +1119,31 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.findAll('.ws-head')).toHaveLength(2)
     // 折叠状态下没有选中会话时，右侧给的是"选一个工作区"的指引而不是空白
     expect(headOf('notes').text()).toContain('个文件夹')
+  })
+
+  it('工作区抽屉可读写项目记忆，消息也能一键记到项目', async () => {
+    workspaceMemory.ws1 = [{ id: 'm1', title: '项目约定', body: '这个仓库用 pnpm', updatedAt: '2026-10-30T10:00:00Z' }]
+    await show()
+    await wrapper.get('[aria-label="工作区文件与改动"]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('项目记忆')).trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('项目约定')
+    await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('项目约定')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目记忆正文"]').element.value).toContain('pnpm')
+    await wrapper.get('[aria-label="项目记忆正文"]').setValue('这个仓库用 pnpm；验收跑 npm run check')
+    await wrapper.findAll('.wfd-memory-actions button').find(b => b.text() === '保存').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1/memory',
+      { id: 'm1', title: '项目约定', body: '这个仓库用 pnpm；验收跑 npm run check' })
+    expect(wrapper.text()).toContain('已保存')
+
+    await wrapper.get('[aria-label="关闭工作区文件"]').trigger('click')
+    await wrapper.get('[aria-label="记到项目记忆"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目记忆标题"]').element.value).toBe('第一件事')
+    expect(wrapper.get('[aria-label="项目记忆正文"]').element.value).toContain('看完了')
   })
 
   it('运行看板带目标会话时，加载完直接选中它', async () => {
