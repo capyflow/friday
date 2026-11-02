@@ -134,7 +134,8 @@
 ## 横切收尾（每完成一批过一遍）
 
 - [x] 真机验收（2026-10-30，包 `dev-05dda6b-dirty.2610301842`）：codex 0.163 全项通过；opencode 1.19.4 建会话超时未过，细节见下节
-- [ ] `feat/workspace-trust` 整体验收后合回 main
+- [x] `feat/workspace-trust` 整体验收后合回 main（2026-11-02，merge `ea2e2fc`，`--no-ff`；
+  合并后在 main 上复跑 `go test ./...` 与 web 332 用例、lint、build 全绿）
 
 ## 真机验收记录（2026-10-30 18:45）
 
@@ -221,7 +222,9 @@
     - P0-1/P0-2：`changes` 带 `turnId`、`vcs=git`、`snapshot=true` 与逐行 diff；`changes/revert`
       后 `note.txt` 消失、`keep.txt` 不动；
     - P1-8 验证面板：`POST /checks` → 审批卡「验证命令」→ 批准 → `state=passed, exit=0, output=ok`。
-- [ ] **V-6 环境侧遗留清理**：软件里的工作区「P0 验收」及其会话、`/tmp/p0-accept`、`/tmp/Friday.prev.app`。
+- [x] **V-6 环境侧遗留清理**（2026-11-02）：`/tmp/p0-accept` 已删（172K 的一次性验收沙箱）；
+  `/tmp/Friday.prev.app`（24M 旧包）**保留**——那是当前已装 App 的回滚副本，等你确认新版能跑再删；
+  软件里的「P0 验收」工作区与会话也**保留**（属线上数据，留给你在界面里一键删；我没动）。
 
 ## 备注
 
