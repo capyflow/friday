@@ -3,7 +3,8 @@
 状态：**M-1/M-2/M-5/M-8 已实施（2026-10-21 上午）**；**M-3/M-4 已实施（2026-10-21 下午，
 拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
 工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
-上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-7 按推荐缓做/不排期。
+上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-13 已实施（2026-11-02，验证面板）；
+M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -225,6 +226,25 @@ bug 类问题已于同日修复（附录 A）。
   `TestScopedMemoryIsolatedAndPersisted`、`TestWorkspaceBriefIncludesProjectMemory`、
   `TestAcpWorkspaceMemoryEndpoints` 与前端抽屉用例。
 
+### M-13 验证面板（本地预览 + 检查命令）
+
+- **动机**：agent 说「做完了」不等于验证过。Friday 里只能看文字，既没有页面预览入口，也没有
+  跑测试/lint 的地方，用户得回终端；而这些命令本来就该走同一套审批与超时。
+- **方案**：`internal/acp/verify.go` 记录一次验证运行（awaiting→running→passed/failed/
+  timeout/killed/denied/error），执行前用 `approval.Queue.RequestCancelable` 强制挂一张
+  「验证命令」审批卡（与 agent 权限卡同源，超时 5 分钟），批准后在会话主目录 `/bin/sh -c` 起进程，
+  独立进程组 + `CommandContext`，停止/超时都杀整组。输出落临时文件只回读尾部（64 KB、400 行、
+  去 ANSI），列表接口不带输出、选中那条走详情接口。建议命令按标志文件推断（package.json scripts +
+  pnpm/yarn 判定、go.mod、Cargo.toml、pytest 标志、Makefile 兜底）。抽屉「验证」标签承载 UI：
+  预览地址从时间线正则提取，也能手填（只允许 localhost/127.0.0.1），内嵌 iframe 不带
+  `allow-same-origin`，预览页读不到 Friday 登录态，同时始终给「新窗口」出口。
+- **边界**：不承诺沙箱——命令是用户自己填的一行 shell，Friday 只做毁灭性片段兜底黑名单 + 人工审批；
+  单条会话同时只跑一个验证命令，记录保留 10 条且不落盘（进程重启后「在跑」没有意义）。
+- **实施记录（2026-11-02）**：admin `threads/:id/checks[/:run][/stop]` 四接口，`RunsView`
+  的待审批区自动出现「验证命令」卡。回归 `TestCheckRun*`/`TestCheckStop*`/`TestCheckDenied*`/
+  `TestCheckTrimsLongOutput`/`TestSuggestChecksFromProjectMarkers` 与
+  `TestAcpCheckEndpoints`、前端「验证标签」用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -237,6 +257,7 @@ bug 类问题已于同日修复（附录 A）。
 | 6 | M-9 + M-10 | ✅ 已实施（2026-10-30） |
 | 7 | M-11 | ✅ 已实施（2026-10-30） |
 | 8 | M-12 | ✅ 已实施（2026-10-30） |
+| 9 | M-13 | ✅ 已实施（2026-11-02，验证面板） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

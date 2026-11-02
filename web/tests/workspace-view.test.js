@@ -45,6 +45,8 @@ let dirPages
 let filesByDir
 let changesByTurn
 let workspaceMemory
+let checkRuns
+let checkSuggestions
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
@@ -62,6 +64,8 @@ beforeEach(() => {
   filesByDir = { '': [] }
   changesByTurn = {}
   workspaceMemory = {}
+  checkRuns = []
+  checkSuggestions = [{ label: 'npm test', command: 'npm test', source: 'package.json 的 scripts.test' }]
   api.mockReset().mockImplementation(server)
   toast.mockClear()
   fetchMock = vi.fn()
@@ -136,6 +140,37 @@ async function server(method, url, body) {
     if (!changesByTurn[turn]) throw new Error('这一轮的改动快照已清理或不存在')
     changesByTurn[turn].revertedAt = '2026-10-30T12:00:00Z'
     return json({ changes: changesByTurn[turn], message: '已还原本轮改动' })
+  }
+  const checkList = url.match(/^\/api\/acp\/threads\/([^/]+)\/checks$/)
+  if (method === 'GET' && checkList) {
+    // 列表不带输出（和后端一致），选中那条走 /checks/:run 取详情
+    const runs = checkRuns.map(({ output, ...r }) => ({ ...r, output: '', hasOutput: !!output }))
+    return json({ runs, suggestions: checkSuggestions })
+  }
+  if (method === 'POST' && checkList) {
+    if (!String(body.command || '').trim()) throw new Error('请求体须为 {"command": "..."}')
+    if (/rm -rf/.test(body.command)) throw new Error('命令含毁灭性片段 "rm -rf"，Friday 不执行')
+    if (checkRuns.some(r => r.state === 'awaiting' || r.state === 'running')) {
+      throw new Error('这条会话已有验证命令在跑或待批，先停掉它')
+    }
+    const run = { id: 'c' + (checkRuns.length + 1), command: body.command, cwd: '/home/u/proj',
+      state: 'awaiting', exitCode: -1, timeoutSec: body.timeoutSec || 300,
+      startedAt: new Date().toISOString() }
+    checkRuns.unshift(run)
+    return json({ run, message: '已提交，等你在审批卡上批准后执行' })
+  }
+  const checkOne = url.match(/^\/api\/acp\/threads\/([^/]+)\/checks\/([^/]+)$/)
+  if (method === 'GET' && checkOne) {
+    const run = checkRuns.find(r => r.id === checkOne[2])
+    if (!run) throw new Error('未找到这次验证运行')
+    return json({ run })
+  }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/checks\/[^/]+\/stop$/.test(url)) {
+    const run = checkRuns.find(r => r.id === url.split('/checks/')[1].split('/stop')[0])
+    if (!run) throw new Error('未找到这次验证运行')
+    run.state = 'killed'
+    run.note = '已手动停止'
+    return json({ message: '已停止这次验证' })
   }
   if (method === 'GET' && url.startsWith('/api/files/preview')) {
     const path = decodeURIComponent(url.split('?path=')[1] || '')
@@ -1124,7 +1159,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
   it('工作区抽屉可读写项目记忆，消息也能一键记到项目', async () => {
     workspaceMemory.ws1 = [{ id: 'm1', title: '项目约定', body: '这个仓库用 pnpm', updatedAt: '2026-10-30T10:00:00Z' }]
     await show()
-    await wrapper.get('[aria-label="工作区文件与改动"]').trigger('click')
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
     await flushPromises()
     await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('项目记忆')).trigger('click')
     await flushPromises()
@@ -1172,7 +1207,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     }
     await show()
 
-    await wrapper.get('[aria-label="工作区文件与改动"]').trigger('click')
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('.wfd-panel').exists()).toBe(true)
     expect(wrapper.findAll('.wfd-row')).toHaveLength(2)
@@ -1196,5 +1231,78 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/changes/revert', { turn: 't1' })
     expect(wrapper.text()).toContain('本轮已还原')
+  })
+
+  it('验证标签：本地预览、检查命令提交与运行输出', async () => {
+    data.threads[0].messages[2].text = '服务起来了，看 http://localhost:5173 就行'
+    await show()
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await flushPromises()
+    const verifyTab = () => wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('验证'))
+    await verifyTab().trigger('click')
+    await flushPromises()
+
+    // 预览地址从时间线里认出来
+    expect(wrapper.get('.wfd-check-main').text()).toBe('http://localhost:5173')
+    // 手填地址只收本机：外站明确拒绝，不悄悄收下
+    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('https://example.com')
+    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
+    expect(wrapper.text()).toContain('只能预览本机地址')
+    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('http://127.0.0.1:3000')
+    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
+    expect(wrapper.get('.wfd-frame').attributes('src')).toBe('http://127.0.0.1:3000')
+    // 内嵌 iframe 不带同源权限：预览页读不到 Friday 的登录态
+    expect(wrapper.get('.wfd-frame').attributes('sandbox')).not.toContain('allow-same-origin')
+
+    // 建议命令一键跑，提交后进审批队列
+    await wrapper.findAll('.wfd-sugs button')[0].trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks',
+      { command: 'npm test', timeoutSec: 300 })
+    expect(checkRuns[0].state).toBe('awaiting')
+    expect(wrapper.text()).toContain('等你在审批卡上批准后执行')
+    expect(wrapper.text()).toContain('待批准')
+    // 有命令待批时运行按钮收着（避免排队歧义），但可以在详情里停止
+    expect(wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行')
+      .attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').exists()).toBe(true)
+
+    // 审批通过后刷新：状态、退出码与输出尾部（失败行标红）
+    checkRuns[0].state = 'failed'
+    checkRuns[0].exitCode = 1
+    checkRuns[0].note = '退出码 1'
+    checkRuns[0].durationMs = 8200
+    checkRuns[0].output = 'PASS a.test.js\nFAIL b.test.js\n  期望 1 得到 2'
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('文件')).trigger('click')
+    await flushPromises()
+    await verifyTab().trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-out').text()).toContain('期望 1 得到 2')
+    expect(wrapper.findAll('.wfd-out-line.bad')).toHaveLength(1)
+    expect(wrapper.text()).toContain('8.2 秒')
+    expect(wrapper.text()).toContain('退出码 1')
+    // 退出码不重复播报，跑完了「等你批准」的提示也该撤掉
+    expect(wrapper.find('.wfd-notice').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('等你在审批卡上批准后执行')
+
+    // 再跑一条并停止
+    await wrapper.get('[aria-label="验证命令"]').setValue('npm run build')
+    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
+    await flushPromises()
+    expect(checkRuns[0].command).toBe('npm run build')
+    await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('npm run build')).trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks/c2/stop')
+    expect(checkRuns[0].state).toBe('killed')
+    expect(wrapper.text()).toContain('已停止')
+
+    // 毁灭性命令：后端拒绝时把原因原样显示出来
+    await wrapper.get('[aria-label="验证命令"]').setValue('rm -rf /tmp/x')
+    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('毁灭性片段')
+    expect(wrapper.text()).not.toContain('undefined')
   })
 })

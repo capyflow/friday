@@ -59,6 +59,10 @@
 //	GET    /api/acp/threads/:id/changes 某轮改动详情（?turn=，含逐文件 diff，需登录）
 //	POST   /api/acp/threads/:id/changes/revert 还原本轮改动 {"turn"}（需登录）
 //	POST   /api/acp/threads/:id/handoff 生成交接摘要并新开续会话（需登录）
+//	GET    /api/acp/threads/:id/checks  验证命令记录与建议命令（需登录）
+//	POST   /api/acp/threads/:id/checks  提交验证命令 {"command","timeoutSec?"}（需登录，进审批队列）
+//	GET    /api/acp/threads/:id/checks/:run 单次验证运行状态与输出（需登录）
+//	POST   /api/acp/threads/:id/checks/:run/stop 停止验证运行（需登录）
 //	GET    /api/runs          运行看板：ACP 轮次/计划/目标/任务/审批/失败（需登录）
 //	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
@@ -372,6 +376,10 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/changes", s.wrap(s.handleAcpThreadChanges))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/changes/revert", s.wrap(s.handleAcpThreadChangesRevert))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/handoff", s.wrap(s.handleAcpThreadHandoff))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/checks", s.wrap(s.handleAcpThreadChecks))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks", s.wrap(s.handleAcpThreadCheckStart))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/checks/:run", s.wrap(s.handleAcpThreadCheckRun))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks/:run/stop", s.wrap(s.handleAcpThreadCheckStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))

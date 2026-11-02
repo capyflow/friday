@@ -55,11 +55,12 @@
   落点：`internal/memory`、`internal/tools/memory.go`、`internal/acp` 工作区说明。
   **实施记录（2026-10-30）**：`memory.Page` 增加 `Scope`，全局记忆与项目记忆分仓读写（`SaveScoped` / `PagesScoped` / `SearchScoped` / `DigestScoped`）；工作区文件抽屉新增「项目记忆」标签，回答行有「记到项目记忆」按钮预填草稿；`Manager.SetMemory` 后工作区说明附带项目速览，并把摘要纳入注入指纹，更新后下一轮/重连重新交代。默认不写 `AGENTS.md`，导出留作后续小项。
 
-- [ ] **P1-8 验证面板（预览 + 测试）**
+- [x] **P1-8 验证面板（预览 + 测试）**
   现状：agent 说“做完了”，Friday 里只能看文字；文件预览是只读单文件，没有页面预览/测试结果。
   做到：会话里填本地 URL 一键在浏览器打开（内嵌受 X-Frame-Options 限制时给打开按钮）；常用测试命令一键跑，显示退出码与输出尾部；命令执行走现有审批/超时。
   验收：agent 改完前端，点预览能看到页面；跑 `npm test` 失败时面板显示失败用例，不用去终端。
   落点：`internal/acp`（运行命令）、`web/src/components/WorkspaceView.vue`。
+  **实施记录（2026-11-02）**：抽屉新增「验证」标签。预览地址由时间线正则提取（`localhost/127.0.0.1/0.0.0.0/[::1]`），可内嵌 iframe（不带 `allow-same-origin`，预览页读不到 Friday 登录态）或新窗口打开，手填地址只收本机、外站直接拒。检查命令按标志文件给建议（package.json scripts + pnpm/yarn 判定、go.mod、Cargo.toml、pytest 标志、Makefile 兜底），也可手填；`internal/acp/verify.go` 走 `approval.Queue.RequestCancelable` 强制挂「验证命令」审批卡（运行页可见可批），批准后 `/bin/sh -c` 在会话主目录执行，独立进程组、超时/停止都杀整组，输出落临时文件只回读尾部（64 KB / 400 行 / 去 ANSI，超出标 truncated），失败行标红。毁灭性片段本地兜底拒绝、同会话单飞、记录留 10 条且不落盘。接口 `GET/POST /threads/:id/checks`、`GET /threads/:id/checks/:run`、`POST .../stop`。回归 `TestCheck*`/`TestSuggestChecksFromProjectMarkers`、`TestAcpCheckEndpoints` 与前端「验证标签」用例；45679 演示实例实跑 `node verify.js` 走完审批→失败→输出尾部，深浅色截图各一张。
 
 - [ ] **P1-9 模型路由、失败回退与低峰调度**
   现状：单活模型手切，没有按任务路由/回退；定时任务只有普通 cron，没有低峰概念。
@@ -127,6 +128,34 @@
 ## 明确不做（本轮）
 
 团队协作/多租户/云同步、IDE 插件、原生移动端、语音、Docker 沙箱、把 Friday 改成自带 IDE。理由：单管理员、本地优先、跨 agent 宿主；这些会稀释定位。
+
+## 横切收尾（每完成一批过一遍）
+
+- [x] 真机验收（2026-10-30，包 `dev-05dda6b-dirty.2610301842`）：codex 0.163 全项通过；opencode 1.19.4 建会话超时未过，细节见下节
+- [ ] `feat/workspace-trust` 整体验收后合回 main
+
+## 真机验收记录（2026-10-30 18:45）
+
+包：`build-release.sh --bundles app` → 替换 `/Applications/Friday.app`（旧包在 `/tmp/Friday.prev.app`）。工作区「P0 验收」含两个目录：`/tmp/p0-accept/repo`（git 仓）、`/tmp/p0-accept/plain`（非 git）。
+
+**通过**
+
+- P0-1：codex 一轮建 3 个文件，done 帧带 `changes`（3 added + 逐文件 unified diff 正确）；`/files` 目录树不含 `.git`；非 git 目录走 `vcs=copy`，added/modified 与 diff 同样正确。
+- P0-2：`changes/revert` 把本轮改的 2 个文件恢复原样，且不误伤上一轮的未跟踪文件；copy 路径还原正确（删新增 + 恢复被改）；人工在本轮后动过 README 时拒绝还原并点名该文件；`git stash create` 失败的轮次自动退到目录副本、写进 `changes.note`，本轮照常结束。
+- P0-3：新建工作区默认 `ask`；`readonly` → codex `approval_mode=read-only` 且写入真被挡住；`auto` → 落到 `agent`（Auto review）。
+- P0-5：两个会话同跑时 `/api/runs` 列出 2 条（标题/agent/工作区/state 齐全），停止后 6 秒内清零。
+- P0-6：新开「… · 续」，摘要含三轮问答并标「可能遗漏」；首轮下发后 agent 能准确复述此前改过的文件；送达后 `handoff` 清空，旧会话保留。
+
+**未通过 / 待修**
+
+- P0-3 codex 的「每次都问」下发不了：codex 只报 read-only / workspace-write / agent / agent-full-access，`pickApprovalValue` 命中不到 ask 关键词 → 有 policyNote 明说，但实际跑在 Auto review（等于自动放行）。「不支持就明说」达标，「换 agent 语义一致」在 codex 上不成立。
+- opencode 建会话超时：`session/new` 返回 `context deadline exceeded`，重启后单跑仍复现 → 跨 agent 一致性这一条没法验。同类：codex 首次走 npx 冷启动时握手也超时（装包 > 10s），缓存热了才正常，第一次用 npx 型 agent 基本必踩。
+- 并发槽位被空闲进程占住：`maxConcurrent=2` 时空闲进程仍占槽，新会话排队；排队期间线程 state 还是 idle、看板 acp 为空 —— 用户看到的是「发了消息没反应」。opencode 失败那轮之后槽位疑似未回收，重启才恢复。
+- 自动档落到 Auto review 而非 Full access，与「全自动」的直觉有落差，UI 最好写清实际落到哪一档。
+
+**未覆盖**：快照超限（20k 文件 / 100MB）提示、目标与计划在看板的条目、P0-4、P1-7 单独复验（前端产物已含「项目记忆」「验证」入口文案，P1-8 的「验证」标签仍缺）。
+
+**环境侧改动（可回滚）**：`~/.npm/_npx/4877722a062902ce` 因并发装包损坏，已改名隔离后重装；工作区「P0 验收」与其会话留在软件里供复核，验完可删。
 
 ## 备注
 

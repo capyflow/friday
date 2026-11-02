@@ -1289,9 +1289,9 @@ function removePreview(p) {
               <template v-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
-          <!-- 工作区文件与改动：文件树、diff 与本轮还原都收在这个抽屉里 -->
-          <button class="ib-btn ag-files" aria-label="工作区文件与改动"
-                  title="工作区文件与改动（看 diff、还原本轮）" @click="openWorkspaceFiles">
+          <!-- 工作区抽屉：文件树、本轮 diff 与还原、项目记忆、验证（预览 + 检查命令） -->
+          <button class="ib-btn ag-files" aria-label="工作区文件与验证"
+                  title="工作区文件（diff、还原、项目记忆、验证）" @click="openWorkspaceFiles">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>

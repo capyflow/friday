@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
@@ -486,6 +487,66 @@ func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"thread": th, "message": "已新开续会话：交接摘要会随下一轮发给 agent",
 	})
+}
+
+// handleAcpThreadChecks 返回会话的验证命令记录与建议命令：
+// GET /api/acp/threads/:id/checks。记录是内存态（重启即清，不留假「在跑」），
+// 建议按主目录的标志文件推断（package.json scripts / go.mod / Makefile 等）。
+func (s *Server) handleAcpThreadChecks(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	suggestions, err := s.acp.CheckSuggestions(id)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	runs := s.acp.Checks(id)
+	// 列表只带状态与说明，不带输出（10 条 × 64 KB 太肥）；选中那条走 GET .../checks/:run。
+	for i := range runs {
+		runs[i].Output = ""
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"runs":        runs,
+		"suggestions": suggestions,
+	})
+}
+
+// handleAcpThreadCheckStart 提交一条验证命令：POST /api/acp/threads/:id/checks
+// body {"command":"npm test","timeoutSec":300}。命令先进审批队列（与 agent 权限卡
+// 同源），返回记录初始为 awaiting，前端轮询 GET .../checks 看后续状态。
+func (s *Server) handleAcpThreadCheckStart(ctx *vhttp.Context) error {
+	var req struct {
+		Command    string `json:"command"`
+		TimeoutSec int    `json:"timeoutSec"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.Command) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"command": "..."}`})
+	}
+	run, err := s.acp.StartCheck(ctx.GinContext().Param("id"), req.Command,
+		time.Duration(req.TimeoutSec)*time.Second)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"run": run, "message": "已提交，等你在审批卡上批准后执行",
+	})
+}
+
+// handleAcpThreadCheckRun 读取单次验证运行的状态与输出尾部：
+// GET /api/acp/threads/:id/checks/:run。
+func (s *Server) handleAcpThreadCheckRun(ctx *vhttp.Context) error {
+	run, err := s.acp.Check(ctx.GinContext().Param("id"), ctx.GinContext().Param("run"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"run": run})
+}
+
+// handleAcpThreadCheckStop 停止一次验证运行：POST /api/acp/threads/:id/checks/:run/stop。
+// 待批的撤卡，在跑的杀掉整个进程组。
+func (s *Server) handleAcpThreadCheckStop(ctx *vhttp.Context) error {
+	if err := s.acp.StopCheck(ctx.GinContext().Param("id"), ctx.GinContext().Param("run")); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "已停止这次验证"})
 }
 
 // handleAcpWorkspaceMemoryList 列出工作区项目记忆页（不含正文）。

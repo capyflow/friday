@@ -321,6 +321,8 @@ type Manager struct {
 	cfgFn      func() config.AcpConfig
 	approver   *approval.Queue
 	memory     *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
+	checks checkRegistry
 
 	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
