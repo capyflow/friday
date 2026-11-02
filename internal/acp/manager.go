@@ -54,6 +54,10 @@ var stopKillGrace = 8 * time.Second
 // 宽限到点仍脏（且没有别的轮次在跑）才回收连接；否则拖到下次使用/空闲回收。测试会改小。
 var timeoutKillGrace = 10 * time.Second
 
+// turnSilenceNotice 是"这一轮收工后多久没有任何 update 就先说一声"的静默阈值：
+// 单轮上限是 300 秒，干等五分钟不出一句话，用户只会以为界面坏了。测试会改小。
+var turnSilenceNotice = 30 * time.Second
+
 // Entry 是投影对话记录里的一条消息。
 type Entry struct {
 	Role    string    `json:"role"` // user | assistant | note
@@ -338,6 +342,9 @@ type Manager struct {
 	memory       *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
 	checks checkRegistry
+	// warmAgents 记下哪些 agent 已经成功起过一次：npx 型命令只有第一次要联网装包，
+	// 冷启动预算给一次就够，之后回落到常规握手值（见 handshakeBudget）。
+	warmAgents map[string]bool
 
 	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
@@ -738,14 +745,15 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 		return nil, err
 	}
 	hooks.status("正在启动 agent " + agentCfg.Name + "…")
-	proc, err := m.spawn(agentCfg, th.Cwd,
-		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second,
+	handshake := m.handshakeBudget(agentCfg)
+	proc, err := m.spawn(agentCfg, th.Cwd, handshake,
 		m.permissionHookFor(key, agentCfg.Name),
 		func() { m.onProcExit(key) })
 	if err != nil {
 		releaseSlot(sem)
 		return nil, err
 	}
+	m.markWarm(agentCfg.Name)
 	ps := &procState{key: key, proc: proc, slot: sem, owners: map[acp.SessionId]string{},
 		pause: make(chan struct{}, 1), ack: make(chan struct{}, 1), resume: make(chan struct{}, 1)}
 	m.mu.Lock()
@@ -755,8 +763,54 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 	return ps, nil
 }
 
-// queuedIdleGrace 是「有人在排队等槽位」时空闲连接的让位时长：不按 IdleKillSeconds
-// 死守（默认 10 分钟），否则上限 2 的机器上第三个会话要等一整段空闲时间才能开跑。
+// coldStartLaunchers 是"每次都要现拉包"的启动命令：第一次跑要联网装包，
+// 10 秒握手预算基本必踩（261030 验收：codex 首次 npx 冷启动握手超时，缓存热了才正常）。
+var coldStartLaunchers = map[string]bool{
+	"npx": true, "pnpm": true, "pnpm-dlx": true, "dlx": true, "bunx": true,
+	"yarn": true, "deno": true, "uvx": true, "pipx": true, "npm": true,
+}
+
+// coldStartLauncher 判断启动命令是不是包管理器拉起器（只看 basename，绝对路径也算）。
+func coldStartLauncher(command string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	if base == "pnpm" || base == "npm" || base == "yarn" || base == "deno" {
+		return true // 这几个只在"用 run/dlx 现拉包"时慢，但多给一次冷启动预算没有坏处
+	}
+	return coldStartLaunchers[base]
+}
+
+// handshakeBudget 决定这次 initialize 给多久：包管理器型命令的首次拉起按冷启动预算给，
+// 同一 agent 成功起过之后就回落到常规握手值——不必为了第一次慢把每次等待都拉长。
+func (m *Manager) handshakeBudget(agentCfg config.AcpAgentConfig) time.Duration {
+	c := m.cfgFn().Normalized()
+	base := time.Duration(c.HandshakeSeconds(agentCfg)) * time.Second
+	cold := time.Duration(config.AcpColdStartHandshakeSeconds) * time.Second
+	m.mu.Lock()
+	warm := m.warmAgents[agentCfg.Name]
+	m.mu.Unlock()
+	if warm || cold <= base || !coldStartLauncher(agentCfg.Command) {
+		return base
+	}
+	return cold
+}
+
+// dialBudget 是"从零把一条会话拉起来"的总预算：握手（含冷启动）+ 建会话 + 排队余量。
+// Options/Capabilities 这类 UI 触发的一次性拉起用它，别拿 10s 握手值去判"能力拿不到"。
+func (m *Manager) dialBudget(agentCfg config.AcpAgentConfig) time.Duration {
+	c := m.cfgFn().Normalized()
+	return m.handshakeBudget(agentCfg) +
+		time.Duration(c.SessionSeconds(agentCfg))*time.Second + 30*time.Second
+}
+
+func (m *Manager) markWarm(name string) {	m.mu.Lock()
+	if m.warmAgents == nil {
+		m.warmAgents = map[string]bool{}
+	}
+	m.warmAgents[name] = true
+	m.mu.Unlock()
+}
+
+// queuedIdleGrace 是「有人在排队等槽位」时空闲连接的让位时长：不按 IdleKillSeconds// 死守（默认 10 分钟），否则上限 2 的机器上第三个会话要等一整段空闲时间才能开跑。
 const queuedIdleGrace = 5 * time.Second
 
 // acquireSlot 取一个并发槽位。满了就把会话标成「排队中」、在时间线上说一声谁占着，
@@ -891,11 +945,20 @@ func (m *Manager) settleTurn(lv *live) {
 	}
 }
 
-// releaseProc 杀进程、归还槽位，并清掉挂在这条连接上的会话记录。
-func (m *Manager) releaseProc(ps *procState, reason string) {
+// stopIdle 停掉一条连接的空闲回收计时。ps.idle 由 ps.mu 保护（armIdle 在别的
+// goroutine 上写它），不加锁读会撞 -race。
+func stopIdle(ps *procState) {
+	ps.mu.Lock()
 	if ps.idle != nil {
 		ps.idle.Stop()
+		ps.idle = nil
 	}
+	ps.mu.Unlock()
+}
+
+// releaseProc 杀进程、归还槽位，并清掉挂在这条连接上的会话记录。
+func (m *Manager) releaseProc(ps *procState, reason string) {
+	stopIdle(ps)
 	m.mu.Lock()
 	for thID, lv := range m.live {
 		if lv.ps == ps {
@@ -931,9 +994,7 @@ func (m *Manager) onProcExit(key string) {
 	}
 	m.mu.Unlock()
 	if ps != nil {
-		if ps.idle != nil {
-			ps.idle.Stop()
-		}
+		stopIdle(ps)
 		if ps.slot != nil {
 			releaseSlot(ps.slot)
 		}
@@ -1047,12 +1108,15 @@ func (m *Manager) ensureLive(ctx context.Context, th *Thread, agentCfg config.Ac
 // 失败或不可靠（DegradeResume / agent 未声明能力）则新开并报告降级。
 func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg config.AcpAgentConfig, hooks TurnHooks) (string, bool, error) {
 	proc := ps.proc
-	handshake := time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds) * time.Second
+	// 建会话单独给预算：skill 表大的 agent（opencode 1.18 实测光列命令就 9.3s）
+	// 在握手的 10s 里连会话都建不出来，报出来像"agent 坏了"，其实是预算太小（V-2）。
+	c := m.cfgFn().Normalized()
+	budget := time.Duration(c.SessionSeconds(agentCfg)) * time.Second
 	// 扩展根 = 工作区里除主目录以外的目录；只在 agent 声明吃这个字段时下发。
 	extra := m.extraDirsFor(proc, th)
 	if th.SessionID != "" && proc.loadSession && !agentCfg.DegradeResume {
 		hooks.status("正在重接上次会话…")
-		lctx, lcancel := context.WithTimeout(context.Background(), handshake)
+		lctx, lcancel := context.WithTimeout(context.Background(), budget)
 		lres, err := proc.conn.LoadSession(lctx, acp.LoadSessionRequest{
 			SessionId: acp.SessionId(th.SessionID), Cwd: proc.cwd, McpServers: []acp.McpServer{},
 			AdditionalDirectories: extra,
@@ -1076,13 +1140,22 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 	} else if th.SessionID != "" && agentCfg.DegradeResume {
 		log.Printf("[智能体] %s 标记为 resume 不可靠，跳过重接", th.Agent)
 	}
-	nctx, ncancel := context.WithTimeout(context.Background(), handshake)
+	nctx, ncancel := context.WithTimeout(context.Background(), budget)
 	res, err := proc.conn.NewSession(nctx, acp.NewSessionRequest{
 		Cwd: proc.cwd, McpServers: []acp.McpServer{},
 		AdditionalDirectories: extra,
 	})
+	// SDK 把超时包成不带 Unwrap 链的 *RequestError，errors.Is 认不出来，
+	// 只能趁 cancel 之前看 ctx 自己的状态。
+	timedOut := errors.Is(nctx.Err(), context.DeadlineExceeded)
 	ncancel()
 	if err != nil {
+		if timedOut {
+			return "", false, fmt.Errorf(
+				"%s 没在 %d 秒内建好会话（它首启要列 skill 表/初始化，慢是正常的）；"+
+					"可在设置 → 智能体把它的「建会话超时」调大，stderr: %s",
+				th.Agent, budget/time.Second, firstLine(proc.stderrTail(6)))
+		}
 		return "", false, fmt.Errorf("建立会话失败: %w（常见原因：未登录；stderr: %s）",
 			err, firstLine(proc.stderrTail(6)))
 	}
@@ -1364,11 +1437,23 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		hooks.status(fmt.Sprintf("已接近单轮上限（%d 秒），本轮即将被中止；中止后可以发「继续」接着做。",
 			int(turnTimeout/time.Second)))
 	})
+	// 静默看门狗：agent 收下这一轮却迟迟不吐任何 update（opencode 实测会卡在
+	// 自己的模型调用上，最后既不报错也不出字）时，先给一条"没回音"的状态帧——
+	// 用户面对的不再是一片安静，而是"它在等什么、可以做什么"（V-2）。
+	silenceTimer := time.AfterFunc(turnSilenceNotice, func() {
+		if !sink.sawNothing() {
+			return
+		}
+		hooks.status(fmt.Sprintf("%s 收到这一轮后 %d 秒没有任何回音：可能在等模型响应，也可能卡在登录/额度。"+
+			"可以先停止这一轮，或到终端跑一次 %s 看它是否可用。",
+			th.Agent, int(turnSilenceNotice/time.Second), th.Agent))
+	})
 	started := time.Now()
 	res, promptErr := lv.proc.conn.Prompt(turnCtx, acp.PromptRequest{
 		SessionId: lv.sessionID, Prompt: blocks,
 	})
 	warnTimer.Stop()
+	silenceTimer.Stop()
 	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
 	close(turnDone)
 	sink.finish()
@@ -1449,6 +1534,15 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	}
 	interrupted := aborted || (stopped && promptErr != nil)
 	abortNote := ""
+	abortNoteTail := ""
+	// 一整轮什么都没吐就被中止：把 agent 自己的 stderr 尾巴带出来，否则用户只能
+	// 看到"连接已断开"，猜不到是 agent 内部报错（opencode 的模型调用失败就是这样
+	// 悄悄挂掉的）。
+	if interrupted && sink.allText() == "" {
+		if tail := firstLine(lv.proc.stderrTail(4)); tail != "" {
+			abortNoteTail = "；agent 侧 stderr 尾部：" + tail
+		}
+	}
 	switch {
 	case !interrupted:
 	case cause == "timeout":
@@ -1458,6 +1552,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	default:
 		abortNote = "连接已断开（页面关闭或网络中断），本轮结果不会回到本对话"
 	}
+	abortNote += abortNoteTail
 
 	m.mu.Lock()
 	if lv.stopTimer != nil {
@@ -1626,8 +1721,9 @@ func (m *Manager) ensureProc(id string) (*live, *Thread, func(), error) {
 	}
 	// 槽位占满/冷启动都会在这里等待（ensureLive 随 ctx 等待），必须带超时兜底
 	// ——否则 chip 触发的 Options 请求在并发已满时无限期挂住，前端按钮永远置灰。
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(c.HandshakeTimeoutSeconds)*time.Second)
+	// 预算 = 握手（含冷启动）+ 建会话 + 一点排队余量：只按握手的 10s 算，
+	// 首启慢的 agent（opencode 列 skill 表就要 9s）会被这条误判成"能力拿不到"。
+	ctx, cancel := context.WithTimeout(context.Background(), m.dialBudget(agentCfg))
 	defer cancel()
 	lv, _, err := m.ensureLive(ctx, th, agentCfg, TurnHooks{})
 	if err != nil {
@@ -1696,8 +1792,12 @@ func (m *Manager) applyCapability(lv *live, th *Thread, capID, value string) err
 	if source == "" {
 		return fmt.Errorf("能力项 %q 不存在或该 agent 不支持", capID)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(m.cfgFn().Normalized().HandshakeTimeoutSeconds)*time.Second)
+	c := m.cfgFn().Normalized()
+	handshake := time.Duration(c.HandshakeTimeoutSeconds) * time.Second
+	if agentCfg, ok := c.Agent(th.Agent); ok {
+		handshake = time.Duration(c.HandshakeSeconds(agentCfg)) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handshake)
 	defer cancel()
 	switch source {
 	case CapSourceConfigOption:
@@ -1971,11 +2071,11 @@ func (m *Manager) Test(name string) error {
 		return err
 	}
 	defer os.RemoveAll(ws)
-	proc, err := m.spawn(agentCfg, ws,
-		time.Duration(c.HandshakeTimeoutSeconds)*time.Second, nil, nil)
+	proc, err := m.spawn(agentCfg, ws, m.handshakeBudget(agentCfg), nil, nil)
 	if err != nil {
 		return err
 	}
+	m.markWarm(agentCfg.Name) // 测通了说明包已经拉下来了，下次按常规握手预算即可
 	proc.kill()
 	return nil
 }

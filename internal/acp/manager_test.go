@@ -94,9 +94,10 @@ type fakeAgent struct {
 	resetOnSession bool
 	extraRoots     bool // initialize 里声明 sessionCapabilities.additionalDirectories
 
-	configOptions []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
-	models        map[string]any   // 协议原生 models 状态（nil = agent 不回报）
-	modes         map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
+	configOptions  []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
+	models         map[string]any   // 协议原生 models 状态（nil = agent 不回报）
+	modes          map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
+	newSessionHang time.Duration    // >0：session/new 先挂这么久（验证建会话超时的文案与预算）
 
 	mu           sync.Mutex
 	methods      []string
@@ -263,6 +264,9 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			})
 		case "session/new":
 			f.record(&f.newReq, msg.Params)
+			if f.newSessionHang > 0 {
+				time.Sleep(f.newSessionHang) // 模拟 opencode 首启列 skill 表那种慢
+			}
 			f.resetOptions()
 			resp := map[string]any{"sessionId": f.newSessionID()}
 			if f.configOptions != nil {
@@ -2374,5 +2378,108 @@ func TestReleaseSlotNeverBlocks(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("空槽位表上归还令牌不该阻塞")
+	}
+}
+
+// npx 型命令第一次拉起要联网装包，握手按冷启动预算给；起过一次之后回落到
+// 常规值——不能为了第一次慢把每次等待都拉长（V-2）。
+func TestHandshakeBudgetCoversColdStart(t *testing.T) {
+	cfg := testConfig(t) // HandshakeTimeoutSeconds: 5
+	cfg.Agents = []config.AcpAgentConfig{
+		{Name: "fake", Command: "npx", Args: []string{"-y", "some-acp"}},
+		{Name: "local", Command: "/opt/homebrew/bin/opencode", Args: []string{"acp"}},
+	}
+	m := newTestManager(t, &cfg, nil, nil)
+	c := m.cfgFn().Normalized()
+
+	if got := m.handshakeBudget(c.Agents[0]); got != time.Duration(config.AcpColdStartHandshakeSeconds)*time.Second {
+		t.Fatalf("npx 首次应按冷启动预算，实际 %v", got)
+	}
+	if got := m.handshakeBudget(c.Agents[1]); got != 5*time.Second {
+		t.Fatalf("绝对路径命令不该吃冷启动预算，实际 %v", got)
+	}
+	m.markWarm("fake")
+	if got := m.handshakeBudget(c.Agents[0]); got != 5*time.Second {
+		t.Fatalf("起过一次后应回落到握手值，实际 %v", got)
+	}
+	// 显式写了更大的覆盖值时不能被"回落"缩掉
+	big := c.Agents[0]
+	big.HandshakeTimeoutSeconds = 120
+	if got := m.handshakeBudget(big); got != 120*time.Second {
+		t.Fatalf("条目覆盖比冷启动预算更大时应以覆盖为准，实际 %v", got)
+	}
+	// 总预算（Options 一次性拉起用）要盖住握手 + 建会话
+	if got := m.dialBudget(c.Agents[1]); got <= 5*time.Second+time.Duration(cfg.SessionTimeoutSeconds)*time.Second {
+		t.Fatalf("dialBudget 应大于握手+建会话之和，实际 %v", got)
+	}
+}
+
+// 建会话超时不该再长得像"agent 坏了"：说清是谁、多久、去哪调（V-2）。
+func TestSessionNewTimeoutNamesTheKnob(t *testing.T) {
+	f := &fakeAgent{newSessionHang: 3 * time.Second, promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.SessionTimeoutSeconds = 1
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThread(t, m)
+
+	_, err := m.Send(context.Background(), th.ID, "在吗", nil, TurnHooks{})
+	if err == nil {
+		t.Fatalf("建会话超时应该报错")
+	}
+	for _, want := range []string{"没在 1 秒内建好会话", "建会话超时", "设置 → 智能体"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误应含 %q，实际 %q", want, err.Error())
+		}
+	}
+	// 超时后不留半条连接占着槽位：再来一次（换成不挂的 fake）应该能正常跑
+	f2 := &fakeAgent{promptScript: defaultScript}
+	m2 := newTestManager(t, &cfg, nil, f2)
+	th2 := mustThread(t, m2)
+	if _, err := m2.Send(context.Background(), th2.ID, "在吗", nil, TurnHooks{}); err != nil {
+		t.Fatalf("另一台实例应能正常建会话: %v", err)
+	}
+}
+
+// agent 收下这一轮却什么都不回时，不能让人对着安静的界面干等：到点先说一声
+// "没回音"并给出下一步（V-2 真机：opencode 卡在自己的模型调用上，三分钟零输出）。
+func TestSilenceWatchdogNoticesQuietAgent(t *testing.T) {
+	old := turnSilenceNotice
+	turnSilenceNotice = 200 * time.Millisecond
+	defer func() { turnSilenceNotice = old }()
+
+	f := &fakeAgent{promptScript: func(fc *fakeConn, sid string) string {
+		time.Sleep(700 * time.Millisecond) // 收下这一轮，但一条 update 都不发
+		return "end_turn"
+	}}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	hooks, statuses := statusLog()
+	if _, err := m.Send(context.Background(), th.ID, "在吗", nil, hooks); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	joined := strings.Join(statuses(), "\n")
+	if !strings.Contains(joined, "没有任何回音") {
+		t.Fatalf("静默到点应给一条状态帧，实际 %q", joined)
+	}
+	if !strings.Contains(joined, "fake") {
+		t.Fatalf("提示要点名是哪个 agent，实际 %q", joined)
+	}
+}
+
+// 反例：agent 正常在吐字时不该弹这条提示（否则每次对话都多一句废话）。
+func TestSilenceWatchdogStaysQuietWhenAgentTalks(t *testing.T) {
+	old := turnSilenceNotice
+	turnSilenceNotice = 50 * time.Millisecond
+	defer func() { turnSilenceNotice = old }()
+
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	hooks, statuses := statusLog()
+	if _, err := m.Send(context.Background(), th.ID, "在吗", nil, hooks); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if strings.Contains(strings.Join(statuses(), "\n"), "没有任何回音") {
+		t.Fatalf("有产出就不该报静默: %v", statuses())
 	}
 }

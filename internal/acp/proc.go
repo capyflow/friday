@@ -258,7 +258,8 @@ func classifyInitError(ictx context.Context, err error, stderr string, done <-ch
 	default:
 	}
 	if ictx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return "握手超时（agent 无响应——常见于 npx 首次下载、静默挂起或卡在交互提示）"
+		return "握手超时（agent 无响应——常见于 npx 首次下载、静默挂起或卡在交互提示）；" +
+			"npx 型命令首次拉起已按冷启动预算放宽，仍不够可在设置 → 智能体把它的「握手超时」调大"
 	}
 	if looksLikeAuthProblem(err.Error(), stderr) {
 		return "疑似未登录：" + loginHintFor(cfg)

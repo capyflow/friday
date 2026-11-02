@@ -455,7 +455,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "== initialize 响应\n   %s\n\n", firstN(string(ib), 1600))
 
 	var mm *mockMCP
-	var servers []acp.McpServer
+	// 空清单也必须是 []：nil 会被编成 mcpServers:null，opencode 的 zod 校验
+	// 直接报 Invalid params（expected array, received null），探到的就不是 Friday 的报文形状了。
+	servers := []acp.McpServer{}
 	if *mockMCPFlag {
 		var err error
 		mm, err = startMockMCP()

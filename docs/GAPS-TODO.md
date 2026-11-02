@@ -170,11 +170,22 @@
   agent 的实际取值。红线：ask 绝不命中自动档、也绝不悄悄退成只读；挑不到可用档就明确不下发，
   列出可选项并提醒它自己的默认档可能更宽松。回归 `TestPickApprovalValue`（codex/claude 两套取值）、
   `TestWorkspacePolicyLandedValue`、`TestWorkspacePolicyDeclinesAmbiguousAgent`。
-- [ ] **V-2 opencode 建会话超时**
+- [x] **V-2 opencode 建会话超时**
   现象：`session/new` 返回 `context deadline exceeded`，重启后单跑仍复现；同类：npx 型 agent 首次
   冷启动（装包 > 10s）握手也超时，缓存热了才正常。影响：跨 agent 一致性没法验，第一次用必踩。
-  做到：定位 opencode 侧原因（ACP 版本/鉴权/初始化），握手与建会话超时可按 agent 配置，冷启动给
-  进度与「重试」入口，不要表现成「发了消息没反应」。
+  **定位与实施记录（2026-11-02，用 `cmd/acp-probe` 实测拆开）**：两件事被记成了一条。
+  ① 建会话与 initialize 共用 10 秒握手预算，而 opencode 1.18 光回 `available_commands_update`
+  （列全部 skill 表）就要 9.3 秒，首启确实撞线 → 已把建会话独立成默认 60 秒、可按 agent 覆盖，
+  npx 这类启动器首次握手自动放宽到 90 秒、起过一次后回落；② 那一轮 3 分钟没下文的真凶是
+  opencode 自己的模型调用挂住（它最终回 `-32603 Internal error: context deadline exceeded`，
+  stderr 全空），不是 Friday 超时 → 加静默看门狗：30 秒没有任何 update 就投一条状态帧说清
+  「谁、等了多久、可以做什么」，空手被中止时把 agent stderr 尾巴带进中断说明。
+  顺手修了探针自己的报文形状（`mcpServers` null → `[]`，否则探到的不是 Friday 的请求）。
+  真机复跑：opencode 在 30 秒处弹出回音提示（原来是一片安静）。回归
+  `TestHandshakeBudgetCoversColdStart`、`TestSessionNewTimeoutNamesTheKnob`、
+  `TestSilenceWatchdog*` 与 config 默认值/覆盖/写回用例。
+  **仍未解决（不属 Friday）**：这台机器上的 opencode 模型调用本身不可用，要它干活得先在终端
+  把它跑通（`opencode` 已登录 opencode-go，但请求超时）。
 - [x] **V-3 空闲进程占住并发槽 → 排队不可见**
   现象：`maxConcurrent=2` 时空闲进程仍占槽，新会话排队；排队期间 thread state 还是 idle、运行看板
   的 acp 为空，用户看到「发了消息没反应」；opencode 失败那轮之后槽位疑似未回收，重启才恢复。

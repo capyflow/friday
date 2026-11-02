@@ -4,7 +4,8 @@
 拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
 工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
 上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-13 已实施（2026-11-02，验证面板）；
-M-14 已实施（2026-11-02，并发排队可见与槽位记账）；M-7 按推荐缓做/不排期。
+M-14 已实施（2026-11-02，并发排队可见与槽位记账）；M-15 已实施（2026-11-02，超时预算分段与静默看门狗）；
+M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -270,6 +271,29 @@ bug 类问题已于同日修复（附录 A）。
   `Reload` 重新记账；回归 `TestSendQueuesWhenSlotsExhausted`、`TestStopCancelsQueuedTurn`、
   `TestReloadReaccountsConcurrencySlots`、`TestReleaseSlotNeverBlocks` 与运行页「排队中」卡片用例。
 
+### M-15 超时预算分段与静默看门狗
+
+- **动机**：261030 验收记的「opencode 建会话超时」，2026-11-02 用 `cmd/acp-probe` 实测拆开看是两件事：
+  ① `session/new` 与 initialize 共用 10 秒握手预算，而 opencode 1.18 光回 `available_commands_update`
+  （列全部 skill 表）就要 9.3 秒 —— 首启确实会撞线，表现成"建会话失败: context deadline exceeded"；
+  ② 真正让那一轮 3 分钟没下文的，是 opencode 自己的模型调用挂住（它最终回 `-32603 Internal error:
+  context deadline exceeded`，stderr 全空）—— 不是 Friday 的超时。另外 npx 型命令首次拉起要装包，
+  10 秒握手基本必踩。
+- **方案**：三段预算各自独立且都能按 agent 覆盖 —— 握手（默认 10s，`npx/pnpm/bunx/uvx` 这类
+  启动器首次给 90s，成功起过一次后回落）、建会话（默认 60s）、单轮（300s）。撞线的文案点名
+  "是哪一段、多久、去设置哪里调"。再加一条静默看门狗：本轮 30 秒内没有任何 update（文本/工具/
+  用量都算）就投一条状态帧说清"谁、等了多久、可以做什么"；这一轮最终空手被中止时，把 agent 的
+  stderr 尾巴附进中断说明。
+- **边界**：看门狗只负责"别让人对着安静干等"，不改判定：静默不等于失败，仍按单轮超时/用户停止
+  收尾；stderr 尾巴只是线索，agent 不写 stderr 时就没有（opencode 正是这种），所以还要靠
+  「到终端跑一次」这句下一步。
+- **实施记录（2026-11-02）**：`config.AcpConfig.SessionTimeoutSeconds` + 条目级
+  `Handshake/SessionTimeoutSeconds` 覆盖、`handshakeBudget`/`dialBudget`、`turnSilenceNotice`
+  与 `turnSink.quiet`（atomic，读方在另一条 goroutine）；`cmd/acp-probe` 顺手修了自己的报文形状
+  （`mcpServers` 从 null 改成 `[]`，否则探到的不是 Friday 的请求）。回归
+  `TestHandshakeBudgetCoversColdStart`、`TestSessionNewTimeoutNamesTheKnob`、
+  `TestSilenceWatchdogNoticesQuietAgent`（+ 反例）、config 侧默认值/覆盖/写回用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -284,6 +308,7 @@ bug 类问题已于同日修复（附录 A）。
 | 8 | M-12 | ✅ 已实施（2026-10-30） |
 | 9 | M-13 | ✅ 已实施（2026-11-02，验证面板） |
 | 10 | M-14 | ✅ 已实施（2026-11-02，并发排队可见与槽位记账） |
+| 11 | M-15 | ✅ 已实施（2026-11-02，超时预算分段与静默看门狗） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）
