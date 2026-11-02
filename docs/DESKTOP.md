@@ -86,6 +86,11 @@ desktop/
 - 解析 `FRIDAY_NOTICE=`，显式授权后交给系统通知；准确内核来源的主窗口才有权限执行通知开启命令
 - `tauri-plugin-global-shortcut` 注册全局快捷键（默认 **Alt+Space**，常量一行可改）→ 创建/切换弹窗：无边框+透明+置顶+不进任务栏，加载内核 `/palette`；失焦/Esc 隐藏（仅隐藏不销毁）
 - 零 JS 构建链：无 npm 工程，`withGlobalTauri` 用全局 API
+- 主窗口用 `titleBarStyle: Overlay` + `hiddenTitle`：内容铺到窗口顶部，macOS 的红绿灯直接浮在
+  侧栏左上角，不再单留一条标题栏黑边。代价是要自己接管：网页端检测到 `__TAURI_INTERNALS__`
+  就给 `<html>` 打 `data-shell="desktop"`，侧栏头部让出 72px（红绿灯宽度）并把行高对齐主区表头；
+  `#chatHead` / 工作区栏 / 运行页表头 / 侧栏品牌行都带 `data-tauri-drag-region` 负责拖动窗口
+  （按钮是子节点，不受影响）。浏览器直访没有这个标记，版式保持原样。
 
 弹窗页放 **Go 侧**是刻意设计：同源共享登录会话（无 CORS/鉴权烦恼）、浏览器访问 `:port/palette` 也能用、壳保持极薄。
 

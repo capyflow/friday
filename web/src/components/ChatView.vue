@@ -806,7 +806,7 @@ async function clearContext() {
 
 <template>
   <section id="view-chat" class="view">
-    <div id="chatHead">
+    <div id="chatHead" data-tauri-drag-region>
       <div class="title">小五</div>
       <button class="btn icon" :class="{ active: store.fullscreen }"
               :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"

@@ -17,7 +17,9 @@
         "height": 760,
         "minWidth": 760,
         "minHeight": 540,
-        "center": true
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
@@ -37,8 +39,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/friday"],
-    "resources": ["resources/config.yaml.example"],
+    "externalBin": [
+      "binaries/friday"
+    ],
+    "resources": [
+      "resources/config.yaml.example"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

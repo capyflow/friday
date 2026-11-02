@@ -165,7 +165,7 @@ onUnmounted(() => {
 <template>
   <section class="view" id="view-runs">
     <div class="view-inner">
-      <header class="runs-head">
+      <header class="runs-head" data-tauri-drag-region>
         <div>
           <h2>运行 <span class="count">{{ hasAnything ? '正在看 ' + (data.acp.length + data.plans.length + data.goals.length) + ' 项' : '' }}</span></h2>
           <p class="meta runs-sub">所有正在跑、排队和需要你处理的事。审批与停止都在这里。</p>

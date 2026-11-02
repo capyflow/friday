@@ -1046,7 +1046,7 @@ function removePreview(p) {
   <div id="workspaceView" class="view" v-show="store.view === 'agent'">
     <!-- 左：工作区（一组目录 + 挂在它里面的会话） -->
     <aside class="ag-rail">
-      <div class="ag-rail-head">
+      <div class="ag-rail-head" data-tauri-drag-region>
         <b>工作区</b>
         <div class="ag-rail-acts">
           <button class="ib-btn" aria-label="收起全部工作区" title="收起全部工作区"
