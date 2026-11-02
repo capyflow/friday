@@ -2164,3 +2164,215 @@ func TestWorkspacePolicyDeclinesAmbiguousAgent(t *testing.T) {
 		}
 	}
 }
+
+// waitThreadState 轮询直到会话进入目标状态（排队/运行这类瞬时状态只能靠轮询抓到）。
+func waitThreadState(t *testing.T, m *Manager, id, want string) Thread {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	var last Thread
+	for time.Now().Before(deadline) {
+		th, ok := m.Get(id)
+		if ok {
+			last = th
+			if th.State == want {
+				return th
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待会话状态 %s 超时，最后为 %q", want, last.State)
+	return Thread{}
+}
+
+// statusLog 收集一轮的 status 帧（并发安全）。
+func statusLog() (TurnHooks, func() []string) {
+	var mu sync.Mutex
+	var got []string
+	return TurnHooks{OnStatus: func(s string) {
+			mu.Lock()
+			got = append(got, s)
+			mu.Unlock()
+		}}, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string{}, got...)
+		}
+}
+
+// 并发槽满时不能只把消息吞掉：会话要标成「排队中」、时间线要说清谁占着，
+// 空闲连接也要提前让位（V-3）。
+func TestSendQueuesWhenSlotsExhausted(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if calls.Add(1) == 1 {
+			<-gate // 第一轮占着这条连接不放
+		}
+		return defaultScript(fc, sid)
+	}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 1
+	cfg.IdleKillSeconds = 1 // 有人排队时空闲连接很快让位
+	m := newTestManager(t, &cfg, nil, f)
+	thA := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	thB := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+
+	hooksA, _ := statusLog()
+	doneA := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thA.ID, "A 占位", nil, hooksA); doneA <- err }()
+	waitThreadState(t, m, thA.ID, StateRunning)
+
+	hooksB, statusesB := statusLog()
+	doneB := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thB.ID, "B 排队", nil, hooksB); doneB <- err }()
+	waitThreadState(t, m, thB.ID, StateQueued)
+
+	// 排队状态要能被列表/看板看到，且时间线给出一句带占用的说明
+	found := false
+	for _, th := range m.List() {
+		if th.ID == thB.ID && th.State == StateQueued {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("List 应把排队会话列出来: %+v", m.List())
+	}
+	close(gate) // A 收尾，让出槽位
+	if err := <-doneA; err != nil {
+		t.Fatalf("A 轮结束失败: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("B 排队后应能跑完: %v", err)
+	}
+	var queued string
+	for _, s := range statusesB() {
+		if strings.Contains(s, "排队") {
+			queued = s
+		}
+	}
+	if !strings.Contains(queued, "1/1") {
+		t.Fatalf("排队提示应带占用比，实际 %q（全部 %v）", queued, statusesB())
+	}
+	m.mu.Lock()
+	waiting := m.waiting
+	m.mu.Unlock()
+	if waiting != 0 {
+		t.Fatalf("两轮结束后等待计数应归零，实际 %d", waiting)
+	}
+}
+
+// 排队中也要能停：Stop 在没有 ACP 会话可取消时，撤掉的就是这次等待。
+func TestStopCancelsQueuedTurn(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	defer func() {
+		select {
+		case <-gate:
+		default:
+			close(gate)
+		}
+	}()
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if calls.Add(1) == 1 {
+			<-gate
+		}
+		return defaultScript(fc, sid)
+	}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 1
+	cfg.IdleKillSeconds = 600 // 不靠空闲回收：这条测试只验取消
+	m := newTestManager(t, &cfg, nil, f)
+	thA := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	thB := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+
+	doneA := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thA.ID, "A 占位", nil, TurnHooks{}); doneA <- err }()
+	waitThreadState(t, m, thA.ID, StateRunning)
+
+	doneB := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thB.ID, "B 排队", nil, TurnHooks{}); doneB <- err }()
+	waitThreadState(t, m, thB.ID, StateQueued)
+
+	if !m.Stop(thB.ID) {
+		t.Fatalf("排队中的会话应该能停")
+	}
+	if err := <-doneB; err == nil || !strings.Contains(err.Error(), "取消") {
+		t.Fatalf("B 应带着取消原因返回: %v", err)
+	}
+	if th, _ := m.Get(thB.ID); th.State == StateQueued {
+		t.Fatalf("取消后不该还挂着排队中: %+v", th)
+	}
+	m.mu.Lock()
+	waiting := m.waiting
+	cancels := len(m.queueCancels)
+	m.mu.Unlock()
+	if waiting != 0 || cancels != 0 {
+		t.Fatalf("取消后等待计数与句柄都要清掉: waiting=%d cancels=%d", waiting, cancels)
+	}
+	close(gate)
+	if err := <-doneA; err != nil {
+		t.Fatalf("A 收尾失败: %v", err)
+	}
+}
+
+// Reload 换掉槽位表时，活下来的连接必须在新表里记账：否则它们回收时抽的是旧
+// channel，新上限被悄悄放大，甚至把空 channel 抽干后卡死后续 spawn。
+func TestReloadReaccountsConcurrencySlots(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 2
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	if _, err := m.Send(context.Background(), th.ID, "占位", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	m.mu.Lock()
+	procs := len(m.procs)
+	m.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("应留下一条存活连接，实际 %d", procs)
+	}
+
+	next := cfg
+	next.MaxConcurrent = 1
+	m.Reload(next)
+
+	m.mu.Lock()
+	held, capacity := len(m.sem), cap(m.sem)
+	var slot chan struct{}
+	for _, ps := range m.procs {
+		slot = ps.slot
+	}
+	m.mu.Unlock()
+	if capacity != 1 {
+		t.Fatalf("槽位表应按新上限重建，实际 cap=%d", capacity)
+	}
+	if held != 1 {
+		t.Fatalf("活下来的连接要在新表里占住自己的名额，实际 held=%d", held)
+	}
+	m.mu.Lock()
+	if slot != m.sem {
+		m.mu.Unlock()
+		t.Fatalf("连接的 slot 应指向新的槽位表")
+	}
+	m.mu.Unlock()
+}
+
+// 归还槽位绝不能阻塞：老代码在 spawn 失败路径上写的是阻塞式 <-m.sem，
+// 计数一旦被上面的 Reload/重复回收打乱，就会死在 spawnMu 里面，
+// 之后所有会话都起不了进程——正是「只能重启」的那个现象。
+func TestReleaseSlotNeverBlocks(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		releaseSlot(make(chan struct{}))
+		releaseSlot(make(chan struct{}, 1))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("空槽位表上归还令牌不该阻塞")
+	}
+}

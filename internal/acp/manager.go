@@ -36,8 +36,11 @@ import (
 
 // thread 状态。orphaned 不落盘——绑定的 agent 被删除是读时计算的展示态。
 const (
-	StateIdle        = "idle"
-	StateRunning     = "running"
+	StateIdle    = "idle"
+	StateRunning = "running"
+	// StateQueued 是「消息已收下，但在等并发槽位」：不标出来的话，用户在时间线
+	// 与运行看板都看不到任何东西，只能猜它是不是死了（V-3）。
+	StateQueued      = "queued"
 	StateInterrupted = "interrupted"
 	StateOrphaned    = "orphaned"
 )
@@ -322,11 +325,17 @@ type Manager struct {
 	spawnMu    sync.Mutex            // 进程创建串行（同一 key 不并发拉两个）
 	locks      map[string]*sync.Mutex
 	sem        chan struct{}
-	lastCfg    config.AcpConfig // Reload 的差异比较基准
-	path       string           // acp-threads.json（工作区与会话同一份投影）
-	cfgFn      func() config.AcpConfig
-	approver   *approval.Queue
-	memory     *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	// waiting 是在等并发槽位的会话数（m.mu 保护）。有人排队时空闲连接不再守着
+	// 完整的 IdleKillSeconds，而是快速让位——否则「上限 2」会变成「后面的人等 10 分钟」。
+	waiting int
+	// queueCancels 是排队中会话的取消句柄：这时还没有 ACP 会话可发 session/cancel，
+	// 「停止」能做的就是把这次等待撤掉（threadID → cancel）。
+	queueCancels map[string]context.CancelFunc
+	lastCfg      config.AcpConfig // Reload 的差异比较基准
+	path         string           // acp-threads.json（工作区与会话同一份投影）
+	cfgFn        func() config.AcpConfig
+	approver     *approval.Queue
+	memory       *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
 	checks checkRegistry
 
@@ -373,6 +382,8 @@ func (m *Manager) List() []Thread {
 			cp.State = StateOrphaned
 		} else if cp.State == StateRunning && m.live[id] == nil {
 			cp.State = StateIdle
+		} else if cp.State == StateQueued && m.queueCancels[id] == nil {
+			cp.State = StateIdle // 等待方已经不在了（异常收尾）：不把「排队中」留成僵尸状态
 		}
 		out = append(out, cp)
 	}
@@ -652,8 +663,8 @@ func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path st
 			if th == nil || th.ID == "" {
 				continue
 			}
-			if th.State == StateRunning {
-				th.State = StateInterrupted // 重启不恢复执行，历史仍可见
+			if th.State == StateRunning || th.State == StateQueued {
+				th.State = StateInterrupted // 重启不恢复执行，历史仍可见（排队同理：没人替它等槽位）
 			}
 			// 旧投影：会话自己带目录、没有归属 → 同目录的旧 thread 收进同一个工作区
 			if th.WorkspaceID == "" || m.workspaces[th.WorkspaceID] == nil {
@@ -717,15 +728,14 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 		m.touchProc(key)
 		return ps, nil
 	}
-	select {
-	case m.sem <- struct{}{}:
-	default:
-		hooks.status("并发的智能体进程已跑满，排队等空闲槽位（上限见设置 → 智能体）…")
-		select {
-		case m.sem <- struct{}{}:
-		case <-ctx.Done():
-			return nil, errors.New("智能体进程并发已满，等待槽位时被取消")
-		}
+	// 槽位以“取的时候是哪个 channel”为准记账：Reload 会换掉 m.sem，若释放时去读
+	// 新的那个，就会抽走别人的令牌，或把空 channel 抽干后死在阻塞式 `<-m.sem` 上
+	// ——而那时 spawnMu 还握着，之后所有会话都起不了进程，只能重启（V-3）。
+	m.mu.Lock()
+	sem := m.sem
+	m.mu.Unlock()
+	if err := m.acquireSlot(ctx, th, hooks, sem); err != nil {
+		return nil, err
 	}
 	hooks.status("正在启动 agent " + agentCfg.Name + "…")
 	proc, err := m.spawn(agentCfg, th.Cwd,
@@ -733,16 +743,71 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 		m.permissionHookFor(key, agentCfg.Name),
 		func() { m.onProcExit(key) })
 	if err != nil {
-		<-m.sem
+		releaseSlot(sem)
 		return nil, err
 	}
-	ps := &procState{key: key, proc: proc, slot: m.sem, owners: map[acp.SessionId]string{},
+	ps := &procState{key: key, proc: proc, slot: sem, owners: map[acp.SessionId]string{},
 		pause: make(chan struct{}, 1), ack: make(chan struct{}, 1), resume: make(chan struct{}, 1)}
 	m.mu.Lock()
 	m.procs[key] = ps
 	m.mu.Unlock()
 	go m.pumpProc(ps)
 	return ps, nil
+}
+
+// queuedIdleGrace 是「有人在排队等槽位」时空闲连接的让位时长：不按 IdleKillSeconds
+// 死守（默认 10 分钟），否则上限 2 的机器上第三个会话要等一整段空闲时间才能开跑。
+const queuedIdleGrace = 5 * time.Second
+
+// acquireSlot 取一个并发槽位。满了就把会话标成「排队中」、在时间线上说一声谁占着，
+// 拿到槽位或被取消后恢复状态；等待期间可被 ctx 取消（关页面/停止）。
+func (m *Manager) acquireSlot(ctx context.Context, th *Thread, hooks TurnHooks, sem chan struct{}) error {
+	select {
+	case sem <- struct{}{}:
+		return nil
+	default:
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.waiting++
+	if m.queueCancels == nil {
+		m.queueCancels = map[string]context.CancelFunc{}
+	}
+	m.queueCancels[th.ID] = cancel
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.waiting > 0 {
+			m.waiting--
+		}
+		delete(m.queueCancels, th.ID)
+		m.mu.Unlock()
+		cancel()
+		m.setThreadState(th, StateIdle)
+	}()
+	hooks.status(fmt.Sprintf("并发的智能体进程已跑满（%d/%d），排队等空闲槽位…", len(sem), cap(sem)))
+	m.setThreadState(th, StateQueued)
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("智能体进程并发已满（%d/%d），等待槽位时被取消；上限可在设置 → 智能体调整", len(sem), cap(sem))
+	}
+}
+
+// releaseSlot 归还一个槽位。非阻塞：计数已经被 Reload 或重复回收打乱时，
+// 宁可放过一次归还也不能卡死在 spawnMu 里面。
+func releaseSlot(sem chan struct{}) {
+	select {
+	case <-sem:
+	default:
+	}
+}
+
+func (m *Manager) setThreadState(th *Thread, state string) {
+	m.mu.Lock()
+	th.State = state
+	m.mu.Unlock()
 }
 
 // permissionHookFor 把权限请求按 sessionId 路由回它所属 thread 的审批卡：
@@ -847,10 +912,7 @@ func (m *Manager) releaseProc(ps *procState, reason string) {
 	m.mu.Unlock()
 	ps.proc.kill()
 	if ps.slot != nil {
-		select {
-		case <-ps.slot:
-		default:
-		}
+		releaseSlot(ps.slot)
 	}
 	log.Printf("[智能体] %s 进程已回收（%s）", ps.proc.agent, reason)
 }
@@ -873,10 +935,7 @@ func (m *Manager) onProcExit(key string) {
 			ps.idle.Stop()
 		}
 		if ps.slot != nil {
-			select {
-			case <-ps.slot:
-			default:
-			}
+			releaseSlot(ps.slot)
 		}
 		log.Printf("[智能体] %s 进程已退出", ps.proc.agent)
 	}
@@ -919,22 +978,30 @@ func (m *Manager) touchProc(key string) {
 }
 
 // armIdle 一轮结束后武装空闲回收计时（以连接为单位：整条连接都没活了才回收）。
+// 有会话在排队等槽位时不守完整的 IdleKillSeconds——空闲连接占着名额，对后面排队
+// 的人来说就是「发了消息没反应」（V-3）。
 func (m *Manager) armIdle(key string) {
 	idle := time.Duration(m.cfgFn().Normalized().IdleKillSeconds) * time.Second
 	if idle <= 0 {
 		return
 	}
+	reason := "空闲回收"
 	m.mu.Lock()
 	ps := m.procs[key]
+	waiting := m.waiting
 	m.mu.Unlock()
 	if ps == nil {
 		return
+	}
+	if waiting > 0 && idle > queuedIdleGrace {
+		idle = queuedIdleGrace
+		reason = "空闲回收（有会话在排队等槽位）"
 	}
 	ps.mu.Lock()
 	if ps.idle != nil {
 		ps.idle.Stop()
 	}
-	ps.idle = time.AfterFunc(idle, func() { m.killProc(key, "空闲回收") })
+	ps.idle = time.AfterFunc(idle, func() { m.killProc(key, reason) })
 	ps.mu.Unlock()
 }
 
@@ -1520,6 +1587,15 @@ func (m *Manager) Stop(id string) bool {
 	}
 	m.mu.Unlock()
 	if !ok || sid == "" {
+		// 还没建会话的两种情况：排队等槽位（撤掉这次等待就是正确的“停止”），
+		// 或者本来就没在跑（返回 false，前端不给按钮）。
+		m.mu.Lock()
+		cancel := m.queueCancels[id]
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+			return true
+		}
 		return false
 	}
 	return lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: acp.SessionId(sid)}) == nil
@@ -1913,16 +1989,32 @@ func (m *Manager) Reload(cfg config.AcpConfig) {
 	m.lastCfg = cfg
 	// 连接按 agent+目录 共享：配置变了的 agent 名下的连接整条回收（会话下次
 	// 使用时按 session/load 重接），没变的连接不动——重载配置不该打断别人的对话。
+	n := cfg.Normalized().MaxConcurrent
+	keep := make([]*procState, 0, len(m.procs))
 	for _, ps := range m.procs {
 		agentName := strings.SplitN(ps.key, "\x00", 2)[0]
 		ac, ok := cfg.Agent(agentName)
 		old, hadOld := prev.Agent(agentName)
 		if !ok || !ac.IsEnabled() || !hadOld || agentChanged(old, ac) {
 			toKill = append(toKill, ps)
+			continue
 		}
+		keep = append(keep, ps)
 	}
-	n := cfg.Normalized().MaxConcurrent
+	// 上限调小：多出来的活连接直接回收，新槽位表才装得下。
+	for len(keep) > n {
+		extra := keep[len(keep)-1]
+		keep = keep[:len(keep)-1]
+		toKill = append(toKill, extra)
+	}
+	// 槽位表重建后，活下来的连接必须在新表里重新记账并把 slot 指过去：否则它们
+	// 回收时抽的是旧 channel 的令牌，新上限被悄悄放大，甚至把空 channel 抽干后
+	// 让下一次失败回收死在阻塞归还上。
 	m.sem = make(chan struct{}, n)
+	for _, ps := range keep {
+		m.sem <- struct{}{}
+		ps.slot = m.sem
+	}
 	m.mu.Unlock()
 	for _, ps := range toKill {
 		m.releaseProc(ps, "配置变更")

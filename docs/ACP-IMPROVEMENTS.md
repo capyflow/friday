@@ -4,7 +4,7 @@
 拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
 工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
 上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-13 已实施（2026-11-02，验证面板）；
-M-7 按推荐缓做/不排期。
+M-14 已实施（2026-11-02，并发排队可见与槽位记账）；M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -254,6 +254,22 @@ bug 类问题已于同日修复（附录 A）。
   `TestCheckTrimsLongOutput`/`TestSuggestChecksFromProjectMarkers` 与
   `TestAcpCheckEndpoints`、前端「验证标签」用例。
 
+### M-14 并发排队可见与槽位记账
+
+- **动机**：261030 真机验收里，`maxConcurrent=2` 被两条空闲连接占住，第三个会话发消息后
+  线程状态还是 idle、运行看板也是空的——用户只能猜“它到底有没有在干活”。
+- **方案**：等槽位期间把会话标成 `queued`（`List` 会列出，异常收尾时自动回落 idle），时间线的
+  status 帧带上占用比「2/2」；`Stop` 在没有 ACP 会话可取消时撤掉的就是这次等待，运行页据此给
+  「取消排队」。有人排队时，刚跑完的空闲连接不再守满 `IdleKillSeconds`，5 秒就让位。
+- **边界**：排队不是队列保证——谁先抢到槽位看调度，只保证“看得见、能取消”；重启后遗留的
+  queued 与 running 一样转成 interrupted，不假装还在等。
+- **顺带修的坑**：槽位改成“按取到时的 channel 记账”（`Reload` 会换 `m.sem`），并把 spawn 失败
+  路径上的阻塞式 `<-m.sem` 换成非阻塞归还——原来一旦计数被换表或重复回收打乱，就会死在握着
+  `spawnMu` 的 goroutine 里，之后所有会话都起不了进程、只能重启，正是验收看到的“槽位没恢复”。
+- **实施记录（2026-11-02）**：`StateQueued`、`acquireSlot`/`releaseSlot`、`armIdle` 让位、
+  `Reload` 重新记账；回归 `TestSendQueuesWhenSlotsExhausted`、`TestStopCancelsQueuedTurn`、
+  `TestReloadReaccountsConcurrencySlots`、`TestReleaseSlotNeverBlocks` 与运行页「排队中」卡片用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -267,6 +283,7 @@ bug 类问题已于同日修复（附录 A）。
 | 7 | M-11 | ✅ 已实施（2026-10-30） |
 | 8 | M-12 | ✅ 已实施（2026-10-30） |
 | 9 | M-13 | ✅ 已实施（2026-11-02，验证面板） |
+| 10 | M-14 | ✅ 已实施（2026-11-02，并发排队可见与槽位记账） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

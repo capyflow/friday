@@ -1555,6 +1555,8 @@ html[data-theme="dark"] .wfd-diff-row.del { background: rgba(248,113,113,.10); }
 .run-dot.running { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-subtle);
   animation: cap-pulse 1.6s ease-in-out infinite; }
 .run-dot.interrupted { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-subtle); }
+.run-dot.queued { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle);
+  animation: cap-pulse 2.4s ease-in-out infinite; }
 .run-link { display: block; width: 100%; padding: 9px 16px; border: none; border-top: 1px solid var(--border);
   background: transparent; color: var(--accent); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; }
 .run-link:hover { background: var(--accent-subtle); }

@@ -114,4 +114,23 @@ describe('运行看板', () => {
     expect(wrapper.text()).toContain('现在没有在跑的任务')
     expect(wrapper.find('.empty-art').exists()).toBe(true)
   })
+
+  it('排队中的会话也列出来，并能取消这次等待', async () => {
+    const data = runs()
+    data.acp = [{ threadId: 'th9', title: '等槽位的会话', workspace: 'proj-a', agent: 'codex',
+      cwd: '/home/u/proj', state: 'queued', startedAt: '', contextUsed: 0, contextSize: 0 }, ...data.acp]
+    data.counts.acp = data.acp.length
+    api.mockResolvedValue(data)
+    await show()
+    const card = () => wrapper.findAll('.run-card').find(c => c.text().includes('等槽位的会话'))
+    expect(card().text()).toContain('排队中')
+    expect(card().text()).toContain('并发已满')
+    const btn = () => card().findAll('button').find(b => b.text().includes('取消排队'))
+    await btn().trigger('click')
+    expect(btn().text()).toContain('确认取消排队')
+    await btn().trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th9/stop', {})
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('已取消这次排队'))
+  })
 })

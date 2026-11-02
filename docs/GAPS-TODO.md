@@ -175,11 +175,16 @@
   冷启动（装包 > 10s）握手也超时，缓存热了才正常。影响：跨 agent 一致性没法验，第一次用必踩。
   做到：定位 opencode 侧原因（ACP 版本/鉴权/初始化），握手与建会话超时可按 agent 配置，冷启动给
   进度与「重试」入口，不要表现成「发了消息没反应」。
-- [ ] **V-3 空闲进程占住并发槽 → 排队不可见**
+- [x] **V-3 空闲进程占住并发槽 → 排队不可见**
   现象：`maxConcurrent=2` 时空闲进程仍占槽，新会话排队；排队期间 thread state 还是 idle、运行看板
   的 acp 为空，用户看到「发了消息没反应」；opencode 失败那轮之后槽位疑似未回收，重启才恢复。
-  做到：排队要有独立状态（queued）并在时间线与看板明说「排队中，等待空闲槽（当前 2/2）」；
-  进程回收与失败路径（含握手/建会话超时）必须释放槽位。
+  **实施记录（2026-11-02）**：等槽位期间会话标 `queued`（头部/列表/运行页都列，异常收尾自动回落
+  idle），时间线 status 帧带占用比「2/2」；`Stop` 在无会话可取消时撤掉的就是这次等待，运行页给
+  「取消排队」；有人排队时空闲连接 5 秒让位而不是守满 `IdleKillSeconds`。另修了真正的“槽位没恢复”
+  根因：spawn 失败路径上的阻塞式 `<-m.sem` 在计数被 `Reload` 换表/重复回收打乱后会死在握着
+  `spawnMu` 的 goroutine 里（之后所有会话都起不了进程）——改成按取到时的 channel 记账 + 非阻塞归还。
+  回归 `TestSendQueuesWhenSlotsExhausted`、`TestStopCancelsQueuedTurn`、
+  `TestReloadReaccountsConcurrencySlots`、`TestReleaseSlotNeverBlocks` 与运行页「排队中」用例。
 - [x] **V-4 自动档的真实落点要说清**
   现象：`auto` 落到 Auto review 而不是 Full access，与「全自动」的直觉有落差。
   **实施记录（2026-11-02）**：与 V-1 同一处改动解决——`policyValue` / `policyValueName` /

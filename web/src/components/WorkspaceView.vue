@@ -265,7 +265,7 @@ const current = computed(() => threads.value.find(t => t.id === currentId.value)
 const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
-const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中断', orphaned: 'agent 已删除' }
+const stateLabel = { idle: '空闲', running: '对话中', queued: '排队中', interrupted: '已中断', orphaned: 'agent 已删除' }
 
 // 工作区 → 会话的两级栏。排序按主流 agent 工具的项目栏习惯：置顶优先，其余按
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
@@ -347,6 +347,7 @@ const dirsNote = computed(() => {
 })
 
 const STATE_HINT = {
+  queued: '并发已满，这条消息在等空闲的 agent 进程；前面那轮收尾后自动开跑（上限见设置 → 智能体）。',
   interrupted: '上次会话被中断（服务重启或进程退出）。继续发消息会重新拉起 agent 并尝试重接上下文。',
   orphaned: '该会话绑定的智能体已被删除；历史仍可查看，但不能继续对话。',
 }

@@ -78,7 +78,15 @@ function decideApproval(a, approve) {
 function stopAcp(t) {
   if (confirmAcp.value !== t.threadId) { armOnce(confirmAcp, t.threadId); return }
   confirmAcp.value = ''
-  act('t' + t.threadId, () => api('POST', '/api/acp/threads/' + t.threadId + '/stop', {}), '已请求停止本轮')
+  act('t' + t.threadId, () => api('POST', '/api/acp/threads/' + t.threadId + '/stop', {}),
+    t.state === 'queued' ? '已取消这次排队（消息没发出去）' : '已请求停止本轮')
+}
+
+// acpStopLabel：排队中的“停止”其实是撤掉等待，别显示成停了一轮在跑的对话。
+function acpStopLabel(t) {
+  const armed = confirmAcp.value === t.threadId
+  if (t.state === 'queued') return armed ? '确认取消排队' : '取消排队'
+  return armed ? '确认停止' : '停止本轮'
 }
 
 function openAcp(t) {
@@ -209,7 +217,7 @@ onUnmounted(() => {
         <section v-if="data.acp.length" class="panel runs-sec" aria-labelledby="runs-acp-title">
           <div class="runs-sec-head">
             <h3 id="runs-acp-title">智能体运行 <span class="count">{{ data.acp.length }}</span></h3>
-            <p class="meta">同一目录的会话共享一条连接；中断的会话发下一句会尝试重接。</p>
+            <p class="meta">同一目录的会话共享一条连接；中断的会话发下一句会尝试重接；排队中说明并发已跑满，可以取消这次等待。</p>
           </div>
           <article v-for="t in data.acp" :key="t.threadId" class="run-card">
             <div class="run-card-main">
@@ -217,21 +225,23 @@ onUnmounted(() => {
                 <span class="run-dot" :class="t.state" aria-hidden="true"></span>
                 <b>{{ t.title }}</b>
                 <span v-if="t.state === 'interrupted'" class="badge cron">已中断</span>
+                <span v-else-if="t.state === 'queued'" class="badge cron">排队中</span>
               </div>
               <div class="run-meta">
                 <span v-if="t.workspace">{{ t.workspace }}</span>
                 <span>{{ t.agent }}</span>
                 <span :title="t.cwd">{{ shortPath(t.cwd) }}</span>
                 <span v-if="t.startedAt && t.state === 'running'">{{ since(t.startedAt) }}前开始</span>
+                <span v-else-if="t.state === 'queued'">并发已满，在等空闲的 agent 进程</span>
                 <span v-else-if="t.state === 'interrupted'">上次运行被中断</span>
                 <span v-if="t.contextSize">上下文 {{ ctxPct(t) }}%</span>
               </div>
             </div>
             <div class="run-actions">
               <button class="btn sm" type="button" @click="openAcp(t)">打开</button>
-              <button v-if="t.state === 'running'" class="btn sm danger" type="button" :disabled="busy['t' + t.threadId]"
-                      @click="stopAcp(t)">
-                {{ confirmAcp === t.threadId ? '确认停止' : '停止本轮' }}
+              <button v-if="t.state === 'running' || t.state === 'queued'" class="btn sm danger" type="button"
+                      :disabled="busy['t' + t.threadId]" @click="stopAcp(t)">
+                {{ acpStopLabel(t) }}
               </button>
             </div>
           </article>
