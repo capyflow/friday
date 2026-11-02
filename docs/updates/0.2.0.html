@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Friday 0.2.0 更新日志</title>
+<style>
+  :root {
+    --ink: #101828;
+    --ink-2: #344054;
+    --muted: #667085;
+    --line: #e6e9ef;
+    --card: #ffffff;
+    --page: #eceef2;
+    --blue-1: #3c86f8;
+    --blue-2: #1c56cf;
+    --blue-deep: #0f3fae;
+    --navy: #0b1a3a;
+    --chip: #f4f6fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.65 "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 28px 16px 40px;
+  }
+  .sheet {
+    width: min(680px, 100%);
+    margin: 0 auto;
+    background: var(--card);
+    border-radius: 26px;
+    overflow: hidden;
+    box-shadow: 0 22px 70px rgba(16, 24, 40, .14), 0 2px 6px rgba(16, 24, 40, .06);
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    padding: 26px 28px 30px;
+    color: #fff;
+    background:
+      radial-gradient(120% 90% at 88% 8%, rgba(255,255,255,.20) 0%, rgba(255,255,255,0) 55%),
+      linear-gradient(148deg, var(--blue-1) 0%, var(--blue-2) 58%, var(--blue-deep) 100%);
+  }
+  .hero::before, .hero::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, .075);
+    pointer-events: none;
+  }
+  .hero::before { width: 320px; height: 320px; right: -120px; top: -140px; }
+  .hero::after { width: 460px; height: 460px; right: -190px; bottom: -330px; background: rgba(255,255,255,.055); }
+  .corner {
+    position: absolute;
+    width: 26px; height: 26px;
+    border: 2px solid rgba(255, 255, 255, .55);
+    pointer-events: none;
+  }
+  .corner.tl { left: 14px; top: 14px; border-right: 0; border-bottom: 0; border-radius: 8px 0 0 0; }
+  .corner.br { right: 14px; bottom: 14px; border-left: 0; border-top: 0; border-radius: 0 0 8px 0; }
+  .brand {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    z-index: 1;
+  }
+  .logo {
+    width: 46px; height: 46px;
+    border-radius: 13px;
+    background: #132a5e;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 6px 16px rgba(6, 20, 60, .35);
+    display: grid;
+    place-items: center;
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: .5px;
+  }
+  .brand-name { font-size: 19px; font-weight: 600; letter-spacing: .3px; }
+  .brand-name small { display: block; font-size: 11.5px; font-weight: 400; opacity: .72; letter-spacing: .6px; margin-top: -2px; }
+  .edition {
+    position: relative;
+    margin-left: auto;
+    z-index: 1;
+    font-size: 10.5px;
+    letter-spacing: 2.4px;
+    padding: 6px 13px;
+    border: 1px solid rgba(255, 255, 255, .55);
+    border-radius: 999px;
+    color: rgba(255, 255, 255, .92);
+    white-space: nowrap;
+  }
+  .version {
+    position: relative;
+    z-index: 1;
+    margin: 22px 0 0;
+    font-size: clamp(60px, 22vw, 86px);
+    line-height: .96;
+    font-weight: 250;
+    letter-spacing: -1px;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 8px 30px rgba(8, 30, 90, .22);
+  }
+  .date {
+    position: relative;
+    z-index: 1;
+    margin-top: 10px;
+    font-size: 12.5px;
+    letter-spacing: 1.2px;
+    color: rgba(255, 255, 255, .78);
+    font-variant-numeric: tabular-nums;
+  }
+  .headline {
+    position: relative;
+    z-index: 1;
+    margin: 26px 0 0;
+    font-size: 26px;
+    font-weight: 650;
+    letter-spacing: .5px;
+  }
+  .tagline {
+    position: relative;
+    z-index: 1;
+    margin-top: 7px;
+    font-size: 12.5px;
+    letter-spacing: 2px;
+    color: rgba(255, 255, 255, .82);
+  }
+
+  /* ---------- sections ---------- */
+  .body { padding: 18px 16px 20px; background: var(--page); }
+  .sec {
+    background: var(--card);
+    border-radius: 18px;
+    padding: 20px 20px 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+  }
+  .sec:last-child { margin-bottom: 0; }
+  .sec-head { display: flex; align-items: center; gap: 12px; }
+  .num {
+    flex: none;
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(150deg, var(--blue-1), var(--blue-2));
+    box-shadow: 0 4px 10px rgba(28, 86, 207, .28);
+  }
+  .sec-head h2 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: .3px; color: var(--ink); }
+  .rule { height: 1px; background: var(--line); margin: 13px 0 12px; }
+  ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+  li {
+    position: relative;
+    padding-left: 15px;
+    color: var(--ink-2);
+    font-size: 13.5px;
+    line-height: 1.62;
+  }
+  li::before {
+    content: "";
+    position: absolute;
+    left: 1px; top: .72em;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--blue-2);
+    opacity: .55;
+  }
+  li b { color: var(--ink); font-weight: 600; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: #f2f4f8;
+    border-radius: 5px;
+    padding: 1px 5px;
+    color: #1c56cf;
+  }
+  .chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
+  .chip {
+    background: var(--chip);
+    border: 1px solid #edf0f5;
+    border-radius: 12px;
+    padding: 12px 14px;
+    text-align: center;
+  }
+  .chip b { display: block; font-size: 16px; font-weight: 650; color: var(--ink); letter-spacing: .5px; }
+  .chip span { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); letter-spacing: .6px; }
+
+  /* ---------- footer ---------- */
+  .foot {
+    background: var(--navy);
+    color: rgba(255, 255, 255, .9);
+    text-align: center;
+    padding: 20px 16px 22px;
+  }
+  .foot b { font-size: 13.5px; font-weight: 600; letter-spacing: .4px; }
+  .foot span { display: block; margin-top: 5px; font-size: 10.5px; letter-spacing: 2px; color: rgba(255, 255, 255, .55); }
+
+  @media (max-width: 420px) {
+    body { padding: 0; background: var(--card); }
+    .sheet { border-radius: 0; box-shadow: none; }
+    .hero { padding: 22px 20px 26px; }
+    .body { padding: 14px 12px 16px; }
+    .sec { padding: 17px 16px 15px; border-radius: 16px; }
+    .version { font-size: 64px; }
+    .headline { font-size: 23px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<main class="sheet">
+  <header class="hero">
+    <span class="corner tl" aria-hidden="true"></span>
+    <span class="corner br" aria-hidden="true"></span>
+    <div class="brand">
+      <div class="logo" aria-hidden="true">五</div>
+      <div class="brand-name">Friday<small>小五 · 个人管家</small></div>
+      <div class="edition">VERSION UPDATE</div>
+    </div>
+    <div class="version">0.2.0</div>
+    <div class="date">更新日期 2026 · 11 · 02</div>
+    <h1 class="headline">更新日志</h1>
+    <div class="tagline">看得见 · 退得回 · 管得住</div>
+  </header>
+
+  <div class="body">
+    <section class="sec">
+      <div class="sec-head"><span class="num">01</span><h2>工作区信任层</h2></div>
+      <div class="rule"></div>
+      <ul>
+        <li>每轮开始前自动快照：git 仓库用无侵入基线加未跟踪备份，非 git 目录用带上限的副本，失败会明说“只能看不能还原”。</li>
+        <li>时间线标出「本轮改动 N 个文件」，逐文件看 diff；工具行能直接跳到对应文件。</li>
+        <li>一键还原本轮：先整轮预检，本轮之后又被改过、删除或重建的文件拒绝还原，并点名是哪个。</li>
+      </ul>
+      <div class="chips">
+        <div class="chip"><b>轮前快照</b><span>无损 · 无侵入</span></div>
+        <div class="chip"><b>一键还原</b><span>先预检再动手</span></div>
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-head"><span class="num">02</span><h2>审批与运行</h2></div>
+      <div class="rule"></div>
+      <ul>
+        <li>工作区可选默认审批档位：每次都问（默认）/ 只读 / 自动。agent 没有等价档时只朝更保守的方向退一档，并在会话头部标出<b>实际落点</b>（例如 codex 的 <code>workspace-write</code>）。</li>
+        <li>新增「运行」页：轮次、排队、计划、目标、定时任务、待审批与失败一屏可见，可停止、批准、重试或跳回会话。</li>
+        <li>并发跑满时消息标成<b>排队中</b>并写明占用比，可以「取消排队」；空闲连接会让位，不再让人干等十分钟。</li>
+      </ul>
+      <div class="chips">
+        <div class="chip"><b>实际落点</b><span>不假装有 ask</span></div>
+        <div class="chip"><b>排队可见</b><span>可取消 · 会让人</span></div>
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-head"><span class="num">03</span><h2>会话与记忆</h2></div>
+      <div class="rule"></div>
+      <ul>
+        <li>上下文交接：水位快满时「总结并新开」，摘要随下一轮下发，旧会话原样保留可查。</li>
+        <li>工作区项目记忆：按工作区共享的约定页，回答行可一键记入；新会话首轮自动带上，跨 codex / opencode 共用。</li>
+        <li>超时预算分三段且可按 agent 调：握手、建会话、单轮；npx 型命令首次拉起自动放宽。</li>
+        <li>agent 收了消息 30 秒没有任何动静会先给提示，不再让人对着安静界面猜它死没死。</li>
+      </ul>
+      <div class="chips">
+        <div class="chip"><b>项目记忆</b><span>按工作区沉淀</span></div>
+        <div class="chip"><b>静默提示</b><span>不再无声等待</span></div>
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-head"><span class="num">04</span><h2>验证面板</h2></div>
+      <div class="rule"></div>
+      <ul>
+        <li>时间线里的本机地址自动列成预览入口，可内嵌打开（读不到 Friday 的登录态）或新窗口；手填只收 localhost。</li>
+        <li>一键跑测试 / lint：按项目类型给建议命令，执行前挂审批卡，超时自动终止。</li>
+        <li>面板显示退出码、耗时与输出尾部，失败行标红；长输出只保留尾部并明确标注。</li>
+      </ul>
+      <div class="chips">
+        <div class="chip"><b>本地预览</b><span>iframe 已隔离</span></div>
+        <div class="chip"><b>命令走审批</b><span>可停 · 有超时</span></div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="foot">
+    <b>Friday（小五） · 0.2.0</b>
+    <span>更新介绍 / UPDATE NOTES</span>
+  </footer>
+</main>
+</body>
+</html>
