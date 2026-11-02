@@ -24,6 +24,7 @@ import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
+import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
 
 const threads = ref([])
 const workspaces = ref([])     // 工作区（一组目录 + 挂在它下面的会话）
@@ -79,6 +80,7 @@ const confirmWsId = ref('')    // 二次确认删除的工作区 id
 const confirmId = ref('')      // 二次确认删除的 thread id
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
+const filesDrawer = ref(null)      // 工作区文件/本轮改动抽屉（文件树 + diff + 还原）
 
 /* 每个 thread 一份前端态：消息缓冲、进行中的一轮、能力清单、上下文水位、输入草稿、
    待发的图片。currentId 只是"现在显示哪一份"——切换 thread 不打断别的 thread 正在
@@ -117,6 +119,28 @@ function dropState(id) {
 
 const cur = computed(() => stateOf(currentId.value))
 const messages = computed(() => (cur.value ? cur.value.messages : []))
+// 工作区文件/改动抽屉：文件树常驻入口；时间线里的“本轮改动”直接落到对应轮次。
+function openWorkspaceFiles() {
+  if (!current.value) return
+  filesDrawer.value?.open('files')
+}
+function openTurnChanges(turnId) {
+  if (!current.value) return
+  filesDrawer.value?.open('changes', turnId)
+}
+function rememberMessage(m) {
+  const body = m.text || answerText(m.blocks || [])
+  if (!body) return
+  filesDrawer.value?.openMemory({ title: current.value?.title || '项目约定', body })
+}
+
+function onChangesReverted(turnId) {
+  for (const m of messages.value) {
+    if (m.role === 'bot' && m.changes && m.changes.turnId === turnId) {
+      m.changes.revertedAt = new Date().toISOString()
+    }
+  }
+}
 const phase = computed(() => (cur.value ? cur.value.phase : 'idle'))
 const busy = computed(() => phase.value === 'streaming')
 const caps = computed(() => (cur.value ? cur.value.caps : null))
@@ -179,6 +203,28 @@ function toggleCtx() {
   if (ctxOpen.value) nextTick(() => { const el = document.getElementById('agCtxPopover'); if (el) popIn(el) })
 }
 
+// 总结并新开：ACP 没有压缩接口，只能由 Friday 整理可见时间线，旧会话保留，
+// 新会话下一轮带上交接摘要。水位低时也允许手动用（agent 不报水位则入口不出现）。
+const handoffBusy = ref(false)
+async function handoffSession() {
+  if (!currentId.value || busy.value || handoffBusy.value) return
+  const owner = currentId.value
+  handoffBusy.value = true
+  ctxOpen.value = false
+  try {
+    const r = await api('POST', `/api/acp/threads/${owner}/handoff`, {})
+    await load()
+    if (r.thread?.id && currentId.value === owner) {
+      select(r.thread.id)
+      toast('已新开续会话：交接摘要随下一轮发出')
+    }
+  } catch (e) {
+    toast('交接失败：' + e.message, true)
+  } finally {
+    handoffBusy.value = false
+  }
+}
+
 const openCap = computed(() => (caps.value || []).find(c => c.id === capOpen.value) || null)
 async function loadOptions(id) {
   const st = stateOf(id)
@@ -219,7 +265,7 @@ const current = computed(() => threads.value.find(t => t.id === currentId.value)
 const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
-const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中断', orphaned: 'agent 已删除' }
+const stateLabel = { idle: '空闲', running: '对话中', queued: '排队中', interrupted: '已中断', orphaned: 'agent 已删除' }
 
 // 工作区 → 会话的两级栏。排序按主流 agent 工具的项目栏习惯：置顶优先，其余按
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
@@ -301,6 +347,7 @@ const dirsNote = computed(() => {
 })
 
 const STATE_HINT = {
+  queued: '并发已满，这条消息在等空闲的 agent 进程；前面那轮收尾后自动开跑（上限见设置 → 智能体）。',
   interrupted: '上次会话被中断（服务重启或进程退出）。继续发消息会重新拉起 agent 并尝试重接上下文。',
   orphaned: '该会话绑定的智能体已被删除；历史仍可查看，但不能继续对话。',
 }
@@ -389,6 +436,12 @@ async function load() {
     // 一个会话都没有时也要摊开一个工作区：否则左栏全是折叠行，"新建会话"没有落点
     else if (!currentWsId.value && workspaces.value.length) currentWsId.value = workspaces.value[0].id
     refreshDirsView()
+    // 运行看板 →「打开」：等列表拉齐再选中目标会话；目标已被删就留在当前页。
+    if (store.acpOpenThread) {
+      const target = store.acpOpenThread
+      store.acpOpenThread = ''
+      if (threads.value.some(t => t.id === target)) select(target)
+    }
   } catch (e) {
     // 已经加载过（轮末刷新失败）就保留现有界面；首次加载失败给可重试的说明。
     if (!loaded.value) loadError.value = e.message || String(e)
@@ -427,6 +480,7 @@ async function select(id) {
           } else {
             st.messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
               blocks: [{ kind: 'text', text: e.text, round: 0 }],
+              changes: e.changes || null,
               turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
           }
         }
@@ -549,7 +603,7 @@ async function commitRenameThread() {
 /* 编辑工作区弹窗：改名 + 源文件夹的增删与主目录，都在这里改。
    列表里默认不铺路径（一组一行只有名字和计数），要看/要改路径是这件明确的事。
    弹窗内是暂存编辑：点保存才按差异落到后端（改主目录要等目录先加进来）。 */
-const wsDlg = reactive({ open: false, id: '', name: '', dirs: [], missing: [], saving: false })
+const wsDlg = reactive({ open: false, id: '', name: '', dirs: [], missing: [], policy: 'ask', saving: false })
 function openWsDialog(ws) {
   closeWsMenu()
   wsDlg.open = true
@@ -557,6 +611,7 @@ function openWsDialog(ws) {
   wsDlg.name = ws.name
   wsDlg.dirs = [...(ws.dirs || [])]
   wsDlg.missing = [...(ws.missingDirs || [])]
+  wsDlg.policy = ws.policy || 'ask'
 }
 function closeWsDialog() { wsDlg.open = false }
 function dlgAddDir() {
@@ -591,6 +646,7 @@ async function saveWsDialog() {
     const body = {}
     if ((ws.name || '') !== wsDlg.name.trim()) body.name = wsDlg.name.trim()
     if (want[0] !== (ws.dirs || [])[0]) body.primaryPath = want[0]
+    if ((ws.policy || 'ask') !== wsDlg.policy) body.policy = wsDlg.policy
     if (Object.keys(body).length) await api('POST', '/api/acp/workspaces/' + ws.id, body)
     await load()
     wsDlg.open = false
@@ -725,8 +781,19 @@ function stick(force) {
 // 切走时记住是否停在底部（或正在流式），切回来按需落到最新一条。
 let backToBottom = false
 watch(() => store.view, (v, prev) => {
-  if (prev === 'agent' && v !== 'agent') backToBottom = nearBottom() || busy.value
-  else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
+  if (prev === 'agent' && v !== 'agent') {
+    backToBottom = nearBottom() || busy.value
+    // v-show 只藏主视图，抽屉是 fixed 兄弟节点；切走时主动收起，别盖到别的页上
+    filesDrawer.value?.close()
+    fileDrawer.value?.close()
+  } else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
+})
+
+watch(() => store.acpOpenThread, id => {
+  if (!id || !loaded.value) return
+  store.acpOpenThread = ''
+  if (threads.value.some(t => t.id === id)) select(id)
+  else toast('这条会话已经不存在了', true)
 })
 
 /* ---------- 发送与排队 ----------
@@ -828,7 +895,7 @@ async function startTurn(owner, text, shots) {
   const ensureBot = () => {
     removeTyping()
     if (!bot) {
-      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
+      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0, changes: null })
       st.messages.push(bot)
     }
     return bot
@@ -874,6 +941,7 @@ async function startTurn(owner, text, shots) {
           turnTotal.contextSize = data.context.size || 0
         }
         if (data.context) syncCtx(owner, data.context.used, data.context.size)
+        if (data.changes && bot) bot.changes = data.changes
         if (data.error) errMsg = data.error
       }
     }
@@ -1219,8 +1287,19 @@ function removePreview(p) {
               · {{ stateLabel[current.state] || current.state }}
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
+              <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>
+              <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
+          <!-- 工作区抽屉：文件树、本轮 diff 与还原、项目记忆、验证（预览 + 检查命令） -->
+          <button class="ib-btn ag-files" aria-label="工作区文件与验证"
+                  title="工作区文件（diff、还原、项目记忆、验证）" @click="openWorkspaceFiles">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              <path d="M8 13h8M8 17h5"/>
+            </svg>
+          </button>
           <!-- 应用内全屏：收起左侧全局导航、对话吃满窗口；Esc 归页面处理（先停本轮，空闲时退出） -->
           <button class="ib-btn ag-full" :class="{ active: store.fullscreen }"
                   :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
@@ -1245,11 +1324,33 @@ function removePreview(p) {
                 <div v-else-if="m.role === 'bot'" class="turn">
                   <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
                                   @preview="path => fileDrawer.open(path)" />
+                  <button v-if="m.changes && m.changes.files.length && !m.streaming"
+                          type="button" class="turn-changes" :class="{ reverted: m.changes.revertedAt }"
+                          :aria-label="'查看本轮改动的 ' + m.changes.files.length + ' 个文件'"
+                          @click="openTurnChanges(m.changes.turnId)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M4 6h7M4 12h5M4 18h7"/><path d="M14 6h6M14 12h6M14 18h6"/>
+                    </svg>
+                    <span>本轮改动 {{ m.changes.files.length }} 个文件</span>
+                    <span class="tc-stat">
+                      <b v-if="m.changes.additions">+{{ m.changes.additions }}</b>
+                      <i v-if="m.changes.deletions">-{{ m.changes.deletions }}</i>
+                    </span>
+                    <span class="tc-more">{{ m.changes.revertedAt ? '已还原 · 查看' : '查看' }}</span>
+                  </button>
                   <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
                     <div v-if="m.turn" class="turn-total">
                       {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
                     </div>
                     <div v-if="!m.streaming" class="msg-acts">
+                      <button class="copy-btn" type="button" title="记到项目记忆"
+                              aria-label="记到项目记忆" @click.stop="rememberMessage(m)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                        </svg>
+                      </button>
                       <CopyMessageButton :blocks="m.blocks" kind="answer" />
                     </div>
                   </div>
@@ -1378,11 +1479,19 @@ function removePreview(p) {
             <div class="perm-foot pop-anim">
               数字来自 agent 的 usage_update，上下文由 agent 的会话自己管理；ACP 协议不提供压缩或清除，重开会话会丢历史。
             </div>
+            <div class="ctx-handoff pop-anim">
+              <button type="button" class="btn sm" :disabled="busy || handoffBusy" @click="handoffSession">
+                {{ handoffBusy ? '正在交接…' : '总结并新开' }}
+              </button>
+              <p class="meta">按可见时间线整理成交接摘要，新会话接着干；旧会话保留。建议水位高时使用。</p>
+            </div>
           </div>
         </div>      </template>
     </section>
   </div>
   <FilePreviewDrawer ref="fileDrawer" />
+  <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
+                        :workspace-id="current?.workspaceId || ''" @reverted="onChangesReverted" />
   <!-- 编辑工作区弹窗：改名 + 源文件夹的增删与主目录（列表里不铺路径，要改来这里改）。
        弹窗内是暂存编辑，点「保存」才按差异落后端；Esc/点遮罩 = 放弃这次编辑。 -->
   <Teleport to="body">
@@ -1399,6 +1508,15 @@ function removePreview(p) {
           <div class="dlg-body">
             <label class="meta" for="wsDlgName">名字（留空回落到主文件夹名）</label>
             <input id="wsDlgName" v-model="wsDlg.name" aria-label="工作区名字" placeholder="比如 proj-a">
+            <div class="ws-dlg-sec">
+              <label class="meta" for="wsDlgPolicy">默认审批档位</label>
+              <select id="wsDlgPolicy" v-model="wsDlg.policy" aria-label="默认审批档位">
+                <option value="ask">每次都问（推荐）</option>
+                <option value="readonly">只读</option>
+                <option value="auto">自动放行</option>
+              </select>
+              <p class="meta ws-dlg-hint">新会话或重连时尝试下发给 agent；agent 没有等价档时只朝更保守的方向退一档（比如 codex 的「每次都问」只能落到 workspace-write），并在会话头部标出实际落点。agent 不支持时会明说，不会假装已经生效。本会话里手动选过的审批模式优先。</p>
+            </div>
             <div class="ws-dlg-sec">
               <span class="meta">源文件夹（第一个是会话的主目录，其余作为扩展根下发）</span>
               <ul class="ws-dirs">

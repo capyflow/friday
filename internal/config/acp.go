@@ -22,9 +22,18 @@ const (
 	AcpDefaultIdleKillSeconds = 600
 	// AcpDefaultTurnSeconds 单轮对话超时（秒）。实测 turn 12~209s 且方差极大。
 	AcpDefaultTurnSeconds = 300
-	// AcpDefaultHandshakeSeconds initialize + session/new 的握手超时（秒）。
+	// AcpDefaultHandshakeSeconds initialize 的握手超时（秒）。
 	// gemini --acp 实测静默挂起 3 分钟，必须独立短超时。
 	AcpDefaultHandshakeSeconds = 10
+	// AcpDefaultSessionSeconds 建会话（session/new、session/load）的超时（秒）。
+	// 不能沿用握手的 10s：opencode 1.18 实测光是回 available_commands_update（把
+	// 全部 skill 表列一遍）就要 9.3s，session/new 紧跟着就撞线——表现成
+	// 「建立会话失败: context deadline exceeded」，看着像 agent 坏了，其实是预算太小。
+	AcpDefaultSessionSeconds = 60
+	// AcpColdStartHandshakeSeconds 包管理器型启动命令（npx/pnpm/bunx/uvx…）首次
+	// 拉起的握手预算：冷启动要联网装包，10s 基本必踩；同一 agent 成功起过一次后
+	// 就回落到常规握手值（缓存见 acp 包的进程内记录）。
+	AcpColdStartHandshakeSeconds = 90
 	// AcpPermissionTimeoutSeconds 智能体权限请求的审批等待（秒）——人可能不在
 	// 屏幕前，比 exec 审批的 5 分钟长得多。
 	AcpPermissionTimeoutSeconds = 30 * 60
@@ -41,8 +50,11 @@ type AcpConfig struct {
 	IdleKillSeconds int `yaml:"idleKillSeconds,omitempty" json:"idleKillSeconds,omitempty"`
 	// TurnTimeoutSeconds 单轮对话超时秒数（默认 300）。
 	TurnTimeoutSeconds int `yaml:"turnTimeoutSeconds,omitempty" json:"turnTimeoutSeconds,omitempty"`
-	// HandshakeTimeoutSeconds 握手超时秒数（默认 10）。
+	// HandshakeTimeoutSeconds initialize 握手超时秒数（默认 10）。
 	HandshakeTimeoutSeconds int `yaml:"handshakeTimeoutSeconds,omitempty" json:"handshakeTimeoutSeconds,omitempty"`
+	// SessionTimeoutSeconds 建会话（session/new、session/load）超时秒数（默认 60）。
+	// 与握手分开：skill 表大的 agent（opencode 实测 9s+）在 10s 里连会话都建不出来。
+	SessionTimeoutSeconds int `yaml:"sessionTimeoutSeconds,omitempty" json:"sessionTimeoutSeconds,omitempty"`
 	// ShowThought 是否默认显示 agent 思考流（agent_thought_chunk，默认显示）。
 	ShowThought *bool `yaml:"showThought,omitempty" json:"showThought,omitempty"`
 	// Agents 已声明的 agent 清单。
@@ -65,6 +77,11 @@ type AcpAgentConfig struct {
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// TurnTimeoutSeconds 单轮超时覆盖（0 = 用全局值）。
 	TurnTimeoutSeconds int `yaml:"turnTimeoutSeconds,omitempty" json:"turnTimeoutSeconds,omitempty"`
+	// HandshakeTimeoutSeconds 握手超时覆盖（0 = 用全局值）：npx 型 agent 冷启动
+	// 慢，可以只给它放宽，不必连别的 agent 一起放宽。
+	HandshakeTimeoutSeconds int `yaml:"handshakeTimeoutSeconds,omitempty" json:"handshakeTimeoutSeconds,omitempty"`
+	// SessionTimeoutSeconds 建会话超时覆盖（0 = 用全局值）。
+	SessionTimeoutSeconds int `yaml:"sessionTimeoutSeconds,omitempty" json:"sessionTimeoutSeconds,omitempty"`
 	// DegradeResume 标记该 agent 的 session/load 恢复保真度实测不可靠：
 	// 重开 thread 不再尝试重接，直接新开会话并标注「上下文已重置」。
 	DegradeResume bool `yaml:"degradeResume,omitempty" json:"degradeResume,omitempty"`
@@ -90,6 +107,9 @@ func (c AcpConfig) Normalized() AcpConfig {
 	if c.HandshakeTimeoutSeconds <= 0 {
 		c.HandshakeTimeoutSeconds = AcpDefaultHandshakeSeconds
 	}
+	if c.SessionTimeoutSeconds <= 0 {
+		c.SessionTimeoutSeconds = AcpDefaultSessionSeconds
+	}
 	return c
 }
 
@@ -99,6 +119,22 @@ func (c AcpConfig) TurnSeconds(agent AcpAgentConfig) int {
 		return agent.TurnTimeoutSeconds
 	}
 	return c.TurnTimeoutSeconds
+}
+
+// HandshakeSeconds 返回某 agent 的生效握手超时（条目覆盖优先）。
+func (c AcpConfig) HandshakeSeconds(agent AcpAgentConfig) int {
+	if agent.HandshakeTimeoutSeconds > 0 {
+		return agent.HandshakeTimeoutSeconds
+	}
+	return c.HandshakeTimeoutSeconds
+}
+
+// SessionSeconds 返回某 agent 的生效建会话超时（条目覆盖优先）。
+func (c AcpConfig) SessionSeconds(agent AcpAgentConfig) int {
+	if agent.SessionTimeoutSeconds > 0 {
+		return agent.SessionTimeoutSeconds
+	}
+	return c.SessionTimeoutSeconds
 }
 
 // ThoughtEnabled 返回思考流是否默认显示（缺省显示，拍板 D5）。
@@ -134,9 +170,15 @@ func (c AcpConfig) Validate() error {
 		if a.TurnTimeoutSeconds < 0 {
 			return fmt.Errorf("config: acp.agents[%s].turnTimeoutSeconds 不能为负", a.Name)
 		}
+		if a.HandshakeTimeoutSeconds < 0 {
+			return fmt.Errorf("config: acp.agents[%s].handshakeTimeoutSeconds 不能为负", a.Name)
+		}
+		if a.SessionTimeoutSeconds < 0 {
+			return fmt.Errorf("config: acp.agents[%s].sessionTimeoutSeconds 不能为负", a.Name)
+		}
 	}
 	if c.MaxConcurrent < 0 || c.IdleKillSeconds < 0 ||
-		c.TurnTimeoutSeconds < 0 || c.HandshakeTimeoutSeconds < 0 {
+		c.TurnTimeoutSeconds < 0 || c.HandshakeTimeoutSeconds < 0 || c.SessionTimeoutSeconds < 0 {
 		return fmt.Errorf("config: acp 各项数值不能为负")
 	}
 	return nil
@@ -190,6 +232,9 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 	if cfg.HandshakeTimeoutSeconds > 0 {
 		intPair(section, "handshakeTimeoutSeconds", cfg.HandshakeTimeoutSeconds)
 	}
+	if cfg.SessionTimeoutSeconds > 0 {
+		intPair(section, "sessionTimeoutSeconds", cfg.SessionTimeoutSeconds)
+	}
 	if cfg.ShowThought != nil && !*cfg.ShowThought {
 		boolPair(section, "showThought", false)
 	}
@@ -225,6 +270,12 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 			}
 			if a.TurnTimeoutSeconds > 0 {
 				intPair(item, "turnTimeoutSeconds", a.TurnTimeoutSeconds)
+			}
+			if a.HandshakeTimeoutSeconds > 0 {
+				intPair(item, "handshakeTimeoutSeconds", a.HandshakeTimeoutSeconds)
+			}
+			if a.SessionTimeoutSeconds > 0 {
+				intPair(item, "sessionTimeoutSeconds", a.SessionTimeoutSeconds)
 			}
 			if a.DegradeResume {
 				boolPair(item, "degradeResume", true)

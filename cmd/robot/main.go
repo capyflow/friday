@@ -391,7 +391,7 @@ func main() {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
 	brain = robotagent.NewBrain(ag, pool, ctxMgr)
-	brain.SetMemory(memStore) // 会话开始时注入长期记忆速览（清上下文后仍有"印象"）
+	brain.SetMemory(memStore)            // 会话开始时注入长期记忆速览（清上下文后仍有"印象"）
 	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
 	if n := len(cfg.Custom.Commands); n > 0 {
 		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)
@@ -445,6 +445,7 @@ func main() {
 	// （重启不失历史），进程空闲回收、session/load 重接。默认关闭
 	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
 	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
+	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
 		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",

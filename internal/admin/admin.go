@@ -43,6 +43,10 @@
 //	POST   /api/acp/workspaces/:id   工作区改名/置顶/换主目录（字段可选，需登录）
 //	POST   /api/acp/workspaces/:id/dirs 工作区加目录 {"path"}（需登录）
 //	DELETE /api/acp/workspaces/:id/dirs?path= 工作区移目录（需登录）
+//	GET    /api/acp/workspaces/:id/memory 工作区项目记忆列表（需登录）
+//	POST   /api/acp/workspaces/:id/memory 新建/更新项目记忆 {"id?","title","body"}（需登录）
+//	GET    /api/acp/workspaces/:id/memory/:page 读取一页项目记忆（需登录）
+//	DELETE /api/acp/workspaces/:id/memory/:page 删除一页项目记忆（需登录）
 //	DELETE /api/acp/workspaces/:id   删工作区连带其会话（需登录）
 //	GET    /api/acp/threads/:id      会话详情含投影消息与目录视图（需登录）
 //	POST   /api/acp/threads/:id      改会话标题 {"title"}（留空回到自动，需登录）
@@ -51,6 +55,15 @@
 //	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
 //	GET    /api/acp/threads/:id/options 会话配置项（模型/模式/推理档位下拉，需登录）
 //	POST   /api/acp/threads/:id/options 切换配置项取值 {"id","value"}（需登录）
+//	GET    /api/acp/threads/:id/files   工作区文件树（?path=相对路径，需登录）
+//	GET    /api/acp/threads/:id/changes 某轮改动详情（?turn=，含逐文件 diff，需登录）
+//	POST   /api/acp/threads/:id/changes/revert 还原本轮改动 {"turn"}（需登录）
+//	POST   /api/acp/threads/:id/handoff 生成交接摘要并新开续会话（需登录）
+//	GET    /api/acp/threads/:id/checks  验证命令记录与建议命令（需登录）
+//	POST   /api/acp/threads/:id/checks  提交验证命令 {"command","timeoutSec?"}（需登录，进审批队列）
+//	GET    /api/acp/threads/:id/checks/:run 单次验证运行状态与输出（需登录）
+//	POST   /api/acp/threads/:id/checks/:run/stop 停止验证运行（需登录）
+//	GET    /api/runs          运行看板：ACP 轮次/计划/目标/任务/审批/失败（需登录）
 //	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
@@ -348,6 +361,10 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspaceDelete))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirAdd))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/dirs", s.wrap(s.handleAcpWorkspaceDirRemove))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/workspaces/:id/memory", s.wrap(s.handleAcpWorkspaceMemoryList))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id/memory", s.wrap(s.handleAcpWorkspaceMemorySave))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/workspaces/:id/memory/:page", s.wrap(s.handleAcpWorkspaceMemoryGet))
+		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id/memory/:page", s.wrap(s.handleAcpWorkspaceMemoryDelete))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadRename))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/threads/:id", s.wrap(s.handleAcpThreadDelete))
@@ -355,11 +372,21 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/stop", s.wrap(s.handleAcpStop))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/options", s.wrap(s.handleAcpOptionsSet))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/files", s.wrap(s.handleAcpThreadFiles))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/changes", s.wrap(s.handleAcpThreadChanges))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/changes/revert", s.wrap(s.handleAcpThreadChangesRevert))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/handoff", s.wrap(s.handleAcpThreadHandoff))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/checks", s.wrap(s.handleAcpThreadChecks))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks", s.wrap(s.handleAcpThreadCheckStart))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/checks/:run", s.wrap(s.handleAcpThreadCheckRun))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks/:run/stop", s.wrap(s.handleAcpThreadCheckStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))
 	}
+	// 运行看板：只读聚合；具体动作仍走各自接口。
+	root.AddRouter([]string{http.MethodGet}, "/api/runs", s.wrap(s.handleRuns))
 	// 成本面板 / 预算闸门 / 价格表（未装配时跳过）。
 	s.registerCostRoutes(root)
 	// 技能管理（技能层关闭时跳过）。

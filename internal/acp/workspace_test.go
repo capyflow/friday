@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +302,7 @@ func TestWorkspaceListMarksMissingDirs(t *testing.T) {
 		t.Fatal("missingDirs 不该落盘")
 	}
 }
+
 // 会话必须落在工作区的目录里：既不在列表也不是可解析路径时报错并给下一步。
 func TestSessionCwdMustBelongToWorkspace(t *testing.T) {
 	inside, outside := t.TempDir(), t.TempDir()
@@ -361,5 +363,86 @@ func TestTitleFromMessage(t *testing.T) {
 	got := titleFromMessage(long)
 	if n := len([]rune(got)); n != 25 { // 24 个字符 + 省略号
 		t.Fatalf("超长标题应截到 24 个 rune（带省略号），实际 %d: %q", n, got)
+	}
+}
+
+// codex 与 claude 风格的真实取值集合：词汇完全不同，映射表必须两边都讲得通。
+var codexModes = []SelectValue{
+	{"read-only", "Read Only"},
+	{"workspace-write", "Workspace Write"},
+	{"agent", "Auto review"},
+	{"agent-full-access", "Full access"},
+}
+var claudeModes = []SelectValue{
+	{"default", "Default"},
+	{"acceptEdits", "Accept edits"},
+	{"plan", "Plan Mode"},
+}
+
+func TestPickApprovalValue(t *testing.T) {
+	cases := []struct {
+		name      string
+		policy    string
+		values    []SelectValue
+		want      string
+		wantKind  string
+		wantExact bool
+	}{
+		{"有 default 就是精确档", WorkspacePolicyAsk, []SelectValue{{"default", "默认"}, {"auto", "自动"}}, "default", "exact", true},
+		{"ask 直接命中", WorkspacePolicyAsk, []SelectValue{{"ask", "每次询问"}}, "ask", "exact", true},
+		{"codex 的 ask 退到 workspace-write", WorkspacePolicyAsk, codexModes, "workspace-write", "limited", false},
+		{"codex 的 readonly 命中 read-only", WorkspacePolicyReadOnly, codexModes, "read-only", "readonly", true},
+		{"codex 的 auto 命中 full-access", WorkspacePolicyAuto, codexModes, "agent-full-access", "exact", true},
+		{"claude 的 ask 命中 default", WorkspacePolicyAsk, claudeModes, "default", "exact", true},
+		{"claude 的 auto 没有全自动，退到 acceptEdits", WorkspacePolicyAuto, claudeModes, "acceptEdits", "auto-limited", false},
+		{"claude 的 readonly 命中 plan", WorkspacePolicyReadOnly, claudeModes, "plan", "readonly", true},
+		{"只有只读与全自动时，ask 宁可不下发也不碰这两档", WorkspacePolicyAsk,
+			[]SelectValue{{"read-only", "只读"}, {"agent-full-access", "全自动"}}, "", "", false},
+		{"没有可用取值", WorkspacePolicyAuto, []SelectValue{{"model", "模型"}}, "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pickApproval(c.policy, c.values)
+			if c.want == "" {
+				if ok {
+					t.Fatalf("不该命中任何取值，实际 %+v", got)
+				}
+				return
+			}
+			if !ok || got.Value != c.want || got.Kind != c.wantKind || got.Exact != c.wantExact {
+				t.Fatalf("pickApproval(%s) = %+v，期望 %s（kind=%s exact=%v）",
+					c.policy, got, c.want, c.wantKind, c.wantExact)
+			}
+			note := policyFallbackNote(c.policy, got)
+			if c.wantExact != (note == "") {
+				t.Fatalf("精确档不该有退让说明，退让档必须有：%+v note=%q", got, note)
+			}
+			if !c.wantExact && !strings.Contains(note, got.Value) {
+				t.Fatalf("退让说明要点名实际落点取值：%q", note)
+			}
+		})
+	}
+}
+
+func TestJoinSelectValuesTruncates(t *testing.T) {
+	vals := make([]SelectValue, 0, 9)
+	for i := 0; i < 9; i++ {
+		vals = append(vals, SelectValue{Value: fmt.Sprintf("v%d", i), Name: fmt.Sprintf("档 %d", i)})
+	}
+	got := joinSelectValues(vals, 6)
+	if !strings.Contains(got, "档 0(v0)") || !strings.Contains(got, "共 9 项") {
+		t.Fatalf("拼接不符: %q", got)
+	}
+	if strings.Contains(got, "v8") {
+		t.Fatalf("超出上限的取值不该出现: %q", got)
+	}
+}
+
+func TestWorkspacePolicyDefaultsAndValidation(t *testing.T) {
+	if got := NormalizeWorkspacePolicy(""); got != WorkspacePolicyAsk {
+		t.Fatalf("空档位应归一为 ask，实际 %q", got)
+	}
+	if !validWorkspacePolicy("readonly") || validWorkspacePolicy("yolo") {
+		t.Fatal("档位校验不符")
 	}
 }

@@ -17,6 +17,7 @@ package acp
 import (
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -68,7 +69,14 @@ type turnSink struct {
 	In, Out, Cached int64
 	rawUpdates      int
 	dropped         int64
+
+	// quiet 表示"这一轮还没收到任何 update"。看门狗在另一条 goroutine 上读它，
+	// 所以必须是 atomic（handle() 只在 pump goroutine 上写）。
+	quiet atomic.Bool
 }
+
+// sawNothing 报告到目前为止这一轮有没有收到过任何动静（文本/工具/用量都算）。
+func (s *turnSink) sawNothing() bool { return s.quiet.Load() }
 
 // allText 返回本轮全部回答文本。
 func (s *turnSink) allText() string { return s.all.String() }
@@ -79,14 +87,17 @@ func (s *turnSink) context() (used, size int, costAmount float64, costCurrency s
 }
 
 func newTurnSink(hooks TurnHooks) *turnSink {
-	return &turnSink{hooks: hooks, startedAt: time.Now(),
+	s := &turnSink{hooks: hooks, startedAt: time.Now(),
 		toolTitles: map[string]string{}, toolStatus: map[string]string{}, toolDetail: map[string]string{},
 		toolInput: map[string]string{}, toolOutput: map[string]string{}}
+	s.quiet.Store(true)
+	return s
 }
 
 // handle 消费一条 update（在 turn 的 pump goroutine 上串行调用）。
 func (s *turnSink) handle(n acp.SessionNotification) {
 	s.rawUpdates++
+	s.quiet.Store(false) // 收到动静，看门狗不再报"没回音"
 	u := n.Update
 	switch {
 	case u.AgentMessageChunk != nil:

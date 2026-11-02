@@ -42,11 +42,17 @@ let wrapper
 let fetchMock
 let data // 可变的服务端替身：用例直接改它，load() 就拿到新状态
 let dirPages
+let filesByDir
+let changesByTurn
+let workspaceMemory
+let checkRuns
+let checkSuggestions
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
   // 否则上一条把视图切到「最近更新」，后面几条就都在摊平列表里找分组行了
   try { localStorage.clear() } catch { /* 环境没给 localStorage 也不拦用例 */ }
+  store.acpOpenThread = ''
   data = {
     workspaces: [copy(wsA)],
     threads: [copy(thread)],
@@ -55,6 +61,11 @@ beforeEach(() => {
     session: {}, // thread id -> 目录视图
   }
   dirPages = {}
+  filesByDir = { '': [] }
+  changesByTurn = {}
+  workspaceMemory = {}
+  checkRuns = []
+  checkSuggestions = [{ label: 'npm test', command: 'npm test', source: 'package.json 的 scripts.test' }]
   api.mockReset().mockImplementation(server)
   toast.mockClear()
   fetchMock = vi.fn()
@@ -84,6 +95,88 @@ async function server(method, url, body) {
     if (path.includes('nope')) throw new Error('目录不存在或不可读')
     return json(dirPages[path] || { path, parent: '/home/u', dirs: [{ name: 'proj', path: '/home/u/proj' }] })
   }
+  const memList = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/memory$/)
+  if (method === 'GET' && memList) {
+    return json({ pages: workspaceMemory[memList[1]] || [] })
+  }
+  if (method === 'POST' && memList) {
+    const list = workspaceMemory[memList[1]] || []
+    let page = body.id ? list.find(x => x.id === body.id) : list.find(x => x.title === body.title)
+    if (page) {
+      page.title = body.title
+      page.body = body.body
+      page.updatedAt = new Date().toISOString()
+    } else {
+      page = { id: 'm' + (list.length + 1), title: body.title, body: body.body,
+        scope: memList[1], updatedAt: new Date().toISOString() }
+      list.push(page)
+    }
+    workspaceMemory[memList[1]] = list
+    return json({ page, created: true, message: '已保存' })
+  }
+  const memPage = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/memory\/([^/]+)$/)
+  if (method === 'GET' && memPage) {
+    const page = (workspaceMemory[memPage[1]] || []).find(x => x.id === memPage[2])
+    if (!page) throw new Error('未找到这页项目记忆')
+    return json({ page })
+  }
+  if (method === 'DELETE' && memPage) {
+    workspaceMemory[memPage[1]] = (workspaceMemory[memPage[1]] || []).filter(x => x.id !== memPage[2])
+    return json({ message: '已删除' })
+  }
+  const filesMatch = url.match(/^\/api\/acp\/threads\/([^/]+)\/files\?path=(.*)$/)
+  if (method === 'GET' && filesMatch) {
+    const rel = decodeURIComponent(filesMatch[2] || '')
+    return json({ path: '/home/u/proj/' + rel, entries: filesByDir[rel] || [], truncated: false })
+  }
+  const changesMatch = url.match(/^\/api\/acp\/threads\/([^/]+)\/changes\?turn=(.*)$/)
+  if (method === 'GET' && changesMatch) {
+    const turn = decodeURIComponent(changesMatch[2])
+    if (!changesByTurn[turn]) throw new Error('这一轮的改动快照已清理或不存在')
+    return json({ changes: changesByTurn[turn] })
+  }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/changes\/revert$/.test(url)) {
+    const turn = body.turn
+    if (!changesByTurn[turn]) throw new Error('这一轮的改动快照已清理或不存在')
+    changesByTurn[turn].revertedAt = '2026-10-30T12:00:00Z'
+    return json({ changes: changesByTurn[turn], message: '已还原本轮改动' })
+  }
+  const checkList = url.match(/^\/api\/acp\/threads\/([^/]+)\/checks$/)
+  if (method === 'GET' && checkList) {
+    // 列表不带输出（和后端一致），选中那条走 /checks/:run 取详情
+    const runs = checkRuns.map(({ output, ...r }) => ({ ...r, output: '', hasOutput: !!output }))
+    return json({ runs, suggestions: checkSuggestions })
+  }
+  if (method === 'POST' && checkList) {
+    if (!String(body.command || '').trim()) throw new Error('请求体须为 {"command": "..."}')
+    if (/rm -rf/.test(body.command)) throw new Error('命令含毁灭性片段 "rm -rf"，Friday 不执行')
+    if (checkRuns.some(r => r.state === 'awaiting' || r.state === 'running')) {
+      throw new Error('这条会话已有验证命令在跑或待批，先停掉它')
+    }
+    const run = { id: 'c' + (checkRuns.length + 1), command: body.command, cwd: '/home/u/proj',
+      state: 'awaiting', exitCode: -1, timeoutSec: body.timeoutSec || 300,
+      startedAt: new Date().toISOString() }
+    checkRuns.unshift(run)
+    return json({ run, message: '已提交，等你在审批卡上批准后执行' })
+  }
+  const checkOne = url.match(/^\/api\/acp\/threads\/([^/]+)\/checks\/([^/]+)$/)
+  if (method === 'GET' && checkOne) {
+    const run = checkRuns.find(r => r.id === checkOne[2])
+    if (!run) throw new Error('未找到这次验证运行')
+    return json({ run })
+  }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/checks\/[^/]+\/stop$/.test(url)) {
+    const run = checkRuns.find(r => r.id === url.split('/checks/')[1].split('/stop')[0])
+    if (!run) throw new Error('未找到这次验证运行')
+    run.state = 'killed'
+    run.note = '已手动停止'
+    return json({ message: '已停止这次验证' })
+  }
+  if (method === 'GET' && url.startsWith('/api/files/preview')) {
+    const path = decodeURIComponent(url.split('?path=')[1] || '')
+    return json({ kind: 'text', name: path.split('/').pop(), path, size: 4,
+      content: 'new\n', dataUrl: '', truncated: false, message: '' })
+  }
   if (method === 'POST' && url === '/api/acp/workspaces') {
     const id = 'ws' + (data.workspaces.length + 1)
     const dirs = body.dirs.length ? body.dirs : ['/home/u/data/acp-sessions/' + id]
@@ -101,6 +194,7 @@ async function server(method, url, body) {
       ws.dirs = [body.primaryPath, ...ws.dirs.filter(d => d !== body.primaryPath)]
     }
     if ('name' in body) ws.name = body.name || ws.dirs[0].split('/').pop()
+    if ('policy' in body) ws.policy = body.policy
     return json({ workspace: ws })
   }
   const wsDirAdd = url.match(/^\/api\/acp\/workspaces\/([^/]+)\/dirs$/)
@@ -121,6 +215,16 @@ async function server(method, url, body) {
     data.threads = data.threads.filter(t => t.workspaceId !== wsMatch[1])
     data.workspaces = data.workspaces.filter(w => w.id !== wsMatch[1])
     return json({ message: '已删除该工作区及其会话', threadIds: ids })
+  }
+  if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/handoff$/.test(url)) {
+    const old = data.threads.find(t => t.id === url.split('/')[4])
+    if (!old) throw new Error('未找到该会话')
+    const nt = {
+      ...old, id: 'th' + (data.threads.length + 1), title: old.title + ' · 续',
+      state: 'idle', handoff: '交接摘要', messages: [{ role: 'note', text: '已从上一个会话交接上下文' }],
+    }
+    data.threads.push(nt)
+    return json({ thread: nt, message: '已新开续会话' })
   }
   if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+$/.test(url)) {
     const id = url.split('/').pop()
@@ -272,8 +376,21 @@ describe('工作区页：两级栏与投影', () => {
     expect(chip.text()).toContain('40%')
     await chip.trigger('click')
     expect(wrapper.get('#agCtxPopover').text()).toContain('占用约 12k / 窗口 30k tokens')
-    // 只读：弹层里没有压缩/清除动作
-    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(0)
+    // 只读 + 一个“总结并新开”入口；没有压缩/清除
+    expect(wrapper.get('#agCtxPopover').text()).toContain('总结并新开')
+    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(1)
+  })
+
+  it('上下文弹层里总结并新开：建续会话、选中并带交接说明', async () => {
+    data.threads = [{ ...thread, contextUsed: 24000, contextSize: 30000 }]
+    await show()
+    await wrapper.get('[aria-label="上下文使用率"]').trigger('click')
+    await wrapper.get('#agCtxPopover button').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/handoff', {})
+    expect(wrapper.get('.ag-head-txt b').text()).toContain('续')
+    expect(wrapper.text()).toContain('已从上一个会话交接上下文')
   })
 
   it('agent 未上报上下文时不显示水位 chip', async () => {
@@ -400,6 +517,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     api.mockClear()
     // 改名 + 移掉一个 + 加一个 + 换主目录：全在弹窗里暂存
     await dlg.get('[aria-label="工作区名字"]').setValue('改过的名字')
+    await dlg.get('[aria-label="默认审批档位"]').setValue('readonly')
     await rows[1].get('[aria-label="从工作区移出 /home/u/shared"]').trigger('click')
     await dlg.findAll('button').find(b => b.text().includes('添加源文件夹')).trigger('click')
     await flushPromises()
@@ -416,9 +534,10 @@ describe('工作区：新建、目录增删、改名、删除', () => {
       '/api/acp/workspaces/ws1/dirs?path=' + encodeURIComponent('/home/u/shared'))
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1/dirs', { path: '/home/u/proj/ref' })
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1',
-      { name: '改过的名字', primaryPath: '/home/u/proj/ref' })
+      { name: '改过的名字', primaryPath: '/home/u/proj/ref', policy: 'readonly' })
     expect(wrapper.text()).toContain('改过的名字')
     expect(data.workspaces[0].dirs[0]).toBe('/home/u/proj/ref')
+    expect(data.workspaces[0].policy).toBe('readonly')
   })
 
   it('取消弹窗就放弃这次编辑；已经在列表里的文件夹不重复加', async () => {
@@ -1035,5 +1154,174 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.findAll('.ws-head')).toHaveLength(2)
     // 折叠状态下没有选中会话时，右侧给的是"选一个工作区"的指引而不是空白
     expect(headOf('notes').text()).toContain('个文件夹')
+  })
+
+  it('工作区抽屉可读写项目记忆，消息也能一键记到项目', async () => {
+    workspaceMemory.ws1 = [{ id: 'm1', title: '项目约定', body: '这个仓库用 pnpm', updatedAt: '2026-10-30T10:00:00Z' }]
+    await show()
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('项目记忆')).trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('项目约定')
+    await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('项目约定')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目记忆正文"]').element.value).toContain('pnpm')
+    await wrapper.get('[aria-label="项目记忆正文"]').setValue('这个仓库用 pnpm；验收跑 npm run check')
+    await wrapper.findAll('.wfd-memory-actions button').find(b => b.text() === '保存').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces/ws1/memory',
+      { id: 'm1', title: '项目约定', body: '这个仓库用 pnpm；验收跑 npm run check' })
+    expect(wrapper.text()).toContain('已保存')
+
+    await wrapper.get('[aria-label="关闭工作区文件"]').trigger('click')
+    await wrapper.get('[aria-label="记到项目记忆"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目记忆标题"]').element.value).toBe('第一件事')
+    expect(wrapper.get('[aria-label="项目记忆正文"]').element.value).toContain('看完了')
+  })
+
+  it('运行看板带目标会话时，加载完直接选中它', async () => {
+    data.threads = [copy(thread), copy(second)]
+    store.acpOpenThread = 'th2'
+    await show()
+    expect(wrapper.get('.ag-head-txt b').text()).toBe('第二件事')
+    expect(store.acpOpenThread).toBe('')
+  })
+
+  it('工作区文件抽屉：文件树预览、本轮 diff 与还原', async () => {
+    data.threads[0].messages[2].changes = {
+      turnId: 't1', at: '2026-10-30T11:00:00Z', snapshot: true,
+      files: [{ path: 'src/app.js', status: 'modified', additions: 1, deletions: 1 }],
+      additions: 1, deletions: 1,
+    }
+    filesByDir = {
+      '': [{ name: 'src', path: 'src', dir: true }, { name: 'README.md', path: 'README.md', dir: false, size: 12 }],
+      src: [{ name: 'app.js', path: 'src/app.js', dir: false, size: 20 }],
+    }
+    changesByTurn.t1 = {
+      turnId: 't1', at: '2026-10-30T11:00:00Z', vcs: 'git', snapshot: true,
+      files: [{ path: 'src/app.js', status: 'modified', additions: 1, deletions: 1,
+        diff: '@@ -1,2 +1,2 @@\n-old\n+new\n same' }],
+      additions: 1, deletions: 1,
+    }
+    await show()
+
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.wfd-panel').exists()).toBe(true)
+    expect(wrapper.findAll('.wfd-row')).toHaveLength(2)
+
+    await wrapper.findAll('.wfd-row').find(r => r.text().includes('src')).trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.wfd-row')).toHaveLength(3)
+    await wrapper.findAll('.wfd-row').find(r => r.text().includes('app.js')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-code').text()).toContain('new')
+
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('本轮改动')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-diff').text()).toContain('old')
+    expect(wrapper.find('.wfd-diff-row.add').text()).toContain('new')
+
+    const revert = wrapper.findAll('.wfd-revert button')[0]
+    await revert.trigger('click')
+    expect(revert.text()).toContain('确认还原 1 个文件')
+    await revert.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/changes/revert', { turn: 't1' })
+    expect(wrapper.text()).toContain('本轮已还原')
+  })
+
+  it('验证标签：本地预览、检查命令提交与运行输出', async () => {
+    data.threads[0].messages[2].text = '服务起来了，看 http://localhost:5173 就行'
+    await show()
+    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await flushPromises()
+    const verifyTab = () => wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('验证'))
+    await verifyTab().trigger('click')
+    await flushPromises()
+
+    // 预览地址从时间线里认出来
+    expect(wrapper.get('.wfd-check-main').text()).toBe('http://localhost:5173')
+    // 手填地址只收本机：外站明确拒绝，不悄悄收下
+    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('https://example.com')
+    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
+    expect(wrapper.text()).toContain('只能预览本机地址')
+    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('http://127.0.0.1:3000')
+    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
+    expect(wrapper.get('.wfd-frame').attributes('src')).toBe('http://127.0.0.1:3000')
+    // 内嵌 iframe 不带同源权限：预览页读不到 Friday 的登录态
+    expect(wrapper.get('.wfd-frame').attributes('sandbox')).not.toContain('allow-same-origin')
+
+    // 建议命令一键跑，提交后进审批队列
+    await wrapper.findAll('.wfd-sugs button')[0].trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks',
+      { command: 'npm test', timeoutSec: 300 })
+    expect(checkRuns[0].state).toBe('awaiting')
+    expect(wrapper.text()).toContain('等你在审批卡上批准后执行')
+    expect(wrapper.text()).toContain('待批准')
+    // 有命令待批时运行按钮收着（避免排队歧义），但可以在详情里停止
+    expect(wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行')
+      .attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').exists()).toBe(true)
+
+    // 审批通过后刷新：状态、退出码与输出尾部（失败行标红）
+    checkRuns[0].state = 'failed'
+    checkRuns[0].exitCode = 1
+    checkRuns[0].note = '退出码 1'
+    checkRuns[0].durationMs = 8200
+    checkRuns[0].output = 'PASS a.test.js\nFAIL b.test.js\n  期望 1 得到 2'
+    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('文件')).trigger('click')
+    await flushPromises()
+    await verifyTab().trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.wfd-out').text()).toContain('期望 1 得到 2')
+    expect(wrapper.findAll('.wfd-out-line.bad')).toHaveLength(1)
+    expect(wrapper.text()).toContain('8.2 秒')
+    expect(wrapper.text()).toContain('退出码 1')
+    // 退出码不重复播报，跑完了「等你批准」的提示也该撤掉
+    expect(wrapper.find('.wfd-notice').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('等你在审批卡上批准后执行')
+
+    // 再跑一条并停止
+    await wrapper.get('[aria-label="验证命令"]').setValue('npm run build')
+    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
+    await flushPromises()
+    expect(checkRuns[0].command).toBe('npm run build')
+    await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('npm run build')).trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks/c2/stop')
+    expect(checkRuns[0].state).toBe('killed')
+    expect(wrapper.text()).toContain('已停止')
+
+    // 毁灭性命令：后端拒绝时把原因原样显示出来
+    await wrapper.get('[aria-label="验证命令"]').setValue('rm -rf /tmp/x')
+    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('毁灭性片段')
+    expect(wrapper.text()).not.toContain('undefined')
+  })
+
+  it('审批档位退让到别的档时，头部标出实际落点', async () => {
+    Object.assign(data.threads[0], {
+      policyApplied: 'ask', policyValue: 'workspace-write', policyValueName: 'Workspace Write',
+      policyFallback: true,
+      policyNote: '该 agent 没有「每次都问」的等价取值，已退到最接近的保守档 Workspace Write（workspace-write）：它不是逐条审批。',
+    })
+    await show()
+    expect(headMeta()).toContain('审批档位实际是 Workspace Write')
+    expect(headMeta()).not.toContain('审批档位未下发')
+  })
+
+  it('档位压根没下发时仍说「审批档位未下发」', async () => {
+    Object.assign(data.threads[0], {
+      policyNote: '该 agent 没有上报审批模式，工作区默认档位无法下发；改动仍会记录并可还原。',
+    })
+    await show()
+    expect(headMeta()).toContain('审批档位未下发')
   })
 })

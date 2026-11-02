@@ -321,7 +321,10 @@ context:
 #   maxConcurrent: 2           # 同时存活的 agent 进程上限（各带自己的 MCP/skill 表）
 #   idleKillSeconds: 600       # 空闲回收秒数（回收不丢对话记录；0 视为默认，负数不回收）
 #   turnTimeoutSeconds: 300    # 单轮对话超时
-#   handshakeTimeoutSeconds: 10 # 启动握手超时（未登录的故障靠它快速报错）
+#   handshakeTimeoutSeconds: 10 # initialize 握手超时（未登录的故障靠它快速报错）
+#   sessionTimeoutSeconds: 60  # 建会话（session/new、session/load）超时：与握手分开，
+#                              # skill 表多的 agent（opencode 实测列命令就要 9s+）在 10s 里
+#                              # 连会话都建不出来。npx 这类现拉包的命令首次握手自动放宽到 90s
 #   showThought: true          # 是否显示 agent 思考流
 #   agents:
 #     - name: codex
@@ -331,4 +334,6 @@ context:
 #       workspace: ~/projects  # 建 thread 时的预填工作目录
 #       enabled: true
 #       turnTimeoutSeconds: 0  # 0 = 用全局值；也可按 agent 覆盖
+#       handshakeTimeoutSeconds: 0 # 0 = 用全局值（npx 型 agent 首启慢，可只给它放宽）
+#       sessionTimeoutSeconds: 0   # 0 = 用全局值
 #       degradeResume: false   # session/load 恢复保真度实测不可靠时置 true

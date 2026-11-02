@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
@@ -100,23 +101,26 @@ func (s *Server) handleAcpWorkspacesCreate(ctx *vhttp.Context) error {
 }
 
 // handleAcpWorkspacesUpdate 改工作区的展示属性：POST /api/acp/workspaces/:id，
-// 三个字段都可选、给哪个改哪个（缺省即不动，避免"改名字顺手把置顶洗掉"）：
-//   {"name":"…"}          改名（留空回落主目录名）
-//   {"pinned":true}       置顶/取消置顶
-//   {"primaryPath":"…"}   把工作区里的某个目录提为主目录（必须是已有目录之一）
+// 字段都可选、给哪个改哪个（缺省即不动，避免"改名字顺手把置顶洗掉"）：
+//
+//	{"name":"…"}          改名（留空回落主目录名）
+//	{"pinned":true}       置顶/取消置顶
+//	{"primaryPath":"…"}   把工作区里的某个目录提为主目录（必须是已有目录之一）
+//	{"policy":"ask"}      默认审批档位：ask / readonly / auto
 func (s *Server) handleAcpWorkspacesUpdate(ctx *vhttp.Context) error {
 	var req struct {
 		Name        *string `json:"name"`
 		Pinned      *bool   `json:"pinned"`
 		PrimaryPath *string `json:"primaryPath"`
+		Policy      *string `json:"policy"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
 	}
 	id := ctx.GinContext().Param("id")
-	if req.Name == nil && req.Pinned == nil && req.PrimaryPath == nil {
+	if req.Name == nil && req.Pinned == nil && req.PrimaryPath == nil && req.Policy == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest,
-			map[string]string{"error": `至少给一个字段：{"name": "..."}、{"pinned": true} 或 {"primaryPath": "目录"}`})
+			map[string]string{"error": `至少给一个字段：{"name": "..."}、{"pinned": true}、{"primaryPath": "目录"} 或 {"policy": "ask|readonly|auto"}`})
 	}
 	if req.Pinned != nil {
 		if err := s.acp.SetPinned(id, *req.Pinned); err != nil {
@@ -125,6 +129,11 @@ func (s *Server) handleAcpWorkspacesUpdate(ctx *vhttp.Context) error {
 	}
 	if req.PrimaryPath != nil {
 		if _, err := s.acp.SetPrimaryDir(id, *req.PrimaryPath); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+	}
+	if req.Policy != nil {
+		if err := s.acp.SetPolicy(id, *req.Policy); err != nil {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 		}
 	}
@@ -423,6 +432,197 @@ func (s *Server) handleAcpTest(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "握手成功：agent 可正常拉起并响应 initialize"})
 }
 
+// handleAcpThreadFiles 列出会话工作区下的直接子项（文件树懒加载）：
+// GET /api/acp/threads/:id/files?path=src。path 是相对主目录的路径，缺省为根。
+func (s *Server) handleAcpThreadFiles(ctx *vhttp.Context) error {
+	entries, full, truncated, err := s.acp.Files(
+		ctx.GinContext().Param("id"), ctx.GinContext().Query("path"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"path": full, "entries": entries, "truncated": truncated,
+	})
+}
+
+// handleAcpThreadChanges 读取某一轮的改动详情（含逐文件 diff）：
+// GET /api/acp/threads/:id/changes?turn=t123。
+func (s *Server) handleAcpThreadChanges(ctx *vhttp.Context) error {
+	turn := strings.TrimSpace(ctx.GinContext().Query("turn"))
+	if turn == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 turn 参数"})
+	}
+	ch, err := s.acp.Changes(ctx.GinContext().Param("id"), turn)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"changes": ch})
+}
+
+// handleAcpThreadChangesRevert 还原本轮改动：POST /api/acp/threads/:id/changes/revert
+// body {"turn":"t123"}。还原前会拒绝“本轮之后又被改过”的文件与同目录仍在跑的会话。
+func (s *Server) handleAcpThreadChangesRevert(ctx *vhttp.Context) error {
+	var req struct {
+		Turn string `json:"turn"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.Turn) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"turn": "..."}`})
+	}
+	ch, err := s.acp.Revert(ctx.GinContext().Param("id"), strings.TrimSpace(req.Turn))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"changes": ch.Summary(), "message": "已还原本轮改动",
+	})
+}
+
+// handleAcpThreadHandoff 从当前会话生成交接摘要并新开一条同工作区/agent/主目录的
+// “续”会话：POST /api/acp/threads/:id/handoff。旧会话保留，摘要随后续首轮下发。
+func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
+	th, err := s.acp.Handoff(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"thread": th, "message": "已新开续会话：交接摘要会随下一轮发给 agent",
+	})
+}
+
+// handleAcpThreadChecks 返回会话的验证命令记录与建议命令：
+// GET /api/acp/threads/:id/checks。记录是内存态（重启即清，不留假「在跑」），
+// 建议按主目录的标志文件推断（package.json scripts / go.mod / Makefile 等）。
+func (s *Server) handleAcpThreadChecks(ctx *vhttp.Context) error {
+	id := ctx.GinContext().Param("id")
+	suggestions, err := s.acp.CheckSuggestions(id)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	runs := s.acp.Checks(id)
+	// 列表只带状态与说明，不带输出（10 条 × 64 KB 太肥）；选中那条走 GET .../checks/:run。
+	for i := range runs {
+		runs[i].Output = ""
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"runs":        runs,
+		"suggestions": suggestions,
+	})
+}
+
+// handleAcpThreadCheckStart 提交一条验证命令：POST /api/acp/threads/:id/checks
+// body {"command":"npm test","timeoutSec":300}。命令先进审批队列（与 agent 权限卡
+// 同源），返回记录初始为 awaiting，前端轮询 GET .../checks 看后续状态。
+func (s *Server) handleAcpThreadCheckStart(ctx *vhttp.Context) error {
+	var req struct {
+		Command    string `json:"command"`
+		TimeoutSec int    `json:"timeoutSec"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.Command) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"command": "..."}`})
+	}
+	run, err := s.acp.StartCheck(ctx.GinContext().Param("id"), req.Command,
+		time.Duration(req.TimeoutSec)*time.Second)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"run": run, "message": "已提交，等你在审批卡上批准后执行",
+	})
+}
+
+// handleAcpThreadCheckRun 读取单次验证运行的状态与输出尾部：
+// GET /api/acp/threads/:id/checks/:run。
+func (s *Server) handleAcpThreadCheckRun(ctx *vhttp.Context) error {
+	run, err := s.acp.Check(ctx.GinContext().Param("id"), ctx.GinContext().Param("run"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"run": run})
+}
+
+// handleAcpThreadCheckStop 停止一次验证运行：POST /api/acp/threads/:id/checks/:run/stop。
+// 待批的撤卡，在跑的杀掉整个进程组。
+func (s *Server) handleAcpThreadCheckStop(ctx *vhttp.Context) error {
+	if err := s.acp.StopCheck(ctx.GinContext().Param("id"), ctx.GinContext().Param("run")); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "已停止这次验证"})
+}
+
+// handleAcpWorkspaceMemoryList 列出工作区项目记忆页（不含正文）。
+func (s *Server) handleAcpWorkspaceMemoryList(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"pages": s.memory.PagesScoped(scope)})
+}
+
+// handleAcpWorkspaceMemoryGet 读取一页项目记忆正文。
+func (s *Server) handleAcpWorkspaceMemoryGet(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	p, ok := s.memory.ReadScoped(scope, ctx.GinContext().Param("page"))
+	if !ok {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到这页项目记忆"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p})
+}
+
+// handleAcpWorkspaceMemorySave 新建或更新一页项目记忆：
+// POST /api/acp/workspaces/:id/memory {"id?","title","body"}。
+func (s *Server) handleAcpWorkspaceMemorySave(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	var req struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"title":"…","body":"…"}`})
+	}
+	p, created, err := s.memory.SaveScoped(scope, req.ID, req.Title, req.Body, "admin")
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	msg := "项目记忆已更新"
+	if created {
+		msg = "已新建项目记忆"
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"page": p, "created": created, "message": msg})
+}
+
+// handleAcpWorkspaceMemoryDelete 删除一页项目记忆。
+func (s *Server) handleAcpWorkspaceMemoryDelete(ctx *vhttp.Context) error {
+	scope, err := s.workspaceMemoryScope(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	if !s.memory.DeleteScoped(scope, ctx.GinContext().Param("page")) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到这页项目记忆"})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"message": "项目记忆已删除"})
+}
+
+// workspaceMemoryScope 校验工作区存在且记忆仓库可用，返回 scope（工作区 id）。
+func (s *Server) workspaceMemoryScope(workspaceID string) (string, error) {
+	if s.acp == nil {
+		return "", fmt.Errorf("智能体功能未启用")
+	}
+	if s.memory == nil {
+		return "", fmt.Errorf("长期记忆未启用")
+	}
+	if _, ok := s.acp.GetWorkspace(workspaceID); !ok {
+		return "", fmt.Errorf("未找到工作区 %s", workspaceID)
+	}
+	return workspaceID, nil
+}
+
 // handleAcpChat 处理一次智能体对话：POST /api/acp/threads/:id/chat，
 // 请求体 {"message":"...", "attachments":["<上传id>", ...]}，响应为 SSE 流，
 // 帧协议与 /api/chat 一致（另有 {"status":"..."} 生命周期占位帧）。
@@ -517,6 +717,10 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 		turn["stopped"] = res.StopReason
 	}
 	payload := map[string]any{"done": true, "turn": turn}
+	if res.Changes != nil {
+		// 只带摘要：逐文件 diff 由 /changes?turn= 单独取，避免 SSE 单帧过大。
+		payload["changes"] = res.Changes.Summary()
+	}
 	if th, ok := s.acp.Get(threadID); ok && th.ContextSize > 0 {
 		// M-5：上下文水位（agent 自报，仅展示）。
 		payload["context"] = map[string]any{

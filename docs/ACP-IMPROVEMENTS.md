@@ -1,7 +1,11 @@
 # ACP 接入改进清单
 
 状态：**M-1/M-2/M-5/M-8 已实施（2026-10-21 上午）**；**M-3/M-4 已实施（2026-10-21 下午，
-拍板：兼容官方 registry.json schema，直接同源）**；M-6/M-7 按推荐缓做/不排期。
+拍板：兼容官方 registry.json schema，直接同源）**；**M-9/M-10 已实施（2026-10-30，
+工作区改动追踪与默认审批档位）**；M-6 已实施（2026-10-29）；M-11 已实施（2026-10-30，
+上下文交接）；M-12 已实施（2026-10-30，工作区项目记忆）；M-13 已实施（2026-11-02，验证面板）；
+M-14 已实施（2026-11-02，并发排队可见与槽位记账）；M-15 已实施（2026-11-02，超时预算分段与静默看门狗）；
+M-7 按推荐缓做/不排期。
 bug 类问题已于同日修复（附录 A）。
 分支：`explore/acp-agents`｜参考系：Zed 的 ACP 客户端实现（`zed-industries/zed` 的
 `agent_servers` / `acp_thread` crate，2026-10-20 逆向笔记）。
@@ -164,6 +168,132 @@ bug 类问题已于同日修复（附录 A）。
   对齐——剩余缺口只是回归保护。新增 `web/tests/approval-cards.test.js`：成功路径
   （移除+提示）与失效路径（toast 失效原因、卡保留）两用例。
 
+### M-9 工作区改动追踪与还原
+
+- **动机**：agent 直接改盘，时间线只有文字和工具行；用户看不到“这一轮改了什么”，也没有退路。
+  对标 ZCode 的编辑历史/撤销，但 Friday 的重点是**把改动落成可核对的文件清单与 diff**，
+  而不是做一个完整 IDE。
+- **方案**：每轮开始前做轮前快照——git 仓库用 `git stash create` 生成不碰工作区的 dangling
+  commit（未跟踪文件另存副本），非 git 目录用带体积/数量上限的副本；轮末按 git diff /
+  文件指纹生成改动清单与逐行 diff，落 `acp/snapshots/<thread>/<turn>/changes.json`。
+  工作区抽屉展示文件树、预览、本轮 diff 与“还原本轮”；还原前整轮预检，本轮后被改过/删除/重建
+  的文件拒绝还原，避免覆盖用户后续编辑。
+- **边界**：单轮 2 万文件 / 100MB / 单文件 5MB，保留最近 30 轮；超出或快照失败时明说
+  “只能看不能还原”，不假装成功；暂存区状态不承诺恢复；不提供 IDE 级文件编辑与终端。
+- **实施记录（2026-10-30）**：`internal/acp/changes.go`（快照/扫描/逐行 diff/还原）、
+  `manager.Send` 接入与 `Thread.Entry.changes` 投影、admin `files/changes/revert` 接口、
+  `WorkspaceFilesDrawer.vue` 与时间线“本轮改动”摘要。回归：`changes_test.go` 覆盖 git/非 git
+  的检测、diff、还原与“本轮后又被改过拒绝还原”；`TestSendRecordsWorkspaceChanges` 覆盖
+  Send → 投影 → 详情 → 还原全链路；前端 `workspace-view.test.js` 覆盖文件树/预览/diff/还原。
+
+### M-10 工作区默认审批档位
+
+- **动机**：ACP 审批卡弹不弹取决于各 agent 自己的审批模式，Friday 没有统一的“只读/每次都问/自动”。
+- **方案**：工作区保存 `policy`（默认 `ask`）；新会话/重连时按语义关键词映射到 agent 的
+  `approval_mode` 能力，映射不到就在线程上写 `policyNote` 并在会话头部标“审批档位未下发”。
+  它只是默认值：同一会话手动选过的审批模式由 `capChoices` 随后重放并覆盖。
+- **边界**：没有沙箱，不能把不支持审批模式的 agent 强行变成只读；这类情况靠轮前快照兜底，
+  文案明确说“只能事后还原、不能事前拦截”，不假装已经生效。
+- **实施记录（2026-10-30）**：`Workspace.Policy` + `SetPolicy`、`applyWorkspacePolicy` 与
+  `pickApprovalValue`、admin 更新接口与编辑工作区弹窗；回归 `TestPickApprovalValue` /
+  `TestWorkspacePolicyDefaultsAndValidation` 与 admin 端点用例。
+- **修订（2026-11-02，V-1/V-4）**：真机跑 codex 发现它只报 `read-only / workspace-write /
+  agent / agent-full-access`，「每次都问」命中不到 → 悄悄留在 Auto review（等于自动放行）。
+  映射改成**分层退让**：先找语义等价档，找不到只朝“同样能干活但更保守”的方向退一档
+  （ask→可写受限，auto→自动但不免审批），并记下发给 agent 的实际取值
+  （`policyValue` / `policyValueName` / `policyFallback`），会话头部直接写“审批档位实际是
+  Workspace Write”。红线：ask 绝不命中自动档，也绝不退到只读——只读是另一个档位，
+  用户想只读会显式选；挑不到可用档就明确不下发，并列出可选项、提醒它自己的默认档可能更宽松。
+  回归 `TestPickApprovalValue`（codex/claude 两套取值）、`TestWorkspacePolicyLandedValue`、
+  `TestWorkspacePolicyDeclinesAmbiguousAgent` 与前端头部落点用例。
+
+### M-11 上下文交接（总结并新开）
+
+- **动机**：ACP 没有上下文压缩/清除接口，水位数只能看；agent 会话真的满了只能重开，重开靠
+  `session/load`，恢复不可靠的 agent 直接“上下文已重置”。
+- **方案**：上下文弹层提供「总结并新开」——Friday 从**可见时间线**整理交接摘要（不调用模型，
+  明确标注 agent 未上报的细节可能遗漏），在同一工作区/agent/主目录新开「· 续」会话；
+  摘要存新线程的 `handoff` 字段，下一轮作为前置文本发给 agent，送达成功才清空；旧会话原样保留，
+  手动选过的模型/审批等能力选择一并复制。
+- **边界**：不是原地压缩，旧会话不会变小；摘要只含用户原话、agent 最终回答与系统备注，
+  工具过程不在投影里，可能遗漏；水位低时也可手动用。
+- **实施记录（2026-10-30）**：`Manager.Handoff`/`handoffSummary`、`Thread.Handoff` 下发与清理、
+  admin `POST /api/acp/threads/:id/handoff`、上下文弹层按钮与「· 续」会话切换。回归
+  `TestHandoffCreatesContinuationThread` / `TestHandoffRejectsEmptyThread` 与前端弹层用例。
+
+### M-12 工作区项目记忆
+
+- **动机**：长期记忆原本是全局用户 wiki，工作区说明只告诉 agent 目录清单；项目约定、验收口径
+  和上一次做出的决定没有地方沉淀，换 agent 还要重新交代。
+- **方案**：`memory.Page` 增加 `Scope`（空=全局用户记忆，工作区 id=项目记忆），全局读写默认
+  只看全局页；工作区抽屉新增「项目记忆」标签，回答行可一键把结论填成草稿。`Manager.SetMemory`
+  后，工作区首轮说明附带该工作区的项目记忆速览，并把摘要纳入注入指纹——记忆变了下一轮/重连
+  才重新交代，不每轮刷屏。
+- **边界**：不写用户仓库（默认不生成 `AGENTS.md`），不混进全局记忆；项目记忆只注入速览，
+  细节仍需要用户或 agent 主动确认。
+- **实施记录（2026-10-30）**：`internal/memory` scoped API、admin `workspaces/:id/memory` CRUD、
+  `WorkspaceFilesDrawer` 项目记忆页、`WorkspaceView` 回答行「记到项目记忆」。回归
+  `TestScopedMemoryIsolatedAndPersisted`、`TestWorkspaceBriefIncludesProjectMemory`、
+  `TestAcpWorkspaceMemoryEndpoints` 与前端抽屉用例。
+
+### M-13 验证面板（本地预览 + 检查命令）
+
+- **动机**：agent 说「做完了」不等于验证过。Friday 里只能看文字，既没有页面预览入口，也没有
+  跑测试/lint 的地方，用户得回终端；而这些命令本来就该走同一套审批与超时。
+- **方案**：`internal/acp/verify.go` 记录一次验证运行（awaiting→running→passed/failed/
+  timeout/killed/denied/error），执行前用 `approval.Queue.RequestCancelable` 强制挂一张
+  「验证命令」审批卡（与 agent 权限卡同源，超时 5 分钟），批准后在会话主目录 `/bin/sh -c` 起进程，
+  独立进程组 + `CommandContext`，停止/超时都杀整组。输出落临时文件只回读尾部（64 KB、400 行、
+  去 ANSI），列表接口不带输出、选中那条走详情接口。建议命令按标志文件推断（package.json scripts +
+  pnpm/yarn 判定、go.mod、Cargo.toml、pytest 标志、Makefile 兜底）。抽屉「验证」标签承载 UI：
+  预览地址从时间线正则提取，也能手填（只允许 localhost/127.0.0.1），内嵌 iframe 不带
+  `allow-same-origin`，预览页读不到 Friday 登录态，同时始终给「新窗口」出口。
+- **边界**：不承诺沙箱——命令是用户自己填的一行 shell，Friday 只做毁灭性片段兜底黑名单 + 人工审批；
+  单条会话同时只跑一个验证命令，记录保留 10 条且不落盘（进程重启后「在跑」没有意义）。
+- **实施记录（2026-11-02）**：admin `threads/:id/checks[/:run][/stop]` 四接口，`RunsView`
+  的待审批区自动出现「验证命令」卡。回归 `TestCheckRun*`/`TestCheckStop*`/`TestCheckDenied*`/
+  `TestCheckTrimsLongOutput`/`TestSuggestChecksFromProjectMarkers` 与
+  `TestAcpCheckEndpoints`、前端「验证标签」用例。
+
+### M-14 并发排队可见与槽位记账
+
+- **动机**：261030 真机验收里，`maxConcurrent=2` 被两条空闲连接占住，第三个会话发消息后
+  线程状态还是 idle、运行看板也是空的——用户只能猜“它到底有没有在干活”。
+- **方案**：等槽位期间把会话标成 `queued`（`List` 会列出，异常收尾时自动回落 idle），时间线的
+  status 帧带上占用比「2/2」；`Stop` 在没有 ACP 会话可取消时撤掉的就是这次等待，运行页据此给
+  「取消排队」。有人排队时，刚跑完的空闲连接不再守满 `IdleKillSeconds`，5 秒就让位。
+- **边界**：排队不是队列保证——谁先抢到槽位看调度，只保证“看得见、能取消”；重启后遗留的
+  queued 与 running 一样转成 interrupted，不假装还在等。
+- **顺带修的坑**：槽位改成“按取到时的 channel 记账”（`Reload` 会换 `m.sem`），并把 spawn 失败
+  路径上的阻塞式 `<-m.sem` 换成非阻塞归还——原来一旦计数被换表或重复回收打乱，就会死在握着
+  `spawnMu` 的 goroutine 里，之后所有会话都起不了进程、只能重启，正是验收看到的“槽位没恢复”。
+- **实施记录（2026-11-02）**：`StateQueued`、`acquireSlot`/`releaseSlot`、`armIdle` 让位、
+  `Reload` 重新记账；回归 `TestSendQueuesWhenSlotsExhausted`、`TestStopCancelsQueuedTurn`、
+  `TestReloadReaccountsConcurrencySlots`、`TestReleaseSlotNeverBlocks` 与运行页「排队中」卡片用例。
+
+### M-15 超时预算分段与静默看门狗
+
+- **动机**：261030 验收记的「opencode 建会话超时」，2026-11-02 用 `cmd/acp-probe` 实测拆开看是两件事：
+  ① `session/new` 与 initialize 共用 10 秒握手预算，而 opencode 1.18 光回 `available_commands_update`
+  （列全部 skill 表）就要 9.3 秒 —— 首启确实会撞线，表现成"建会话失败: context deadline exceeded"；
+  ② 真正让那一轮 3 分钟没下文的，是 opencode 自己的模型调用挂住（它最终回 `-32603 Internal error:
+  context deadline exceeded`，stderr 全空）—— 不是 Friday 的超时。另外 npx 型命令首次拉起要装包，
+  10 秒握手基本必踩。
+- **方案**：三段预算各自独立且都能按 agent 覆盖 —— 握手（默认 10s，`npx/pnpm/bunx/uvx` 这类
+  启动器首次给 90s，成功起过一次后回落）、建会话（默认 60s）、单轮（300s）。撞线的文案点名
+  "是哪一段、多久、去设置哪里调"。再加一条静默看门狗：本轮 30 秒内没有任何 update（文本/工具/
+  用量都算）就投一条状态帧说清"谁、等了多久、可以做什么"；这一轮最终空手被中止时，把 agent 的
+  stderr 尾巴附进中断说明。
+- **边界**：看门狗只负责"别让人对着安静干等"，不改判定：静默不等于失败，仍按单轮超时/用户停止
+  收尾；stderr 尾巴只是线索，agent 不写 stderr 时就没有（opencode 正是这种），所以还要靠
+  「到终端跑一次」这句下一步。
+- **实施记录（2026-11-02）**：`config.AcpConfig.SessionTimeoutSeconds` + 条目级
+  `Handshake/SessionTimeoutSeconds` 覆盖、`handshakeBudget`/`dialBudget`、`turnSilenceNotice`
+  与 `turnSink.quiet`（atomic，读方在另一条 goroutine）；`cmd/acp-probe` 顺手修了自己的报文形状
+  （`mcpServers` 从 null 改成 `[]`，否则探到的不是 Friday 的请求）。回归
+  `TestHandshakeBudgetCoversColdStart`、`TestSessionNewTimeoutNamesTheKnob`、
+  `TestSilenceWatchdogNoticesQuietAgent`（+ 反例）、config 侧默认值/覆盖/写回用例。
+
 ## 二、开工顺位
 
 | 顺位 | 项 | 状态 |
@@ -172,7 +302,13 @@ bug 类问题已于同日修复（附录 A）。
 | 2 | M-8 | ✅ 已实施（2026-10-21） |
 | 3 | M-5 | ✅ 已实施（2026-10-21，口径修正后） |
 | 4 | M-3（①②③ 全量）+ M-4 | ✅ 已实施（2026-10-21，拍板：直接兼容官方 schema） |
-| 5 | M-6 | ⏸ 缓做，等 MaxConcurrent 真实瓶颈信号 |
+| 5 | M-6 | ✅ 已实施（2026-10-29，同一 agent+目录复用连接） |
+| 6 | M-9 + M-10 | ✅ 已实施（2026-10-30） |
+| 7 | M-11 | ✅ 已实施（2026-10-30） |
+| 8 | M-12 | ✅ 已实施（2026-10-30） |
+| 9 | M-13 | ✅ 已实施（2026-11-02，验证面板） |
+| 10 | M-14 | ✅ 已实施（2026-11-02，并发排队可见与槽位记账） |
+| 11 | M-15 | ✅ 已实施（2026-11-02，超时预算分段与静默看门狗） |
 | — | M-7 | 观察，不排期 |
 
 ## 附录 A：本次已修复的 bug（2026-10-21，供对照）

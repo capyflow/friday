@@ -28,6 +28,7 @@ type Page struct {
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`             // markdown 正文
 	Source    string    `json:"source,omitempty"` // user=用户要求 / agent=机器人主动 / admin=后台 / migrate=旧记忆迁移
+	Scope     string    `json:"scope,omitempty"`  // 空=全局用户记忆；工作区 id=项目记忆
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -37,6 +38,7 @@ type PageMeta struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
 	Source    string    `json:"source,omitempty"`
+	Scope     string    `json:"scope,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Snippet   string    `json:"snippet,omitempty"`
@@ -47,6 +49,7 @@ type frontMatter struct {
 	ID        string    `yaml:"id"`
 	Title     string    `yaml:"title"`
 	Source    string    `yaml:"source,omitempty"`
+	Scope     string    `yaml:"scope,omitempty"`
 	CreatedAt time.Time `yaml:"created"`
 	UpdatedAt time.Time `yaml:"updated"`
 }
@@ -163,6 +166,7 @@ func readPageFile(path string) (*Page, error) {
 		Title:     strings.TrimSpace(fm.Title),
 		Body:      body,
 		Source:    fm.Source,
+		Scope:     fm.Scope,
 		CreatedAt: fm.CreatedAt,
 		UpdatedAt: fm.UpdatedAt,
 	}, nil
@@ -178,7 +182,7 @@ func (s *WikiStore) writePageLocked(p *Page) error {
 		return fmt.Errorf("非法页面 ID %q", p.ID)
 	}
 	fmRaw, err := yaml.Marshal(frontMatter{
-		ID: p.ID, Title: p.Title, Source: p.Source,
+		ID: p.ID, Title: p.Title, Source: p.Source, Scope: p.Scope,
 		CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
 	})
 	if err != nil {
@@ -206,10 +210,16 @@ func (s *WikiStore) newIDLocked() string {
 	}
 }
 
-// Save 新建或更新一页记忆并落盘，返回页面与是否新建。
-// id 非空：更新指定页面（标题可改，页面不存在时报错）；
-// id 为空：按标题精确匹配更新已有页面（agent 合并写入的幂等入口），无匹配则新建。
+// Save 新建或更新一页全局记忆并落盘（scope 为空）。
 func (s *WikiStore) Save(id, title, body, source string) (Page, bool, error) {
+	return s.SaveScoped("", id, title, body, source)
+}
+
+// SaveScoped 在指定作用域内新建或更新一页记忆。scope 为空 = 全局用户记忆，
+// 工作区 id = 项目记忆；按标题匹配与 id 更新都只在同一作用域内进行。
+// id 非空：更新指定页面（标题可改，页面不存在/跨作用域时报错）；
+// id 为空：按标题精确匹配更新已有页面，无匹配则新建。
+func (s *WikiStore) SaveScoped(scope, id, title, body, source string) (Page, bool, error) {
 	title = strings.TrimSpace(title)
 	body = strings.TrimSpace(body)
 	if title == "" {
@@ -225,25 +235,25 @@ func (s *WikiStore) Save(id, title, body, source string) (Page, bool, error) {
 	created := false
 	if trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), "#")); trimmed != "" {
 		cur, ok := s.pages[trimmed]
-		if !ok {
+		if !ok || cur.Scope != scope {
 			return Page{}, false, fmt.Errorf("未找到记忆页 #%s", trimmed)
 		}
 		p = cur
 	} else {
 		for _, c := range s.pages {
-			if c.Title == title {
+			if c.Scope == scope && c.Title == title {
 				p = c
 				break
 			}
 		}
 		if p == nil {
-			p = &Page{ID: s.newIDLocked(), CreatedAt: now}
+			p = &Page{ID: s.newIDLocked(), Scope: scope, CreatedAt: now}
 			s.pages[p.ID] = p
 			created = true
 		}
 	}
 	oldBody := p.Body
-	p.Title, p.Body, p.Source, p.UpdatedAt = title, body, source, now
+	p.Title, p.Body, p.Source, p.Scope, p.UpdatedAt = title, body, source, scope, now
 	if err := s.writePageLocked(p); err != nil {
 		if created { // 新建落盘失败：移除内存态，避免内存与磁盘不一致
 			delete(s.pages, p.ID)
@@ -255,23 +265,33 @@ func (s *WikiStore) Save(id, title, body, source string) (Page, bool, error) {
 	return *p, created, nil
 }
 
-// Read 返回一页完整内容。
+// Read 返回一页全局记忆的完整内容。
 func (s *WikiStore) Read(id string) (Page, bool) {
+	return s.ReadScoped("", id)
+}
+
+// ReadScoped 返回指定作用域内一页记忆的完整内容（跨作用域按未找到处理）。
+func (s *WikiStore) ReadScoped(scope, id string) (Page, bool) {
 	id = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), "#"))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p, ok := s.pages[id]; ok {
+	if p, ok := s.pages[id]; ok && p.Scope == scope {
 		return *p, true
 	}
 	return Page{}, false
 }
 
-// Delete 删除一页记忆（整页删除），返回是否删除了。
+// Delete 删除一页全局记忆（整页删除），返回是否删除了。
 func (s *WikiStore) Delete(id string) bool {
+	return s.DeleteScoped("", id)
+}
+
+// DeleteScoped 删除指定作用域内一页记忆；跨作用域按未找到处理。
+func (s *WikiStore) DeleteScoped(scope, id string) bool {
 	id = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), "#"))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.pages[id]; !ok {
+	if p, ok := s.pages[id]; !ok || p.Scope != scope {
 		return false
 	}
 	delete(s.pages, id)
@@ -289,13 +309,18 @@ func (s *WikiStore) Delete(id string) bool {
 // 140 个 rune，空白压成单空格），总长不超过 maxChars。没有页面返回空串——
 // 调用方据此决定"要不要注入"，别拿一段空标题冒充已有记忆。
 func (s *WikiStore) Digest(maxPages, maxChars int) string {
+	return s.DigestScoped("", maxPages, maxChars)
+}
+
+// DigestScoped 生成指定作用域的记忆速览；没有页面返回空串。
+func (s *WikiStore) DigestScoped(scope string, maxPages, maxChars int) string {
 	if maxPages <= 0 {
 		maxPages = 6
 	}
 	if maxChars <= 0 {
 		maxChars = 800
 	}
-	metas := s.Pages() // 已按更新时间倒序
+	metas := s.PagesScoped(scope) // 已按更新时间倒序
 	var b strings.Builder
 	used := 0
 	for _, m := range metas {
@@ -338,9 +363,14 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// Pages 返回全部页面元数据，按更新时间倒序。
+// Pages 返回全部全局页面元数据，按更新时间倒序。
 func (s *WikiStore) Pages() []PageMeta {
-	return s.Search("")
+	return s.SearchScoped("", "")
+}
+
+// PagesScoped 返回指定作用域的页面元数据，按更新时间倒序。
+func (s *WikiStore) PagesScoped(scope string) []PageMeta {
+	return s.SearchScoped(scope, "")
 }
 
 // Search 按关键词匹配标题与正文（不区分大小写）；keyword 为空返回全部页面。
@@ -348,6 +378,11 @@ func (s *WikiStore) Pages() []PageMeta {
 // 分词是必须的：模型很自然把查询写成「用户 称呼 名字」，整串 Contains 永远不命中，
 // 结果就是"记忆里明明有，recall 却说没有"。
 func (s *WikiStore) Search(keyword string) []PageMeta {
+	return s.SearchScoped("", keyword)
+}
+
+// SearchScoped 在指定作用域内搜索；scope 为空只搜全局记忆。
+func (s *WikiStore) SearchScoped(scope, keyword string) []PageMeta {
 	tokens := strings.Fields(strings.ToLower(strings.TrimSpace(keyword)))
 	type scored struct {
 		meta  PageMeta
@@ -356,6 +391,9 @@ func (s *WikiStore) Search(keyword string) []PageMeta {
 	s.mu.Lock()
 	hits := make([]scored, 0, len(s.pages))
 	for _, p := range s.pages {
+		if p.Scope != scope {
+			continue
+		}
 		title := strings.ToLower(p.Title)
 		body := strings.ToLower(p.Body)
 		score, snipAt, snipLen := 0, -1, 0
@@ -396,17 +434,28 @@ func (s *WikiStore) Search(keyword string) []PageMeta {
 	return out
 }
 
-// Count 返回页面数。
+// Count 返回全局页面数。
 func (s *WikiStore) Count() int {
+	return s.CountScoped("")
+}
+
+// CountScoped 返回指定作用域的页面数。
+func (s *WikiStore) CountScoped(scope string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.pages)
+	n := 0
+	for _, p := range s.pages {
+		if p.Scope == scope {
+			n++
+		}
+	}
+	return n
 }
 
 // metaOf 投影出页面元数据。
 func metaOf(p *Page, snip string) PageMeta {
 	return PageMeta{
-		ID: p.ID, Title: p.Title, Source: p.Source,
+		ID: p.ID, Title: p.Title, Source: p.Source, Scope: p.Scope,
 		CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Snippet: snip,
 	}
 }

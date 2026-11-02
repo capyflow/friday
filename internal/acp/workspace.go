@@ -28,8 +28,37 @@ type Workspace struct {
 	Name      string    `json:"name"`
 	Dirs      []string  `json:"dirs"` // 绝对路径；第一个 = 主目录（新建会话时的默认 cwd）
 	Pinned    bool      `json:"pinned,omitempty"`
+	Policy    string    `json:"policy,omitempty"` // ask | readonly | auto；空值按 ask
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// 工作区审批档位。它只是“新会话/重连时的默认值”，不是硬闸门：
+// agent 不支持审批模式时只能记录下来并靠轮前快照兜底。
+const (
+	WorkspacePolicyAsk      = "ask"
+	WorkspacePolicyReadOnly = "readonly"
+	WorkspacePolicyAuto     = "auto"
+)
+
+// NormalizeWorkspacePolicy 把空值/未知值收成 ask（默认每次都问）。
+func NormalizeWorkspacePolicy(p string) string {
+	switch strings.TrimSpace(p) {
+	case WorkspacePolicyReadOnly:
+		return WorkspacePolicyReadOnly
+	case WorkspacePolicyAuto:
+		return WorkspacePolicyAuto
+	default:
+		return WorkspacePolicyAsk
+	}
+}
+
+func validWorkspacePolicy(p string) bool {
+	switch strings.TrimSpace(p) {
+	case WorkspacePolicyAsk, WorkspacePolicyReadOnly, WorkspacePolicyAuto:
+		return true
+	}
+	return false
 }
 
 // WorkspaceListItem 是列表接口回给前端的形态：工作区本体 + 已经不存在的目录。
@@ -97,6 +126,7 @@ func (m *Manager) CreateWorkspace(name string, dirs []string) (Workspace, error)
 	ws := &Workspace{
 		ID:        randHex(8),
 		Name:      strings.TrimSpace(name),
+		Policy:    WorkspacePolicyAsk,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -168,6 +198,25 @@ func (m *Manager) SetPinned(id string, pinned bool) error {
 	ws.Pinned, ws.UpdatedAt = pinned, time.Now()
 	if err := m.saveLocked(); err != nil {
 		log.Printf("[智能体] 工作区置顶落盘失败: %v", err)
+	}
+	return nil
+}
+
+// SetPolicy 设置工作区的默认审批档位（新会话/重连时尝试下发，手动选择优先）。
+func (m *Manager) SetPolicy(id, policy string) error {
+	policy = strings.TrimSpace(policy)
+	if !validWorkspacePolicy(policy) {
+		return fmt.Errorf("审批档位只支持 ask / readonly / auto，收到 %q", policy)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ws := m.workspaces[id]
+	if ws == nil {
+		return fmt.Errorf("未找到工作区 %s", id)
+	}
+	ws.Policy, ws.UpdatedAt = policy, time.Now()
+	if err := m.saveLocked(); err != nil {
+		log.Printf("[智能体] 工作区审批档位落盘失败: %v", err)
 	}
 	return nil
 }

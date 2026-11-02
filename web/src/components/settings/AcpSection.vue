@@ -8,7 +8,7 @@ import { api } from '../../api.js'
 
 const cfg = reactive({
   enabled: false, maxConcurrent: 2, idleKillSeconds: 600,
-  turnTimeoutSeconds: 300, handshakeTimeoutSeconds: 10, showThought: true,
+  turnTimeoutSeconds: 300, handshakeTimeoutSeconds: 10, sessionTimeoutSeconds: 60, showThought: true,
   agents: [],
 })
 const busy = ref(false)
@@ -26,7 +26,8 @@ function show(t, ok) {
 // open 是纯前端状态（toAgent 不带它，不会写回 config.yaml）。
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
-           enabled: true, turnTimeoutSeconds: 0, degradeResume: false, version: '', testing: false }
+           enabled: true, turnTimeoutSeconds: 0, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
+           degradeResume: false, version: '', testing: false }
 }
 // launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
 // 一眼看出是哪个 agent、怎么起的。
@@ -45,6 +46,8 @@ function toAgent(a) {
     workspace: (a.workspace || '').trim(),
     enabled: a.enabled,
     turnTimeoutSeconds: Math.max(0, Math.floor(Number(a.turnTimeoutSeconds) || 0)),
+    handshakeTimeoutSeconds: Math.max(0, Math.floor(Number(a.handshakeTimeoutSeconds) || 0)),
+    sessionTimeoutSeconds: Math.max(0, Math.floor(Number(a.sessionTimeoutSeconds) || 0)),
     degradeResume: a.degradeResume,
     version: a.version || '',   // 安装时登记的版本戳（M-4），保存时原样带回
   }
@@ -129,6 +132,7 @@ async function load() {
       idleKillSeconds: a.idleKillSeconds ?? 600,
       turnTimeoutSeconds: a.turnTimeoutSeconds ?? 300,
       handshakeTimeoutSeconds: a.handshakeTimeoutSeconds ?? 10,
+      sessionTimeoutSeconds: a.sessionTimeoutSeconds ?? 60,
       showThought: a.showThought !== false,
     })
     cfg.agents = (a.agents || []).map(x => ({
@@ -136,6 +140,8 @@ async function load() {
       argsText: (x.args || []).join(', '), envText: envText(x.env),
       workspace: x.workspace || '', enabled: x.enabled !== false,
       turnTimeoutSeconds: x.turnTimeoutSeconds || 0, degradeResume: !!x.degradeResume,
+      handshakeTimeoutSeconds: x.handshakeTimeoutSeconds || 0,
+      sessionTimeoutSeconds: x.sessionTimeoutSeconds || 0,
       version: x.version || '',
     }))
   } catch (e) { show(e.message, false) }
@@ -149,6 +155,7 @@ async function save() {
       idleKillSeconds: num(cfg.idleKillSeconds, 600),
       turnTimeoutSeconds: num(cfg.turnTimeoutSeconds, 300),
       handshakeTimeoutSeconds: num(cfg.handshakeTimeoutSeconds, 10),
+      sessionTimeoutSeconds: num(cfg.sessionTimeoutSeconds, 60),
       showThought: cfg.showThought,
       agents: cfg.agents.map(toAgent),
     }
@@ -187,7 +194,10 @@ onMounted(load)
         <label><span>空闲回收（秒）</span><input v-model="cfg.idleKillSeconds" type="number" min="0"></label>
         <label><span>单轮超时（秒）</span><input v-model="cfg.turnTimeoutSeconds" type="number" min="1"></label>
         <label><span>握手超时（秒）</span><input v-model="cfg.handshakeTimeoutSeconds" type="number" min="1"></label>
+        <label><span>建会话超时（秒）</span><input v-model="cfg.sessionTimeoutSeconds" type="number" min="1"
+                title="session/new 与 session/load 的等待上限：skill 表多的 agent 首启很慢，10 秒建不出会话"></label>
       </div>
+      <p class="meta acp-coldnote">npx 这类「每次现拉包」的启动命令，第一次拉起会自动按 90 秒冷启动预算等；起过一次之后回到上面的握手值。</p>
       <label class="acp-check">
         <input v-model="cfg.showThought" type="checkbox">
         <span>显示 agent 思考流</span>
@@ -249,6 +259,9 @@ onMounted(load)
             <label><span>启动命令</span><input v-model="a.command" placeholder="npx 或绝对路径"></label>
             <label><span>参数（逗号分隔）</span><input v-model="a.argsText" placeholder='-y, @zed-industries/codex-acp'></label>
             <label><span>单轮超时覆盖（秒，0=全局）</span><input v-model="a.turnTimeoutSeconds" type="number" min="0"></label>
+            <label><span>握手超时覆盖（秒，0=全局）</span><input v-model="a.handshakeTimeoutSeconds" type="number" min="0"></label>
+            <label><span>建会话超时覆盖（秒，0=全局）</span><input v-model="a.sessionTimeoutSeconds" type="number" min="0"
+                    title="该 agent 首启列 skill 表/初始化很慢时调大这一项，不必动全局"></label>
           </div>
           <label class="acp-env"><span>额外环境变量（每行 K=V）</span>
             <textarea v-model="a.envText" rows="2" placeholder="API_KEY=sk-..."></textarea></label>
@@ -288,6 +301,7 @@ onMounted(load)
 .acp-global { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .acp-check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .acp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.acp-coldnote { margin: 8px 0 0; font-size: 11.5px; line-height: 1.55; }
 .acp-grid label, .acp-env { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .acp-grid input, .acp-env textarea {
   font: inherit; font-size: 13px; padding: 7px 9px; border: 1px solid var(--border-strong);

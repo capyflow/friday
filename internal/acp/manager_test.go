@@ -23,6 +23,7 @@ import (
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/memory"
 )
 
 // ---------- fake agent 侧 ----------
@@ -91,23 +92,24 @@ type fakeAgent struct {
 	// resetOnSession=true 模拟"agent 不把选项存进会话"：每次 session/new、load
 	// 都把 configOptions / models 的当前值打回初始默认，等客户端重新设。
 	resetOnSession bool
-	extraRoots  bool // initialize 里声明 sessionCapabilities.additionalDirectories
+	extraRoots     bool // initialize 里声明 sessionCapabilities.additionalDirectories
 
-	configOptions []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
-	models        map[string]any   // 协议原生 models 状态（nil = agent 不回报）
-	modes         map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
+	configOptions  []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
+	models         map[string]any   // 协议原生 models 状态（nil = agent 不回报）
+	modes          map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
+	newSessionHang time.Duration    // >0：session/new 先挂这么久（验证建会话超时的文案与预算）
 
-	mu         sync.Mutex
-	methods    []string
-	sessions   []string
-	cur        string
-	setCalls   []string          // "config:model=builtin/b" / "model:m2" / "mode:plan"
-	spawns     int               // 进程拉起次数（验证 M-6 的复用）
-	prompts    [][]string        // 每次 session/prompt 的文本块（按顺序）
-	optDefault map[string]string // 首次建会话时记下的初始值（供 resetOnSession 回滚）
+	mu           sync.Mutex
+	methods      []string
+	sessions     []string
+	cur          string
+	setCalls     []string          // "config:model=builtin/b" / "model:m2" / "mode:plan"
+	spawns       int               // 进程拉起次数（验证 M-6 的复用）
+	prompts      [][]string        // 每次 session/prompt 的文本块（按顺序）
+	optDefault   map[string]string // 首次建会话时记下的初始值（供 resetOnSession 回滚）
 	modelDefault string
-	newReq   map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
-	loadReq  map[string]any // 最近一次 session/load 的 params
+	newReq       map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
+	loadReq      map[string]any // 最近一次 session/load 的 params
 
 	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
@@ -262,6 +264,9 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			})
 		case "session/new":
 			f.record(&f.newReq, msg.Params)
+			if f.newSessionHang > 0 {
+				time.Sleep(f.newSessionHang) // 模拟 opencode 首启列 skill 表那种慢
+			}
 			f.resetOptions()
 			resp := map[string]any{"sessionId": f.newSessionID()}
 			if f.configOptions != nil {
@@ -628,6 +633,51 @@ func TestSendBasicTurn(t *testing.T) {
 	}
 	if got.Title == "" {
 		t.Fatal("标题未从首条消息生成")
+	}
+}
+
+func TestSendRecordsWorkspaceChanges(t *testing.T) {
+	f := &fakeAgent{}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	th := mustThreadIn(t, m, ws)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if err := os.WriteFile(filepath.Join(ws.Dirs[0], "note.txt"), []byte("from agent\n"), 0o600); err != nil {
+			t.Errorf("写测试文件失败: %v", err)
+		}
+		return defaultScript(fc, sid)
+	}
+
+	res, err := m.Send(context.Background(), th.ID, "写个文件", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if res.Changes == nil || !res.Changes.Snapshot {
+		t.Fatalf("本轮应有快照: %+v", res.Changes)
+	}
+	if len(res.Changes.Files) != 1 || res.Changes.Files[0].Path != "note.txt" || res.Changes.Files[0].Status != "added" {
+		t.Fatalf("改动清单不符: %+v", res.Changes.Files)
+	}
+	got, _ := m.Get(th.ID)
+	if len(got.Messages) < 2 || got.Messages[1].Changes == nil || got.Messages[1].Changes.TurnID != res.Changes.TurnID {
+		t.Fatalf("投影没有带上改动摘要: %+v", got.Messages)
+	}
+	full, err := m.Changes(th.ID, res.Changes.TurnID)
+	if err != nil {
+		t.Fatalf("读取改动详情失败: %v", err)
+	}
+	if len(full.Files) != 1 || !strings.Contains(full.Files[0].Diff, "+from agent") {
+		t.Fatalf("改动详情缺 diff: %+v", full.Files)
+	}
+	if _, err := m.Revert(th.ID, res.Changes.TurnID); err != nil {
+		t.Fatalf("还原失败: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws.Dirs[0], "note.txt")); !os.IsNotExist(err) {
+		t.Fatalf("还原后文件仍存在: %v", err)
+	}
+	got, _ = m.Get(th.ID)
+	if got.Messages[1].Changes == nil || got.Messages[1].Changes.RevertedAt == nil {
+		t.Fatalf("投影未标记已还原: %+v", got.Messages[1].Changes)
 	}
 }
 
@@ -1930,5 +1980,506 @@ func TestPermissionRoutedBySession(t *testing.T) {
 	}
 	if got := f.spawnCount(); got != 1 {
 		t.Fatalf("两个会话应共用一条连接，实际拉起 %d 次", got)
+	}
+}
+
+func TestHandoffCreatesContinuationThread(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "先看下这个项目", nil, TurnHooks{}); err != nil {
+		t.Fatalf("首轮失败: %v", err)
+	}
+
+	nt, err := m.Handoff(th.ID)
+	if err != nil {
+		t.Fatalf("交接失败: %v", err)
+	}
+	if nt.ID == th.ID || nt.WorkspaceID != th.WorkspaceID || nt.Agent != th.Agent || nt.Cwd != th.Cwd {
+		t.Fatalf("续会话应复用工作区/agent/主目录: old=%+v new=%+v", th, nt)
+	}
+	if !strings.Contains(nt.Handoff, "先看下这个项目") || !strings.Contains(nt.Handoff, "你好，这是回答。") {
+		t.Fatalf("交接摘要没带上可见对话: %q", nt.Handoff)
+	}
+	if !strings.Contains(nt.Title, "续") {
+		t.Fatalf("续会话标题应带标记: %q", nt.Title)
+	}
+	if len(nt.Messages) != 1 || nt.Messages[0].Role != "note" {
+		t.Fatalf("续会话应有交接说明 note: %+v", nt.Messages)
+	}
+	old, _ := m.Get(th.ID)
+	if len(old.Messages) != 2 || old.Handoff != "" {
+		t.Fatalf("旧会话应原样保留: %+v", old)
+	}
+
+	if _, err := m.Send(context.Background(), nt.ID, "继续", nil, TurnHooks{}); err != nil {
+		t.Fatalf("续会话首轮失败: %v", err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) < 2 {
+		t.Fatalf("应有两轮 prompt，实际 %d", len(blocks))
+	}
+	joined := strings.Join(blocks[len(blocks)-1], "\n")
+	if !strings.Contains(joined, "交接摘要") || !strings.Contains(joined, "先看下这个项目") {
+		t.Fatalf("续会话首轮没把摘要发给 agent: %q", joined)
+	}
+	got, _ := m.Get(nt.ID)
+	if got.Handoff != "" {
+		t.Fatalf("摘要送达后应清空，实际 %q", got.Handoff)
+	}
+}
+
+func TestHandoffRejectsEmptyThread(t *testing.T) {
+	m := newTestManager(t, nil, nil, &fakeAgent{promptScript: defaultScript})
+	th := mustThread(t, m)
+	if _, err := m.Handoff(th.ID); err == nil {
+		t.Fatal("空会话不应允许交接")
+	}
+}
+
+func TestWorkspaceBriefIncludesProjectMemory(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	store := memory.NewWikiStore("", "")
+	if _, _, err := store.SaveScoped(ws.ID, "", "项目约定", "这个仓库用 pnpm，不要用 npm", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	m.SetMemory(store)
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "开始干活", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	blocks := f.promptBlocks()
+	if len(blocks) == 0 {
+		t.Fatal("没有记录 prompt")
+	}
+	joined := strings.Join(blocks[0], "\n")
+	if !strings.Contains(joined, "项目记忆") || !strings.Contains(joined, "pnpm") {
+		t.Fatalf("首轮没有注入项目记忆: %q", joined)
+	}
+	if _, _, err := store.SaveScoped(ws.ID, "", "项目约定", "这个仓库用 pnpm；Node 版本 22", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), th.ID, "继续", nil, TurnHooks{}); err != nil {
+		t.Fatalf("第二轮失败: %v", err)
+	}
+	blocks = f.promptBlocks()
+	joined = strings.Join(blocks[len(blocks)-1], "\n")
+	if !strings.Contains(joined, "Node 版本 22") {
+		t.Fatalf("项目记忆更新后下一轮应重新交代: %q", joined)
+	}
+}
+
+// codex 形态的 modes：没有「每次都问」的等价档，工作区默认档位只能退到
+// workspace-write（可写但受限），且必须把实际落点讲清楚（V-1/V-4）。
+func codexSessionModes(current string) map[string]any {
+	return map[string]any{
+		"currentModeId": current,
+		"availableModes": []any{
+			map[string]any{"id": "read-only", "name": "Read Only"},
+			map[string]any{"id": "workspace-write", "name": "Workspace Write"},
+			map[string]any{"id": "agent", "name": "Auto review"},
+			map[string]any{"id": "agent-full-access", "name": "Full access"},
+		},
+	}
+}
+
+func TestWorkspacePolicyLandedValue(t *testing.T) {
+	cases := []struct {
+		name         string
+		policy       string
+		wantValue    string
+		wantFallback bool
+	}{
+		{"每次都问退到工作区内可写", WorkspacePolicyAsk, "workspace-write", true},
+		{"只读命中等价档", WorkspacePolicyReadOnly, "read-only", false},
+		{"自动命中全自动档", WorkspacePolicyAuto, "agent-full-access", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeAgent{modes: codexSessionModes("agent"), promptScript: defaultScript}
+			m := newTestManager(t, nil, nil, f)
+			ws := mustWorkspace(t, m)
+			if err := m.SetPolicy(ws.ID, c.policy); err != nil {
+				t.Fatalf("设档位失败: %v", err)
+			}
+			th := mustThreadIn(t, m, ws)
+			if _, err := m.Send(context.Background(), th.ID, "改一下", nil, TurnHooks{}); err != nil {
+				t.Fatalf("Send 失败: %v", err)
+			}
+			got, _ := m.Get(th.ID)
+			if got.PolicyApplied != c.policy {
+				t.Fatalf("档位应记为已下发 %s，实际 %q（note=%q）", c.policy, got.PolicyApplied, got.PolicyNote)
+			}
+			if got.PolicyValue != c.wantValue {
+				t.Fatalf("实际落点应为 %s，实际 %q", c.wantValue, got.PolicyValue)
+			}
+			if got.PolicyFallback != c.wantFallback {
+				t.Fatalf("退让标记应为 %v，实际 %v", c.wantFallback, got.PolicyFallback)
+			}
+			note := got.PolicyNote
+			if c.wantFallback && (!strings.Contains(note, "workspace-write") || !strings.Contains(note, "逐条")) {
+				t.Fatalf("退让时说明要写清实际落点与差别: %q", note)
+			}
+			if !c.wantFallback && note != "" {
+				t.Fatalf("精确命中不该有提示: %q", note)
+			}
+			want := "mode:" + c.wantValue
+			for _, call := range f.setCalls {
+				if call == want {
+					return
+				}
+			}
+			t.Fatalf("应把 %s 下发给 agent，实际调用 %v", want, f.setCalls)
+		})
+	}
+}
+
+// 只有 build/plan 这种「能不能干活」的档时，「每次都问」宁可不碰设置也不悄悄把
+// agent 关进只读；这时要把原因、可选项和「它自己的默认档可能更宽松」一起说清。
+func TestWorkspacePolicyDeclinesAmbiguousAgent(t *testing.T) {
+	// zcode 形态：只有「能不能干活」两档，没有审批强度可谈。
+	f := &fakeAgent{modes: map[string]any{
+		"currentModeId": "build",
+		"availableModes": []any{
+			map[string]any{"id": "build", "name": "Build"},
+			map[string]any{"id": "plan", "name": "Plan"},
+		},
+	}, promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m) // 默认 ask
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "改一下", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	got, _ := m.Get(th.ID)
+	if got.PolicyApplied != "" || got.PolicyValue != "" {
+		t.Fatalf("没有可用档时不该记成已下发: %+v", got)
+	}
+	for _, want := range []string{"没有能对应「每次都问」", "更宽松", "手动选一个"} {
+		if !strings.Contains(got.PolicyNote, want) {
+			t.Fatalf("提示应含 %q，实际 %q", want, got.PolicyNote)
+		}
+	}
+	for _, call := range f.setCalls {
+		if strings.HasPrefix(call, "mode:") {
+			t.Fatalf("不该改 agent 的审批模式: %v", f.setCalls)
+		}
+	}
+}
+
+// waitThreadState 轮询直到会话进入目标状态（排队/运行这类瞬时状态只能靠轮询抓到）。
+func waitThreadState(t *testing.T, m *Manager, id, want string) Thread {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	var last Thread
+	for time.Now().Before(deadline) {
+		th, ok := m.Get(id)
+		if ok {
+			last = th
+			if th.State == want {
+				return th
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待会话状态 %s 超时，最后为 %q", want, last.State)
+	return Thread{}
+}
+
+// statusLog 收集一轮的 status 帧（并发安全）。
+func statusLog() (TurnHooks, func() []string) {
+	var mu sync.Mutex
+	var got []string
+	return TurnHooks{OnStatus: func(s string) {
+			mu.Lock()
+			got = append(got, s)
+			mu.Unlock()
+		}}, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string{}, got...)
+		}
+}
+
+// 并发槽满时不能只把消息吞掉：会话要标成「排队中」、时间线要说清谁占着，
+// 空闲连接也要提前让位（V-3）。
+func TestSendQueuesWhenSlotsExhausted(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if calls.Add(1) == 1 {
+			<-gate // 第一轮占着这条连接不放
+		}
+		return defaultScript(fc, sid)
+	}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 1
+	cfg.IdleKillSeconds = 1 // 有人排队时空闲连接很快让位
+	m := newTestManager(t, &cfg, nil, f)
+	thA := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	thB := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+
+	hooksA, _ := statusLog()
+	doneA := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thA.ID, "A 占位", nil, hooksA); doneA <- err }()
+	waitThreadState(t, m, thA.ID, StateRunning)
+
+	hooksB, statusesB := statusLog()
+	doneB := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thB.ID, "B 排队", nil, hooksB); doneB <- err }()
+	waitThreadState(t, m, thB.ID, StateQueued)
+
+	// 排队状态要能被列表/看板看到，且时间线给出一句带占用的说明
+	found := false
+	for _, th := range m.List() {
+		if th.ID == thB.ID && th.State == StateQueued {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("List 应把排队会话列出来: %+v", m.List())
+	}
+	close(gate) // A 收尾，让出槽位
+	if err := <-doneA; err != nil {
+		t.Fatalf("A 轮结束失败: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("B 排队后应能跑完: %v", err)
+	}
+	var queued string
+	for _, s := range statusesB() {
+		if strings.Contains(s, "排队") {
+			queued = s
+		}
+	}
+	if !strings.Contains(queued, "1/1") {
+		t.Fatalf("排队提示应带占用比，实际 %q（全部 %v）", queued, statusesB())
+	}
+	m.mu.Lock()
+	waiting := m.waiting
+	m.mu.Unlock()
+	if waiting != 0 {
+		t.Fatalf("两轮结束后等待计数应归零，实际 %d", waiting)
+	}
+}
+
+// 排队中也要能停：Stop 在没有 ACP 会话可取消时，撤掉的就是这次等待。
+func TestStopCancelsQueuedTurn(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	defer func() {
+		select {
+		case <-gate:
+		default:
+			close(gate)
+		}
+	}()
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		if calls.Add(1) == 1 {
+			<-gate
+		}
+		return defaultScript(fc, sid)
+	}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 1
+	cfg.IdleKillSeconds = 600 // 不靠空闲回收：这条测试只验取消
+	m := newTestManager(t, &cfg, nil, f)
+	thA := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	thB := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+
+	doneA := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thA.ID, "A 占位", nil, TurnHooks{}); doneA <- err }()
+	waitThreadState(t, m, thA.ID, StateRunning)
+
+	doneB := make(chan error, 1)
+	go func() { _, err := m.Send(context.Background(), thB.ID, "B 排队", nil, TurnHooks{}); doneB <- err }()
+	waitThreadState(t, m, thB.ID, StateQueued)
+
+	if !m.Stop(thB.ID) {
+		t.Fatalf("排队中的会话应该能停")
+	}
+	if err := <-doneB; err == nil || !strings.Contains(err.Error(), "取消") {
+		t.Fatalf("B 应带着取消原因返回: %v", err)
+	}
+	if th, _ := m.Get(thB.ID); th.State == StateQueued {
+		t.Fatalf("取消后不该还挂着排队中: %+v", th)
+	}
+	m.mu.Lock()
+	waiting := m.waiting
+	cancels := len(m.queueCancels)
+	m.mu.Unlock()
+	if waiting != 0 || cancels != 0 {
+		t.Fatalf("取消后等待计数与句柄都要清掉: waiting=%d cancels=%d", waiting, cancels)
+	}
+	close(gate)
+	if err := <-doneA; err != nil {
+		t.Fatalf("A 收尾失败: %v", err)
+	}
+}
+
+// Reload 换掉槽位表时，活下来的连接必须在新表里记账：否则它们回收时抽的是旧
+// channel，新上限被悄悄放大，甚至把空 channel 抽干后卡死后续 spawn。
+func TestReloadReaccountsConcurrencySlots(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.MaxConcurrent = 2
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThreadIn(t, m, mustWorkspace(t, m, t.TempDir()))
+	if _, err := m.Send(context.Background(), th.ID, "占位", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	m.mu.Lock()
+	procs := len(m.procs)
+	m.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("应留下一条存活连接，实际 %d", procs)
+	}
+
+	next := cfg
+	next.MaxConcurrent = 1
+	m.Reload(next)
+
+	m.mu.Lock()
+	held, capacity := len(m.sem), cap(m.sem)
+	var slot chan struct{}
+	for _, ps := range m.procs {
+		slot = ps.slot
+	}
+	m.mu.Unlock()
+	if capacity != 1 {
+		t.Fatalf("槽位表应按新上限重建，实际 cap=%d", capacity)
+	}
+	if held != 1 {
+		t.Fatalf("活下来的连接要在新表里占住自己的名额，实际 held=%d", held)
+	}
+	m.mu.Lock()
+	if slot != m.sem {
+		m.mu.Unlock()
+		t.Fatalf("连接的 slot 应指向新的槽位表")
+	}
+	m.mu.Unlock()
+}
+
+// 归还槽位绝不能阻塞：老代码在 spawn 失败路径上写的是阻塞式 <-m.sem，
+// 计数一旦被上面的 Reload/重复回收打乱，就会死在 spawnMu 里面，
+// 之后所有会话都起不了进程——正是「只能重启」的那个现象。
+func TestReleaseSlotNeverBlocks(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		releaseSlot(make(chan struct{}))
+		releaseSlot(make(chan struct{}, 1))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("空槽位表上归还令牌不该阻塞")
+	}
+}
+
+// npx 型命令第一次拉起要联网装包，握手按冷启动预算给；起过一次之后回落到
+// 常规值——不能为了第一次慢把每次等待都拉长（V-2）。
+func TestHandshakeBudgetCoversColdStart(t *testing.T) {
+	cfg := testConfig(t) // HandshakeTimeoutSeconds: 5
+	cfg.Agents = []config.AcpAgentConfig{
+		{Name: "fake", Command: "npx", Args: []string{"-y", "some-acp"}},
+		{Name: "local", Command: "/opt/homebrew/bin/opencode", Args: []string{"acp"}},
+	}
+	m := newTestManager(t, &cfg, nil, nil)
+	c := m.cfgFn().Normalized()
+
+	if got := m.handshakeBudget(c.Agents[0]); got != time.Duration(config.AcpColdStartHandshakeSeconds)*time.Second {
+		t.Fatalf("npx 首次应按冷启动预算，实际 %v", got)
+	}
+	if got := m.handshakeBudget(c.Agents[1]); got != 5*time.Second {
+		t.Fatalf("绝对路径命令不该吃冷启动预算，实际 %v", got)
+	}
+	m.markWarm("fake")
+	if got := m.handshakeBudget(c.Agents[0]); got != 5*time.Second {
+		t.Fatalf("起过一次后应回落到握手值，实际 %v", got)
+	}
+	// 显式写了更大的覆盖值时不能被"回落"缩掉
+	big := c.Agents[0]
+	big.HandshakeTimeoutSeconds = 120
+	if got := m.handshakeBudget(big); got != 120*time.Second {
+		t.Fatalf("条目覆盖比冷启动预算更大时应以覆盖为准，实际 %v", got)
+	}
+	// 总预算（Options 一次性拉起用）要盖住握手 + 建会话
+	if got := m.dialBudget(c.Agents[1]); got <= 5*time.Second+time.Duration(cfg.SessionTimeoutSeconds)*time.Second {
+		t.Fatalf("dialBudget 应大于握手+建会话之和，实际 %v", got)
+	}
+}
+
+// 建会话超时不该再长得像"agent 坏了"：说清是谁、多久、去哪调（V-2）。
+func TestSessionNewTimeoutNamesTheKnob(t *testing.T) {
+	f := &fakeAgent{newSessionHang: 3 * time.Second, promptScript: defaultScript}
+	cfg := testConfig(t)
+	cfg.SessionTimeoutSeconds = 1
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThread(t, m)
+
+	_, err := m.Send(context.Background(), th.ID, "在吗", nil, TurnHooks{})
+	if err == nil {
+		t.Fatalf("建会话超时应该报错")
+	}
+	for _, want := range []string{"没在 1 秒内建好会话", "建会话超时", "设置 → 智能体"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误应含 %q，实际 %q", want, err.Error())
+		}
+	}
+	// 超时后不留半条连接占着槽位：再来一次（换成不挂的 fake）应该能正常跑
+	f2 := &fakeAgent{promptScript: defaultScript}
+	m2 := newTestManager(t, &cfg, nil, f2)
+	th2 := mustThread(t, m2)
+	if _, err := m2.Send(context.Background(), th2.ID, "在吗", nil, TurnHooks{}); err != nil {
+		t.Fatalf("另一台实例应能正常建会话: %v", err)
+	}
+}
+
+// agent 收下这一轮却什么都不回时，不能让人对着安静的界面干等：到点先说一声
+// "没回音"并给出下一步（V-2 真机：opencode 卡在自己的模型调用上，三分钟零输出）。
+func TestSilenceWatchdogNoticesQuietAgent(t *testing.T) {
+	old := turnSilenceNotice
+	turnSilenceNotice = 200 * time.Millisecond
+	defer func() { turnSilenceNotice = old }()
+
+	f := &fakeAgent{promptScript: func(fc *fakeConn, sid string) string {
+		time.Sleep(700 * time.Millisecond) // 收下这一轮，但一条 update 都不发
+		return "end_turn"
+	}}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	hooks, statuses := statusLog()
+	if _, err := m.Send(context.Background(), th.ID, "在吗", nil, hooks); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	joined := strings.Join(statuses(), "\n")
+	if !strings.Contains(joined, "没有任何回音") {
+		t.Fatalf("静默到点应给一条状态帧，实际 %q", joined)
+	}
+	if !strings.Contains(joined, "fake") {
+		t.Fatalf("提示要点名是哪个 agent，实际 %q", joined)
+	}
+}
+
+// 反例：agent 正常在吐字时不该弹这条提示（否则每次对话都多一句废话）。
+func TestSilenceWatchdogStaysQuietWhenAgentTalks(t *testing.T) {
+	old := turnSilenceNotice
+	turnSilenceNotice = 50 * time.Millisecond
+	defer func() { turnSilenceNotice = old }()
+
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	hooks, statuses := statusLog()
+	if _, err := m.Send(context.Background(), th.ID, "在吗", nil, hooks); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if strings.Contains(strings.Join(statuses(), "\n"), "没有任何回音") {
+		t.Fatalf("有产出就不该报静默: %v", statuses())
 	}
 }
