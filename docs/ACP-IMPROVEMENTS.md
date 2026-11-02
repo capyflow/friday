@@ -196,6 +196,15 @@ bug 类问题已于同日修复（附录 A）。
 - **实施记录（2026-10-30）**：`Workspace.Policy` + `SetPolicy`、`applyWorkspacePolicy` 与
   `pickApprovalValue`、admin 更新接口与编辑工作区弹窗；回归 `TestPickApprovalValue` /
   `TestWorkspacePolicyDefaultsAndValidation` 与 admin 端点用例。
+- **修订（2026-11-02，V-1/V-4）**：真机跑 codex 发现它只报 `read-only / workspace-write /
+  agent / agent-full-access`，「每次都问」命中不到 → 悄悄留在 Auto review（等于自动放行）。
+  映射改成**分层退让**：先找语义等价档，找不到只朝“同样能干活但更保守”的方向退一档
+  （ask→可写受限，auto→自动但不免审批），并记下发给 agent 的实际取值
+  （`policyValue` / `policyValueName` / `policyFallback`），会话头部直接写“审批档位实际是
+  Workspace Write”。红线：ask 绝不命中自动档，也绝不退到只读——只读是另一个档位，
+  用户想只读会显式选；挑不到可用档就明确不下发，并列出可选项、提醒它自己的默认档可能更宽松。
+  回归 `TestPickApprovalValue`（codex/claude 两套取值）、`TestWorkspacePolicyLandedValue`、
+  `TestWorkspacePolicyDeclinesAmbiguousAgent` 与前端头部落点用例。
 
 ### M-11 上下文交接（总结并新开）
 

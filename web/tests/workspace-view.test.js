@@ -1305,4 +1305,23 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.text()).toContain('毁灭性片段')
     expect(wrapper.text()).not.toContain('undefined')
   })
+
+  it('审批档位退让到别的档时，头部标出实际落点', async () => {
+    Object.assign(data.threads[0], {
+      policyApplied: 'ask', policyValue: 'workspace-write', policyValueName: 'Workspace Write',
+      policyFallback: true,
+      policyNote: '该 agent 没有「每次都问」的等价取值，已退到最接近的保守档 Workspace Write（workspace-write）：它不是逐条审批。',
+    })
+    await show()
+    expect(headMeta()).toContain('审批档位实际是 Workspace Write')
+    expect(headMeta()).not.toContain('审批档位未下发')
+  })
+
+  it('档位压根没下发时仍说「审批档位未下发」', async () => {
+    Object.assign(data.threads[0], {
+      policyNote: '该 agent 没有上报审批模式，工作区默认档位无法下发；改动仍会记录并可还原。',
+    })
+    await show()
+    expect(headMeta()).toContain('审批档位未下发')
+  })
 })

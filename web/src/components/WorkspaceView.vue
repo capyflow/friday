@@ -1286,7 +1286,8 @@ function removePreview(p) {
               · {{ stateLabel[current.state] || current.state }}
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
-              <template v-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
+              <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>
+              <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
           <!-- 工作区抽屉：文件树、本轮 diff 与还原、项目记忆、验证（预览 + 检查命令） -->
@@ -1513,7 +1514,7 @@ function removePreview(p) {
                 <option value="readonly">只读</option>
                 <option value="auto">自动放行</option>
               </select>
-              <p class="meta ws-dlg-hint">新会话或重连时尝试下发给 agent；agent 不支持时会明说，不会假装已经生效。本会话里手动选过的审批模式优先。</p>
+              <p class="meta ws-dlg-hint">新会话或重连时尝试下发给 agent；agent 没有等价档时只朝更保守的方向退一档（比如 codex 的「每次都问」只能落到 workspace-write），并在会话头部标出实际落点。agent 不支持时会明说，不会假装已经生效。本会话里手动选过的审批模式优先。</p>
             </div>
             <div class="ws-dlg-sec">
               <span class="meta">源文件夹（第一个是会话的主目录，其余作为扩展根下发）</span>

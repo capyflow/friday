@@ -161,13 +161,15 @@
 
 ## 真机验收发现的缺陷（待修，优先级高于新特性）
 
-- [ ] **V-1 codex 上「每次都问」落不下去**
+- [x] **V-1 codex 上「每次都问」落不下去**
   现象：codex 只报 `read-only / workspace-write / agent / agent-full-access`，`pickApprovalValue`
   命中不到 ask 关键词 → 有 `policyNote` 明说，但进程实际跑在 Auto review（等于自动放行）。
   影响：用户拍板的默认档位在 codex 上名不副实，「不敢放手」这条没达成。
-  做到：映射不到就别停在自动档——退到更保守的取值，或显式不下发并把「当前实际跑在 X 档」写进
-  会话头部与档位下拉；不假装有 ask。落点：`internal/acp/manager.go`（`pickApprovalValue`/`policyLabel`）
-  + `WorkspaceView` 头部文案。
+  **实施记录（2026-11-02）**：映射改成分层退让（`approvalTiers`/`pickApproval`）——先找语义等价档，
+  找不到只朝“同样能干活但更保守”的方向退一档（ask→可写受限，auto→自动但不免审批），并记下发给
+  agent 的实际取值。红线：ask 绝不命中自动档、也绝不悄悄退成只读；挑不到可用档就明确不下发，
+  列出可选项并提醒它自己的默认档可能更宽松。回归 `TestPickApprovalValue`（codex/claude 两套取值）、
+  `TestWorkspacePolicyLandedValue`、`TestWorkspacePolicyDeclinesAmbiguousAgent`。
 - [ ] **V-2 opencode 建会话超时**
   现象：`session/new` 返回 `context deadline exceeded`，重启后单跑仍复现；同类：npx 型 agent 首次
   冷启动（装包 > 10s）握手也超时，缓存热了才正常。影响：跨 agent 一致性没法验，第一次用必踩。
@@ -178,9 +180,11 @@
   的 acp 为空，用户看到「发了消息没反应」；opencode 失败那轮之后槽位疑似未回收，重启才恢复。
   做到：排队要有独立状态（queued）并在时间线与看板明说「排队中，等待空闲槽（当前 2/2）」；
   进程回收与失败路径（含握手/建会话超时）必须释放槽位。
-- [ ] **V-4 自动档的真实落点要说清**
+- [x] **V-4 自动档的真实落点要说清**
   现象：`auto` 落到 Auto review 而不是 Full access，与「全自动」的直觉有落差。
-  做到：档位下拉与会话头部展示 `policyApplied` 的实际取值并解释差别。
+  **实施记录（2026-11-02）**：与 V-1 同一处改动解决——`policyValue` / `policyValueName` /
+  `policyFallback` 记实际落点，会话头部标「审批档位实际是 <显示名>」，`policyNote` 解释差别
+  （“仍可能向你请求审批，不是完全放行”）；编辑工作区弹窗的档位说明同步。
 - [ ] **V-5 验收未覆盖项**：快照超限（2 万文件 / 100MB）的降级提示、看板里的目标与计划条目、
   P1-7 项目记忆真机复验、P1-8 验证面板真机复验（当时包里还没有）。
 - [ ] **V-6 环境侧遗留清理**：软件里的工作区「P0 验收」及其会话、`/tmp/p0-accept`、`/tmp/Friday.prev.app`。

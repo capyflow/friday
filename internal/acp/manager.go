@@ -105,6 +105,12 @@ type Thread struct {
 	// Applied 为空表示没有下发过；Note 说明为什么没下发（agent 没报审批模式等）。
 	PolicyApplied string `json:"policyApplied,omitempty"`
 	PolicyNote    string `json:"policyNote,omitempty"`
+	// PolicyValue / PolicyValueName 是真正下发给 agent 的审批模式取值与它的显示名；
+	// PolicyFallback 标出这次是「退让命中」（agent 没有语义等价档）。只说「已下发」不够——
+	// codex 上「每次都问」只能落到 workspace-write，用户得看到实际跑的是哪一档。
+	PolicyValue     string `json:"policyValue,omitempty"`
+	PolicyValueName string `json:"policyValueName,omitempty"`
+	PolicyFallback  bool   `json:"policyFallback,omitempty"`
 	// TurnStartedAt 是当前这一轮的开始时刻（运行看板用；空闲/结束时清零）。
 	TurnStartedAt time.Time `json:"turnStartedAt,omitempty"`
 }
@@ -1697,6 +1703,11 @@ func (m *Manager) reapplyChoices(lv *live, th *Thread) {
 // applyWorkspacePolicy 把工作区默认审批档位下发给会话。它只做“能映射就映射”：
 // agent 没报 approval_mode（或取值对不上）时明确记录原因，绝不假装已经只读；
 // 手动在 chips 里改过的选择由 reapplyChoices 随后覆盖，工作区档位只是默认值。
+//
+// 映射不到精确等价值时只朝“更保守”的方向退让一档（见 approvalTiers），并把实际落点
+// 记进 PolicyValue/PolicyNote：codex 只有 read-only / workspace-write / agent /
+// agent-full-access，「每次都问」只能落到 workspace-write——不写清落点的话，用户会
+// 以为逐条审批在跑，而它其实只是“越界才问”（V-1/V-4）。
 func (m *Manager) applyWorkspacePolicy(lv *live, th *Thread) {
 	m.mu.Lock()
 	policy := WorkspacePolicyAsk
@@ -1714,29 +1725,47 @@ func (m *Manager) applyWorkspacePolicy(lv *live, th *Thread) {
 		}
 	}
 	if approval == nil {
-		m.setPolicyState(th, "", "该 agent 没有上报审批模式，工作区默认档位无法下发；改动仍会记录并可还原")
+		m.setPolicyState(th, policyState{
+			note: "该 agent 没有上报审批模式，工作区默认档位无法下发；改动仍会记录并可还原",
+		})
 		return
 	}
-	want := pickApprovalValue(policy, approval.Values)
-	if want == "" {
-		m.setPolicyState(th, "", "该 agent 的审批模式没有与「"+policyLabel(policy)+"」对应的取值；未改它的设置，改动仍会记录并可还原")
+	pick, ok := pickApproval(policy, approval.Values)
+	if !ok {
+		m.setPolicyState(th, policyState{note: fmt.Sprintf(
+			"该 agent 的审批模式里没有能对应「%s」的取值（可选：%s）；没改它的设置，"+
+				"它自己的默认档可能比「%s」更宽松，需要时请在档位下拉里手动选一个。改动仍会记录并可还原",
+			policyLabel(policy), joinSelectValues(approval.Values, 6), policyLabel(policy))})
 		return
 	}
-	if approval.CurrentValue == want {
-		m.setPolicyState(th, policy, "")
+	note := policyFallbackNote(policy, pick)
+	if approval.CurrentValue == pick.Value {
+		m.setPolicyState(th, policyState{applied: policy, value: pick.Value, name: pick.Name,
+			fallback: !pick.Exact, note: note})
 		return
 	}
-	if err := m.applyCapability(lv, th, approval.ID, want); err != nil {
+	if err := m.applyCapability(lv, th, approval.ID, pick.Value); err != nil {
 		log.Printf("[智能体] %s 应用工作区默认档位 %s 失败: %v", th.Agent, policy, err)
-		m.setPolicyState(th, "", "工作区默认档位下发失败："+err.Error()+"；改动仍会记录并可还原")
+		m.setPolicyState(th, policyState{note: "工作区默认档位下发失败：" + err.Error() + "；改动仍会记录并可还原"})
 		return
 	}
-	m.setPolicyState(th, policy, "")
+	m.setPolicyState(th, policyState{applied: policy, value: pick.Value, name: pick.Name,
+		fallback: !pick.Exact, note: note})
 }
 
-func (m *Manager) setPolicyState(th *Thread, applied, note string) {
+// policyState 是一次档位下发的结果投影。
+type policyState struct {
+	applied  string // 生效的工作区档位（ask/readonly/auto）；空=没下发
+	value    string // 实际下发给 agent 的审批模式取值
+	name     string // 该取值的显示名（agent 给的）
+	fallback bool   // 是否“退让命中”（agent 没有语义等价档）
+	note     string // 退让原因 / 未下发原因
+}
+
+func (m *Manager) setPolicyState(th *Thread, st policyState) {
 	m.mu.Lock()
-	th.PolicyApplied, th.PolicyNote = applied, note
+	th.PolicyApplied, th.PolicyNote = st.applied, st.note
+	th.PolicyValue, th.PolicyValueName, th.PolicyFallback = st.value, st.name, st.fallback
 	m.mu.Unlock()
 }
 
@@ -1751,28 +1780,97 @@ func policyLabel(policy string) string {
 	}
 }
 
-// pickApprovalValue 把工作区档位映射到 agent 自己报的审批模式取值。
-// 各 agent 词汇不同（ask/default/manual、read-only/plan、auto/accept/full），
-// 这里按语义关键词挑一个；挑不到就返回空，由调用方明说“没下发”。
-func pickApprovalValue(policy string, vals []SelectValue) string {
-	for _, v := range vals {
-		s := strings.ToLower(v.Value + " " + v.Name)
-		switch policy {
-		case WorkspacePolicyReadOnly:
-			if containsAny(s, "read-only", "readonly", "read only", "read_only", "只读", "plan", "计划") {
-				return v.Value
-			}
-		case WorkspacePolicyAuto:
-			if containsAny(s, "auto", "自动", "accept", "full", "yolo", "bypass", "免审批") {
-				return v.Value
-			}
-		default:
-			if containsAny(s, "ask", "询问", "每次", "default", "manual", "suggest", "建议") {
-				return v.Value
+// approvalPick 是在 agent 审批模式取值里挑中的那一项。Kind 说明它是哪一层命中：
+// exact=语义等价；limited=可写但受限；readonly=只能给到只读；auto-limited=自动但不免审批。
+type approvalPick struct {
+	SelectValue
+	Exact bool
+	Kind  string
+}
+
+// approvalTier 是一层候选词。
+type approvalTier struct {
+	keywords []string
+	kind     string
+	exact    bool
+}
+
+// approvalTiers 给出每个工作区档位的候选层，按“先精确、再只朝更保守方向退让”排序。
+// 各 agent 词汇不同（ask/default/manual、read-only/plan、full-access/yolo），只能按语义
+// 关键词匹配。两条红线：ask 绝不命中自动档；退让绝不跨过“还能不能干活”这条线——
+// 只读是另一个档位，用户想只读会显式选，不能由 ask 悄悄退过去（那会让 agent 改不了文件）。
+// 所以 ask 只允许退到“可写但受限”，再挑不到就明确不下发。
+func approvalTiers(policy string) []approvalTier {
+	switch policy {
+	case WorkspacePolicyReadOnly:
+		return []approvalTier{{
+			keywords: []string{"read-only", "readonly", "read only", "read_only", "只读", "plan", "计划"},
+			kind:     "readonly", exact: true,
+		}}
+	case WorkspacePolicyAuto:
+		return []approvalTier{
+			{keywords: []string{"full-access", "full access", "full_access", "no-approval",
+				"auto-approve", "yolo", "bypass", "免审批", "全自动"}, kind: "exact", exact: true},
+			{keywords: []string{"auto", "自动", "accept", "agent"}, kind: "auto-limited"},
+		}
+	default: // ask
+		return []approvalTier{
+			{keywords: []string{"ask", "询问", "每次", "确认", "prompt", "manual",
+				"default", "suggest", "建议"}, kind: "exact", exact: true},
+			{keywords: []string{"workspace-write", "workspace write", "workspace_write",
+				"sandbox", "工作区", "受限"}, kind: "limited"},
+		}
+	}
+}
+
+// pickApproval 按层顺序取第一个命中的取值。
+func pickApproval(policy string, vals []SelectValue) (approvalPick, bool) {
+	for _, tier := range approvalTiers(policy) {
+		for _, v := range vals {
+			if containsAny(strings.ToLower(v.Value+" "+v.Name), tier.keywords...) {
+				return approvalPick{SelectValue: v, Exact: tier.exact, Kind: tier.kind}, true
 			}
 		}
 	}
-	return ""
+	return approvalPick{}, false
+}
+
+// policyFallbackNote 把“退让到了哪一档、差别是什么”讲清楚；精确命中时返回空串。
+func policyFallbackNote(policy string, pick approvalPick) string {
+	if pick.Exact {
+		return ""
+	}
+	shown := pick.Value
+	if pick.Name != "" && !strings.EqualFold(pick.Name, pick.Value) {
+		shown = pick.Name + "（" + pick.Value + "）"
+	}
+	switch pick.Kind {
+	case "limited":
+		return "该 agent 没有「每次都问」的等价取值，已退到最接近的保守档 " + shown +
+			"：它不是逐条审批，越界动作才会问你；实际行为由该 agent 决定。要更严选「只读」，要免批选「自动」。"
+	case "auto-limited":
+		return "该 agent 没有「全自动」的等价取值，已退到 " + shown +
+			"：它仍可能向你请求审批，不是完全放行。"
+	default:
+		return "工作区档位「" + policyLabel(policy) + "」已下发为 " + shown + "。"
+	}
+}
+
+// joinSelectValues 把可选取值拼成一句人话（截断，用于“没有对应取值”的提示）。
+func joinSelectValues(vals []SelectValue, max int) string {
+	parts := make([]string, 0, len(vals))
+	for i, v := range vals {
+		if i >= max {
+			parts = append(parts, fmt.Sprintf("…共 %d 项", len(vals)))
+			break
+		}
+		if v.Name != "" && !strings.EqualFold(v.Name, v.Value) {
+			parts = append(parts, v.Name+"("+v.Value+")")
+			continue
+		}
+		parts = append(parts, v.Value)
+	}
+	return strings.Join(parts, " / ")
 }
 
 func containsAny(s string, want ...string) bool {

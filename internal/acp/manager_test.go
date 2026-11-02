@@ -2066,3 +2066,101 @@ func TestWorkspaceBriefIncludesProjectMemory(t *testing.T) {
 		t.Fatalf("项目记忆更新后下一轮应重新交代: %q", joined)
 	}
 }
+
+// codex 形态的 modes：没有「每次都问」的等价档，工作区默认档位只能退到
+// workspace-write（可写但受限），且必须把实际落点讲清楚（V-1/V-4）。
+func codexSessionModes(current string) map[string]any {
+	return map[string]any{
+		"currentModeId": current,
+		"availableModes": []any{
+			map[string]any{"id": "read-only", "name": "Read Only"},
+			map[string]any{"id": "workspace-write", "name": "Workspace Write"},
+			map[string]any{"id": "agent", "name": "Auto review"},
+			map[string]any{"id": "agent-full-access", "name": "Full access"},
+		},
+	}
+}
+
+func TestWorkspacePolicyLandedValue(t *testing.T) {
+	cases := []struct {
+		name         string
+		policy       string
+		wantValue    string
+		wantFallback bool
+	}{
+		{"每次都问退到工作区内可写", WorkspacePolicyAsk, "workspace-write", true},
+		{"只读命中等价档", WorkspacePolicyReadOnly, "read-only", false},
+		{"自动命中全自动档", WorkspacePolicyAuto, "agent-full-access", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeAgent{modes: codexSessionModes("agent"), promptScript: defaultScript}
+			m := newTestManager(t, nil, nil, f)
+			ws := mustWorkspace(t, m)
+			if err := m.SetPolicy(ws.ID, c.policy); err != nil {
+				t.Fatalf("设档位失败: %v", err)
+			}
+			th := mustThreadIn(t, m, ws)
+			if _, err := m.Send(context.Background(), th.ID, "改一下", nil, TurnHooks{}); err != nil {
+				t.Fatalf("Send 失败: %v", err)
+			}
+			got, _ := m.Get(th.ID)
+			if got.PolicyApplied != c.policy {
+				t.Fatalf("档位应记为已下发 %s，实际 %q（note=%q）", c.policy, got.PolicyApplied, got.PolicyNote)
+			}
+			if got.PolicyValue != c.wantValue {
+				t.Fatalf("实际落点应为 %s，实际 %q", c.wantValue, got.PolicyValue)
+			}
+			if got.PolicyFallback != c.wantFallback {
+				t.Fatalf("退让标记应为 %v，实际 %v", c.wantFallback, got.PolicyFallback)
+			}
+			note := got.PolicyNote
+			if c.wantFallback && (!strings.Contains(note, "workspace-write") || !strings.Contains(note, "逐条")) {
+				t.Fatalf("退让时说明要写清实际落点与差别: %q", note)
+			}
+			if !c.wantFallback && note != "" {
+				t.Fatalf("精确命中不该有提示: %q", note)
+			}
+			want := "mode:" + c.wantValue
+			for _, call := range f.setCalls {
+				if call == want {
+					return
+				}
+			}
+			t.Fatalf("应把 %s 下发给 agent，实际调用 %v", want, f.setCalls)
+		})
+	}
+}
+
+// 只有 build/plan 这种「能不能干活」的档时，「每次都问」宁可不碰设置也不悄悄把
+// agent 关进只读；这时要把原因、可选项和「它自己的默认档可能更宽松」一起说清。
+func TestWorkspacePolicyDeclinesAmbiguousAgent(t *testing.T) {
+	// zcode 形态：只有「能不能干活」两档，没有审批强度可谈。
+	f := &fakeAgent{modes: map[string]any{
+		"currentModeId": "build",
+		"availableModes": []any{
+			map[string]any{"id": "build", "name": "Build"},
+			map[string]any{"id": "plan", "name": "Plan"},
+		},
+	}, promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m) // 默认 ask
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "改一下", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	got, _ := m.Get(th.ID)
+	if got.PolicyApplied != "" || got.PolicyValue != "" {
+		t.Fatalf("没有可用档时不该记成已下发: %+v", got)
+	}
+	for _, want := range []string{"没有能对应「每次都问」", "更宽松", "手动选一个"} {
+		if !strings.Contains(got.PolicyNote, want) {
+			t.Fatalf("提示应含 %q，实际 %q", want, got.PolicyNote)
+		}
+	}
+	for _, call := range f.setCalls {
+		if strings.HasPrefix(call, "mode:") {
+			t.Fatalf("不该改 agent 的审批模式: %v", f.setCalls)
+		}
+	}
+}
