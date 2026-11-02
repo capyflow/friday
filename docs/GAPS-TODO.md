@@ -201,8 +201,26 @@
   **实施记录（2026-11-02）**：与 V-1 同一处改动解决——`policyValue` / `policyValueName` /
   `policyFallback` 记实际落点，会话头部标「审批档位实际是 <显示名>」，`policyNote` 解释差别
   （“仍可能向你请求审批，不是完全放行”）；编辑工作区弹窗的档位说明同步。
-- [ ] **V-5 验收未覆盖项**：快照超限（2 万文件 / 100MB）的降级提示、看板里的目标与计划条目、
+- [x] **V-5 验收未覆盖项**：快照超限（2 万文件 / 100MB）的降级提示、看板里的目标与计划条目、
   P1-7 项目记忆真机复验、P1-8 验证面板真机复验（当时包里还没有）。
+  **实施记录（2026-11-02）**：
+  - 快照超限：副本路径早已写「N 个文件超过单文件/总量上限，未备份内容，不能还原」，补了守护用例
+    `TestTurnSnapshotCopyFlagsOversizedFiles`（6MB 文件 → 快照阶段就写明不能还原；改了再还原被整轮预检
+    拒绝并点名该文件）。
+  - 看板的目标/计划条目：已有 `TestRunsDashboardAggregatesActiveWork` 覆盖（计划当前步、目标预算、
+    任务、审批、失败），这次没再重复造。
+  - 真机复跑（隔离实例 `--port 45679`，真实 codex 经 `npx -y @agentclientprotocol/codex-acp`，
+    `maxConcurrent=1`）：
+    - V-2 冷启动：npx 首次拉起约 38 秒握手成功（旧的 10s 预算必踩）；
+    - V-3 排队：第二条会话立刻显示 `queued`，`/api/runs` 可见「V5 建文件 running / V5 排队 queued」，
+      状态帧写「已跑满（1/1）」；`/stop` 取消排队后收尾帧带原因、会话回 idle；
+    - P1-7 项目记忆：先写「新建文本文件末尾必须加 `// by friday-project`」，codex 首轮新建的
+      `note.txt` 正是 `ok\n// by friday-project`（消息里没提这条约定）；
+    - V-1/V-4 档位：线程上 `policyApplied=ask / policyValue=workspace-write /
+      policyValueName=Workspace access / policyFallback=true`，note 写明「不是逐条审批、越界才问」；
+    - P0-1/P0-2：`changes` 带 `turnId`、`vcs=git`、`snapshot=true` 与逐行 diff；`changes/revert`
+      后 `note.txt` 消失、`keep.txt` 不动；
+    - P1-8 验证面板：`POST /checks` → 审批卡「验证命令」→ 批准 → `state=passed, exit=0, output=ok`。
 - [ ] **V-6 环境侧遗留清理**：软件里的工作区「P0 验收」及其会话、`/tmp/p0-accept`、`/tmp/Friday.prev.app`。
 
 ## 备注

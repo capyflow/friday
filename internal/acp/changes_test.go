@@ -255,3 +255,36 @@ func TestTurnSnapshotGitWorkspaceSubdir(t *testing.T) {
 		t.Fatalf("workspace 外的文件不该被还原: %q", b)
 	}
 }
+
+// 超过单文件上限的副本不能还原——这时必须当场说清（V-5 验收点），而不是等用户点
+// 「还原本轮」才给一个看不懂的错。
+func TestTurnSnapshotCopyFlagsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("x", int(snapshotMaxCopyFile)+1)
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "small.txt"), []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := beginTurnSnapshot(dir, t.TempDir(), "th1", "t1")
+	if err != nil {
+		t.Fatalf("快照失败: %v", err)
+	}
+	if snap.meta.Kind != "copy" {
+		t.Fatalf("非 git 目录应走副本快照: %+v", snap.meta)
+	}
+	if !strings.Contains(snap.meta.Note, "1 个文件") || !strings.Contains(snap.meta.Note, "不能还原") {
+		t.Fatalf("超限要在快照阶段就写明不能还原: %q", snap.meta.Note)
+	}
+	// 改了超限文件之后再还原：整轮预检要拒绝并点名是哪个文件
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ch := snap.Finish(); ch == nil || len(ch.Files) == 0 {
+		t.Fatalf("收尾应给出改动清单: %+v", ch)
+	}
+	if _, err := snap.Revert(); err == nil || !strings.Contains(err.Error(), "big.bin") {
+		t.Fatalf("超限文件应拒绝还原并点名: %v", err)
+	}
+}
