@@ -490,6 +490,9 @@ func chatErrorMessage(err error) string {
 	case strings.Contains(low, "429") || strings.Contains(low, "rate limit") ||
 		strings.Contains(low, "quota") || strings.Contains(low, "insufficient"):
 		return "模型服务限流或额度不足。稍等片刻再试，或检查服务商账户余额/配额。"
+	case strings.Contains(cause, "轮数上限"):
+		return "这一轮的工具调用轮数到了上限（可在「设置 → 运行上限」把「单轮工具调用上限」调大），" +
+			"后半截活儿没做完；已完成的工具操作都保留着，调大后重试即可。"
 	case strings.Contains(low, "timeout") || strings.Contains(low, "dial tcp") ||
 		strings.Contains(low, "connection refused") || strings.Contains(low, "no such host") ||
 		strings.Contains(low, "eof"):

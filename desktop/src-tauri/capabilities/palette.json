@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "palette-remote",
-  "description": "全局快捷键弹窗（加载内核 /palette 远程页）最小权限：页面 Esc 时调用窗口 hide。",
+  "description": "全局快捷键弹窗（加载内核 /palette 远程页）最小权限：页面 Esc 时调用窗口 hide，回答里的外链交给系统浏览器打开。",
   "windows": ["palette"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
@@ -13,6 +13,7 @@
     "core:window:allow-set-focus",
     "allow-auth-get-token",
     "allow-auth-set-token",
-    "allow-auth-clear-token"
+    "allow-auth-clear-token",
+    "allow-open-url"
   ]
 }

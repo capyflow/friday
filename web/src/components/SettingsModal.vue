@@ -8,7 +8,9 @@ import PersonaSection from './settings/PersonaSection.vue'
 import McpSection from './settings/McpSection.vue'
 import AcpSection from './settings/AcpSection.vue'
 import SkillsSection from './settings/SkillsSection.vue'
+import ToolsSection from './settings/ToolsSection.vue'
 import PermissionSection from './settings/PermissionSection.vue'
+import RuntimeSection from './settings/RuntimeSection.vue'
 import CostSection from './settings/CostSection.vue'
 import HeartbeatSection from './settings/HeartbeatSection.vue'
 import StatusSection from './settings/StatusSection.vue'
@@ -27,11 +29,15 @@ const GROUPS = [
     { id: 'model', icon: 'i-model', label: '模型服务', comp: markRaw(ModelSection) },
     { id: 'persona', icon: 'i-persona', label: '人设提示词', comp: markRaw(PersonaSection) },
   ]},
-  { label: '能力与行为', items: [
+  { label: '扩展', items: [
+    { id: 'tools', icon: 'i-plug', label: '工具', comp: markRaw(ToolsSection) },
     { id: 'mcp', icon: 'i-mcp', label: 'MCP 服务器', comp: markRaw(McpSection) },
-    { id: 'agent', icon: 'i-acp', label: '智能体', comp: markRaw(AcpSection) },
     { id: 'skills', icon: 'i-skill', label: '技能', comp: markRaw(SkillsSection) },
+  ]},
+  { label: '能力与行为', items: [
+    { id: 'agent', icon: 'i-acp', label: '智能体', comp: markRaw(AcpSection) },
     { id: 'permissions', icon: 'i-shield', label: '权限模式', comp: markRaw(PermissionSection) },
+    { id: 'runtime', icon: 'i-run', label: '运行上限', comp: markRaw(RuntimeSection) },
     { id: 'cost', icon: 'i-coin', label: '成本与预算', comp: markRaw(CostSection) },
     { id: 'heartbeat', icon: 'i-heart', label: '心跳清单', comp: markRaw(HeartbeatSection) },
   ]},

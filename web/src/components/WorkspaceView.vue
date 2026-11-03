@@ -23,6 +23,7 @@ import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
+import SelectBox from './SelectBox.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
 
@@ -76,8 +77,8 @@ const creatingWs = ref(false)  // 新建工作区表单展开
 const wsForm = reactive({ name: '', dirs: [] })
 const sessionFor = ref('')     // 正在新建会话的工作区 id（'' = 没在建）
 const sessionForm = reactive({ agent: '' })
-const confirmWsId = ref('')    // 二次确认删除的工作区 id
-const confirmId = ref('')      // 二次确认删除的 thread id
+// 删除确认弹窗：{ kind:'thread'|'workspace', id, title, count }；null = 没打开
+const pendingDelete = ref(null)
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 const filesDrawer = ref(null)      // 工作区文件/本轮改动抽屉（文件树 + diff + 还原）
@@ -387,12 +388,13 @@ function onDocClick(e) {
 function onKey(e) {
   if (e.key !== 'Escape' || e.defaultPrevented) return
   const hasLayer = popOpen.value || capOpen.value || ctxOpen.value || !!wsMenu.value ||
-    !!threadMenu.value || wsDlg.open
+    !!threadMenu.value || wsDlg.open || !!pendingDelete.value
   if (hasLayer) {
     e.preventDefault()
     setPop(false); capOpen.value = ''; ctxOpen.value = false
     closeWsMenu(); closeThreadMenu()
     if (wsDlg.open) closeWsDialog() // 弹窗里按 Esc 直接放弃暂存的编辑
+    if (pendingDelete.value) cancelDelete()
     return
   }
   if (busy.value && e.target && typeof e.target.closest === 'function' && e.target.closest('.ag-foot, .ag-scroller')) {
@@ -515,6 +517,19 @@ async function select(id) {
 
 /* ---------- 工作区：新建 / 目录增删 / 改名 / 删除 ---------- */
 function enabledAgents() { return (acp.value?.agents || []).filter(a => a.enabled !== false) }
+
+// 智能体下拉：停用的也列出来（让人知道有这台工具、以及为什么选不了），但选不中。
+const agentOptions = computed(() => (acp.value?.agents || []).map(a => ({
+  value: a.name,
+  label: a.name + (a.enabled === false ? '（已停用）' : ''),
+  disabled: a.enabled === false,
+})))
+// 默认审批档位：与后端 policy 取值一一对应，按「问得越多越保守」排。
+const POLICY_OPTIONS = [
+  { value: 'ask', label: '每次都问（推荐）' },
+  { value: 'readonly', label: '只读' },
+  { value: 'auto', label: '自动放行' },
+]
 
 function openCreateWs() {
   creatingWs.value = !creatingWs.value
@@ -658,28 +673,25 @@ async function saveWsDialog() {
   }
 }
 
-// 第一下只武装确认（返回 false，菜单留着让人点第二下），第二下才真删
-function removeWorkspace(id) {
-  if (confirmWsId.value !== id) {
-    confirmWsId.value = id
-    setTimeout(() => { if (confirmWsId.value === id) confirmWsId.value = '' }, 3000)
-    return false
-  }
-  confirmWsId.value = ''
-  api('DELETE', '/api/acp/workspaces/' + id)
-    .then(r => {
-      // 连带删掉的会话：本机在途的请求与缓冲都要收起
-      for (const tid of r.threadIds || []) {
-        inflight.get(tid)?.abort()
-        inflight.delete(tid)
-        dropState(tid)
-        if (currentId.value === tid) currentId.value = ''
-      }
-      if (currentWsId.value === id) currentWsId.value = ''
-      return load()
-    })
-    .then(() => toast('已删除该工作区及其会话（磁盘目录不动）'))
-    .catch(e => toast('删除失败：' + e.message, true))
+// 删除是不可逆的本地记录操作：统一走确认弹窗，不靠带时限的「再点一次」。
+function askRemoveWorkspace(ws) {
+  closeWsMenu()
+  pendingDelete.value = { kind: 'workspace', id: ws.id, title: ws.name, count: wsThreads(ws.id).length }
+}
+async function doRemoveWorkspace(id) {
+  try {
+    const r = await api('DELETE', '/api/acp/workspaces/' + id)
+    // 连带删掉的会话：本机在途的请求与缓冲都要收起
+    for (const tid of r.threadIds || []) {
+      inflight.get(tid)?.abort()
+      inflight.delete(tid)
+      dropState(tid)
+      if (currentId.value === tid) currentId.value = ''
+    }
+    if (currentWsId.value === id) currentWsId.value = ''
+    await load()
+    toast('已删除该工作区及其会话（磁盘目录不动）')
+  } catch (e) { toast('删除失败：' + e.message, true) }
 }
 
 /* ---------- 会话：在工作区里选 agent + 主目录 ---------- */
@@ -739,17 +751,18 @@ function chooseDir() {
   dirPicker.open = false
   if (onPick && dirPicker.path) onPick(dirPicker.path)
 }
-// 第一下只武装确认（菜单留着让人点第二下），第二下才真删。菜单项的点击是同步的，
-// 所以"武装/删除"的分流必须同步做——异步函数返回 Promise 会让 && 永远成立、菜单提前关。
-function removeThread(id) {
-  if (confirmId.value !== id) {
-    confirmId.value = id
-    setTimeout(() => { if (confirmId.value === id) confirmId.value = '' }, 3000)
-    return
-  }
-  confirmId.value = ''
+// 行尾「×」与会话菜单共用这一条删除入口：先弹确认，再真删。
+function askRemoveThread(t) {
   closeThreadMenu()
-  doRemoveThread(id)
+  pendingDelete.value = { kind: 'thread', id: t.id, title: t.title || '新会话', count: 0 }
+}
+function cancelDelete() { pendingDelete.value = null }
+async function confirmDelete() {
+  const p = pendingDelete.value
+  if (!p) return
+  pendingDelete.value = null
+  if (p.kind === 'workspace') await doRemoveWorkspace(p.id)
+  else await doRemoveThread(p.id)
 }
 
 async function doRemoveThread(id) {
@@ -1107,7 +1120,7 @@ function removePreview(p) {
             <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"
                   title="这一轮还在后台跑，切到别的会话不会打断它">生成中</span>
             <span class="ag-del" role="button" :aria-label="'删除 ' + (t.title || '会话')"
-                  @click.stop="removeThread(t.id)">{{ confirmId === t.id ? '确认删除?' : '×' }}</span>
+                  title="删除会话" @click.stop="askRemoveThread(t)">×</span>
           </div>
           <div v-if="loaded && !recentThreads.length" class="ag-empty meta">还没有会话。切到「按工作区」，在工作区里新建一条。</div>
         </template>
@@ -1160,10 +1173,10 @@ function removePreview(p) {
                     {{ ws.pinned ? '取消置顶' : '置顶' }}
                   </button>
                   <button role="menuitem" class="danger" :aria-label="'删除工作区 ' + ws.name"
-                          @click="removeWorkspace(ws.id) && closeWsMenu()">
+                          @click="askRemoveWorkspace(ws)">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
-                    {{ confirmWsId === ws.id ? '再点一次确认删除' : '删除工作区' }}
+                    删除工作区
                   </button>
                   <p class="ws-menu-note">删除会连同里面的会话记录一起删；磁盘上的文件夹不动。</p>
                 </div>
@@ -1202,9 +1215,7 @@ function removePreview(p) {
                     <div v-if="threadMenu === t.id" class="ws-menu pop-anim" role="menu">
                       <button role="menuitem" :aria-label="'重命名 ' + (t.title || '会话')" @click="startRenameThread(t)">重命名</button>
                       <button role="menuitem" class="danger" :aria-label="'删除 ' + (t.title || '会话')"
-                              @click="removeThread(t.id)">
-                        {{ confirmId === t.id ? '再点一次确认删除' : '删除会话' }}
-                      </button>
+                              @click="askRemoveThread(t)">删除会话</button>
                     </div>
                   </span>
                 </div>
@@ -1219,10 +1230,7 @@ function removePreview(p) {
                      标题建好后在会话行的「…」里改（首条消息也会自动起一个） -->
                 <div v-if="sessionFor === ws.id" class="ag-form ws-session-form">
                   <label class="meta">智能体工具</label>
-                  <select v-model="sessionForm.agent" aria-label="选择智能体">
-                    <option v-for="a in (acp ? acp.agents : [])" :key="a.name" :value="a.name"
-                            :disabled="a.enabled === false">{{ a.name }}{{ a.enabled === false ? '（已停用）' : '' }}</option>
-                  </select>
+                  <SelectBox v-model="sessionForm.agent" :options="agentOptions" aria-label="选择智能体" />
                   <p class="meta ws-session-hint" :title="ws.dirs[0]">
                     主目录：{{ base(ws.dirs[0]) }}（工作区的第一个源文件夹；要换去「编辑工作区」）
                   </p>
@@ -1492,6 +1500,33 @@ function removePreview(p) {
   <FilePreviewDrawer ref="fileDrawer" />
   <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
                         :workspace-id="current?.workspaceId || ''" @reverted="onChangesReverted" />
+  <!-- 删除确认：会话与工作区共用一张，标题和影响范围随目标变化。遮罩、Esc 与「取消」
+       同义；破坏性动作不放 ✕，也不靠「再点一次」的带时限第二下。 -->
+  <Teleport to="body">
+    <div v-if="pendingDelete" class="dlg-mask" @click.self="cancelDelete">
+      <div class="dlg dlg-confirm" role="dialog" aria-modal="true"
+           :aria-label="pendingDelete.kind === 'workspace' ? '删除工作区确认' : '删除会话确认'"
+           @keydown.esc="cancelDelete">
+        <div class="dlg-form">
+          <header class="dlg-head">
+            <h3 class="dlg-title">{{ pendingDelete.kind === 'workspace' ? '删除工作区？' : '删除会话？' }}</h3>
+          </header>
+          <div class="dlg-body">
+            <p v-if="pendingDelete.kind === 'workspace'">
+              「{{ pendingDelete.title }}」<template v-if="pendingDelete.count">及其 {{ pendingDelete.count }} 条会话记录</template>会从列表里删除；磁盘上的文件夹不动。
+            </p>
+            <p v-else>「{{ pendingDelete.title }}」的会话记录会从列表里删除；磁盘上的文件不动。</p>
+          </div>
+          <footer class="dlg-foot">
+            <div class="dlg-btns">
+              <button type="button" class="btn sm" aria-label="取消删除" @click="cancelDelete">取消</button>
+              <button type="button" class="btn sm danger" aria-label="确认删除" @click="confirmDelete">删除</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </Teleport>
   <!-- 编辑工作区弹窗：改名 + 源文件夹的增删与主目录（列表里不铺路径，要改来这里改）。
        弹窗内是暂存编辑，点「保存」才按差异落后端；Esc/点遮罩 = 放弃这次编辑。 -->
   <Teleport to="body">
@@ -1510,11 +1545,8 @@ function removePreview(p) {
             <input id="wsDlgName" v-model="wsDlg.name" aria-label="工作区名字" placeholder="比如 proj-a">
             <div class="ws-dlg-sec">
               <label class="meta" for="wsDlgPolicy">默认审批档位</label>
-              <select id="wsDlgPolicy" v-model="wsDlg.policy" aria-label="默认审批档位">
-                <option value="ask">每次都问（推荐）</option>
-                <option value="readonly">只读</option>
-                <option value="auto">自动放行</option>
-              </select>
+              <SelectBox id="wsDlgPolicy" v-model="wsDlg.policy" :options="POLICY_OPTIONS"
+                         aria-label="默认审批档位" />
               <p class="meta ws-dlg-hint">新会话或重连时尝试下发给 agent；agent 没有等价档时只朝更保守的方向退一档（比如 codex 的「每次都问」只能落到 workspace-write），并在会话头部标出实际落点。agent 不支持时会明说，不会假装已经生效。本会话里手动选过的审批模式优先。</p>
             </div>
             <div class="ws-dlg-sec">

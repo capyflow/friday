@@ -115,9 +115,13 @@ type CatalogView struct {
 	Source string `json:"source"`
 	// Version 官方条目的当前版本（内置条目为空）。
 	Version string `json:"version,omitempty"`
+	// LatestVersion npm registry 的 latest 真值（仅 npx 分发条目；registry 条目
+	// 常滞后于 npm——实测 minimax-code registry=0.2.7 时 npm 已 0.6.12）。
+	LatestVersion string `json:"latestVersion,omitempty"`
 	// Registered 清单（config.acp.agents）里是否已有同名 agent。
 	Registered bool `json:"registered"`
-	// UpdateAvailable 已注册且清单里的版本戳与官方目录不一致（M-4 升级提示）。
+	// UpdateAvailable 已注册且有比登记版本戳更新的可用版本（分段数字比较，
+	// 只报升级不报降级——手动升过级、registry 条目滞后的用户不再被误报）。
 	UpdateAvailable bool `json:"updateAvailable,omitempty"`
 	// Supported binary 分发是否覆盖当前平台（false 时禁用安装）。
 	Supported bool `json:"supported"`
@@ -133,6 +137,9 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 
 	out := make([]CatalogView, 0, len(catalog)+8)
 	seen := map[string]bool{}
+	// curLatest 是当前条目的可用最新版（npm 真值优先，registry 滞后时取两者较大）；
+	// add() 用它做有方向的升级判断。
+	curLatest := ""
 	add := func(e CatalogEntry, source string) {
 		if seen[e.ID] {
 			return
@@ -152,7 +159,12 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 		}
 		if a, ok := registered[e.Template.Name]; ok {
 			v.Registered = true
-			v.UpdateAvailable = e.Template.Version != "" && a.Version != e.Template.Version
+			avail := e.Template.Version
+			if compareVersions(curLatest, avail) > 0 {
+				avail = curLatest // npm 真值比 registry 条目新（常态）
+			}
+			v.UpdateAvailable = avail != "" &&
+				(a.Version == "" || compareVersions(avail, a.Version) > 0)
 			if e.Check == "" { // registry 条目：注册即已安装
 				v.Installed = true
 				v.Path = a.Command
@@ -165,8 +177,27 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 	for _, e := range catalog {
 		add(e, "builtin")
 	}
-	// 官方注册表（拉取失败静默降级为仅内置）。
-	for _, re := range m.registryIndex(ctx, refresh) {
+	// 官方注册表（拉取失败静默降级为仅内置）。npx 条目顺带查 npm latest 真值：
+	// registry 的 Npx.Package 自带版本号（"@scope/name@1.2.3"），要剥出纯包名
+	// 再问 npm——带版本查 latest 会被 npm 以 HTTP 400 拒掉。
+	entries := m.registryIndex(ctx, refresh)
+	pkgs := make([]string, 0, len(entries))
+	pkgSeen := map[string]bool{}
+	entryPkg := map[string]string{} // entryID → 纯包名
+	for _, re := range entries {
+		if re.Distribution.Npx == nil || re.Distribution.Npx.Package == "" {
+			continue
+		}
+		name, _ := npxPackageToken([]string{re.Distribution.Npx.Package})
+		if name == "" || pkgSeen[name] {
+			continue
+		}
+		pkgSeen[name] = true
+		entryPkg[re.ID] = name
+		pkgs = append(pkgs, name)
+	}
+	npmVer := m.npmLatest(ctx, pkgs, refresh)
+	for _, re := range entries {
 		if seen[re.ID] {
 			continue
 		}
@@ -178,7 +209,9 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 		if ce.Name == "" {
 			ce.Name = re.Name
 		}
+		curLatest = npmVer[entryPkg[re.ID]] // binary 分发条目不在表里，自然为空
 		add(ce, "registry")
+		out[len(out)-1].LatestVersion = curLatest
 		if !supported {
 			out[len(out)-1].Supported = false
 		}
@@ -243,6 +276,15 @@ func (m *Manager) Install(ctx context.Context, id string) (InstallResult, error)
 	}
 	for _, re := range m.registryIndex(ctx, false) {
 		if re.ID == id {
+			// 已注册且启动参数带 <包名>@<版本> → 原位升级：参数形态原样保留
+			//（registry 模板的整表覆写会把多 bin 包必需的自定义形态打回坏掉的
+			// 旧形态，实测 minimax 0.6.x 需要 -p … mcode acp）；无版本 token
+			// 的（如 codex 模板）仍走完整安装路径。
+			if ag, ok := m.cfgFn().Normalized().Agent(re.ID); ok {
+				if _, tokIdx := npxPackageToken(ag.Args); tokIdx >= 0 && re.Distribution.Npx != nil {
+					return m.upgradeNpx(ctx, ag)
+				}
+			}
 			return m.installRegistryAgent(ctx, re)
 		}
 	}

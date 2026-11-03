@@ -7,7 +7,8 @@ import (
 // entry 从 SKILL.md 文本造条目（与后台保存走同一条解析路径）。
 func entry(t *testing.T, id, raw string) *Entry {
 	t.Helper()
-	e, err := parseEntry(id, "/tmp/"+id+"/SKILL.md", ScopeProject, raw)
+	// 与后台保存同一条路径：可写根，所以目录名约束也照旧生效。
+	e, err := parseEntry(id, "/tmp/"+id+"/SKILL.md", Root{Scope: ScopeProject, Writable: true}, raw)
 	if err != nil {
 		t.Fatalf("解析 %s 失败: %v", id, err)
 	}

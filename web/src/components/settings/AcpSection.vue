@@ -79,6 +79,16 @@ async function refreshCatalog() {
   } finally { refreshing.value = false }
 }
 
+// upgradeHint 升级徽章的「v旧 → v新」注记：旧取清单里登记的版本戳（没有就退
+// 回目录条目版本），新取 npm latest 真值（没有就退回目录版本）。
+function upgradeHint(c) {
+  const to = c.latestVersion || c.version
+  const reg = cfg.agents.find(a => a.name === (c.template?.name || c.id))
+  const from = reg?.version || c.version
+  if (!to || !from || from === to) return ''
+  return `（v${from} → v${to}）`
+}
+
 // 安装目录条目：后端装完会自动注册进清单（写回配置并热生效），
 // 这里把返回的 agent 模板同步进本地表单，列表即刻可见。
 async function installAgent(entry) {
@@ -215,7 +225,7 @@ onMounted(load)
           <div class="acp-cat-top">
             <b>{{ c.name }}<span v-if="c.version" class="acp-cat-ver"> v{{ c.version }}</span></b>
             <span v-if="c.supported === false" class="acp-cat-badge no">本平台无分发包</span>
-            <span v-else-if="c.updateAvailable" class="acp-cat-badge warn">可升级</span>
+            <span v-else-if="c.updateAvailable" class="acp-cat-badge warn">可升级{{ upgradeHint(c) }}</span>
             <span v-else-if="c.registered" class="acp-cat-badge ok">已添加</span>
             <span v-else-if="c.installed" class="acp-cat-badge ok">已安装</span>
             <span v-else class="acp-cat-badge no">未安装</span>

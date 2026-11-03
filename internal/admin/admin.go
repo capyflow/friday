@@ -28,6 +28,8 @@
 //	POST   /api/persona       切换人设/保存自定义人设（需登录，热生效并写回 config.yaml）
 //	GET    /api/permissions   全局权限模式与审批策略（需登录）
 //	POST   /api/permissions   切换权限模式 confirm/acceptEdits/fullAccess（需登录，热生效并写回 config.yaml）
+//	GET    /api/runtime       内置管家运行上限（当前工具轮数上限与可填区间，需登录）
+//	POST   /api/runtime       保存工具轮数上限（需登录，热生效并写回 config.yaml；maxIterations=0 恢复默认）
 //	POST   /api/context/clear 清除对话上下文（需登录）
 //	GET    /api/context       会话上下文占用快照（活跃区估算 token/窗口/比例，需登录）
 //	POST   /api/context/compact 手动压缩一次上下文（归档旧块并重写活跃历史，需登录）
@@ -325,7 +327,16 @@ func (s *Server) Handler() http.Handler {
 			root.AddRouter([]string{http.MethodPost}, "/api/persona", s.wrap(s.handleSetPersona))
 			root.AddRouter([]string{http.MethodGet}, "/api/permissions", s.wrap(s.handleGetPermissions))
 			root.AddRouter([]string{http.MethodPost}, "/api/permissions", s.wrap(s.handleSetPermissions))
+			// 运行上限（设置 → 能力与行为 → 运行上限）：单轮工具调用轮数。
+			root.AddRouter([]string{http.MethodGet}, "/api/runtime", s.wrap(s.handleGetRuntime))
+			root.AddRouter([]string{http.MethodPost}, "/api/runtime", s.wrap(s.handleSetRuntime))
 		}
+	}
+	if s.cfg != nil {
+		// 联网搜索配置（设置 → 扩展 → 工具）：读/存 tools.search + 真搜一次的测试端点。
+		root.AddRouter([]string{http.MethodGet}, "/api/tools/search", s.wrap(s.handleToolsSearchGet))
+		root.AddRouter([]string{http.MethodPost}, "/api/tools/search", s.wrap(s.handleToolsSearchSet))
+		root.AddRouter([]string{http.MethodPost}, "/api/tools/search/test", s.wrap(s.handleToolsSearchTest))
 	}
 	if s.heartbeatFile != "" {
 		root.AddRouter([]string{http.MethodGet}, "/api/heartbeat", s.wrap(s.handleGetHeartbeat))

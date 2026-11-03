@@ -860,7 +860,7 @@ async function clearContext() {
           <!-- bot：zcode 风时间线——思考 / 工具调用 / 正文按到达顺序分开成块 -->
           <div v-else-if="m.role === 'bot'" class="turn">
             <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
-                            @preview="path => fileDrawer.open(path)" />
+                            own-tools @preview="path => fileDrawer.open(path)" />
             <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
                 <div class="pc-head">

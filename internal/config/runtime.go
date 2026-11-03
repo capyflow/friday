@@ -61,6 +61,7 @@ func (c *Config) Apply(fn func(next *Config) error) error {
 	c.Provider = next.Provider
 	c.Persona = next.Persona
 	c.Permissions = next.Permissions
+	c.Agent = next.Agent
 	c.Mcp = next.Mcp
 	c.Acp = next.Acp
 	return nil

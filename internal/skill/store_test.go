@@ -257,16 +257,30 @@ func TestStoreSaveRejectsInvalid(t *testing.T) {
 	}
 }
 
-// TestStoreSaveRejectsOversizedBody 正文会进系统提示词，超长要挡下并说明代价。
-func TestStoreSaveRejectsOversizedBody(t *testing.T) {
+// TestStoreSaveAcceptsLongBody 正文超预算不再判无效：照常保存，命中时走"概览 +
+// read_skill 按需取"那条通道（渲染在 agent 层，这里只验条目与概览）。
+func TestStoreSaveAcceptsLongBody(t *testing.T) {
 	s := newStoreAt(t, t.TempDir())
-	long := "---\nname: 超长\n---\n" + strings.Repeat("字", maxBodyRunes+1) + "\n"
-	_, err := s.Save("", long)
-	if err == nil {
-		t.Fatal("超长正文应被拒绝")
+	long := "---\nname: 超长\ndescription: 一份很长的技能\n---\n" + strings.Repeat("字", InlineBudget+500) + "\n"
+	sum, err := s.Save("", long)
+	if err != nil {
+		t.Fatalf("超长正文应能保存: %v", err)
 	}
-	if !strings.Contains(err.Error(), "系统提示词") {
-		t.Errorf("错误应解释代价，实际 %v", err)
+	if sum.ParseErr != "" || sum.Note != "" {
+		t.Fatalf("不该因为长就判无效: %+v", sum)
+	}
+	e, ok := s.Find(sum.ID)
+	if !ok {
+		t.Fatalf("保存后应能按 id 找到: %s", sum.ID)
+	}
+	ov := e.Overview()
+	for _, want := range []string{"超过一次注入的预算", "read_skill", "开头一段"} {
+		if !strings.Contains(ov, want) {
+			t.Errorf("概览应包含 %q，实际:\n%s", want, ov)
+		}
+	}
+	if len([]rune(ov)) > InlineBudget {
+		t.Errorf("概览本身不该超过预算: %d 字", len([]rune(ov)))
 	}
 }
 

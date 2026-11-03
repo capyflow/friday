@@ -104,8 +104,11 @@ weather:
 # 也不需要重建 agent）。同名时项目目录覆盖本机 $HOME/.vortex/skills 里的版本。
 # skills:
 #   enabled: true              # false = 整个技能层关闭（不读目录、不注入）
-#   dir: skills                # 技能目录（相对数据目录，每个技能一个 <id>/SKILL.md）
+#   dir: skills                # 后台可写的技能目录（相对数据目录，每个技能一个 <id>/SKILL.md）
 #   autoTrigger: true          # 自动匹配总开关；单个技能仍要写 auto: true 才参与
+# 除上面这一个根，还按优先级扫三个只读根（约定地址不存在是常态，不会报错也不会被创建）：
+#   <工作目录>/.agents/skills、~/.agents/skills、<数据目录>/skills-user
+# 同名技能优先级高的赢，其余在「设置 → 技能」里标明被谁覆盖。详见 USAGE「技能」。
 
 # 人设提示词：多套可切换的"性格与语气"（内置：default 贴心管家 / playful 活泼调皮 /
 # rigorous 严谨可靠 / warm 温柔陪伴 / concise 简洁高效）。人设只改变小五怎么说话，
@@ -262,6 +265,13 @@ planFile: plans.json
 # plan:
 #   enabled: true              # false 时聊天里的「计划」请求直接被拒并说明原因
 #   maxIterations: 12          # 规划轮与每一步各自的工具轮数上限（框架默认仅 10）
+
+# 内置管家（网页/终端对话那条链路）的运行上限。
+# 一轮 = 模型说话 + 它调用的工具跑完，如此反复。默认 100 轮——框架缺省只有 10 轮，
+# 改多文件、联网检索这类活儿常常半路就撞墙（撞墙报错「工具调用超过 N 轮仍未结束」，
+# 本轮已完成的工具副作用保留）。可在「设置 → 运行上限」在线改，保存即热生效。
+# agent:
+#   maxIterations: 100         # 单轮工具调用轮数上限（1-500，填 0 恢复默认 100）
 
 # MCP 服务器（Model Context Protocol）：工具以 mcp_<名称>_<工具名> 前缀动态注册进
 # agent。两种接入方式二选一（管理后台"设置 → MCP 服务器"可在线配置，保存即热生效）：

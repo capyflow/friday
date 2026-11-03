@@ -20,32 +20,34 @@ import (
 
 // Config 是 Friday 整体配置。
 type Config struct {
-	runtimeMu    *sync.RWMutex
-	Provider     ProviderConfig    `yaml:"provider"`
-	Audio        AudioConfig       `yaml:"audio"`
-	ASR          ASRConfig         `yaml:"asr"`
-	Wake         WakeConfig        `yaml:"wake"`
-	TTS          TTSConfig         `yaml:"tts"`
-	VAD          VADConfig         `yaml:"vad"`
-	Display      DisplayConfig     `yaml:"display"`
-	Hardware     HardwareConfig    `yaml:"hardware"`
-	Weather      WeatherConfig     `yaml:"weather"`
-	Custom       CustomConfig      `yaml:"custom"`
-	Skills       SkillsConfig      `yaml:"skills"`
-	Chan         ChanConfig        `yaml:"chan"`
-	File         FileConfig        `yaml:"file"`
-	Admin        AdminConfig       `yaml:"admin"`
-	Memory       MemoryConfig      `yaml:"memory"`
-	Context      ContextConfig     `yaml:"context"`
-	Tools        ToolsConfig       `yaml:"tools"`
-	Permissions  PermissionsConfig `yaml:"permissions"`
-	Trace        TraceConfig       `yaml:"trace"`
-	Heartbeat    HeartbeatConfig   `yaml:"heartbeat"`
-	Mcp          McpConfig         `yaml:"mcp"`
-	Acp          AcpConfig         `yaml:"acp"`
-	Persona      PersonaConfig     `yaml:"persona"`
-	Cost         CostConfig        `yaml:"cost"`
-	SystemPrompt string            `yaml:"systemPrompt"`
+	runtimeMu   *sync.RWMutex
+	Provider    ProviderConfig    `yaml:"provider"`
+	Audio       AudioConfig       `yaml:"audio"`
+	ASR         ASRConfig         `yaml:"asr"`
+	Wake        WakeConfig        `yaml:"wake"`
+	TTS         TTSConfig         `yaml:"tts"`
+	VAD         VADConfig         `yaml:"vad"`
+	Display     DisplayConfig     `yaml:"display"`
+	Hardware    HardwareConfig    `yaml:"hardware"`
+	Weather     WeatherConfig     `yaml:"weather"`
+	Custom      CustomConfig      `yaml:"custom"`
+	Skills      SkillsConfig      `yaml:"skills"`
+	Chan        ChanConfig        `yaml:"chan"`
+	File        FileConfig        `yaml:"file"`
+	Admin       AdminConfig       `yaml:"admin"`
+	Memory      MemoryConfig      `yaml:"memory"`
+	Context     ContextConfig     `yaml:"context"`
+	Tools       ToolsConfig       `yaml:"tools"`
+	Permissions PermissionsConfig `yaml:"permissions"`
+	Trace       TraceConfig       `yaml:"trace"`
+	Heartbeat   HeartbeatConfig   `yaml:"heartbeat"`
+	Mcp         McpConfig         `yaml:"mcp"`
+	Acp         AcpConfig         `yaml:"acp"`
+	Persona     PersonaConfig     `yaml:"persona"`
+	Cost        CostConfig        `yaml:"cost"`
+	// Agent 内置管家的运行参数（对话轮数上限）。
+	Agent        AgentConfig `yaml:"agent"`
+	SystemPrompt string      `yaml:"systemPrompt"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
 	// TodoFile 待办清单持久化 JSON 文件路径（默认 todos.json，重启自动恢复）。
@@ -242,7 +244,28 @@ func (c ContextConfig) FactsEnabled() bool {
 
 // ToolsConfig 描述执行类工具。
 type ToolsConfig struct {
-	Exec ExecConfig `yaml:"exec"`
+	Exec   ExecConfig   `yaml:"exec"`
+	Search SearchConfig `yaml:"search"`
+}
+
+// SearchConfig 是联网搜索工具的供应商配置（设置 → 扩展 → 工具）：provider
+// 选后端，apiKey 是对应供应商的密钥（bing 免密钥不需要）。设置页保存后热
+// 生效——工具实例经 SearchFn 每次调用读快照，无需重建 agent。
+type SearchConfig struct {
+	// Provider 搜索供应商：bing（默认，免密钥）/ tavily / brave / bocha。
+	Provider string `yaml:"provider"`
+	// APIKey 供应商密钥；bing 恒忽略。
+	APIKey string `yaml:"apiKey"`
+}
+
+// ProviderOrDefault 返回规范化的供应商名（空/未知回落 bing）。
+func (s SearchConfig) ProviderOrDefault() string {
+	switch s.Provider {
+	case "tavily", "brave", "bocha":
+		return s.Provider
+	default:
+		return "bing"
+	}
 }
 
 // ExecConfig 描述 exec_command 工具的审批与安全边界。策略经
@@ -426,6 +449,48 @@ func (c SkillsConfig) EnabledOrDefault() bool {
 // AutoTriggerEnabled 返回是否允许自动匹配（缺省允许，仍需技能自身 auto: true）。
 func (c SkillsConfig) AutoTriggerEnabled() bool {
 	return c.AutoTrigger == nil || *c.AutoTrigger
+}
+
+// DefaultAgentMaxIterations 是一轮回答默认允许的工具调用轮数（框架缺省仅 10 轮，
+// 对多步骤的真实活儿太少）。设置页「运行上限」可改，写回 config.yaml。
+const DefaultAgentMaxIterations = 100
+
+// AgentConfig 是内置管家（/api/chat 那条对话链路）的运行参数。
+type AgentConfig struct {
+	// MaxIterations 一轮回答里允许的工具调用轮数上限（默认 100）。
+	// 一轮 = 模型说话 + 它调用的工具跑完，如此反复，直到模型给出不再调工具的正文。
+	// 框架缺省只有 10 轮，多文件改动 / 联网检索这类活儿很容易半路撞墙
+	// （撞墙时报"工具调用超过 N 轮仍未结束"，本轮已做的工具副作用保留）。
+	// 设得越大越不容易中断，但失控的自循环也烧得越久——配合「成本与预算」一起看。
+	MaxIterations int `yaml:"maxIterations"`
+}
+
+// 轮数上限的可填区间：低于下限几乎必然半路中断，高于上限等于放任自循环烧 token。
+const (
+	MinAgentMaxIterations = 1
+	MaxAgentMaxIterations = 500
+)
+
+// MaxIterationsOrDefault 返回生效的工具轮数上限（未配置或填了非正数时给默认值，
+// 不依赖 SetDefaults 是否跑过）。
+func (c AgentConfig) MaxIterationsOrDefault() int {
+	if c.MaxIterations <= 0 {
+		return DefaultAgentMaxIterations
+	}
+	return c.MaxIterations
+}
+
+// NormalizeAgentMaxIterations 校验并规范化轮数上限：0 表示回到默认
+// （DefaultAgentMaxIterations），越界时报错并说明可填区间。
+func NormalizeAgentMaxIterations(n int) (int, error) {
+	if n == 0 {
+		return DefaultAgentMaxIterations, nil
+	}
+	if n < MinAgentMaxIterations || n > MaxAgentMaxIterations {
+		return 0, fmt.Errorf("轮数上限只能填 %d-%d 的整数（填 0 恢复默认 %d），当前是 %d",
+			MinAgentMaxIterations, MaxAgentMaxIterations, DefaultAgentMaxIterations, n)
+	}
+	return n, nil
 }
 
 // PlanConfig 是计划模式参数。计划本身存在 planFile 里，后台"自动化 → 计划"可管。
@@ -966,6 +1031,90 @@ func UpdatePermissionMode(path, mode string) error {
 	return os.Rename(tmp, path)
 }
 
+// UpdateAgentMaxIterations 热更新 config.yaml 中的 agent.maxIterations：
+// 与 UpdatePermissionMode 同一写法——yaml.Node 编辑保留注释与结构，agent 段
+// 不存在时追加，临时文件 + rename 原子写回。n 须为已规范化的正整数。
+func UpdateAgentMaxIterations(path string, n int) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	agentNode := mappingValue(root, "agent")
+	if agentNode == nil || agentNode.Kind != yaml.MappingNode {
+		agentNode = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "agent"},
+			agentNode)
+	}
+	setMappingInt(agentNode, "maxIterations", n)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// UpdateToolsSearch 热更新 config.yaml 中的 tools.search（provider + apiKey）：
+// 与 UpdatePermissionMode 同一写法——yaml.Node 编辑保留注释与结构，tools 段
+// 不存在时追加，原子写回。provider 传空表示回落默认（bing）。
+func UpdateToolsSearch(path string, s SearchConfig) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	tools := mappingValue(root, "tools")
+	if tools == nil || tools.Kind != yaml.MappingNode {
+		tools = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "tools"},
+			tools)
+	}
+	search := mappingValue(tools, "search")
+	if search == nil || search.Kind != yaml.MappingNode {
+		search = &yaml.Node{Kind: yaml.MappingNode}
+		tools.Content = append(tools.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "search"},
+			search)
+	}
+	setMappingKey(search, "provider", s.Provider)
+	setMappingKey(search, "apiKey", s.APIKey)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
 // UpdatePersona 热更新 config.yaml 中的 persona 配置（active + 自定义预设列表）：
 // 以 yaml.Node 方式编辑（保留文件其余部分的注释与结构；persona 段不存在时追加），
 // 临时文件 + rename 原子写回。presets 允许为空（写空列表，表示清空自定义覆盖）。
@@ -1059,6 +1208,23 @@ func setMappingKey(mapping *yaml.Node, key, val string) {
 	mapping.Content = append(mapping.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
 		&yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: "!!str"})
+}
+
+// setMappingInt 更新或新增映射中的整数键（写 !!int 标签，避免读回时
+// 因 !!str 无法反序列化成 int 字段）。
+func setMappingInt(mapping *yaml.Node, key string, val int) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			if len(mapping.Content[i+1].Content) == 0 { // 标量才直接改值
+				mapping.Content[i+1].Value = strconv.Itoa(val)
+				mapping.Content[i+1].Tag = "!!int"
+			}
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(val), Tag: "!!int"})
 }
 
 // marshalNode 以 2 空格缩进序列化。
@@ -1179,6 +1345,9 @@ func (c *Config) applyDefaults() {
 	if c.Plan.MaxIterations <= 0 {
 		c.Plan.MaxIterations = 12
 	}
+	if c.Agent.MaxIterations <= 0 {
+		c.Agent.MaxIterations = DefaultAgentMaxIterations
+	}
 	if c.Cost.Currency == "" {
 		c.Cost.Currency = "CNY"
 	}
@@ -1199,6 +1368,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Tools.Exec.Mode == "" {
 		c.Tools.Exec.Mode = "confirm"
+	}
+	if c.Tools.Search.Provider == "" {
+		c.Tools.Search.Provider = "bing"
 	}
 	if c.Permissions.MCP == "" {
 		c.Permissions.MCP = "allow"
@@ -1305,6 +1477,12 @@ func (c *Config) Validate() error {
 	}
 	if _, err := NormalizePermissionMode(c.Permissions.Mode); err != nil {
 		return fmt.Errorf("config: permissions.mode 非法: %v", err)
+	}
+	// 轮数上限挡住明显误配（多打一个 0 就是十倍 token），留空/填 0 已由
+	// applyDefaults 归到默认值，这里只可能撞上超过上限的大数。
+	if c.Agent.MaxIterations > MaxAgentMaxIterations {
+		return fmt.Errorf("config: agent.maxIterations 不能超过 %d（留空或填 0 表示默认 %d），当前 %d",
+			MaxAgentMaxIterations, DefaultAgentMaxIterations, c.Agent.MaxIterations)
 	}
 	if r := c.Cost.Budget.SoftRatio; r <= 0 || r > 1 {
 		return fmt.Errorf("config: cost.budget.softRatio 需落在 (0,1] 区间，当前 %g", r)

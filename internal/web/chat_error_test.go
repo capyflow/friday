@@ -45,6 +45,11 @@ func TestChatErrorMessage(t *testing.T) {
 			wants: []string{"连不上模型服务", "API 地址"},
 		},
 		{
+			name:  "轮数上限",
+			err:   errors.New("agent: 工具调用超过 100 轮仍未结束: agent: 轮数上限"),
+			wants: []string{"轮数到了上限", "设置 → 运行上限", "已完成的工具操作都保留着"},
+		},
+		{
 			name:  "未知错误带出原文",
 			err:   errors.New("agent: 第 3 轮调用失败: 某个服务商自创的怪错误"),
 			wants: []string{"这轮回复失败了", "某个服务商自创的怪错误"},

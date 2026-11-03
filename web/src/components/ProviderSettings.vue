@@ -209,7 +209,8 @@ onMounted(load)
 
 <style scoped>
 .provider-settings label { display: block; }
-/* 行卡片与 .mcp-row 同规格但独立类名；默认收成一行摘要，展开才是表单（zcode 式收拢） */
+/* 行卡片与设置页能力卡片（style.css 的 .svc-card）同规格但独立类名；
+   默认收成一行摘要，展开才是表单（zcode 式收拢，MCP 服务器同套路） */
 .pm-list { display: flex; flex-direction: column; gap: 8px; }
 .pm-empty { display: flex; flex-direction: column; gap: 6px; padding: 24px 18px;
   border: 1px dashed var(--border); border-radius: var(--radius); text-align: center;

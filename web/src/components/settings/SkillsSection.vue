@@ -21,6 +21,7 @@ priority: 10
 
 const skills = ref([])
 const dir = ref('')
+const roots = ref([])     // 发现根（含只读的约定地址），按优先级排列
 const storeErr = ref('')
 const msg = reactive({ text: '', cls: '' })
 const editing = ref(null)   // { id, raw, isNew }
@@ -40,6 +41,7 @@ async function load() {
     const r = await api('GET', '/api/skills')
     skills.value = r.skills || []
     dir.value = r.dir || ''
+    roots.value = r.roots || []
     storeErr.value = r.error || ''
   } catch (e) { show('技能列表加载失败：' + e.message, false) }
 }
@@ -47,7 +49,8 @@ async function load() {
 async function openEditor(s) {
   try {
     const r = await api('GET', '/api/skills/' + encodeURIComponent(s.id))
-    editing.value = { id: s.id, raw: r.raw, isNew: false, name: s.name }
+    editing.value = { id: s.id, raw: r.raw, isNew: false, name: s.name,
+      source: s.source, path: s.path, readOnly: !!s.readOnly }
   } catch (e) { show(e.message, false) }
 }
 function newSkill() { editing.value = { id: '', raw: TEMPLATE, isNew: true } }
@@ -99,7 +102,11 @@ onMounted(load)
     <button class="btn primary" type="button" @click="newSkill">＋ 新建技能</button>
     <button class="btn" type="button" @click="reload">重新扫描目录</button>
     <span class="grow"></span>
-    <span class="meta" v-if="dir">目录 {{ dir }}</span>
+    <!-- 多根发现：说清扫了哪几个目录、哪个才是后台能改的 -->
+    <span v-if="roots.length" class="meta skill-roots"
+          :title="roots.map(r => r.source + '：' + r.dir + (r.writable ? '（后台可写）' : '（只读）')).join('\n')">
+      扫描 {{ roots.length }} 个目录，可写的是 {{ dir || '未配置' }}
+    </span>
   </div>
   <div v-if="storeErr" class="msg err">{{ storeErr }}</div>
   <div class="msg skill-msg" :class="msg.cls">{{ msg.text }}</div>
@@ -107,6 +114,8 @@ onMounted(load)
   <div v-if="editing" class="skill-edit">
     <div class="se-head">
       <b>{{ editing.isNew ? '新建技能' : '编辑 ' + (editing.name || editing.id) }}</b>
+      <!-- 只读根（约定地址）改不了：把文件位置说清楚，人才知道去哪儿改 -->
+      <span v-if="editing.readOnly" class="meta se-path">{{ editing.source }} · {{ editing.path }}（只读）</span>
       <span class="grow"></span>
       <button class="btn sm" type="button" @click="cancelEdit">取消</button>
       <button class="btn sm primary" type="button" :disabled="saving" @click="save">
@@ -121,7 +130,7 @@ onMounted(load)
     <div v-for="s in skills" :key="s.id" class="skill-row" :class="{ broken: !!s.parseError }">
       <div class="sr-head">
         <b>{{ s.name || s.id }}</b>
-        <span class="meta">{{ s.scope === 'user' ? '本机目录' : '项目' }} · {{ s.id }}</span>
+        <span class="meta">{{ s.source || (s.scope === 'user' ? '个人技能目录' : 'Friday 技能目录') }} · {{ s.id }}</span>
         <span v-if="s.auto" class="chip">自动匹配</span>
         <span v-if="s.model" class="chip">{{ s.model }}</span>
         <span class="grow"></span>

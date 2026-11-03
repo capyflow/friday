@@ -1,5 +1,6 @@
-// store.go 负责技能目录的扫描、加载与写入：项目目录可写、用户目录只读，
-// 一份 SKILL.md 就是全部真相（不另存 sidecar、不写 config.yaml）。
+// store.go 负责技能目录的扫描、加载与写入：多个发现根按顺序定优先级，只有
+// 后台管理的那一个可写，其余只读；一份 SKILL.md 就是全部真相（不另存 sidecar、
+// 不写 config.yaml）。
 package skill
 
 import (
@@ -15,27 +16,41 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Store 是技能仓库。零值不可用，请用 NewStore。
+// Store 是技能仓库。零值不可用，请用 NewStore / NewStoreRoots。
 type Store struct {
 	mu      sync.RWMutex
-	dir     string // 可写：默认 <数据目录>/skills
-	userDir string // 只读：默认 <数据目录>/skills-user
+	roots   []Root
+	dir     string // 可写根目录（第一个 Writable 的 Dir）：后台新建/保存落这里
 	entries []*Entry
 	byName  map[string]*Entry
 	byID    map[string]*Entry
 	loadErr error
 }
 
-// NewStore 创建仓库并首次扫描。dir/userDir 为空表示不启用该目录
-// （测试用纯内存传两个空串）。
+// NewStore 用 Friday 自己的两个目录建仓库：<dir> 后台可写、<userDir> 个人只读。
+// 要接上约定地址（工作目录的 .agents/skills 与 ~/.agents/skills）用 NewStoreRoots。
 func NewStore(dir, userDir string) *Store {
-	s := &Store{dir: dir, userDir: userDir, byName: map[string]*Entry{}, byID: map[string]*Entry{}}
-	for _, d := range []string{dir, userDir} {
-		if d == "" {
+	return NewStoreRoots(
+		Root{Dir: dir, Scope: ScopeProject, Source: "Friday 技能目录", Writable: true},
+		Root{Dir: userDir, Scope: ScopeUser, Source: "个人技能目录"},
+	)
+}
+
+// NewStoreRoots 按给定顺序扫描多个发现根并首次加载。dir 为空的根跳过；
+// 可写根只认第一个（后台只有一个"新建技能落哪儿"的答案）。
+//
+// 只读根一律不替用户创建：约定地址没建过就是没有，读不到不是故障。
+func NewStoreRoots(roots ...Root) *Store {
+	s := &Store{roots: roots, byName: map[string]*Entry{}, byID: map[string]*Entry{}}
+	for _, r := range roots {
+		if r.Dir == "" || !r.Writable {
 			continue
 		}
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			s.loadErr = fmt.Errorf("创建技能目录 %q 失败: %w", d, err)
+		if s.dir == "" {
+			s.dir = r.Dir
+		}
+		if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+			s.loadErr = fmt.Errorf("创建技能目录 %q 失败: %w", r.Dir, err)
 		}
 	}
 	s.reloadLocked()
@@ -47,6 +62,21 @@ func (s *Store) Err() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.loadErr
+}
+
+// Roots 返回当前启用的发现根（含 Dir 为空以外的全部），供后台与启动日志说明
+// "技能是从哪儿找到的"。返回副本：调用方改不动仓库配置。
+func (s *Store) Roots() []Root {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Root, 0, len(s.roots))
+	for _, r := range s.roots {
+		if r.Dir == "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // Dir 返回可写技能目录。
@@ -64,23 +94,19 @@ func (s *Store) Reload() []Summary {
 	return s.summariesLocked()
 }
 
-// reloadLocked 重新扫描；调用方须持写锁。
+// reloadLocked 按根顺序重新扫描；调用方须持写锁。
 func (s *Store) reloadLocked() {
 	entries := make([]*Entry, 0, 8)
-	// 项目目录先扫：同名技能项目覆盖用户（与框架 SkillManager 的优先级一致）。
-	for _, scan := range []struct {
-		dir, scope string
-	}{
-		{s.dir, ScopeProject},
-		{s.userDir, ScopeUser},
-	} {
-		if scan.dir == "" {
+	for i, root := range s.roots {
+		if root.Dir == "" {
 			continue
 		}
-		dirs, err := os.ReadDir(scan.dir)
+		dirs, err := os.ReadDir(root.Dir)
 		if err != nil {
-			if !os.IsNotExist(err) && scan.scope == ScopeProject {
-				s.loadErr = fmt.Errorf("读取技能目录 %q 失败: %w", scan.dir, err)
+			// 约定地址常常还没建（~/.agents/skills 十有八九没有），读不到不算故障；
+			// 只有后台可写那个根读不动才需要报出来。
+			if !os.IsNotExist(err) && root.Writable {
+				s.loadErr = fmt.Errorf("读取技能目录 %q 失败: %w", root.Dir, err)
 			}
 			continue
 		}
@@ -88,16 +114,18 @@ func (s *Store) reloadLocked() {
 			if !d.IsDir() {
 				continue
 			}
-			path := filepath.Join(scan.dir, d.Name(), "SKILL.md")
+			path := filepath.Join(root.Dir, d.Name(), "SKILL.md")
 			if _, err := os.Stat(path); err != nil {
 				continue // 目录里没有 SKILL.md：不是技能包
 			}
-			entries = append(entries, loadEntry(d.Name(), path, scan.scope))
+			e := loadEntry(d.Name(), path, root)
+			e.RootIdx = i
+			entries = append(entries, e)
 		}
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].Scope != entries[j].Scope {
-			return entries[i].Scope == ScopeProject // 项目在前
+		if entries[i].RootIdx != entries[j].RootIdx {
+			return entries[i].RootIdx < entries[j].RootIdx // 越靠前的根越优先
 		}
 		if entries[i].Extra.Priority != entries[j].Extra.Priority {
 			return entries[i].Extra.Priority > entries[j].Extra.Priority
@@ -108,18 +136,20 @@ func (s *Store) reloadLocked() {
 	byName := map[string]*Entry{}
 	byID := map[string]*Entry{}
 	for _, e := range entries {
-		byID[e.ID] = e
+		// 两个根里目录名一样时，ID 归优先级高的那条（后台按 ID 编辑的只能是它）；
+		// 低优先级那条照常参与选择——它的技能名可能完全不同，不该被顺手废掉。
+		if _, taken := byID[e.ID]; !taken {
+			byID[e.ID] = e
+		}
 		if e.ParseErr != "" || e.Name() == "" {
 			continue
 		}
 		if prev, dup := byName[e.Name()]; dup {
 			// 重名不静默丢弃：后来者标记原因，让用户在后台看得见改哪个。
-			if prev.Scope == e.Scope {
+			if prev.RootIdx == e.RootIdx {
 				e.Note = fmt.Sprintf("技能名与 %q 重复，本条不参与选择——请改 name 或删除其一", prev.ID)
 			} else {
-				e.Note = fmt.Sprintf("已被 %s 目录的同名技能 %q 覆盖", e.Scope, prev.ID)
-				byID[e.ID] = e
-				continue
+				e.Note = fmt.Sprintf("已被「%s」里的同名技能 %q 覆盖，本条不参与选择", prev.Source, prev.ID)
 			}
 			continue
 		}
@@ -187,6 +217,20 @@ func (s *Store) FindName(name string) (*Entry, bool) {
 	return nil, false
 }
 
+// Find 按 id 或技能名找条目：模型手里可能是设置页看到的 id，也可能是对话里叫的名字。
+func (s *Store) Find(idOrName string) (*Entry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := strings.TrimSpace(idOrName)
+	if e, ok := s.byID[key]; ok {
+		return e, true
+	}
+	if e, ok := s.byName[key]; ok {
+		return e, true
+	}
+	return nil, false
+}
+
 // Raw 返回技能文件原文（后台编辑器用）。
 func (s *Store) Raw(id string) (string, error) {
 	s.mu.RLock()
@@ -212,7 +256,7 @@ func (s *Store) Save(id, raw string) (Summary, error) {
 	if err := Validate(raw); err != nil {
 		return Summary{}, err
 	}
-	proposed, err := parseEntry("probe", filepath.Join(s.dir, "probe", "SKILL.md"), ScopeProject, raw)
+	proposed, err := parseEntry("probe", filepath.Join(s.dir, "probe", "SKILL.md"), s.writableRoot(), raw)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -248,6 +292,17 @@ func (s *Store) Save(id, raw string) (Summary, error) {
 	return Summary{}, fmt.Errorf("技能已写入但未能加载：%s", path)
 }
 
+// writableRoot 返回后台可写根（保存/新建落点）；没配可写根时给一个空 Dir，
+// 调用方（Save）会因此报"未配置技能目录"。
+func (s *Store) writableRoot() Root {
+	for _, r := range s.roots {
+		if r.Writable && r.Dir != "" {
+			return r
+		}
+	}
+	return Root{Dir: s.dir, Scope: ScopeProject, Source: "Friday 技能目录", Writable: true}
+}
+
 // SetEnabled 只改写 frontmatter 的 enabled 键，保留正文与其余注释。
 func (s *Store) SetEnabled(id string, enabled bool) (Summary, error) {
 	s.mu.Lock()
@@ -256,8 +311,9 @@ func (s *Store) SetEnabled(id string, enabled bool) (Summary, error) {
 	if !ok {
 		return Summary{}, fmt.Errorf("技能不存在: %s", id)
 	}
-	if e.Scope == ScopeUser {
-		return Summary{}, fmt.Errorf("用户目录技能（%s）位于 %s，后台只读", id, s.userDir)
+	if !e.Writable {
+		return Summary{}, fmt.Errorf("「%s」里的技能（%s）在 %s，后台只读——要停用请直接编辑该文件的 enabled",
+			e.Source, id, e.Path)
 	}
 	raw, err := os.ReadFile(e.Path)
 	if err != nil {
@@ -289,8 +345,9 @@ func (s *Store) Delete(id string) error {
 	if !ok {
 		return fmt.Errorf("技能不存在: %s", id)
 	}
-	if e.Scope == ScopeUser {
-		return fmt.Errorf("用户目录技能（%s）位于 %s，后台不删", id, s.userDir)
+	if !e.Writable {
+		return fmt.Errorf("「%s」里的技能（%s）在 %s，后台不删——那是外部工具或团队共享的文件",
+			e.Source, id, filepath.Dir(e.Path))
 	}
 	dir := filepath.Dir(e.Path)
 	stash := filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+".disabled-"+
@@ -306,15 +363,16 @@ func (s *Store) Delete(id string) error {
 }
 
 // loadEntry 读取一个 SKILL.md 并生成条目；任何失败都写进 ParseErr（保留原文件）。
-func loadEntry(id, path, scope string) *Entry {
+func loadEntry(id, path string, root Root) *Entry {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return &Entry{ID: id, Path: path, Scope: scope,
-			ParseErr: fmt.Sprintf("读取失败：%v", err)}
+		return &Entry{ID: id, Path: path, Scope: root.Scope, Source: root.Source,
+			Writable: root.Writable, ParseErr: fmt.Sprintf("读取失败：%v", err)}
 	}
-	e, err := parseEntry(id, path, scope, string(data))
+	e, err := parseEntry(id, path, root, string(data))
 	if err != nil {
-		return &Entry{ID: id, Path: path, Scope: scope, ParseErr: err.Error()}
+		return &Entry{ID: id, Path: path, Scope: root.Scope, Source: root.Source,
+			Writable: root.Writable, ParseErr: err.Error()}
 	}
 	return e
 }
@@ -322,8 +380,10 @@ func loadEntry(id, path, scope string) *Entry {
 // parseEntry 解析一份 SKILL.md 文本。框架字段用框架自己的导出类型
 // （vxagent.SkillMetadata，字段名与 yaml tag 由上游定义），Friday 扩展键用本包的
 // Extra；不读磁盘，因此后台保存前就能校验同一套规则。
-func parseEntry(id, path, scope, raw string) (*Entry, error) {
-	if scope == ScopeProject && !validSkillID(id) {
+func parseEntry(id, path string, root Root, raw string) (*Entry, error) {
+	// 目录名约束只对后台可写的根生效：那是防路径穿越的。约定地址里的目录名
+	// 是别人起的（"My Skill" 之类），照原样收下就行，别替人判非法。
+	if root.Writable && !validSkillID(id) {
 		return nil, fmt.Errorf("技能目录名 %q 非法（只能含字母/数字/下划线/连字符）", id)
 	}
 	if err := Validate(raw); err != nil {
@@ -339,10 +399,12 @@ func parseEntry(id, path, scope, raw string) (*Entry, error) {
 		return nil, fmt.Errorf("扩展键解析失败：%v", err)
 	}
 	meta.Name = strings.TrimSpace(meta.Name)
-	return &Entry{
-		ID: id, Path: path, Scope: scope, Extra: extra,
-		Skill: &vxagent.Skill{Metadata: meta, Content: body, Path: path, Scope: scope},
-	}, nil
+	e := &Entry{
+		ID: id, Path: path, Scope: root.Scope, Source: root.Source, Writable: root.Writable,
+		Extra: extra,
+		Skill: &vxagent.Skill{Metadata: meta, Content: body, Path: path, Scope: root.Scope},
+	}
+	return e, nil
 }
 
 // validSkillID 限制目录名字符集，防路径穿越（与记忆页 ID 同一套约束）。

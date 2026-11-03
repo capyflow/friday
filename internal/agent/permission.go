@@ -41,9 +41,11 @@ var passThroughTools = []string{
 	"add_todo", "list_todos", "complete_todo", "delete_todo", "update_todo",
 	"add_note", "list_notes", "update_note", "delete_note", "pin_entry",
 	"get_weather",
+	"web_search", "web_fetch",
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",
 	"read_file", "list_files", "write_file", "edit_file",
+	"read_skill",
 	"mcp_edit",
 }
 

@@ -413,6 +413,56 @@ func TestOAuthRefreshRejectedAsksReauth(t *testing.T) {
 	}
 }
 
+// TestOAuthSeedStateFromStoredToken 状态由令牌库推断，覆盖重启后的四种情形。
+func TestOAuthSeedStateFromStoredToken(t *testing.T) {
+	const res = "https://mcp.example.com/mcp"
+	now := time.Now()
+	write := func(t *testing.T, path string, sess vxauth.Session) {
+		t.Helper()
+		b, err := json.Marshal(map[string]vxauth.Session{"remote": sess})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stateAfterRestart := func(t *testing.T, sess vxauth.Session, resource string) (string, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "mcp-oauth.json")
+		write(t, path, sess)
+		o := NewOAuthWithClient(path, nil)
+		o.Configure("remote", AuthOAuth, resource)
+		return o.StateOf("remote")
+	}
+
+	base := vxauth.Session{Resource: res, AuthorizationServer: "https://auth.example.com",
+		Token: vxauth.Token{AccessToken: "a1", RefreshToken: "r1", ExpiresAt: now.Add(time.Hour)}}
+
+	// 1. 令牌有效：已授权
+	if st, _ := stateAfterRestart(t, base, res); st != AuthStateAuthorized {
+		t.Errorf("有效令牌应算已授权: %q", st)
+	}
+	// 2. 过期但有刷新令牌：仍算已授权（连上时自动换）
+	expired := base
+	expired.Token.ExpiresAt = now.Add(-time.Hour)
+	if st, _ := stateAfterRestart(t, expired, res); st != AuthStateAuthorized {
+		t.Errorf("过期但有 refresh_token 应算已授权: %q", st)
+	}
+	// 3. 过期且没有刷新令牌：需要重新授权
+	dead := expired
+	dead.Token.RefreshToken = ""
+	if st, _ := stateAfterRestart(t, dead, res); st != AuthStateRequired {
+		t.Errorf("彻底过期的令牌应回到待授权: %q", st)
+	}
+	// 4. 配置里的地址换过：旧会话不再算数（令牌按资源发放，换地址等于换资源）
+	moved := base
+	moved.Resource = "https://old.example.com/mcp"
+	if st, msg := stateAfterRestart(t, moved, res); st != AuthStateRequired || !strings.Contains(msg, "变更") {
+		t.Errorf("地址变更应回到待授权并说明原因: %q %q", st, msg)
+	}
+}
+
 func TestOAuthStorePersistsAndReloads(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth.json")
@@ -435,6 +485,10 @@ func TestOAuthStorePersistsAndReloads(t *testing.T) {
 	// 重启语义：新实例从文件读回，不需要再走一次浏览器授权。
 	reloaded := NewOAuthWithClient(path, f.srv.Client())
 	reloaded.configureTest("remote", f.resource())
+	// 状态也要跟着恢复：否则每次重启都显示「待授权」，把人引去重走一遍浏览器授权。
+	if state, _ := reloaded.StateOf("remote"); state != AuthStateAuthorized {
+		t.Fatalf("重启后应直接显示已授权: %q", state)
+	}
 	value, ok := reloaded.Provider("remote").Authorization(context.Background())
 	if !ok || !strings.HasPrefix(value, "Bearer access-") {
 		t.Fatalf("重载后应能直接取到令牌: %q ok=%v", value, ok)

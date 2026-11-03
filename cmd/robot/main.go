@@ -321,7 +321,15 @@ func main() {
 	// 引擎绑定 provider/model，随 Agent 重建路径一起重建（见 rebuild 闭包与热更新）。
 	ctxMgr := robotagent.NewContextManager(robotagent.WikiFactSink(memStore))
 
+	// 技能仓库必须在注册工具之前就位：read_skill 工具靠它按需取正文（超预算的技能只把
+	// 概览交给模型）。技能层关闭时保持 nil，工具会直接回「技能层未启用」。
+	var skillStore *skill.Store
+	if cfg.Skills.EnabledOrDefault() {
+		skillStore = skill.NewStoreRoots(skillRoots(cfg.Skills.Dir, skill.UserScopeDir, workDir())...)
+	}
+
 	deps := robotagent.Deps{
+		Skills:     skillStore,
 		Engine:     eng,
 		Todos:      todos,
 		Memory:     memStore,
@@ -333,6 +341,10 @@ func main() {
 		Approver:   approver,
 		Mcp:        mcpMgr,
 		ConfigPath: *cfgPath,
+		Search: func() (string, string) {
+			s := cfg.Snapshot().Tools.Search
+			return s.ProviderOrDefault(), s.APIKey
+		},
 	}
 
 	// rebuild 重建注册表与 Agent（上下文引擎 + 内置工具 + 当前在线的 MCP 工具），原子替换。
@@ -392,6 +404,7 @@ func main() {
 	}
 	brain = robotagent.NewBrain(ag, pool, ctxMgr)
 	brain.SetMemory(memStore)            // 会话开始时注入长期记忆速览（清上下文后仍有"印象"）
+	brain.SetProjectDir(workDir())       // 会话开始时注入项目上下文（工作目录下的 AGENTS.md / README.md）
 	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
 	if n := len(cfg.Custom.Commands); n > 0 {
 		log.Printf("[自定义指令] 已启用 %d 条（config custom.commands，重启生效）", n)
@@ -399,9 +412,8 @@ func main() {
 
 	// 技能层：SKILL.md 目录（沿用 vortexagent 的框架格式，另加 Friday 的启用/触发键）。
 	// 后台"设置 → 技能"增删改即时生效——技能是按次注入的，不需要重建 Agent。
-	var skillStore *skill.Store
-	if cfg.Skills.EnabledOrDefault() {
-		skillStore = skill.NewStore(cfg.Skills.Dir, skill.UserScopeDir)
+	// 仓库在注册工具前就建好了（read_skill 要用），这里只接给 Brain 并打日志。
+	if skillStore != nil {
 		brain.SetSkills(skillStore, cfg.Skills.AutoTriggerEnabled())
 		list := skillStore.List()
 		broken := 0
@@ -414,8 +426,8 @@ func main() {
 		if cfg.Skills.AutoTriggerEnabled() {
 			auto = "开启"
 		}
-		log.Printf("[技能] 目录 %s：共 %d 个，自动匹配%s（技能需自身 auto: true 才参与）",
-			cfg.Skills.Dir, len(list), auto)
+		log.Printf("[技能] 共 %d 个，自动匹配%s（技能需自身 auto: true 才参与）；发现根：%s",
+			len(list), auto, strings.Join(rootSummary(skillStore), "、"))
 		if broken > 0 {
 			log.Printf("[技能] 其中 %d 个文件无效，已在后台标出原因（原文件保留，不参与选择）", broken)
 		}
@@ -865,6 +877,70 @@ func printHelp() {
 // freePort 挑一个当前空闲的 TCP 端口（监听 :0 由内核分配后立刻关闭）。
 // 桌面外壳传 --port 0 依赖它：端口在占用检查与服务监听之间可能被抢走，
 // 但对单机个人应用是可接受的竞态。
+// workDir 是"Friday 此刻在哪个目录里干活"的唯一答案：今天就是进程的工作目录
+// （桌面模式启动时已 chdir 到数据目录，非桌面模式是启动时的当前目录）。
+// 后续做"选一个目录工作"的模式时改这一处即可——技能的 .agents/skills 发现根与
+// AGENTS.md / README.md 项目上下文都从这里取根。
+func workDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
+// skillRoots 按优先级从高到低列出技能发现根：
+//  1. <数据目录>/skills            后台"设置 → 技能"可写，改哪条生效哪条
+//  2. <工作目录>/.agents/skills     项目共享（约定地址，只读）
+//  3. ~/.agents/skills             个人全局（约定地址，只读）
+//  4. <数据目录>/skills-user       个人技能（后台只读）
+//
+// 后台可写的那条排在最前：用户在界面上编辑的技能不该被某个看不见的共享文件悄悄压住。
+// 约定地址不存在是常态（没建过就是没有），空目录不会报错，也不会被创建。
+func skillRoots(dir, userDir, work string) []skill.Root {
+	roots := []skill.Root{
+		{Dir: dir, Scope: skill.ScopeProject, Source: "Friday 技能目录", Writable: true},
+	}
+	if p := filepath.Join(work, ".agents", "skills"); abs(p) != abs(dir) {
+		roots = append(roots, skill.Root{Dir: p, Scope: skill.ScopeProject, Source: "项目 .agents/skills"})
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		p := filepath.Join(home, ".agents", "skills")
+		if abs(p) != abs(dir) {
+			roots = append(roots, skill.Root{Dir: p, Scope: skill.ScopeUser, Source: "公共 ~/.agents/skills"})
+		}
+	}
+	roots = append(roots, skill.Root{Dir: userDir, Scope: skill.ScopeUser, Source: "个人技能目录"})
+	return roots
+}
+
+// rootSummary 把发现根写成"来源=路径(状态)"一串，启动日志里能一眼看出扫了哪几个目录、
+// 哪个可写。约定地址读不到（还没建）时标"未建"，免得被当成故障。
+func rootSummary(store *skill.Store) []string {
+	out := make([]string, 0, 4)
+	for _, r := range store.Roots() {
+		state := "只读"
+		if r.Writable {
+			state = "可写"
+		}
+		if _, err := os.Stat(r.Dir); err != nil {
+			state = "未建"
+		}
+		out = append(out, fmt.Sprintf("%s %s[%s]", r.Source, r.Dir, state))
+	}
+	return out
+}
+
+func abs(p string) string {
+	if p == "" {
+		return ""
+	}
+	if out, err := filepath.Abs(p); err == nil {
+		return out
+	}
+	return p
+}
+
 func freePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

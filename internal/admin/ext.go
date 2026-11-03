@@ -576,6 +576,48 @@ func (s *Server) handleSetPermissions(ctx *vhttp.Context) error {
 	})
 }
 
+// handleGetRuntime 返回内置管家的运行上限（设置页「运行上限」展示）：
+// 当前生效的工具轮数上限 + 可填区间与默认值，前端据此渲染输入框提示。
+func (s *Server) handleGetRuntime(ctx *vhttp.Context) error {
+	out := map[string]any{
+		"maxIterations":        config.DefaultAgentMaxIterations,
+		"defaultMaxIterations": config.DefaultAgentMaxIterations,
+		"minIterations":        config.MinAgentMaxIterations,
+		"maxIterationsLimit":   config.MaxAgentMaxIterations,
+	}
+	if s.cfg != nil {
+		out["maxIterations"] = s.cfg.Snapshot().Agent.MaxIterationsOrDefault()
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, out)
+}
+
+// handleSetRuntime 保存一轮回答的工具调用轮数上限：经
+// agent.ReloadAgentMaxIterations 热生效（重建 Agent + 写回 config.yaml）。
+// body {"maxIterations": 60}，填 0 表示恢复默认。
+func (s *Server) handleSetRuntime(ctx *vhttp.Context) error {
+	var req struct {
+		MaxIterations *int `json:"maxIterations"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if req.MaxIterations == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 maxIterations 字段"})
+	}
+	if s.cfg == nil || s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": "配置或聊天服务未启用，轮数上限无法热生效"})
+	}
+	n, err := agent.ReloadAgentMaxIterations(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, *req.MaxIterations)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"maxIterations": n,
+		"message":       fmt.Sprintf("单轮工具调用上限已设为 %d 轮并热生效（下一轮起），已写回 config.yaml", n),
+	})
+}
+
 // handleGetPersona 返回人设提示词配置：当前生效 ID + 全部可用预设
 // （内置在前、自定义在后；自定义覆盖内置时替换同 ID 文案并打标记）。
 // builtin=true 表示该 ID 有内置版本（覆盖后可"恢复内置"）；

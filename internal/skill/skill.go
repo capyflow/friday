@@ -3,30 +3,53 @@
 // 与正文指令），并在同一份文件里补上 Friday 需要的启用与触发元数据。
 //
 // 框架负责执行期的一切：<skill-instruction> 注入系统提示词、model/temperature 覆盖、
-// allowed-tools 在"发给模型的工具声明"与"实际执行"两处过滤。本包只解决框架没有的
-// 三件事：目录发现与持久化、按消息选择技能、后台可见的错误解释。
+// allowed-tools 在"发给模型的工具声明"与"实际执行"两处过滤。本包解决框架没有的
+// 三件事：目录发现与持久化、按消息选择技能、后台可见的错误解释，外加一项渲染决策——
+// 正文超过 InlineBudget 时只给概览，由 read_skill 工具按需取全文（见 Overview）。
+// 长度不再判无效：长技能照样可用，只是走概览通道。
 package skill
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 	"gopkg.in/yaml.v3"
 )
 
-// 技能作用域。
+// 技能作用域（后台分组与文案用；谁生效由发现根的顺序决定，不看这个）。
 const (
-	ScopeProject = "project" // <dataDir>/skills/<id>/SKILL.md，后台可写
-	ScopeUser    = "user"    // <dataDir>/skills-user/<id>/SKILL.md，个人技能，后台只读
+	ScopeProject = "project" // 项目级：Friday 数据目录的技能 + 工作目录里的 .agents/skills
+	ScopeUser    = "user"    // 个人级：~/.agents/skills 与 <dataDir>/skills-user
 )
+
+// Root 是一个技能发现根。Store 按传入顺序扫描，越靠前优先级越高：同名技能里
+// 靠后的那条不参与选择，并在后台写明"被谁覆盖"。
+type Root struct {
+	// Dir 是 <dir>/<技能目录名>/SKILL.md 的父目录；空串表示这个根不启用。
+	Dir string `json:"dir"`
+	// Scope 是后台分组标签（ScopeProject / ScopeUser）。
+	Scope string `json:"scope"`
+	// Source 是给人看的来源名（如「项目 .agents/skills」），标在后台每一行上。
+	Source string `json:"source"`
+	// Writable 表示这一根由 Friday 后台管理（可新建/可改/可删）。约定地址
+	// （.agents/skills）属于外部工具与团队共享的文件，一律只读——不替用户改别人的仓库，
+	// 也就不创建、不写 frontmatter。
+	Writable bool `json:"writable"`
+}
 
 // UserScopeDir 是 user 级技能在数据目录下的目录名（内核 chdir 到数据目录后按相对路径使用）。
 const UserScopeDir = "skills-user"
 
-// maxBodyRunes 限制技能正文长度：正文会作为 <skill-instruction> 进系统提示词，
-// 过长的技能会让每轮对话都变贵。
-const maxBodyRunes = 8000
+// InlineBudget 是"命中技能时整段注入正文"的字数上限。超过它的技能不整段塞进
+// 系统提示词，而是只给概览（description + 技能目录 + 开头一小段），正文与引用
+// 资料由模型用 read_skill 按需取——与 Anthropic Agent Skills、Cursor Rules
+// agent-requested 那类渐进披露同一套思路：常驻只留索引，细节按需加载。
+const InlineBudget = 4000
+
+// overviewHeadRunes 是概览里附带的正文开头长度：够模型判断"要不要用它"即可。
+const overviewHeadRunes = 600
 
 // Extra 是 Friday 写在同一份 frontmatter 里的扩展键。框架的 SkillMetadata 未开启
 // yaml.KnownFields，未知键天然被忽略，因此两种解释器共用一个文件不冲突。
@@ -54,6 +77,9 @@ func (e Extra) AutoOrDefault() bool { return e.Auto != nil && *e.Auto }
 type Entry struct {
 	ID       string
 	Scope    string
+	Source   string // 来自哪个发现根（后台展示）
+	RootIdx  int    // 发现根的顺序：越小优先级越高，同名时靠后者被覆盖
+	Writable bool   // 该根是否由后台管理（否则只读）
 	Path     string
 	Skill    *vxagent.Skill
 	Extra    Extra
@@ -87,6 +113,40 @@ func (e *Entry) Candidate() bool {
 	return e.Usable() && e.Extra.AutoOrDefault()
 }
 
+// Dir 返回技能目录（SKILL.md 的父目录）：read_skill 读引用资料时以它为根。
+func (e *Entry) Dir() string {
+	if e == nil || e.Path == "" {
+		return ""
+	}
+	return filepath.Dir(e.Path)
+}
+
+// Overview 生成超预算技能的概要：说清它是谁、正文多长、怎么取全文与引用资料，
+// 再附开头一段让模型判断要不要用。它替代整段正文进入系统提示词。
+func (e *Entry) Overview() string {
+	body := ""
+	if e.Skill != nil {
+		body = strings.TrimSpace(e.Skill.Content)
+	}
+	var b strings.Builder
+	name := e.Name()
+	b.WriteString("技能：" + name + "\n")
+	if e.Skill != nil && strings.TrimSpace(e.Skill.Metadata.Description) != "" {
+		b.WriteString(strings.TrimSpace(e.Skill.Metadata.Description) + "\n")
+	}
+	fmt.Fprintf(&b, "\n正文 %d 字，超过一次注入的预算（%d 字），这里只给开头一段。要按这份技能做事时：\n",
+		len([]rune(body)), InlineBudget)
+	fmt.Fprintf(&b, "- 取全文：read_skill({\"name\":\"%s\"})\n", name)
+	fmt.Fprintf(&b, "- 引用资料：先 read_skill({\"name\":\"%s\",\"path\":\".\"}) 列目录，再读具体文件\n", name)
+	b.WriteString("不要凭这段概览猜细节。\n\n开头一段：\n")
+	if r := []rune(body); len(r) > overviewHeadRunes {
+		b.WriteString(string(r[:overviewHeadRunes]) + "…（已截断）")
+	} else {
+		b.WriteString(body)
+	}
+	return b.String()
+}
+
 // Summary 是后台列表用的一行视图。
 type Summary struct {
 	ID           string   `json:"id"`
@@ -104,12 +164,14 @@ type Summary struct {
 	ParseErr     string   `json:"parseError,omitempty"`
 	Note         string   `json:"note,omitempty"`
 	ReadOnly     bool     `json:"readOnly"`
+	Source       string   `json:"source,omitempty"` // 来自哪个发现根
+	Path         string   `json:"path,omitempty"`   // 文件位置：多根之后"哪一条"要说得清
 }
 
 // Summarize 生成后台视图。
 func (e *Entry) Summarize() Summary {
 	s := Summary{ID: e.ID, Scope: e.Scope, Enabled: true, ParseErr: e.ParseErr,
-		Note: e.Note, ReadOnly: e.Scope == ScopeUser}
+		Note: e.Note, ReadOnly: !e.Writable, Source: e.Source, Path: e.Path}
 	if e.Skill != nil {
 		m := e.Skill.Metadata
 		s.Name, s.Description = m.Name, m.Description
@@ -143,10 +205,11 @@ func frontmatterParts(content string) (meta string, body string, ok bool) {
 	return "", content, false // 未闭合
 }
 
-// Validate 检查一份 SKILL.md 是否可作为项目技能落盘。
-// 错误信息面向后台用户，说清"哪里不对、怎么改"。
+// Validate 检查一份 SKILL.md 是否可作为后台技能落盘。
+// 错误信息面向后台用户，说清"哪里不对、怎么改"。正文长度不设限：超预算的技能
+// 走概览 + read_skill 通道，不再因为长而失效。
 func Validate(raw string) error {
-	metaText, body, ok := frontmatterParts(raw)
+	metaText, _, ok := frontmatterParts(raw)
 	if !ok {
 		return fmt.Errorf("技能文件需要以 --- 开头、并以单独一行 --- 结束的 frontmatter")
 	}
@@ -161,10 +224,6 @@ func Validate(raw string) error {
 	name, _ := framework["name"].(string)
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("frontmatter 缺少 name（技能名，对话里用它点名）")
-	}
-	if len([]rune(body)) > maxBodyRunes {
-		return fmt.Errorf("技能正文 %d 字，超过 %d 字上限——正文会整段进系统提示词，太长会让每轮对话都变贵",
-			len([]rune(body)), maxBodyRunes)
 	}
 	var extra Extra
 	if err := yaml.Unmarshal([]byte(metaText), &extra); err != nil {

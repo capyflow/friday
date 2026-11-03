@@ -134,6 +134,7 @@ async function logout() {
     <symbol id="i-mem" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></symbol>
     <symbol id="i-persona" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
     <symbol id="i-mcp" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6"/><path d="M6 8h12l-1 5a5 5 0 0 1-10 0z"/><path d="M12 18v4"/><path d="M8 22h8"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6.3a5 5 0 1 1 7.5 6.3z"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
@@ -157,7 +158,8 @@ async function logout() {
                 :data-view="n.id" @click="store.view = n.id">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="'#' + n.icon"/></svg>
-          <span class="txt">{{ n.label }}<span v-if="n.id === 'notifications' && store.unread" class="nav-unread" :aria-label="store.unread + ' 条未读通知'">{{ store.unread }}</span></span>
+          <span class="txt">{{ n.label }}</span>
+          <span v-if="n.id === 'notifications' && store.unread" class="nav-unread" :aria-label="store.unread + ' 条未读通知'">{{ store.unread }}</span>
         </button>
       </nav>
       <div class="grow"></div>

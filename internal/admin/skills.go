@@ -27,7 +27,9 @@ func (s *Server) handleSkillsList(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"skills": s.skills.List(),
 		"dir":    s.skills.Dir(),
-		"error":  errText(s.skills.Err()),
+		// roots：全部发现根（含只读的约定地址）。多根之后"这条从哪儿来"必须看得见。
+		"roots": s.skills.Roots(),
+		"error": errText(s.skills.Err()),
 	})
 }
 

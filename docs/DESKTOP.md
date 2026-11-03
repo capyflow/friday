@@ -59,7 +59,7 @@ sidecar 机制本身不提供父子进程生命周期绑定（Tauri 不自动杀
 - 服务就绪（轮询 `GET /` 200）后 stdout 打印 `FRIDAY_ADDR=` 标记；桌面模式强制 admin 开启
 - `version` 变量供 `-ldflags -X main.version=` 注入
 
-`internal/admin`：新增 `GET /palette` 弹窗页（`go:embed` + 公有静态路由，模式同 `handleIndex`）——Spotlight 风格输入框，同源调 `/api/chat`（SSE 流式渲染），未登录提示先去主窗口登录。
+`internal/admin`：新增 `GET /palette` 弹窗页（`go:embed` + 公有静态路由，模式同 `handleIndex`）——Spotlight 风格输入框 + 可滚动的多轮对话面板，同源调 `/api/chat`（SSE 流式、Markdown 渲染、暂停/继续），首开回显主窗口最近 8 条问答；未登录提示先去主窗口登录。
 
 桌面版强制监听 `127.0.0.1`；Web 远程部署须显式设置 host。首次账号通过本机设置页面创建，远程部署使用启动凭据预置，旧账号保持兼容。
 
@@ -84,7 +84,9 @@ desktop/
 - sidecar 拉起内核，后台线程解析 `FRIDAY_ADDR=` → emit 事件；监听 `Terminated` → 错误页
 - 托盘「显示 Friday」/「退出 Friday」，关闭主窗口隐藏并继续运行；系统退出 → stdin 写 `/quit` → 3s 后 kill 兜底
 - 解析 `FRIDAY_NOTICE=`，显式授权后交给系统通知；准确内核来源的主窗口才有权限执行通知开启命令
-- `tauri-plugin-global-shortcut` 注册全局快捷键（默认 **Alt+Space**，常量一行可改）→ 创建/切换弹窗：无边框+透明+置顶+不进任务栏，加载内核 `/palette`；失焦/Esc 隐藏（仅隐藏不销毁）
+- `tauri-plugin-global-shortcut` 注册全局快捷键（默认 **Alt+Space**，常量一行可改）→ 创建/切换弹窗：无边框+透明+置顶+不进任务栏，加载内核 `/palette`；失焦/Esc 隐藏（仅隐藏不销毁，消息列表跨多次唤起保留）
+- 弹窗落位：当前显示器水平居中、顶部 15% 处（`place_palette`），每次显示重算一次——隐藏期间可能换过显示器，老坐标会弹到不存在的屏幕上；小屏 + 高缩放时夹到下边界内，拿不到显示器信息则退回系统居中
+- 弹窗权限（`capabilities/palette.json`）额外放开 `allow-open-url`：回答里的外链交系统浏览器，避免在浮层内跳转回不到问答页
 - 零 JS 构建链：无 npm 工程，`withGlobalTauri` 用全局 API
 - 主窗口用 `titleBarStyle: Overlay` + `hiddenTitle`：内容铺到窗口顶部，macOS 的红绿灯直接浮在
   侧栏左上角，不再单留一条标题栏黑边。代价是要自己接管：网页端检测到 `__TAURI_INTERNALS__`
@@ -93,6 +95,8 @@ desktop/
   （按钮是子节点，不受影响）。浏览器直访没有这个标记，版式保持原样。
 
 弹窗页放 **Go 侧**是刻意设计：同源共享登录会话（无 CORS/鉴权烦恼）、浏览器访问 `:port/palette` 也能用、壳保持极薄。
+
+弹窗与主窗口**共用同一条会话**（`/api/chat` 后端固定 `web` 会话）：随手问的下一句不会丢上下文，主窗口那边也看得见这段对话。代价是弹窗里的「清屏」只清本面板显示，不动后端历史——真要重新开始，去主窗口清上下文。
 
 ## 五、后续按系统扩展不同功能的路径
 

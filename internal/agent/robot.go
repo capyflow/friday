@@ -19,6 +19,7 @@ import (
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/output"
+	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
 	tools_pkg "github.com/capyflow/friday/internal/tools"
@@ -55,6 +56,10 @@ func Build(cfg *config.Config, registry *vxagent.Registry, pool *SessionPool, ap
 		Hooks:         buildHooks(pool, prompt),
 		Permissions:   perms,
 		ContextEngine: engine,
+		// 一轮回答允许的工具调用轮数（agent.maxIterations，默认 100）；
+		// 不填则用框架缺省 10 轮——真实活儿半路就断。计划/目标轮另有自己的
+		// 按次上限（WithMaxIterations），优先级高于这里。
+		MaxIterations: cfg.Agent.MaxIterationsOrDefault(),
 	})
 	return ag, nil
 }
@@ -240,7 +245,11 @@ type Deps struct {
 	Config     *config.Config    // 运行配置（文件白名单、硬件开关、天气默认城市等）
 	Approver   *approval.Queue   // 危险操作审批队列（权限层 ApprovalUI 桥接与 write/edit 用，可为 nil）
 	Mcp        *mcp.Manager      // MCP 服务器管理器（mcp_edit 工具用，可为 nil）
+	Skills     *skill.Store      // 技能仓库（read_skill 按需取正文用，可为 nil）
 	ConfigPath string            // config.yaml 路径（mcp_edit 写回用）
+	// Search 返回联网搜索的当前供应商与密钥（设置页保存即生效，工具每次调用读取；
+	// nil 时按默认 bing 免密钥处理）。
+	Search func() (provider, apiKey string)
 }
 
 // RegisterTools 把管家全部业务工具注册进 Registry。
@@ -274,6 +283,8 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.DeleteNoteTool{Store: d.Todos},
 		&tools_pkg.PinEntryTool{Store: d.Todos},
 		&tools_pkg.WeatherTool{DefaultCity: d.Config.Weather.DefaultCity},
+		&tools_pkg.WebSearchTool{SearchFn: d.Search},
+		&tools_pkg.WebFetchTool{},
 		&tools_pkg.RememberTool{Memory: d.Memory},
 		&tools_pkg.RecallTool{Memory: d.Memory},
 		&tools_pkg.ForgetTool{Memory: d.Memory},
@@ -283,6 +294,8 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.WriteFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.EditFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.McpEditTool{Manager: d.Mcp, Config: d.Config, ConfigPath: d.ConfigPath, Approver: approver},
+		// 技能正文超过注入预算时只给概览，模型靠它取全文与 references/。
+		&tools_pkg.ReadSkillTool{Store: d.Skills},
 	}
 	if d.Config.Hardware.Enabled {
 		tools = append(tools,

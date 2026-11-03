@@ -256,6 +256,43 @@ func rebuildForPermissions(cfg *config.Config, configPath string, registry *vxag
 	})
 }
 
+// ReloadAgentMaxIterations 调整一轮回答的工具调用轮数上限（agent.maxIterations）并热生效：
+//  1. 规范化取值（0 = 回到默认 100，越界报错并说明可填区间）；
+//  2. 在串行配置事务里重建 Agent（会话在池里，历史不断），先写回 config.yaml（保留注释）；
+//  3. 全部成功后发布配置与 Agent，失败保留原运行状态。
+//
+// 进行中的那一轮仍按旧上限跑完，下一轮起用新值。返回生效值，同值重复保存不写盘不重建。
+func ReloadAgentMaxIterations(cfg *config.Config, configPath string, registry *vxagent.Registry,
+	brain *Brain, approver *approval.Queue, n int) (int, error) {
+	n, err := config.NormalizeAgentMaxIterations(n)
+	if err != nil {
+		return 0, err
+	}
+	if cfg.Snapshot().Agent.MaxIterationsOrDefault() == n {
+		return n, nil
+	}
+	if err := cfg.Apply(func(next *config.Config) error {
+		next.Agent.MaxIterations = n
+		return brain.Reconfigure(func() (*vxagent.Agent, error) {
+			var engine *ctxengine.Engine
+			if mgr := brain.CtxMgr(); mgr != nil {
+				engine = mgr.Current()
+			}
+			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
+			if err != nil {
+				return nil, err
+			}
+			if err := config.UpdateAgentMaxIterations(configPath, n); err != nil {
+				return nil, err
+			}
+			return newAg, nil
+		})
+	}); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ReloadPersona 切换人设并保存自定义人设预设：
 //  1. 校验 active 必须命中（内置预设 + 自定义 presets 合集），防止切到不存在的人设；
 //  2. 用独立配置快照构建 Agent，先写回 config.yaml（保留注释）；

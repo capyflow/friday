@@ -268,6 +268,7 @@ type procState struct {
 	proc   *agentProc
 	slot   chan struct{}
 	idle   *time.Timer
+	ready  bool // 至少一个会话已建立（拉起途中的连接不参与快速让位，免得建会话中途被杀）
 	mu     sync.Mutex
 	owners map[acp.SessionId]string // sessionId → threadID
 
@@ -760,6 +761,10 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 	m.procs[key] = ps
 	m.mu.Unlock()
 	go m.pumpProc(ps)
+	// 拉起时就武装空闲回收：选中线程拉能力清单会建会话但未必发消息（4a43629），
+	// 计时只在轮次结束武装的话，这类进程永远不被回收，把并发槽位白占到底。
+	// 这里不享受 5 秒让位（建会话中途被掐），给完整 IdleKillSeconds。
+	m.armIdle(key, false)
 	return ps, nil
 }
 
@@ -802,7 +807,8 @@ func (m *Manager) dialBudget(agentCfg config.AcpAgentConfig) time.Duration {
 		time.Duration(c.SessionSeconds(agentCfg))*time.Second + 30*time.Second
 }
 
-func (m *Manager) markWarm(name string) {	m.mu.Lock()
+func (m *Manager) markWarm(name string) {
+	m.mu.Lock()
 	if m.warmAgents == nil {
 		m.warmAgents = map[string]bool{}
 	}
@@ -829,6 +835,9 @@ func (m *Manager) acquireSlot(ctx context.Context, th *Thread, hooks TurnHooks, 
 	}
 	m.queueCancels[th.ID] = cancel
 	m.mu.Unlock()
+	// 有人开始排队：所有空闲连接立刻进入快速让位倒计时。不然按完整 IdleKillSeconds
+	// 武装的连接要傻等到点才让位，排队的会话干等好几分钟（用户感知就是「新开窗口卡住」）。
+	m.fastEvictIdle()
 	defer func() {
 		m.mu.Lock()
 		if m.waiting > 0 {
@@ -855,6 +864,29 @@ func releaseSlot(sem chan struct{}) {
 	select {
 	case <-sem:
 	default:
+	}
+}
+
+// fastEvictIdle 有人开始排队时调用：把所有空闲连接的回收计时压到让位时长
+// （armIdle 的 queueGrace 路径）。只动「已就绪且在空闲倒计时里」的连接：
+// 正在跑轮次的连接计时被 touchProc 停着（ps.idle == nil），拉起途中还没建好
+// 会话的连接 ready == false（刚拉起时按完整 IdleKillSeconds 武装，5 秒让位
+// 会把建会话中途的连接杀掉），都不在此列。
+// 调用方不得持 m.mu（armIdle 内部要加锁）。
+func (m *Manager) fastEvictIdle() {
+	m.mu.Lock()
+	keys := make([]string, 0, len(m.procs))
+	for key, ps := range m.procs {
+		ps.mu.Lock()
+		eligible := ps.ready && ps.idle != nil
+		ps.mu.Unlock()
+		if eligible {
+			keys = append(keys, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, key := range keys {
+		m.armIdle(key, true)
 	}
 }
 
@@ -1038,10 +1070,12 @@ func (m *Manager) touchProc(key string) {
 	ps.mu.Unlock()
 }
 
-// armIdle 一轮结束后武装空闲回收计时（以连接为单位：整条连接都没活了才回收）。
-// 有会话在排队等槽位时不守完整的 IdleKillSeconds——空闲连接占着名额，对后面排队
-// 的人来说就是「发了消息没反应」（V-3）。
-func (m *Manager) armIdle(key string) {
+// armIdle 武装空闲回收计时（以连接为单位：整条连接都没活了才回收）。
+// queueGrace 为真时（轮次结束、能力清单取完这类"刚用完"的时点），有会话在排队
+// 等槽位就不守完整的 IdleKillSeconds——空闲连接占着名额，对后面排队的人来说
+// 就是「发了消息没反应」（V-3）。拉起进程的时点传假：进程正在建会话，5 秒
+// 让位会把 setup 中途的连接掐死。
+func (m *Manager) armIdle(key string, queueGrace bool) {
 	idle := time.Duration(m.cfgFn().Normalized().IdleKillSeconds) * time.Second
 	if idle <= 0 {
 		return
@@ -1054,7 +1088,7 @@ func (m *Manager) armIdle(key string) {
 	if ps == nil {
 		return
 	}
-	if waiting > 0 && idle > queuedIdleGrace {
+	if queueGrace && waiting > 0 && idle > queuedIdleGrace {
 		idle = queuedIdleGrace
 		reason = "空闲回收（有会话在排队等槽位）"
 	}
@@ -1086,6 +1120,9 @@ func (m *Manager) ensureLive(ctx context.Context, th *Thread, agentCfg config.Ac
 		return nil, false, err
 	}
 	lv.sessionID = acp.SessionId(sid)
+	ps.mu.Lock()
+	ps.ready = true
+	ps.mu.Unlock()
 	m.mu.Lock()
 	m.live[th.ID] = lv
 	// 会话 id 与降级标记写回投影：重开时靠它 session/load、Stop 也按它取消
@@ -1624,7 +1661,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	log.Printf("[智能体] 轮次结束 thread=%s agent=%s 用时=%s 原因=%s tokens=%d/%d",
 		id, th.Agent, elapsed.Round(time.Second), result.StopReason, result.In, result.Out)
-	m.armIdle(procKey(th.Agent, th.Cwd))
+	m.armIdle(procKey(th.Agent, th.Cwd), true)
 	return result, runErr
 }
 
@@ -1730,7 +1767,9 @@ func (m *Manager) ensureProc(id string) (*live, *Thread, func(), error) {
 		mu.Unlock()
 		return nil, nil, nil, err
 	}
-	return lv, th, func() { m.touchProc(procKey(th.Agent, th.Cwd)); mu.Unlock() }, nil
+	// 用完即武装回收（带排队让位）：这条 unlock 服务能力清单/切换取值，进程
+	// 之后没有轮次来重新 armIdle，只 touchProc 会让计时永远停着（槽位被占死）。
+	return lv, th, func() { m.armIdle(procKey(th.Agent, th.Cwd), true); mu.Unlock() }, nil
 }
 
 // Capabilities 返回该 thread 当前会话的统一能力清单（归一化，见 options.go）。
@@ -1792,6 +1831,13 @@ func (m *Manager) applyCapability(lv *live, th *Thread, capID, value string) err
 	if source == "" {
 		return fmt.Errorf("能力项 %q 不存在或该 agent 不支持", capID)
 	}
+	// 切思考强度前把会话模型显式设置一遍（best-effort）：跨版本重接的会话
+	// （如 0.2.7 建的会话被 0.6.12 load）agent 侧没有"已选模型"记录，直接切
+	// 会被拒（"Select a Session model before changing thinking effort"）。
+	// 按当前值幂等回设不改语义；探针实测此序即可解除限制。
+	if capID == CapKindThoughtLevel {
+		m.ensureModelSelected(lv, th)
+	}
 	c := m.cfgFn().Normalized()
 	handshake := time.Duration(c.HandshakeTimeoutSeconds) * time.Second
 	if agentCfg, ok := c.Agent(th.Agent); ok {
@@ -1832,6 +1878,56 @@ func (m *Manager) applyCapability(lv *live, th *Thread, capID, value string) err
 		lv.setCurrentMode(value)
 	}
 	return nil
+}
+
+// ensureModelSelected 把会话模型按当前值显式设置一遍（best-effort，失败只记日志
+// 不阻塞——目标项自己的错误照常上浮）。minimax 0.6.12 对思考强度加了一个前置：
+// 会话模型必须被显式选择过（session/new 的默认展示值与跨版本 load 重接都不算），
+// 否则报 "Select a Session model before changing thinking effort"。
+func (m *Manager) ensureModelSelected(lv *live, th *Thread) {
+	source, configID := resolveCapSource(lv, CapKindModel)
+	c := m.cfgFn().Normalized()
+	handshake := time.Duration(c.HandshakeTimeoutSeconds) * time.Second
+	if agentCfg, ok := c.Agent(th.Agent); ok {
+		handshake = time.Duration(c.HandshakeSeconds(agentCfg)) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handshake)
+	defer cancel()
+	var err error
+	switch source {
+	case CapSourceConfigOption:
+		cur := ""
+		for _, o := range lv.getOptions() {
+			_, cap, ok := convertConfigOption(o.Select)
+			if ok && cap.ID == CapKindModel {
+				cur = cap.CurrentValue
+				break
+			}
+		}
+		if cur == "" {
+			return
+		}
+		_, err = lv.proc.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				ConfigId:  acp.SessionConfigId(configID),
+				SessionId: lv.sessionID,
+				Value:     acp.SessionConfigValueId(cur),
+			},
+		})
+	case CapSourceSessionModel:
+		ms := lv.getModelState()
+		if ms == nil || ms.CurrentModelId == "" {
+			return
+		}
+		_, err = lv.proc.conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+			ModelId: ms.CurrentModelId, SessionId: lv.sessionID,
+		})
+	default:
+		return
+	}
+	if err != nil {
+		log.Printf("[智能体] 思考强度前置（显式选模型 %s）失败（忽略继续）: %v", th.Agent, err)
+	}
 }
 
 // recordChoice 记下用户这次的选择并落盘（只记手动选过的，不从 agent 推送反推）。
@@ -2084,6 +2180,7 @@ func (m *Manager) Test(name string) error {
 // session/load 在下次打开时尝试恢复），并发槽位按新值重建。
 func (m *Manager) Reload(cfg config.AcpConfig) {
 	var toKill []*procState
+	var unwarm []string
 	m.mu.Lock()
 	prev := m.lastCfg
 	m.lastCfg = cfg
@@ -2097,6 +2194,7 @@ func (m *Manager) Reload(cfg config.AcpConfig) {
 		old, hadOld := prev.Agent(agentName)
 		if !ok || !ac.IsEnabled() || !hadOld || agentChanged(old, ac) {
 			toKill = append(toKill, ps)
+			unwarm = append(unwarm, agentName)
 			continue
 		}
 		keep = append(keep, ps)
@@ -2118,6 +2216,13 @@ func (m *Manager) Reload(cfg config.AcpConfig) {
 	m.mu.Unlock()
 	for _, ps := range toKill {
 		m.releaseProc(ps, "配置变更")
+	}
+	// 配置变更（升级改了启动参数是常态）的 agent 撤销 warm 标记：下次拉起是
+	// 新包冷启动，要重新拿 90s 冷启动握手预算，不然 10s 常规预算必超时。
+	for _, name := range unwarm {
+		m.mu.Lock()
+		delete(m.warmAgents, name)
+		m.mu.Unlock()
 	}
 }
 

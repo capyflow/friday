@@ -143,8 +143,23 @@ func (o *OAuth) state(name string) *oauthState {
 		return st
 	}
 	st := &oauthState{state: AuthStateRequired}
+	st.state = seedState(o.store[name])
 	o.states[name] = st
 	return st
+}
+
+// seedState 用令牌库里的会话推断初始状态。内核重启后 states 是空的、只有 store 从
+// 文件恢复，不补这一下，明明令牌有效、连接正常的服务器会一直显示「待授权」，把人
+// 引去重走一遍浏览器授权。
+func seedState(sess vxauth.Session) string {
+	if sess.Token.AccessToken == "" {
+		return AuthStateRequired
+	}
+	// 过期但有 refresh_token 也算已授权：连上时会自动换，不用用户再点一次。
+	if !sess.Token.Expired(time.Now(), tokenSkew) || sess.Token.RefreshToken != "" {
+		return AuthStateAuthorized
+	}
+	return AuthStateRequired
 }
 
 // Configure 记录一台服务器的鉴权声明（管理器 Apply 时调用）。
@@ -173,6 +188,13 @@ func (o *OAuth) Configure(name, authMode, resourceURL string) {
 	}
 	if st.state == "" || st.state == AuthStateError {
 		st.state = AuthStateRequired
+	}
+	// 地址是令牌的绑定对象（RFC 8707）：配置里的地址换过，旧会话不再算数。
+	// 与 sessionFor 的判定保持一致，别让设置页挂着「已授权」而实际连不上。
+	if sess, ok := o.store[name]; ok && st.state == AuthStateAuthorized &&
+		st.resourceURL != "" && sess.Resource != "" && sess.Resource != st.resourceURL {
+		st.state = AuthStateRequired
+		st.message = "远程地址已变更，需要重新授权"
 	}
 }
 

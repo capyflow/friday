@@ -39,6 +39,9 @@ type Brain struct {
 
 	memMu  sync.RWMutex      // 保护长期记忆仓库指针
 	memory *memory.WikiStore // 长期记忆（可为 nil：不注入速览）
+
+	projMu     sync.RWMutex // 保护工作目录（切工作模式时会变）
+	projectDir string       // 当前工作目录：AGENTS.md / README.md 从这里找（空=不注入）
 }
 
 // NewBrain 创建对话大脑。pool 为会话池（含持久化存储），ctx 为上下文引擎
@@ -76,6 +79,23 @@ func (b *Brain) memoryWarmup() string {
 		"以下是长期记忆里已经记下的要点，直接当作已知背景（比如用户希望的称谓、偏好、重要的人和事）：\n" +
 		digest + "\n" +
 		"需要细节或原文时调用 recall 查整页；不要在回复里复述这一段，也不必声明「我看了记忆」。"
+}
+
+// SetProjectDir 注入当前工作目录（启动时一次；未来的"工作模式"切目录时再调一次）。
+// 传空串等于关掉项目上下文注入。
+func (b *Brain) SetProjectDir(dir string) {
+	b.projMu.Lock()
+	b.projectDir = strings.TrimSpace(dir)
+	b.projMu.Unlock()
+}
+
+// projectWarmup 生成会话开始时注入的项目上下文（工作目录下的 AGENTS.md 全文 +
+// README.md 摘要）。没有这两个文件时返回空串，不注入。
+func (b *Brain) projectWarmup() string {
+	b.projMu.RLock()
+	dir := b.projectDir
+	b.projMu.RUnlock()
+	return projectContext(dir)
 }
 
 // SetSkills 注入技能仓库与自动匹配配置（启动时调用一次）。技能是按次生效的，
@@ -206,6 +226,10 @@ func (b *Brain) AskWith(ctx context.Context, text string, imgs []llm.Content, on
 	// 新会话或刚清过上下文（历史为空）：先把长期记忆的速览垫进去。写在会话里而
 	// 不是每轮拼进提问，避免每轮重复计费，也不会污染用户看到的问题文本。
 	if len(sess.Messages()) == 0 {
+		// 项目约定先垫（它框定"在哪个目录、按什么规矩干活"），再垫个人记忆速览。
+		if pc := b.projectWarmup(); pc != "" {
+			sess.Add(llm.NewTextMessage(llm.RoleSystem, pc))
+		}
 		if warm := b.memoryWarmup(); warm != "" {
 			sess.Add(llm.NewTextMessage(llm.RoleSystem, warm))
 		}
@@ -281,7 +305,7 @@ func (b *Brain) resolveSkill(ctx context.Context, text string, cfg callCfg) (que
 			PublishStep(ctx, Step{Kind: "skill", Name: name, Status: "fail", Detail: "技能不存在"})
 			return question, askOpts, note, nil
 		}
-		askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+		askOpts = append(askOpts, vxagent.WithSkill(skillForTurn(e)))
 		skillSinkFrom(ctx).set(e.Name())
 		why := append([]string{"explicit:" + name}, e.MatchedBy...)
 		trace.Record(ctx, "skill", "启用技能 %s（依据：%s）", e.Name(), strings.Join(why, "、"))
@@ -302,7 +326,7 @@ func (b *Brain) resolveSkill(ctx context.Context, text string, cfg callCfg) (que
 		return question, askOpts, "", nil
 	}
 	if e, why, ok := skill.Match(question, store.Candidates(), autoCfg); ok {
-		askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+		askOpts = append(askOpts, vxagent.WithSkill(skillForTurn(e)))
 		skillSinkFrom(ctx).set(e.Name())
 		trace.Record(ctx, "skill", "自动启用技能 %s（依据：%s）", e.Name(), strings.Join(why, "、"))
 		PublishStep(ctx, Step{Kind: "skill", Name: e.Name(), Status: "ok", Detail: strings.Join(why, "、")})
@@ -351,7 +375,7 @@ func (b *Brain) Resume(ctx context.Context, key, question, partial string, onDel
 		store := b.skills
 		b.skillMu.RUnlock()
 		if e := b.lookupSkill(store, cfg.skillName); e != nil {
-			askOpts = append(askOpts, vxagent.WithSkill(e.Skill))
+			askOpts = append(askOpts, vxagent.WithSkill(skillForTurn(e)))
 			trace.Record(ctx, "skill", "继续被暂停的回答，沿用技能 %s", e.Name())
 		} else if cfg.skillName != "" {
 			trace.Record(ctx, "skill", "暂停现场记录的技能 %q 已不可用，继续时不再启用", cfg.skillName)

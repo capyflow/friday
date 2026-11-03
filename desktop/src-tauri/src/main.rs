@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    Emitter, Manager, PhysicalPosition, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 #[cfg(not(target_os = "macos"))]
@@ -23,6 +25,9 @@ use tauri_plugin_shell::ShellExt;
 
 /// 全局快捷键（Spotlight 风格弹窗），想换键改这一行（格式见 tauri-plugin-global-shortcut）。
 const PALETTE_SHORTCUT: &str = "Alt+Space";
+/// 快捷键弹窗尺寸（逻辑像素）：一条输入 + 一段可滚动的多轮对话。
+const PALETTE_WIDTH: f64 = 680.0;
+const PALETTE_HEIGHT: f64 = 420.0;
 /// 退出时等内核优雅退出的时长，超时 kill 兜底。
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 /// 内核数据目录名（系统配置目录下）。
@@ -1085,6 +1090,8 @@ fn toggle_palette(app: &tauri::AppHandle) {
             if win.is_visible().unwrap_or(false) {
                 let _ = win.hide();
             } else {
+                // 隐藏期间可能换过显示器，落位每次重算，别用老坐标弹到不存在的屏幕上。
+                place_palette(&win);
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -1093,14 +1100,19 @@ fn toggle_palette(app: &tauri::AppHandle) {
             let url: tauri::Url = format!("{addr}/palette").parse().expect("内核地址非法");
             let win = WebviewWindowBuilder::new(app, "palette", WebviewUrl::External(url))
                 .title("Friday")
-                .inner_size(680.0, 420.0)
+                .inner_size(PALETTE_WIDTH, PALETTE_HEIGHT)
                 .decorations(false)
                 .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .resizable(false)
+                // 先建后显：位置算完再露面，避免右上角闪一下再跳到顶部居中。
+                .visible(false)
                 .build()
                 .expect("创建弹窗失败");
+            place_palette(&win);
+            let _ = win.show();
+            let _ = win.set_focus();
             // 失焦即隐藏（仅隐藏不销毁，保住会话与登录态）；Esc 隐藏由页面侧处理。
             let w = win.clone();
             win.on_window_event(move |event| {
@@ -1110,6 +1122,28 @@ fn toggle_palette(app: &tauri::AppHandle) {
             });
         }
     }
+}
+
+/// 弹窗落位：当前显示器水平居中、顶部约 15% 处（Spotlight 手感，而不是压正中）。
+/// 拿不到显示器信息时退回系统居中——位置糙一点也比弹到屏幕外强。
+fn place_palette(win: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = win.current_monitor() else {
+        let _ = win.center();
+        return;
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let (pw, ph) = win.outer_size().map(|s| (s.width, s.height)).unwrap_or_else(|_| {
+        (
+            (PALETTE_WIDTH * scale) as u32,
+            (PALETTE_HEIGHT * scale) as u32,
+        )
+    });
+    let screen = monitor.size();
+    let x = monitor.position().x + screen.width.saturating_sub(pw) as i32 / 2;
+    // 顶部 15% 起步，同时保证整块面板不越过下边界（小屏 + 高缩放时 0.15 已经太靠下）。
+    let y = monitor.position().y
+        + ((screen.height as f64 * 0.15) as i32).min(screen.height.saturating_sub(ph) as i32);
+    let _ = win.set_position(PhysicalPosition::new(x, y));
 }
 
 /// 正常退出（确定性）：向内核 stdin 写 /quit，等 QUIT_GRACE 后 kill 兜底。

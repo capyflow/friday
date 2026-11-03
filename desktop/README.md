@@ -122,7 +122,8 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 ## 运行时行为速查
 
 - **全局快捷键**：`Alt+Space` 唤起/隐藏 Spotlight 风格弹窗（改 `src-tauri/src/main.rs`
-  顶部 `PALETTE_SHORTCUT` 常量一行即可换键）
+  顶部 `PALETTE_SHORTCUT` 常量一行即可换键）。弹窗是多轮对话面板：Enter 发送、Shift+Enter
+  换行、暂停/继续与主窗口同一套；收起只隐藏不销毁，回到面板还能接着看刚才那段；`⌘L` 清本面板显示
 - **防多开**：再次启动唤起已有主窗口（single-instance 插件）
 - **驻留与退出**：关闭主窗口会隐藏到托盘，内核继续运行；点击托盘「显示 Friday」恢复窗口，点击「退出 Friday」或系统退出菜单才结束进程。内核先死时会显示恢复提示。
 - **退出一致性**（详见 docs/DESKTOP.md 第二节）：退出应用后壳向内核 stdin 写 `/quit`，3s 未退 kill 兜底；壳崩溃/被强杀时 stdin EOF 和 ppid 看门狗负责收尾。

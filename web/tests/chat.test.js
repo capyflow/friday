@@ -304,14 +304,15 @@ describe('聊天发送和失败恢复', () => {
     await push({ step: { kind: 'round', detail: '耗时 1.2s' } })
     expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
     expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
-    // 工具调用：收起只报"工具调用"，名称与参数不外露；展开才给详情与结果
+    // 工具调用：收起就把「是哪个工具」说清（目录里没有的照直显示原始名），
+    // 参数与结果仍要点开才给
     await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
     expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
     await push({ step: { kind: 'tool', name: 'weather', detail: '晴 22℃', status: 'ok' } })
     const tool = wrapper.get('.tool')
-    expect(tool.get('.tool-head .step-name').text()).toBe('工具调用')
-    expect(tool.get('.tool-head').text()).not.toContain('weather')
+    expect(tool.get('.tool-head .step-name').text()).toBe('weather')
     expect(tool.get('.tool-head').text()).not.toContain('上海')
+    expect(tool.get('.tool-head').text()).not.toContain('晴 22℃')
     expect(tool.get('.tool-call').isVisible()).toBe(false)
     expect(tool.get('.tool-out').isVisible()).toBe(false)
     // 成功不再打勾：前导恒为扳手，状态只靠类名表达（✓/✕ 字符已退出模板）
@@ -344,6 +345,66 @@ describe('聊天发送和失败恢复', () => {
     await tool.get('.tool-head').trigger('click')
     expect(tool.get('.tool-call .step-name').text()).toBe('Bash')
     expect(tool.find('.tool-out').exists()).toBe(false)
+  })
+
+  // 连续多次工具调用不再一条条铺满屏幕：收成一叠，收起只报次数，点开才逐条列出。
+  it('连续多次工具调用收成一叠，点「执行工具 N 次」才逐条列出', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'run' } },
+      { step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'ok' } },
+      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
+      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'ok' } },
+      { done: true },
+    ]))
+    // 挂在 body 上：v-show 切换后 isVisible 才可信
+    wrapper = mount(ChatView, { attachTo: document.body })
+    await flushPromises()
+    await send('改三个文件')
+    const head = wrapper.get('.tool-stack > .tool-head')
+    expect(head.text()).toBe('执行工具 3 次')
+    expect(head.text()).not.toContain('grep')          // 收起时工具名与参数不外露
+    expect(wrapper.findAll('.tool')).toHaveLength(3)   // 三条都在，只是收在叠里
+    expect(wrapper.get('.tool .tool-call').isVisible()).toBe(false)
+    await head.trigger('click')
+    expect(wrapper.get('.tool-stack-body').isVisible()).toBe(true)
+    const rows = wrapper.findAll('.tool-stack-body .tool')
+    await rows[1].get('.tool-head').trigger('click')
+    expect(rows[1].get('.tool-call .step-name').text()).toBe('grep')
+    expect(rows[1].get('.tool-out').text()).toBe('foo')
+    // 再点一次整叠合上
+    await wrapper.get('.tool-stack > .tool-head').trigger('click')
+    expect(wrapper.get('.tool-stack-body').isVisible()).toBe(false)
+  })
+
+  it('只调用一次工具不套折叠壳：直接摆一行，不多点一下', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('看一个文件')
+    expect(wrapper.find('.tool-stack').exists()).toBe(false)
+    expect(wrapper.findAll('.tool')).toHaveLength(1)
+  })
+
+  it('一叠里有失败时收起态也要说出来，不把错误藏进展开区', async () => {
+    fetchMock.mockResolvedValueOnce(stream([
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
+      { step: { kind: 'tool', name: 'edit', detail: '权限被拒绝', status: 'fail' } },
+      { done: true },
+    ]))
+    await mountChat()
+    await send('改两个文件')
+    const stack = wrapper.get('.tool-stack')
+    expect(stack.get(':scope > .tool-head').text()).toBe('执行工具 2 次 · 1 次出错')
+    expect(stack.classes()).toContain('is-fail')
+    // 前导换成告警圈：跟单条失败同一套语言
+    expect(stack.get(':scope > .tool-head .step-ico').classes()).toContain('fail')
   })
 
   it('结束帧兜底：结果事件丢失的工具块就地收掉，不再转圈', async () => {
@@ -456,9 +517,10 @@ describe('聊天发送和失败恢复', () => {
     await mountChat()
     expect(wrapper.get('.think-title').text()).toBe('思考')
     expect(wrapper.get('.think-text').text()).toBe('先查时区')
-    // 历史恢复的块同样走图标槽：思考=灯泡且不带 live，工具=扳手
+    // 历史恢复的块同样走图标槽：思考=灯泡且不带 live，工具=该工具自己的图标（非扳手）
     expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
-    expect(wrapper.get('.tool .tool-head .step-name').text()).toBe('工具调用')
+    // 目录里认识的工具给中文名（get_time → 看时间），前导是它自己的图标
+    expect(wrapper.get('.tool .tool-head .step-name').text()).toBe('看时间')
     expect(wrapper.get('.tool .step-ico svg').exists()).toBe(true)
     expect(wrapper.get('.tool .tool-call .step-name').text()).toBe('get_time')
     expect(wrapper.get('.tool .tool-call .step-detail').text()).toBe('Asia/Shanghai')

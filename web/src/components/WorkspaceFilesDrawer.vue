@@ -9,6 +9,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
 import { renderMD } from '../md.js'
+import SelectBox from './SelectBox.vue'
 
 const props = defineProps({
   thread: { type: Object, default: null },
@@ -38,6 +39,15 @@ const changeTurns = computed(() => {
 })
 const latestChangeCount = computed(() => changeTurns.value[0]?.files?.length || 0)
 const activeTurnId = ref('')
+// 轮次下拉的选项：一轮一条，文案与折叠行同源（最近一轮 / 第 N 轮 · 文件数 · 时刻）
+const turnOptions = computed(() => changeTurns.value.map((c, i) => ({ value: c.turnId, label: turnLabel(c, i) })))
+// 验证命令的超时档位（秒）：只给常用的四档，避免把「跑多久」变成自由输入
+const TIMEOUT_OPTIONS = [
+  { value: 120, label: '2 分钟' },
+  { value: 300, label: '5 分钟' },
+  { value: 900, label: '15 分钟' },
+  { value: 1800, label: '30 分钟' },
+]
 const changeLoading = ref(false)
 const changeError = ref('')
 const changeDetail = ref(null)
@@ -504,8 +514,10 @@ async function loadChanges(turnId) {
   }
 }
 
-function selectTurn() {
-  loadChanges(activeTurnId.value)
+// 轮次下拉直接给出选中的 turnId（不是原生 select 的 change 事件）：先记下来再按那一轮拉 diff
+function selectTurn(id) {
+  activeTurnId.value = id
+  loadChanges(id)
 }
 
 function selectChangeFile(f) {
@@ -733,10 +745,8 @@ defineExpose({ open, close, openMemory })
       <div v-else-if="tab === 'changes'" class="wfd-body wfd-changes">
         <div class="wfd-change-list">
           <div class="wfd-change-top">
-            <select v-if="changeTurns.length > 1" v-model="activeTurnId" class="wfd-turn-select"
-                    aria-label="选择轮次" @change="selectTurn">
-              <option v-for="(c, i) in changeTurns" :key="c.turnId" :value="c.turnId">{{ turnLabel(c, i) }}</option>
-            </select>
+            <SelectBox v-if="changeTurns.length > 1" :model-value="activeTurnId" :options="turnOptions"
+                       class="wfd-turn-select" compact aria-label="选择轮次" @update:model-value="selectTurn" />
             <span v-else class="wfd-turn-label">{{ changeTurns.length ? turnLabel(changeTurns[0], 0) : '本轮改动' }}</span>
             <span v-if="changeDetail?.revertedAt" class="wfd-reverted">已还原</span>
           </div>
@@ -894,12 +904,8 @@ defineExpose({ open, close, openMemory })
           <div class="wfd-check-run">
             <input v-model="chk.command" aria-label="验证命令" placeholder="npm run check"
                    :disabled="chk.busy" @keyup.enter="runCheck()">
-            <select v-model.number="chk.timeoutSec" class="wfd-turn-select" aria-label="执行超时">
-              <option :value="120">2 分钟</option>
-              <option :value="300">5 分钟</option>
-              <option :value="900">15 分钟</option>
-              <option :value="1800">30 分钟</option>
-            </select>
+            <SelectBox v-model="chk.timeoutSec" :options="TIMEOUT_OPTIONS" class="wfd-turn-select"
+                       compact aria-label="执行超时" />
             <button type="button" class="btn sm primary"
                     :disabled="!chk.command.trim() || chk.busy || checkActiveCount > 0"
                     @click="runCheck()">{{ chk.busy ? '提交中…' : '运行' }}</button>

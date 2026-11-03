@@ -11,3 +11,9 @@ if (typeof localStorage === 'undefined') {
     configurable: true,
   })
 }
+
+// jsdom 不实现 scrollIntoView（只滚动、不返回任何东西），但键盘导航的下拉框会调它。
+// 补一个空实现，免得一个与断言无关的 TypeError 把整个用例文件判红。
+if (window.Element && !window.Element.prototype.scrollIntoView) {
+  window.Element.prototype.scrollIntoView = function scrollIntoView() {}
+}

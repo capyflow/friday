@@ -22,6 +22,7 @@ const DATA = {
   '/api/wiki/pages': { pages: [{ id: 'p1', title: '用户偏好', snippet: '喜欢深色', source: 'chat', updatedAt: '2026-10-14T02:00:00Z' }] },
   '/api/provider/models': { active: 'gpt-x', globalWindowTokens: 0,
     models: [{ name: 'gpt-x', baseURL: 'https://api.example.com/v1', model: 'gpt-x', keySet: true, contextWindow: 128000, inputs: ['text', 'image'] }] },
+  '/api/runtime': { maxIterations: 100, defaultMaxIterations: 100, minIterations: 1, maxIterationsLimit: 500 },
 }
 
 let wrapper
@@ -101,6 +102,15 @@ describe('设置弹窗', () => {
 
     await click(nav('会话管理'))
     expect(text()).toContain('web:1')
+  })
+
+  it('运行上限一节能打开并只拉 /api/runtime', async () => {
+    wrapper = mount(SettingsModal)
+    await flushPromises()
+    await click(nav('运行上限'))
+    expect(document.getElementById('setDialogTitle').textContent).toBe('运行上限')
+    expect(api).toHaveBeenCalledWith('GET', '/api/runtime')
+    expect(document.querySelector('input[aria-label="单轮工具调用上限"]').value).toBe('100')
   })
 
   it('已访问的节保持挂载：切走再切回不丢未保存的编辑，也不重复拉取', async () => {

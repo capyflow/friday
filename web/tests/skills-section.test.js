@@ -7,19 +7,28 @@ vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 // 设置弹窗静态引入运行状态节，后者经 anim.js 模块加载即调 window.matchMedia（jsdom 未实现）。
 vi.mock('../src/anim.js', () => ({ runCountUp: vi.fn() }))
 
+const ROOTS = [
+  { dir: '/data/skills', scope: 'project', source: 'Friday 技能目录', writable: true },
+  { dir: '/work/proj/.agents/skills', scope: 'project', source: '项目 .agents/skills', writable: false },
+  { dir: '/home/u/.agents/skills', scope: 'user', source: '公共 ~/.agents/skills', writable: false },
+]
 const SKILLS = [
   { id: 'morning', name: '晨会准备', description: '汇总今日待办与天气', scope: 'project',
+    source: 'Friday 技能目录', path: '/data/skills/morning/SKILL.md',
     enabled: true, auto: true, triggers: ['晨会'], keywords: [], priority: 10, readOnly: false },
-  { id: 'broken-one', name: '', description: '', scope: 'project', enabled: true, auto: false,
-    parseError: 'frontmatter 缺少 name（技能名，对话里用它点名）', readOnly: false },
-  { id: 'shared', name: '本机共享技能', description: '', scope: 'user', enabled: true, auto: false,
-    readOnly: true },
+  { id: 'broken-one', name: '', description: '', scope: 'project', source: 'Friday 技能目录',
+    enabled: true, auto: false, parseError: 'frontmatter 缺少 name（技能名，对话里用它点名）', readOnly: false },
+  { id: 'shared', name: '本机共享技能', description: '', scope: 'user',
+    source: '公共 ~/.agents/skills', path: '/home/u/.agents/skills/shared/SKILL.md',
+    enabled: true, auto: false, readOnly: true },
 ]
 
 let wrapper
 beforeEach(() => {
   api.mockReset().mockImplementation((method, url) => {
-    if (method === 'GET' && url === '/api/skills') return Promise.resolve({ skills: SKILLS, dir: '/data/skills', error: '' })
+    if (method === 'GET' && url === '/api/skills') {
+      return Promise.resolve({ skills: SKILLS, dir: '/data/skills', roots: ROOTS, error: '' })
+    }
     if (method === 'POST' && url === '/api/skills') return Promise.resolve({ message: '已保存', skill: SKILLS[0] })
     if (method === 'POST' && url === '/api/skills/reload') return Promise.resolve({ message: '已重新扫描', skills: SKILLS })
     if (method === 'GET' && url === '/api/skills/morning') return Promise.resolve({ skill: SKILLS[0], raw: '---\nname: 晨会准备\n---\n正文\n' })
@@ -43,12 +52,19 @@ async function openSkills() {
 }
 
 describe('设置 · 技能', () => {
-  it('列出技能的名称、触发词与所在目录', async () => {
+  it('列出技能的名称、触发词，并说清每条来自哪个发现根', async () => {
     await openSkills()
     expect(api).toHaveBeenCalledWith('GET', '/api/skills')
     expect(document.querySelector('.skill-list').textContent).toContain('晨会准备')
     expect(document.body.textContent).toContain('触发词：晨会')
-    expect(document.querySelector('.meta') && document.body.textContent).toContain('/data/skills')
+    // 多根之后"哪一条"只能靠来源标签：行上标来源，头部说清扫了几个目录
+    const morningRow = Array.from(document.querySelectorAll('.skill-row'))
+      .find(r => r.textContent.includes('晨会准备'))
+    expect(morningRow.textContent).toContain('Friday 技能目录')
+    const rootsLine = document.querySelector('.skill-roots')
+    expect(rootsLine.textContent).toContain('扫描 3 个目录')
+    expect(rootsLine.textContent).toContain('/data/skills')
+    expect(rootsLine.getAttribute('title')).toContain('项目 .agents/skills')
   })
 
   it('无效文件按原因标出但不隐藏，重名/覆盖也说明清楚', async () => {
@@ -60,13 +76,19 @@ describe('设置 · 技能', () => {
     expect(document.querySelector('.skill-row.broken')).toBeTruthy()
   })
 
-  it('本机目录技能只读：只能查看，不给停用/删除', async () => {
+  it('约定地址的技能只读：只能查看，且把文件位置说清楚', async () => {
     await openSkills()
     const rows = document.querySelectorAll('.skill-row')
     const userRow = Array.from(rows).find(r => r.textContent.includes('本机共享技能'))
     expect(btnIn(userRow, '删除')).toBeUndefined()
     expect(btnIn(userRow, '停用')).toBeUndefined()
     expect(btnIn(userRow, '查看')).toBeTruthy()
+    expect(userRow.textContent).toContain('公共 ~/.agents/skills')
+    // 打开查看时头部要写出来源与路径——不然用户不知道该去哪儿改
+    btnIn(userRow, '查看').click()
+    await flushPromises()
+    expect(document.querySelector('.se-path').textContent).toContain('/home/u/.agents/skills/shared/SKILL.md')
+    expect(document.querySelector('.se-path').textContent).toContain('只读')
   })
 
   it('停用调用 enabled 接口并重拉列表', async () => {

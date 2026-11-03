@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import WorkspaceView from '../src/components/WorkspaceView.vue'
+import SelectBox from '../src/components/SelectBox.vue'
 import { api } from '../src/api.js'
 import { store, toast } from '../src/store.js'
 
@@ -287,6 +288,29 @@ async function newSession(name) {
   await wrapper.get(`[aria-label="在 ${name} 新建会话"]`).trigger('click')
   await flushPromises()
 }
+// 下拉一律是 SelectBox 自绘控件（原生 select 已下线）：按 aria-label 找，别按下标数。
+// 一律从根 wrapper 查：aria-label 在页内唯一，而弹窗那层套了 Teleport，
+// 从 DOMWrapper（如 openDialog 的返回值）再往下找会拿到另一份节点，点不到活的实例。
+function selectBox(label) {
+  const box = wrapper.findAllComponents(SelectBox).find(s => s.props('ariaLabel') === label)
+  if (!box) throw new Error(`找不到下拉：${label}`)
+  return box
+}
+function selectedText(label) {
+  return wrapper.get(`.selbox-trigger[aria-label="${label}"] .selbox-label`).text()
+}
+async function openOptions(label) {
+  await wrapper.get(`.selbox-trigger[aria-label="${label}"]`).trigger('click')
+  await flushPromises()
+  return wrapper.get('.selbox-pop')
+}
+// 走真实交互：点触发器展开 → 点选项文案
+async function pickOption(label, optionLabel) {
+  const opt = (await openOptions(label)).findAll('.selbox-opt').find(o => o.text() === optionLabel)
+  if (!opt) throw new Error(`下拉「${label}」里没有选项：${optionLabel}`)
+  await opt.trigger('click')
+  await flushPromises()
+}
 function headOf(name) {
   return wrapper.findAll('.ws-head').find(h => h.text().includes(name))
 }
@@ -452,7 +476,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces', { name: 'notes', dirs: ['/home/u/proj'] })
     // 建完直接进下一步：会话表单在新技术区里摊开，agent 默认选中第一个
     expect(wrapper.get('.ws-item.active').text()).toContain('notes')
-    expect(wrapper.get('[aria-label="选择智能体"]').element.value).toBe('codex')
+    expect(selectedText('选择智能体')).toBe('codex')
   })
 
   it('新建工作区：目录一个都不给也能创建（后端回退临时工作区目录）', async () => {
@@ -517,7 +541,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     api.mockClear()
     // 改名 + 移掉一个 + 加一个 + 换主目录：全在弹窗里暂存
     await dlg.get('[aria-label="工作区名字"]').setValue('改过的名字')
-    await dlg.get('[aria-label="默认审批档位"]').setValue('readonly')
+    await pickOption('默认审批档位', '只读')
     await rows[1].get('[aria-label="从工作区移出 /home/u/shared"]').trigger('click')
     await dlg.findAll('button').find(b => b.text().includes('添加源文件夹')).trigger('click')
     await flushPromises()
@@ -605,18 +629,23 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     expect(dlg.get('.ws-dir.missing').text()).toContain('/home/u/shared')
   })
 
-  it('删除工作区要二次确认，并断掉里面在跑的会话流', async () => {
+  it('删除工作区先弹确认，确认后连会话一起删并断掉在跑的流', async () => {
     await show()
     const held = await startTurn('跑着删')
     await openMenu('proj-a')
     await flushPromises()
-    expect(wrapper.find('.ws-menu').exists()).toBe(true) // 武装确认后菜单还开着，才点得到第二下
     const signal = fetchMock.mock.calls[0][1].signal
     const del = wrapper.get('[aria-label="删除工作区 proj-a"]')
     expect(del.text()).toContain('删除工作区')
     await del.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ws-menu').exists()).toBe(false) // 菜单让位给确认弹窗
     expect(api).not.toHaveBeenCalledWith('DELETE', '/api/acp/workspaces/ws1')
-    await wrapper.get('[aria-label="删除工作区 proj-a"]').trigger('click') // 再点一次才真删
+    const dlg = wrapper.get('[aria-label="删除工作区确认"]')
+    expect(dlg.text()).toContain('「proj-a」')
+    expect(dlg.text()).toContain('会话记录')
+    expect(dlg.text()).toContain('磁盘上的文件夹不动')
+    await dlg.get('[aria-label="确认删除"]').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/workspaces/ws1')
     expect(signal.aborted).toBe(true)
@@ -646,7 +675,7 @@ describe('会话：在工作区里创建与删除', () => {
     await newSession('proj-a')
     expect(wrapper.find('[aria-label="选择主目录"]').exists()).toBe(false)
     expect(wrapper.get('.ws-session-hint').text()).toContain('proj')
-    await wrapper.get('[aria-label="选择智能体"]').setValue('opencode')
+    await pickOption('选择智能体', 'opencode')
     api.mockClear()
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
     await flushPromises()
@@ -680,9 +709,16 @@ describe('会话：在工作区里创建与删除', () => {
     data.threads = []
     await show()
     await newSession('proj-a')
-    const opt = wrapper.get('[aria-label="选择智能体"] option')
+    const box = selectBox('选择智能体')
+    const opt = (await openOptions('选择智能体')).get('.selbox-opt')
     expect(opt.text()).toContain('已停用')
     expect(opt.element.disabled).toBe(true)
+    // 真的点下去也不改变选中值：创建会话仍然是禁用态
+    // （VTU 的 trigger 会跳过 disabled 元素，这里手动派发事件才测得到组件里的挡门）
+    opt.element.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+    await flushPromises()
+    expect(box.props('modelValue')).toBe('')
+    expect(wrapper.get('.ag-form-acts .primary').element.disabled).toBe(true)
   })
 
   it('双击会话标题就地改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
@@ -720,14 +756,26 @@ describe('会话：在工作区里创建与删除', () => {
     expect(wrapper.find('.ag-menu-wrap .ws-menu').exists()).toBe(false) // 进编辑就收起菜单
   })
 
-  it('会话行「…」里删除要二次确认，删掉后从工作区里消失', async () => {
+  it('会话行「…」里删除先弹确认：取消不删，确认后才从工作区消失', async () => {
     await show()
     api.mockClear()
     const menu = await openThreadMenu('第一件事')
     await menu.get('[aria-label="删除 第一件事"]').trigger('click')
-    expect(menu.text()).toContain('再点一次确认删除')
+    await flushPromises()
+    expect(wrapper.find('.ag-menu-wrap .ws-menu').exists()).toBe(false) // 菜单让位给确认弹窗
+    const dlg = wrapper.get('[aria-label="删除会话确认"]')
+    expect(dlg.text()).toContain('「第一件事」')
+    expect(dlg.text()).toContain('磁盘上的文件不动')
     expect(api).not.toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
-    await menu.get('[aria-label="删除 第一件事"]').trigger('click')
+    await dlg.get('[aria-label="取消删除"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="删除会话确认"]').exists()).toBe(false)
+    expect(api).not.toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
+
+    const again = await openThreadMenu('第一件事')
+    await again.get('[aria-label="删除 第一件事"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="删除会话确认"] [aria-label="确认删除"]').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
     expect(wrapper.text()).toContain('这个工作区还没有会话')
@@ -986,7 +1034,8 @@ describe('一轮进行中切换会话', () => {
     expect(signal.aborted).toBe(false)
     const menu = await openThreadMenu('第一件事')
     await menu.get('[aria-label="删除 第一件事"]').trigger('click')
-    await menu.get('[aria-label="删除 第一件事"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="删除会话确认"] [aria-label="确认删除"]').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
     expect(signal.aborted).toBe(true)
