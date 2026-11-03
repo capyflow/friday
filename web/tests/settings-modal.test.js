@@ -92,9 +92,11 @@ describe('设置弹窗', () => {
     await click(nav('MCP 服务器'))
     expect(document.getElementById('setDialogTitle').textContent).toBe('MCP 服务器')
     expect(api).toHaveBeenCalledWith('GET', '/api/mcp/config')
-    expect(document.querySelectorAll('.mcp-row')).toHaveLength(1)
-    expect(document.querySelector('.mcp-row .mr-name').value).toBe('fs')
-    expect(document.querySelector('.mcp-row .mr-state').textContent).toContain('在线 · 3 工具')
+    expect(document.querySelectorAll('.svc-card')).toHaveLength(1)
+    expect(document.querySelector('[aria-label="服务器名称"]').value).toBe('fs')
+    expect(document.querySelector('.svc-card .svc-badge').textContent).toContain('在线 · 3 工具')
+    // 卡片默认收起：表单字段不在展开态之外摊开（v-show 留着 DOM，但标记为不可见）
+    expect(document.querySelector('.svc-body').style.display).toBe('none')
     expect(nav('MCP 服务器').classList.contains('active')).toBe(true)
 
     await click(nav('会话管理'))
