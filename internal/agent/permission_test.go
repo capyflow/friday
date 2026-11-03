@@ -246,7 +246,7 @@ func TestOffModeSkipsExecTool(t *testing.T) {
 
 // TestExecCommandToolWrapper：wrapper 注入配置默认超时、透传工具名。
 func TestExecCommandToolWrapper(t *testing.T) {
-	tool := NewExecCommandTool(45)
+	tool := NewExecCommandTool(45, scratchDir())
 	if tool.Name() != execToolName {
 		t.Fatalf("工具名应为 %s，实际 %s", execToolName, tool.Name())
 	}

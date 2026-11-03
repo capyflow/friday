@@ -199,11 +199,16 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 	})
 }
 
-// ReloadPermissions 切换全局权限模式（confirm / acceptEdits / fullAccess）并热生效：
-//  1. 校验模式值，在串行配置事务中构建独立快照与新 Agent（权限 Checker 随之重建）；
-//  2. 先写回 config.yaml（保留注释），全部成功后发布配置与 Agent；
-//  3. 更新审批队列的编辑免审标记（acceptEdits/fullAccess 下 write/edit/mcp_edit
-//     的内部审批直接放行）。任一步失败保留原运行状态。
+// ReloadPermissions 切换全局权限模式（confirm / acceptEdits / fullAccess）并热生效。
+//
+// 走的是「层级生效」而不是整体重建 Agent：重建要等本轮对话释放读锁（brain.rw），
+// 对话中点切换会把 HTTP 请求一直挂到本轮跑完，而本轮用的还是旧档位。现在的次序：
+//  1. 校验模式并先写回 config.yaml（写不进去就不动运行态）；
+//  2. 更新配置快照（GET /api/permissions 立刻读到新值）；
+//  3. 编辑免审标记当场翻转——acceptEdits/fullAccess 下 write/edit/mcp_edit 的内部
+//     审批立刻放行，正在进行的这一轮也算数；
+//  4. 命令审批档位对活着的权限 Checker 做 SetMode（后台一次，见
+//     ApplyPermissionModeNow）；只有查不到活 Checker 时才退回重建 Agent。
 func ReloadPermissions(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue, mode string) error {
 	mode, err := config.NormalizePermissionMode(mode)
 	if err != nil {
@@ -212,29 +217,43 @@ func ReloadPermissions(cfg *config.Config, configPath string, registry *vxagent.
 	if cfg.Snapshot().Permissions.EffectiveMode() == mode {
 		return nil // 同模式重复切换：无变化
 	}
+	if err := config.UpdatePermissionMode(configPath, mode); err != nil {
+		return err
+	}
 	if err := cfg.Apply(func(next *config.Config) error {
 		next.Permissions.Mode = mode
-		return brain.Reconfigure(func() (*vxagent.Agent, error) {
-			var engine *ctxengine.Engine
-			if mgr := brain.CtxMgr(); mgr != nil {
-				engine = mgr.Current()
-			}
-			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
-			if err != nil {
-				return nil, err
-			}
-			if err := config.UpdatePermissionMode(configPath, mode); err != nil {
-				return nil, err
-			}
-			return newAg, nil
-		})
+		return nil
 	}); err != nil {
 		return err
 	}
 	if approver != nil {
-		approver.SetEditsFree(mode != config.PermModeConfirm)
+		approver.SetEditsFree(cfg.Snapshot().Permissions.EditsAutoApproved())
 	}
-	return nil
+	if ApplyPermissionModeNow(cfg, approver) {
+		return nil
+	}
+	// 兜底：没记录过活 Checker（例如测试里直接拼了个队列）才重建 Agent。
+	return rebuildForPermissions(cfg, configPath, registry, brain, approver)
+}
+
+// rebuildForPermissions 是切换权限模式的旧路径：重建 Agent 让权限 Checker 跟着换。
+// 它会等本轮对话读锁，只在 ApplyPermissionModeNow 落不到时使用。
+func rebuildForPermissions(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue) error {
+	mode := cfg.Snapshot().Permissions.EffectiveMode()
+	return brain.Reconfigure(func() (*vxagent.Agent, error) {
+		var engine *ctxengine.Engine
+		if mgr := brain.CtxMgr(); mgr != nil {
+			engine = mgr.Current()
+		}
+		newAg, err := Build(cfg.Snapshot(), registry, brain.Pool(), approver, engine)
+		if err != nil {
+			return nil, err
+		}
+		if err := config.UpdatePermissionMode(configPath, mode); err != nil {
+			return nil, err
+		}
+		return newAg, nil
+	})
 }
 
 // ReloadPersona 切换人设并保存自定义人设预设：

@@ -186,7 +186,9 @@ async function loadHistory() {
 /* ---------- 附件：归一化压缩 + 预览 + 上传 ---------- */
 function removePreview(p) {
   const i = pendingImages.indexOf(p)
-  if (i >= 0 && !busy.value) { pendingImages.splice(i, 1); releaseUnusedImages() }
+  // 回复中也允许撤：发出去的那批已经挪进 draft/messages（URL 由那边保着），
+  // pendingImages 里剩下的是这轮新选的，撤掉不影响正在跑的那次请求。
+  if (i >= 0) { pendingImages.splice(i, 1); releaseUnusedImages() }
 }
 function releaseUnusedImages() {
   const used = new Set([...pendingImages.map(p => p.url), ...messages.flatMap(m => m.images || [])])
@@ -233,13 +235,15 @@ async function normalizeImage(file) {
 
 async function addImageFiles(files) {
   for (const f of files) {
-    if (busy.value || clearing.value || disposed) break
+    // 回复中也允许加：发出去的那批在 sendChat 里已经快照走人，这里新加的
+    // 只挂在 pendingImages，等下一条消息用（清历史/离开页面仍会回收 URL）。
+    if (clearing.value || disposed) break
     if (!imageSupported.value) { toast('当前模型不支持图片输入', true); break }
     if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (!f.type.startsWith('image/')) { toast('仅支持图片文件', true); continue }
     let r
     try { r = await normalizeImage(f) } catch { r = null }
-    if (busy.value || clearing.value || disposed) break
+    if (clearing.value || disposed) break
     if (!r) { toast('图片无法解码，已跳过', true); continue }
     if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (r.down) toast('图片过大，已降采样：' + r.note)
@@ -296,6 +300,9 @@ function setPop(open) {
     nextTick(() => { const el = document.getElementById('addPopover'); if (el) popIn(el) })
   }
 }
+// 回复中输入框是禁的（对话页没有排队），凡是往输入框里写东西的入口这时都要说清原因，
+// 别让人对着一个点不动的按钮猜。权限模式与「添加图片」不受这条限制。
+const BUSY_INPUT_HINT = '小五正在回复：等这轮跑完（或先点停止）再改输入'
 function setMode(m) {
   if (busy.value || clearing.value) return
   mode.value = mode.value === m ? null : m
@@ -320,7 +327,7 @@ async function loadPerm() {
   try { permMode.value = (await api('GET', '/api/permissions')).mode || 'confirm' } catch (_) {}
 }
 function togglePerm() {
-  if (busy.value || clearing.value) return
+  if (clearing.value) return
   permOpen.value = !permOpen.value
   if (permOpen.value) {
     setPop(false)
@@ -339,7 +346,9 @@ async function setPerm(m) {
     await api('POST', '/api/permissions', { mode: m })
     permMode.value = m
     permOpen.value = false
-    toast('权限模式：' + PERM_META[m].short)
+    const base = '权限模式：' + PERM_META[m].short
+    // 回复中切：编辑免审当场生效；命令审批档位要等当前那次判定（可能正卡在审批卡片上）结束
+    toast(busy.value ? base + '（编辑免审已即时生效，命令审批档位在当前审批答完后跟上）' : base)
   } catch (e) { toast('切换失败：' + e.message) } finally { permBusy.value = false }
 }
 // 设置页「权限模式」保存后广播同步，chip 即时跟上
@@ -926,16 +935,22 @@ async function clearContext() {
               <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
             </div>
           </div>
+          <!-- 回复中选的图片先挂着：这轮跑完才发得出去，说清楚免得以为已经发出 -->
+          <p v-if="busy && pendingImages.length" class="meta attach-hint">
+            小五正在回复：图片挂在下一条消息上，这轮跑完再发
+          </p>
         </template>
         <template #left>
+          <!-- 这两个入口在回复中也点得动：权限模式改的是全局档位（后端当场生效），
+               加号选图片是给下一条消息预选附件，都不受「输入框禁用」影响 -->
           <button class="ib-btn plus-btn" :class="{ active: popOpen }" aria-label="添加" title="添加"
-                  :disabled="busy || clearing" @click.stop="setPop(!popOpen)">
+                  :disabled="clearing" @click.stop="setPop(!popOpen)">
             <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           </button>
           <input type="file" ref="fileInput" accept="image/*" multiple hidden @change="onFilesPicked">
           <button class="ib-btn perm-btn" :class="['pm-' + permMode, { active: permOpen }]"
                   aria-label="权限模式" :title="'权限模式：' + PERM_META[permMode].label"
-                  :disabled="busy || clearing" @click.stop="togglePerm">
+                  :disabled="clearing" @click.stop="togglePerm">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             <span class="perm-short">{{ PERM_META[permMode].short }}</span>
@@ -978,22 +993,26 @@ async function clearContext() {
             <span v-if="!imageSupported" class="pd">当前模型不支持图片输入</span>
           </button>
           <div class="pop-sep pop-anim"></div>
-          <button class="pop-item pop-anim" :class="{ selected: mode === 'plan' }" @click="setMode('plan'); setPop(false)">
+          <button class="pop-item pop-anim" :class="{ selected: mode === 'plan' }" :disabled="busy"
+                  :title="busy ? BUSY_INPUT_HINT : ''" @click="setMode('plan'); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></span>
             <span class="pl">计划</span>
             <span class="pd">向小五请求制定任务计划</span>
           </button>
-          <button class="pop-item pop-anim" :class="{ selected: mode === 'goal' }" @click="setMode('goal'); setPop(false)">
+          <button class="pop-item pop-anim" :class="{ selected: mode === 'goal' }" :disabled="busy"
+                  :title="busy ? BUSY_INPUT_HINT : ''" @click="setMode('goal'); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
             <span class="pl">目标</span>
             <span class="pd">描述你的目标，成果定义越清晰效果越好</span>
           </button>
           <div class="pop-group pop-anim">快捷创建</div>
-          <button class="pop-item pop-anim" @click="fill('提醒我 '); setPop(false)">
+          <button class="pop-item pop-anim" :disabled="busy" :title="busy ? BUSY_INPUT_HINT : ''"
+                  @click="fill('提醒我 '); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
             <span class="pl">定时提醒</span>
           </button>
-          <button class="pop-item pop-anim" @click="fill('待办：'); setPop(false)">
+          <button class="pop-item pop-anim" :disabled="busy" :title="busy ? BUSY_INPUT_HINT : ''"
+                  @click="fill('待办：'); setPop(false)">
             <span class="pi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>
             <span class="pl">新建待办</span>
           </button>

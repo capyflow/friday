@@ -623,6 +623,63 @@ describe('输入框权限模式 chip', () => {
   })
 })
 
+describe('回复中也能改权限与预选附件', () => {
+  const permApi = mode => vi.fn((method, url) => {
+    if (method === 'GET' && url === '/api/permissions') return Promise.resolve({ mode, execMode: 'confirm', mcp: 'allow' })
+    if (method === 'POST' && url === '/api/permissions') return Promise.resolve({ message: '已切换并热生效' })
+    return Promise.resolve({ messages: [] })
+  })
+
+  // 起一轮不收尾的回复：输入框被禁用＝busy（这就是「对话期间」）
+  async function startTurn() {
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start() {} })))
+    await mountChat()
+    await send('在吗')
+    expect(wrapper.get('textarea').element.disabled).toBe(true)
+  }
+
+  it('回复中权限 chip 仍能点开并切档', async () => {
+    api.mockImplementation(permApi('confirm'))
+    await startTurn()
+    const chip = wrapper.get('[aria-label="权限模式"]')
+    expect(chip.element.disabled).toBe(false)
+    await chip.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('#permPopover').isVisible()).toBe(true)
+    const items = wrapper.findAll('#permPopover .pop-item')
+    await items.find(i => i.find('.pl').text() === '自动接受编辑').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'acceptEdits' })
+    expect(wrapper.get('[aria-label="权限模式"]').text()).toContain('自动编辑')
+  })
+
+  it('回复中加号可用：图片能预选，要改输入的入口禁用并说明原因', async () => {
+    api.mockImplementation(permApi('confirm'))
+    await startTurn()
+    const plus = wrapper.get('.plus-btn')
+    expect(plus.element.disabled).toBe(false)
+    await plus.trigger('click')
+    await flushPromises()
+    expect(modeButton('添加图片').element.disabled).toBe(false)
+    expect(modeButton('计划').element.disabled).toBe(true)
+    expect(modeButton('计划').attributes('title')).toContain('正在回复')
+    expect(modeButton('定时提醒').element.disabled).toBe(true)
+    expect(modeButton('新建待办').element.disabled).toBe(true)
+  })
+
+  it('回复中选好的图片先挂着，并说清是下一条消息', async () => {
+    await startTurn()
+    await attach()
+    await flushPromises()
+    expect(wrapper.find('#attachPreviews').exists()).toBe(true)
+    expect(wrapper.get('.attach-hint').text()).toContain('下一条消息')
+    // 撤得掉：发出去的那批已经挪进消息，预览里剩的是这轮新选的
+    await wrapper.get('#attachPreviews .rm').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('#attachPreviews').exists()).toBe(false)
+  })
+})
+
 describe('轮末 token 汇总与上下文占用 chip', () => {
   const snap = (over = {}) => ({
     enabled: true, session: 'web', used: 43000, window: 128000, ratio: 0.34,

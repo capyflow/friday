@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
 	vxexec "github.com/capyflow/vortexagent/tools/exec"
@@ -46,6 +47,40 @@ var passThroughTools = []string{
 	"mcp_edit",
 }
 
+// checkerMode 把「全局权限模式 + tools.exec 策略」翻成框架权限层的执行模式。
+// 单独抽出来是因为切换权限模式不再重建 Agent（重建要等本轮对话的读锁，对话中
+// 点切换会把请求挂住），只对活着的 Checker 做一次 SetMode——两处必须同一口径。
+func checkerMode(cfg *config.Config) vxagent.Mode {
+	switch {
+	case cfg.Permissions.BypassesAll():
+		return vxagent.ModeFullAccess
+	case cfg.Tools.Exec.Mode == string(approval.ModeAuto):
+		return vxagent.ModeWhitelist
+	default: // confirm / off：off 时 exec_command 不注册，模式无实际作用
+		return vxagent.ModeConfirm
+	}
+}
+
+// liveCheckers 记下每条审批队列当前生效的权限 Checker（每次 Build 都新建一个，
+// 后建的覆盖先建的）。切换权限模式靠它 SetMode，不重建整个 Agent。
+var liveCheckers sync.Map // *approval.Queue → *vxagent.Checker
+
+// ApplyPermissionModeNow 把 cfg 当前的权限模式落到活 Checker 上，返回是否落成了
+// （没经过 NewPermissionChecker 建过 Checker 时返回 false，调用方退回重建 Agent）。
+//
+// Checker 的锁贯穿整次判定（含网页审批问询），所以 SetMode 放后台做一次：有审批
+// 卡片正等人答时，新档位在那张卡答完之后跟上，而不是把这个 HTTP 请求挂在那儿。
+// 配置快照与编辑免审标记在调用方已同步改好，界面读到的是新值。
+func ApplyPermissionModeNow(cfg *config.Config, q *approval.Queue) bool {
+	v, ok := liveCheckers.Load(q)
+	if !ok {
+		return false
+	}
+	m := checkerMode(cfg.Snapshot())
+	go v.(*vxagent.Checker).SetMode(m)
+	return true
+}
+
 // NewPermissionChecker 按配置组装框架权限 Checker。规则格式错误返回错误，
 // 调用方应视为致命（Build 快失败），不带残缺策略运行。
 //
@@ -54,13 +89,7 @@ var passThroughTools = []string{
 //   - 其余按 exec 模式映射：auto → whitelist（仅规则命中可执行）、
 //     confirm/off → confirm（off 时 exec_command 不注册，其余工具经直通规则放行）。
 func NewPermissionChecker(cfg *config.Config, q *approval.Queue) (*vxagent.Checker, error) {
-	mode := vxagent.ModeConfirm
-	switch {
-	case cfg.Permissions.BypassesAll():
-		mode = vxagent.ModeFullAccess
-	case cfg.Tools.Exec.Mode == string(approval.ModeAuto):
-		mode = vxagent.ModeWhitelist
-	}
+	mode := checkerMode(cfg)
 
 	allow := append([]string{}, passThroughTools...)
 	if cfg.Tools.Exec.Mode != string(approval.ModeOff) {
@@ -91,6 +120,9 @@ func NewPermissionChecker(cfg *config.Config, q *approval.Queue) (*vxagent.Check
 	// 与 vxagent.New 的自动收集（collectPermissionMatchers）幂等——注册的是同一对
 	// 匹配器；显式注册使 Checker 不依赖 Agent 的构建顺序即可独立工作。
 	c.RegisterToolMatcher(execToolName, vxexec.CommandMatcher, vxexec.CommandDenyMatcher)
+	if q != nil {
+		liveCheckers.Store(q, c) // 记下「这条队列当前用的 Checker」，切档靠它
+	}
 	return c, nil
 }
 
