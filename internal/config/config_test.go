@@ -65,6 +65,45 @@ func TestResolveAdminCredentials(t *testing.T) {
 	}
 }
 
+// TestFileAllowDirsDefaults 白名单默认要放行临时目录：脚本与中间产物按约定落
+// /tmp（系统 3 天后兜底清理），不放行的话 write_file 只能写数据目录。
+func TestFileAllowDirsDefaults(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if len(cfg.File.AllowDirs) == 0 {
+		t.Fatal("file.allowDirs 不应为空")
+	}
+	if cfg.File.AllowDirs[0] != "." {
+		t.Errorf("首个允许目录应为服务运行目录，实际 %q", cfg.File.AllowDirs[0])
+	}
+	// 平台相关：临时目录清单随系统走（macOS/Linux 是 /tmp，Windows 是 %TEMP%），
+	// 清单里的每一项都必须在白名单里。
+	for _, d := range TempDirs() {
+		found := false
+		for _, a := range cfg.File.AllowDirs {
+			if a == d {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("默认应放行本平台临时目录 %s，实际 %v", d, cfg.File.AllowDirs)
+		}
+	}
+	// 显式配置过白名单时也要补上临时目录（不覆盖用户已有条目、不重复）
+	own := &Config{File: FileConfig{AllowDirs: []string{"/tmp", "/Users/me/docs"}}}
+	own.applyDefaults()
+	seen := map[string]int{}
+	for _, d := range own.File.AllowDirs {
+		seen[d]++
+	}
+	if seen["/tmp"] != 1 {
+		t.Errorf("/tmp 不应重复出现，实际 %v", own.File.AllowDirs)
+	}
+	if seen["/Users/me/docs"] != 1 {
+		t.Errorf("用户原有目录应保留，实际 %v", own.File.AllowDirs)
+	}
+}
+
 // TestContextDefaults 上下文引擎配置的默认值与开关语义：
 // 未配置默认启用、归档目录默认 archive；显式关闭必须生效。
 func TestContextDefaults(t *testing.T) {

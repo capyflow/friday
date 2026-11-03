@@ -299,7 +299,7 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 	// exec_command（框架工具 + 默认超时包装）：off 模式不注册——模型不可见即整体禁用。
 	// 权限规则（白名单/毁灭性黑名单）由 Build 里的权限 Checker 承担，见 permission.go。
 	if d.Config.Tools.Exec.Mode != string(approval.ModeOff) {
-		if err := r.Add(NewExecCommandTool(d.Config.Tools.Exec.TimeoutSeconds())); err != nil {
+		if err := r.Add(NewExecCommandTool(d.Config.Tools.Exec.TimeoutSeconds(), scratchDir())); err != nil {
 			return err
 		}
 	}
@@ -371,6 +371,11 @@ func systemPrompt(cfg *config.Config) string {
 1. 读文件用 read_file（可分段续读），列目录用 list_files；写文件用 write_file（原文件自动备份为 .bak）；精确修改用 edit_file（old 必须唯一匹配，防止误改）。
 2. write_file/edit_file/exec_command 属于受控操作：confirm 审批模式下需用户在管理后台批准后才会执行，请把要做什么说清楚；收到"用户未批准"或"被权限系统拒绝"时不要反复重试同一操作。
 3. 执行 shell 命令用 exec_command（默认 30 秒超时，可通过 timeout 参数最长调到 10 分钟）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。
+4. 写脚本、跑中间产物一律走系统临时目录（macOS/Linux 是 /tmp，Windows 是 %TEMP%），不要写进数据目录、工作目录或用户家目录——那些地方是长期资产，脚本和中间产物留在里面会越积越多：
+   - 需要写脚本时，先在临时目录下造一个本次专用的子目录（macOS/Linux 用 mktemp -d，如 /tmp/tmp.XXXX；Windows 在 %TEMP% 下新建一个目录），脚本放进去并用绝对路径引用；不要在数据目录或工作目录根下直接建 .py/.sh 文件。
+   - 脚本跑完自己删掉（连同那个临时子目录一起 rm），别把垃圾留在那儿。
+   - 生成的产物（报告、导出、转换结果、中间数据）用户没指定去处时也放临时目录，并把完整路径告诉用户；临时目录里的旧文件会被系统定期清掉，用户要长期留的，就按他指定的位置另存一份。
+   - 只有用户明确说了放在哪里，或产物本身就是给他长期使用的东西（改他的项目文件、交付给他保留的资料），才写到临时目录以外。
 
 【长期记忆】（按主题分页的 wiki）
 1. 长期记忆按主题分页维护（如"用户偏好""家庭与重要的人""健康状况"）。用户分享值得长期记住的信息（偏好、习惯、家人、纪念日、所在城市、身体状况等），或明确说"记住…"时：先 recall 用关键词查相关主题页，把新信息合并进该页正文后调用 remember 保存；没有合适页面才新建（title 起主题名）。

@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1136,6 +1137,9 @@ func (c *Config) applyDefaults() {
 	if len(c.File.AllowDirs) == 0 {
 		c.File.AllowDirs = []string{"."}
 	}
+	// 临时目录默认放行：脚本与中间产物按约定落 /tmp（macOS 的 tmp_cleaner 每天扫一遍，
+	// 3 天没碰过的清掉），不放行的话 write_file 只能写数据目录，脚本就堆在数据目录根下。
+	c.File.AllowDirs = appendUniqueDirs(c.File.AllowDirs, TempDirs()...)
 	if c.TaskFile == "" {
 		c.TaskFile = "tasks.json"
 	}
@@ -1203,6 +1207,56 @@ func (c *Config) applyDefaults() {
 		c.Trace.File = "traces.json"
 	}
 	c.Acp = c.Acp.Normalized()
+}
+
+// TempDirs 返回本平台的临时目录清单：macOS/Linux 是 /tmp（Linux 上通常与 TMPDIR 同址），
+// Windows 是系统临时目录（%TEMP%）。脚本与中间产物按约定放这儿，系统会定期清理。
+// macOS 上额外带上用户私有 TMPDIR（/var/folders/…/T）：/tmp 是全机共享的，
+// 私有目录更干净，两处都放行省得 agent 挑花眼。
+func TempDirs() []string {
+	if runtime.GOOS == "windows" {
+		if d := os.TempDir(); d != "" {
+			return []string{d}
+		}
+		return nil
+	}
+	out := []string{"/tmp"}
+	if d := os.TempDir(); d != "" && d != "/tmp" && d != "/private/tmp" {
+		out = append(out, d)
+	}
+	return out
+}
+
+// TempDirBase 返回本次运行临时工作目录的父目录：macOS/Linux 是 /tmp，
+// Windows 是 %TEMP%（os.TempDir 指向的那处）。
+func TempDirBase() string {
+	if runtime.GOOS == "windows" {
+		return os.TempDir()
+	}
+	if st, err := os.Stat("/tmp"); err == nil && st.IsDir() {
+		return "/tmp"
+	}
+	return os.TempDir()
+}
+
+// appendUniqueDirs 追加不重复的目录，保持原有顺序。
+func appendUniqueDirs(dirs []string, more ...string) []string {
+	for _, d := range more {
+		if d == "" {
+			continue
+		}
+		hit := false
+		for _, e := range dirs {
+			if e == d {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
 }
 
 // Validate 校验必填项。
