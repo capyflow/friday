@@ -293,6 +293,11 @@ bug 类问题已于同日修复（附录 A）。
   （`mcpServers` 从 null 改成 `[]`，否则探到的不是 Friday 的请求）。回归
   `TestHandshakeBudgetCoversColdStart`、`TestSessionNewTimeoutNamesTheKnob`、
   `TestSilenceWatchdogNoticesQuietAgent`（+ 反例）、config 侧默认值/覆盖/写回用例。
+- **后续调整（2026-11-03）**：**单轮 300s 上限整体移除**（用户拍板：一轮对话跑几个小时很正常，
+  总时限反而在长任务中途切断；agent 侧自己的请求超时才该兜底）。`TurnTimeoutSeconds`/
+  `AcpDefaultTurnSeconds`/`TurnSeconds` 删除，manager 的 turnCtx/warnTimer/脏连接宽限回收
+  机制一并拆除；超时预算只剩握手 + 建会话两段，静默看门狗保留（仅提示不判定），
+  中止只剩用户停止与客户端断开两种。
 
 ## 二、开工顺位
 

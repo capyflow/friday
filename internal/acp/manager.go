@@ -49,13 +49,8 @@ const (
 // 就强杀进程组（取消只是通知，agent 可能不执行）。测试会临时改小。
 var stopKillGrace = 8 * time.Second
 
-// timeoutKillGrace 是单轮超时后的强杀宽限：先 session/cancel，留一点时间让 agent
-// 自己停下；一条连接承载多个会话（M-6），不该为了一轮立刻把同组别的会话一起打断。
-// 宽限到点仍脏（且没有别的轮次在跑）才回收连接；否则拖到下次使用/空闲回收。测试会改小。
-var timeoutKillGrace = 10 * time.Second
-
 // turnSilenceNotice 是"这一轮收工后多久没有任何 update 就先说一声"的静默阈值：
-// 单轮上限是 300 秒，干等五分钟不出一句话，用户只会以为界面坏了。测试会改小。
+// 干等几分钟不出一句话，用户只会以为界面坏了。测试会改小。
 var turnSilenceNotice = 30 * time.Second
 
 // Entry 是投影对话记录里的一条消息。
@@ -68,7 +63,7 @@ type Entry struct {
 	In      int64     `json:"in,omitempty"`
 	Out     int64     `json:"out,omitempty"`
 	Ms      int64     `json:"ms,omitempty"`
-	Stopped string    `json:"stopped,omitempty"` // end_turn | cancelled | timeout | error…
+	Stopped string    `json:"stopped,omitempty"` // end_turn | cancelled | error…
 	// Changes 是这一轮的改动摘要（不含逐文件 diff；详情按 turnId 单独取）。
 	Changes *TurnChanges `json:"changes,omitempty"`
 }
@@ -172,15 +167,11 @@ type live struct {
 	models    *acp.SessionModelState
 	modeState *acp.SessionModeState
 
-	sinkMu     sync.Mutex
-	sink       *turnSink     // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
-	turnDone   chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
-	stopTimer  *time.Timer   // 用户停止后的强杀兜底
-	graceTimer *time.Timer   // 超时后的强杀宽限（先 cancel，仍不收尾才杀）
-	stopping   atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
-	// dirty 表示"agent 可能还在跑上一轮"（超时后取消只是通知）。下轮开始前若
-	// 还是脏的就回收这条连接，保证同一 session 不会有两轮并发（C3）。
-	dirty atomic.Bool
+	sinkMu    sync.Mutex
+	sink      *turnSink     // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
+	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
+	stopTimer *time.Timer   // 用户停止后的强杀兜底
+	stopping  atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
 }
 
 // 会话级能力缓存：会话响应、config_options_update 推送、切换响应都会刷新它。
@@ -304,19 +295,6 @@ func (ps *procState) dropThread(threadID string) int {
 }
 
 func procKey(agent, cwd string) string { return agent + "\x00" + cwd }
-
-// procHasActiveTurn 报告这条连接上是否还有轮次在跑（宽限强杀前用：
-// 别为了一个超时的会话把同连接上别的会话一起打断）。
-func (m *Manager) procHasActiveTurn(ps *procState) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, lv := range m.live {
-		if lv.ps == ps && lv.takeSink() != nil {
-			return true
-		}
-	}
-	return false
-}
 
 // Manager 管理全部工作区、thread 与存活进程。
 type Manager struct {
@@ -997,9 +975,6 @@ func (m *Manager) releaseProc(ps *procState, reason string) {
 			if lv.stopTimer != nil {
 				lv.stopTimer.Stop()
 			}
-			if lv.graceTimer != nil {
-				lv.graceTimer.Stop()
-			}
 			delete(m.live, thID)
 		}
 	}
@@ -1393,15 +1368,6 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	if err != nil {
 		return TurnResult{}, err
 	}
-	// 上一轮超时了、agent 当时可能还在跑：宽度过了也没停的话，这条连接是脏的，
-	// 不能直接在上面再发一轮（同一 session 两轮并发违背 C3）——先回收再重接。
-	if lv.dirty.Load() {
-		m.killLive(id, "上一轮超时后仍未收尾，重接前回收")
-		lv, degraded, err = m.ensureLive(ctx, th, agentCfg, hooks)
-		if err != nil {
-			return TurnResult{}, err
-		}
-	}
 	if !lv.proc.alive() {
 		return TurnResult{}, errors.New("agent 连接已断开，请重试")
 	}
@@ -1416,9 +1382,6 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		snap.meta.Note = joinNote(snap.meta.Note, "同一目录还有别的会话在跑，本次改动的归属可能混在一起")
 	}
 
-	turnTimeout := time.Duration(c.TurnSeconds(agentCfg)) * time.Second
-	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
 	// turn 结束信号：pump 收尾与权限审批撤卡共用（权限钩子在 SDK 的请求
 	// goroutine 上读到它，感知 turn 已结束即自动撤卡）。
 	turnDone := make(chan struct{})
@@ -1465,18 +1428,11 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	sink := newTurnSink(hooks)
 	lv.setSink(sink)
 
-	// 快到单轮上限时先给 UI 一条状态帧：让用户知道不是卡死，而是马上会被中止
-	warnAfter := turnTimeout - 5*time.Second
-	if warnAfter < time.Second {
-		warnAfter = time.Second
-	}
-	warnTimer := time.AfterFunc(warnAfter, func() {
-		hooks.status(fmt.Sprintf("已接近单轮上限（%d 秒），本轮即将被中止；中止后可以发「继续」接着做。",
-			int(turnTimeout/time.Second)))
-	})
 	// 静默看门狗：agent 收下这一轮却迟迟不吐任何 update（opencode 实测会卡在
 	// 自己的模型调用上，最后既不报错也不出字）时，先给一条"没回音"的状态帧——
 	// 用户面对的不再是一片安静，而是"它在等什么、可以做什么"（V-2）。
+	// 注意这只是提醒：单轮不设时限（长任务可能跑几个小时），只有用户停止或
+	// 客户端断开才会中止这一轮。
 	silenceTimer := time.AfterFunc(turnSilenceNotice, func() {
 		if !sink.sawNothing() {
 			return
@@ -1486,10 +1442,9 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 			th.Agent, int(turnSilenceNotice/time.Second), th.Agent))
 	})
 	started := time.Now()
-	res, promptErr := lv.proc.conn.Prompt(turnCtx, acp.PromptRequest{
+	res, promptErr := lv.proc.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: lv.sessionID, Prompt: blocks,
 	})
-	warnTimer.Stop()
 	silenceTimer.Stop()
 	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
 	close(turnDone)
@@ -1535,39 +1490,13 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		m.mu.Unlock()
 	}
 
-	// 中止原因分开记：DeadlineExceeded 才是"超时"，Canceled 是用户停止或客户端断开。
-	// 取消只是通知，agent 不一定执行（实测有 agent 超时后继续跑工具）——
-	// 超时的处理是"先 cancel + 标记脏 + 宽限后（且同组无其它轮次）才回收进程"，
-	// 不再为了一轮立刻杀掉整条连接（M-6 后连接是共享的）。
-	ctxErr := turnCtx.Err()
-	aborted := ctxErr != nil
+	// 单轮不设时限：ctx 只会被取消（用户停止走 Stop 的 session/cancel；客户端
+	// 断开时请求上下文跟着取消）。取消后没人接收结果，立刻回收这条连接。
+	aborted := ctx.Err() != nil
 	stopped := lv.stopping.Load()
-	cause := ""
-	if aborted {
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			cause = "timeout"
-		} else {
-			cause = "cancelled"
-		}
-	}
 	if aborted && promptErr != nil {
 		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
-		if cause == "timeout" {
-			lv.dirty.Store(true)
-			ps := lv.ps
-			lv.graceTimer = time.AfterFunc(timeoutKillGrace, func() {
-				if !lv.dirty.Load() || ps == nil {
-					return
-				}
-				// 同一条连接上还有别的轮次在跑就先不动，等空闲回收/下次使用再收
-				if m.procHasActiveTurn(ps) {
-					return
-				}
-				m.killProc(ps.key, "超时后仍未收尾，回收连接")
-			})
-		} else {
-			m.killLive(id, "本轮被中止，回收进程") // 客户端已放弃这一轮，没人接收结果
-		}
+		m.killLive(id, "本轮被中止，回收进程") // 客户端已放弃这一轮，没人接收结果
 	}
 	interrupted := aborted || (stopped && promptErr != nil)
 	abortNote := ""
@@ -1582,8 +1511,6 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	}
 	switch {
 	case !interrupted:
-	case cause == "timeout":
-		abortNote = "超时（已中止本轮 agent 执行；上下文仍在，可以发「继续」接着做）"
 	case stopped:
 		abortNote = "被用户停止"
 	default:
@@ -1621,7 +1548,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		result.StopReason = string(res.StopReason) // cancelled 不判失败（C8）
 	case aborted:
 		result.Answer = sink.allText()
-		result.StopReason = cause // timeout | cancelled（客户端断开/用户停止）
+		result.StopReason = "cancelled" // 客户端断开/用户停止；单轮无时限，不再有 timeout
 	case stopped:
 		// 停止指令未生效、兜底强杀：按用户取消收尾，不算崩溃。
 		result.Answer = sink.allText()
@@ -2228,8 +2155,7 @@ func (m *Manager) Reload(cfg config.AcpConfig) {
 
 // agentChanged 判断 agent 的启动参数是否变化（变化即需回收进程）。
 func agentChanged(a, b config.AcpAgentConfig) bool {
-	if a.Command != b.Command || a.TurnTimeoutSeconds != b.TurnTimeoutSeconds ||
-		len(a.Args) != len(b.Args) || len(a.Env) != len(b.Env) {
+	if a.Command != b.Command || len(a.Args) != len(b.Args) || len(a.Env) != len(b.Env) {
 		return true
 	}
 	for i := range a.Args {

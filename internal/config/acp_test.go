@@ -14,18 +14,13 @@ func TestAcpNormalized(t *testing.T) {
 	n := c.Normalized()
 	if n.MaxConcurrent != AcpDefaultMaxConcurrent ||
 		n.IdleKillSeconds != AcpDefaultIdleKillSeconds ||
-		n.TurnTimeoutSeconds != AcpDefaultTurnSeconds ||
 		n.HandshakeTimeoutSeconds != AcpDefaultHandshakeSeconds ||
 		n.SessionTimeoutSeconds != AcpDefaultSessionSeconds {
 		t.Fatalf("默认值不符: %+v", n)
 	}
-	// agent 条目超时覆盖优先
-	n.Agents = []AcpAgentConfig{{Name: "x", Command: "c", TurnTimeoutSeconds: 42}}
-	if got := n.TurnSeconds(n.Agents[0]); got != 42 {
-		t.Fatalf("条目覆盖应优先生效，实际 %d", got)
-	}
 	// 建会话/握手各有自己的预算：opencode 首启列 skill 表就要 9s，拿 10s 握手值
-	// 去等 session/new 必然误判（V-2）。
+	// 去等 session/new 必然误判（V-2）。条目覆盖优先。
+	n.Agents = []AcpAgentConfig{{Name: "x", Command: "c"}}
 	n.Agents[0].HandshakeTimeoutSeconds = 30
 	n.Agents[0].SessionTimeoutSeconds = 120
 	if got := n.HandshakeSeconds(n.Agents[0]); got != 30 {
@@ -59,7 +54,6 @@ func TestAcpValidate(t *testing.T) {
 		{"缺 name", AcpConfig{Enabled: true, Agents: []AcpAgentConfig{{Command: "c"}}}, true},
 		{"name 重复", AcpConfig{Enabled: true, Agents: []AcpAgentConfig{
 			{Name: "x", Command: "c"}, {Name: "x", Command: "c"}}}, true},
-		{"负超时", AcpConfig{Enabled: true, TurnTimeoutSeconds: -1}, true},
 		{"负建会话超时", AcpConfig{Enabled: true, SessionTimeoutSeconds: -5}, true},
 		{"条目负握手超时", AcpConfig{Enabled: true, Agents: []AcpAgentConfig{
 			{Name: "x", Command: "c", HandshakeTimeoutSeconds: -1}}}, true},

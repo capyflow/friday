@@ -508,8 +508,8 @@ func testConfig(t *testing.T) config.AcpConfig {
 	t.Helper()
 	return config.AcpConfig{
 		Enabled: true, MaxConcurrent: 2, IdleKillSeconds: 600,
-		TurnTimeoutSeconds: 60, HandshakeTimeoutSeconds: 5,
-		Agents: []config.AcpAgentConfig{{Name: "fake", Command: "fake-bin"}},
+		HandshakeTimeoutSeconds: 5,
+		Agents:                  []config.AcpAgentConfig{{Name: "fake", Command: "fake-bin"}},
 	}
 }
 
@@ -1409,57 +1409,6 @@ func TestCapabilitiesEmptyWhenAgentOmits(t *testing.T) {
 	}
 }
 
-// 单轮超时：先 cancel、标记脏、宽限后才回收（M-6 后连接是共享的，不能为一轮
-// 立刻打断同组别的会话）；接近上限时会先投一条状态帧。
-func TestTimeoutDefersKillWithGrace(t *testing.T) {
-	oldGrace := timeoutKillGrace
-	timeoutKillGrace = 60 * time.Millisecond
-	t.Cleanup(func() { timeoutKillGrace = oldGrace })
-
-	f := &fakeAgent{}
-	blocked := make(chan struct{})
-	t.Cleanup(func() { close(blocked) })
-	f.promptScript = func(*fakeConn, string) string {
-		<-blocked // 模拟不理会客户端取消的长任务
-		return "end_turn"
-	}
-	cfg := testConfig(t)
-	cfg.TurnTimeoutSeconds = 2 // 1s 时出"接近上限"状态帧，2s 时中止
-	m := newTestManager(t, &cfg, nil, f)
-	th := mustThread(t, m)
-
-	c := &collector{}
-	res, err := m.Send(context.Background(), th.ID, "长任务", nil, c.hooks())
-	if err != nil {
-		t.Fatalf("超时不应算失败: %v", err)
-	}
-	if res.StopReason != "timeout" {
-		t.Fatalf("stopReason 应为 timeout: %+v", res)
-	}
-	// 中止后立刻：连接还在（等 agent 自己停），标成脏
-	if lv := m.liveOf(th.ID); lv == nil || !lv.dirty.Load() {
-		t.Fatal("超时后应保留连接并标记脏，等宽限/下次使用再收")
-	}
-	// 投影里的注记写清楚原因与下一步
-	got, _ := m.Get(th.ID)
-	last := got.Messages[len(got.Messages)-1]
-	if last.Role != "note" || !strings.Contains(last.Text, "超时") || !strings.Contains(last.Text, "继续") {
-		t.Fatalf("中断注记应说清超时与可继续: %+v", last)
-	}
-	// 宽限到点、同组没有别的轮次 → 回收
-	waitFor(t, 2*time.Second, "宽限后回收连接", func() bool { return m.liveOf(th.ID) == nil })
-
-	found := false
-	for _, st := range c.statuses() {
-		if strings.Contains(st, "接近单轮上限") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("接近上限时应投一条状态帧，实际 %v", c.statuses())
-	}
-}
-
 // 客户端断开（不是用户点停止）：停因记为 cancelled、注记写"连接已断开"，
 // 并且立刻回收进程（这一轮没人接收结果了）。
 func TestClientDisconnectCancelsTurn(t *testing.T) {
@@ -1492,51 +1441,6 @@ func TestClientDisconnectCancelsTurn(t *testing.T) {
 	}
 	if m.liveOf(th.ID) != nil {
 		t.Fatal("没人接收结果时应立刻回收进程")
-	}
-}
-
-// 超时后 agent 一直不收尾（宽限内也没停）：下一次发消息前必须先把脏连接换掉，
-// 保证同一 session 不会两轮并发。
-func TestDirtyConnectionReplacedOnNextTurn(t *testing.T) {
-	oldGrace := timeoutKillGrace
-	timeoutKillGrace = 30 * time.Second // 让宽限不参与，纯粹验"下次使用"时换连接
-	t.Cleanup(func() { timeoutKillGrace = oldGrace })
-
-	f := &fakeAgent{}
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	var calls atomic.Int32
-	f.promptScript = func(fc *fakeConn, sid string) string {
-		if calls.Add(1) == 1 {
-			<-release // 第一轮卡到超时也不收尾
-			return "end_turn"
-		}
-		return defaultScript(fc, sid)
-	}
-	cfg := testConfig(t)
-	cfg.TurnTimeoutSeconds = 1
-	m := newTestManager(t, &cfg, nil, f)
-	th := mustThread(t, m)
-
-	if _, err := m.Send(context.Background(), th.ID, "第一轮卡住", nil, TurnHooks{}); err != nil {
-		t.Fatal(err)
-	}
-	if !m.liveOf(th.ID).dirty.Load() {
-		t.Fatal("超时后连接应是脏的")
-	}
-	spawnsBefore := f.spawnCount()
-	res, err := m.Send(context.Background(), th.ID, "再试一次", nil, TurnHooks{})
-	if err != nil {
-		t.Fatalf("脏连接后的下一轮应重接后成功: %v", err)
-	}
-	if res.StopReason != "end_turn" {
-		t.Fatalf("第二轮应正常收尾: %+v", res)
-	}
-	if f.spawnCount() != spawnsBefore+1 {
-		t.Fatalf("脏连接应先回收再重连（process 数 +1），实际 %d → %d", spawnsBefore, f.spawnCount())
-	}
-	if m.liveOf(th.ID).dirty.Load() {
-		t.Fatal("重接后的连接不应还是脏的")
 	}
 }
 

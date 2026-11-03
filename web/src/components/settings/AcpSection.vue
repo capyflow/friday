@@ -8,7 +8,7 @@ import { api } from '../../api.js'
 
 const cfg = reactive({
   enabled: false, maxConcurrent: 2, idleKillSeconds: 600,
-  turnTimeoutSeconds: 300, handshakeTimeoutSeconds: 10, sessionTimeoutSeconds: 60, showThought: true,
+  handshakeTimeoutSeconds: 10, sessionTimeoutSeconds: 60, showThought: true,
   agents: [],
 })
 const busy = ref(false)
@@ -26,7 +26,7 @@ function show(t, ok) {
 // open 是纯前端状态（toAgent 不带它，不会写回 config.yaml）。
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
-           enabled: true, turnTimeoutSeconds: 0, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
+           enabled: true, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
            degradeResume: false, version: '', testing: false }
 }
 // launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
@@ -45,7 +45,6 @@ function toAgent(a) {
     // 免得手写在 config.yaml 里的 acp.agents[].workspace 被一次保存抹掉。
     workspace: (a.workspace || '').trim(),
     enabled: a.enabled,
-    turnTimeoutSeconds: Math.max(0, Math.floor(Number(a.turnTimeoutSeconds) || 0)),
     handshakeTimeoutSeconds: Math.max(0, Math.floor(Number(a.handshakeTimeoutSeconds) || 0)),
     sessionTimeoutSeconds: Math.max(0, Math.floor(Number(a.sessionTimeoutSeconds) || 0)),
     degradeResume: a.degradeResume,
@@ -140,7 +139,6 @@ async function load() {
       enabled: !!a.enabled,
       maxConcurrent: a.maxConcurrent ?? 2,
       idleKillSeconds: a.idleKillSeconds ?? 600,
-      turnTimeoutSeconds: a.turnTimeoutSeconds ?? 300,
       handshakeTimeoutSeconds: a.handshakeTimeoutSeconds ?? 10,
       sessionTimeoutSeconds: a.sessionTimeoutSeconds ?? 60,
       showThought: a.showThought !== false,
@@ -149,7 +147,7 @@ async function load() {
       ...blankAgent(), name: x.name, command: x.command,
       argsText: (x.args || []).join(', '), envText: envText(x.env),
       workspace: x.workspace || '', enabled: x.enabled !== false,
-      turnTimeoutSeconds: x.turnTimeoutSeconds || 0, degradeResume: !!x.degradeResume,
+      degradeResume: !!x.degradeResume,
       handshakeTimeoutSeconds: x.handshakeTimeoutSeconds || 0,
       sessionTimeoutSeconds: x.sessionTimeoutSeconds || 0,
       version: x.version || '',
@@ -163,7 +161,6 @@ async function save() {
     const payload = {
       enabled: cfg.enabled, maxConcurrent: num(cfg.maxConcurrent, 2),
       idleKillSeconds: num(cfg.idleKillSeconds, 600),
-      turnTimeoutSeconds: num(cfg.turnTimeoutSeconds, 300),
       handshakeTimeoutSeconds: num(cfg.handshakeTimeoutSeconds, 10),
       sessionTimeoutSeconds: num(cfg.sessionTimeoutSeconds, 60),
       showThought: cfg.showThought,
@@ -202,7 +199,6 @@ onMounted(load)
       <div class="acp-grid">
         <label><span>进程并发上限</span><input v-model="cfg.maxConcurrent" type="number" min="1"></label>
         <label><span>空闲回收（秒）</span><input v-model="cfg.idleKillSeconds" type="number" min="0"></label>
-        <label><span>单轮超时（秒）</span><input v-model="cfg.turnTimeoutSeconds" type="number" min="1"></label>
         <label><span>握手超时（秒）</span><input v-model="cfg.handshakeTimeoutSeconds" type="number" min="1"></label>
         <label><span>建会话超时（秒）</span><input v-model="cfg.sessionTimeoutSeconds" type="number" min="1"
                 title="session/new 与 session/load 的等待上限：skill 表多的 agent 首启很慢，10 秒建不出会话"></label>
@@ -268,7 +264,6 @@ onMounted(load)
             <label><span>名称</span><input v-model="a.name" placeholder="codex"></label>
             <label><span>启动命令</span><input v-model="a.command" placeholder="npx 或绝对路径"></label>
             <label><span>参数（逗号分隔）</span><input v-model="a.argsText" placeholder='-y, @zed-industries/codex-acp'></label>
-            <label><span>单轮超时覆盖（秒，0=全局）</span><input v-model="a.turnTimeoutSeconds" type="number" min="0"></label>
             <label><span>握手超时覆盖（秒，0=全局）</span><input v-model="a.handshakeTimeoutSeconds" type="number" min="0"></label>
             <label><span>建会话超时覆盖（秒，0=全局）</span><input v-model="a.sessionTimeoutSeconds" type="number" min="0"
                     title="该 agent 首启列 skill 表/初始化很慢时调大这一项，不必动全局"></label>

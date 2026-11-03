@@ -20,8 +20,6 @@ const (
 	// AcpDefaultIdleKillSeconds 空闲回收：最后一轮结束后保留进程的时长（秒）。
 	// 回收后上下文不丢——重开 thread 经 session/load 重接。
 	AcpDefaultIdleKillSeconds = 600
-	// AcpDefaultTurnSeconds 单轮对话超时（秒）。实测 turn 12~209s 且方差极大。
-	AcpDefaultTurnSeconds = 300
 	// AcpDefaultHandshakeSeconds initialize 的握手超时（秒）。
 	// gemini --acp 实测静默挂起 3 分钟，必须独立短超时。
 	AcpDefaultHandshakeSeconds = 10
@@ -48,8 +46,6 @@ type AcpConfig struct {
 	MaxConcurrent int `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
 	// IdleKillSeconds 空闲回收秒数（默认 600）。0 视为默认；负数不回收。
 	IdleKillSeconds int `yaml:"idleKillSeconds,omitempty" json:"idleKillSeconds,omitempty"`
-	// TurnTimeoutSeconds 单轮对话超时秒数（默认 300）。
-	TurnTimeoutSeconds int `yaml:"turnTimeoutSeconds,omitempty" json:"turnTimeoutSeconds,omitempty"`
 	// HandshakeTimeoutSeconds initialize 握手超时秒数（默认 10）。
 	HandshakeTimeoutSeconds int `yaml:"handshakeTimeoutSeconds,omitempty" json:"handshakeTimeoutSeconds,omitempty"`
 	// SessionTimeoutSeconds 建会话（session/new、session/load）超时秒数（默认 60）。
@@ -75,8 +71,6 @@ type AcpAgentConfig struct {
 	Workspace string `yaml:"workspace,omitempty" json:"workspace,omitempty"`
 	// Enabled 启用开关（缺省启用）。
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// TurnTimeoutSeconds 单轮超时覆盖（0 = 用全局值）。
-	TurnTimeoutSeconds int `yaml:"turnTimeoutSeconds,omitempty" json:"turnTimeoutSeconds,omitempty"`
 	// HandshakeTimeoutSeconds 握手超时覆盖（0 = 用全局值）：npx 型 agent 冷启动
 	// 慢，可以只给它放宽，不必连别的 agent 一起放宽。
 	HandshakeTimeoutSeconds int `yaml:"handshakeTimeoutSeconds,omitempty" json:"handshakeTimeoutSeconds,omitempty"`
@@ -101,9 +95,6 @@ func (c AcpConfig) Normalized() AcpConfig {
 	if c.IdleKillSeconds == 0 {
 		c.IdleKillSeconds = AcpDefaultIdleKillSeconds
 	}
-	if c.TurnTimeoutSeconds <= 0 {
-		c.TurnTimeoutSeconds = AcpDefaultTurnSeconds
-	}
 	if c.HandshakeTimeoutSeconds <= 0 {
 		c.HandshakeTimeoutSeconds = AcpDefaultHandshakeSeconds
 	}
@@ -111,14 +102,6 @@ func (c AcpConfig) Normalized() AcpConfig {
 		c.SessionTimeoutSeconds = AcpDefaultSessionSeconds
 	}
 	return c
-}
-
-// TurnSeconds 返回某 agent 的生效单轮超时（条目覆盖优先）。
-func (c AcpConfig) TurnSeconds(agent AcpAgentConfig) int {
-	if agent.TurnTimeoutSeconds > 0 {
-		return agent.TurnTimeoutSeconds
-	}
-	return c.TurnTimeoutSeconds
 }
 
 // HandshakeSeconds 返回某 agent 的生效握手超时（条目覆盖优先）。
@@ -167,9 +150,6 @@ func (c AcpConfig) Validate() error {
 		if a.Command == "" {
 			return fmt.Errorf("config: acp.agents[%s].command 不能为空", a.Name)
 		}
-		if a.TurnTimeoutSeconds < 0 {
-			return fmt.Errorf("config: acp.agents[%s].turnTimeoutSeconds 不能为负", a.Name)
-		}
 		if a.HandshakeTimeoutSeconds < 0 {
 			return fmt.Errorf("config: acp.agents[%s].handshakeTimeoutSeconds 不能为负", a.Name)
 		}
@@ -178,7 +158,7 @@ func (c AcpConfig) Validate() error {
 		}
 	}
 	if c.MaxConcurrent < 0 || c.IdleKillSeconds < 0 ||
-		c.TurnTimeoutSeconds < 0 || c.HandshakeTimeoutSeconds < 0 || c.SessionTimeoutSeconds < 0 {
+		c.HandshakeTimeoutSeconds < 0 || c.SessionTimeoutSeconds < 0 {
 		return fmt.Errorf("config: acp 各项数值不能为负")
 	}
 	return nil
@@ -226,9 +206,6 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 	if cfg.IdleKillSeconds > 0 {
 		intPair(section, "idleKillSeconds", cfg.IdleKillSeconds)
 	}
-	if cfg.TurnTimeoutSeconds > 0 {
-		intPair(section, "turnTimeoutSeconds", cfg.TurnTimeoutSeconds)
-	}
 	if cfg.HandshakeTimeoutSeconds > 0 {
 		intPair(section, "handshakeTimeoutSeconds", cfg.HandshakeTimeoutSeconds)
 	}
@@ -267,9 +244,6 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 			}
 			if a.Enabled != nil && !*a.Enabled {
 				boolPair(item, "enabled", false)
-			}
-			if a.TurnTimeoutSeconds > 0 {
-				intPair(item, "turnTimeoutSeconds", a.TurnTimeoutSeconds)
 			}
 			if a.HandshakeTimeoutSeconds > 0 {
 				intPair(item, "handshakeTimeoutSeconds", a.HandshakeTimeoutSeconds)
