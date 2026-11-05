@@ -266,6 +266,9 @@ async function setCap(cap, value) {
 }
 
 const current = computed(() => threads.value.find(t => t.id === currentId.value) || null)
+// 内置会话没有会话级能力项（模型与权限都在全局设置里），头部要说明它是内置那条，
+// 而不是让"没有 chips"看着像清单没加载出来。
+const isBuiltinThread = computed(() => !!(current.value && isBuiltinAgent(current.value.agent)))
 const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
@@ -508,10 +511,16 @@ async function select(id) {
 /* ---------- 工作区：新建 / 目录增删 / 改名 / 删除 ---------- */
 function enabledAgents() { return (acp.value?.agents || []).filter(a => a.enabled !== false) }
 
+// 内置 Friday 这一项由后端注入（config.acp.agents 里没有它），它吃不到会话级模型与
+// 审批档位，靠 builtin 标出来——清单里它排最前，但默认仍选用户自己配的那台。
+function isBuiltinAgent(name) {
+  return !!(acp.value?.agents || []).find(a => a.name === name && a.builtin)
+}
+
 // 智能体下拉：停用的也列出来（让人知道有这台工具、以及为什么选不了），但选不中。
 const agentOptions = computed(() => (acp.value?.agents || []).map(a => ({
   value: a.name,
-  label: a.name + (a.enabled === false ? '（已停用）' : ''),
+  label: a.name + (a.builtin ? '（内置）' : '') + (a.enabled === false ? '（已停用）' : ''),
   disabled: a.enabled === false,
 })))
 // 默认审批档位：与后端 policy 取值一一对应，按「问得越多越保守」排。
@@ -525,9 +534,11 @@ function openCreateWs() {
   creatingWs.value = !creatingWs.value
   if (!creatingWs.value) return
   wsForm.name = ''
-  // 没想好目录也能建（后端回退临时工作区目录）；agent 配过默认目录就拿来做预填
-  const first = enabledAgents()[0]
-  wsForm.dirs = first && first.workspace ? [first.workspace] : []
+  // 没想好目录也能建（后端回退临时工作区目录）；agent 配过默认目录就拿来做预填。
+  // 找"第一个配了默认目录的"而不是清单第一条：内置那一条没有默认目录，
+  // 拿它当 first 会让外部 agent 的预填凭空失效。
+  const first = enabledAgents().find(a => a.workspace)
+  wsForm.dirs = first ? [first.workspace] : []
 }
 function addWsFormDir(path) {
   if (path && !wsForm.dirs.includes(path)) wsForm.dirs.push(path)
@@ -692,10 +703,14 @@ function toggleSessionForm(wsId) {
 function openSessionForm(wsId) {
   sessionFor.value = wsId
   const list = enabledAgents()
-  sessionForm.agent = list.length ? list[0].name : '' // 只有一个候选时也直接选中
+  // 默认选用户自己配的那台（内置那条排最前，但不抢老用户的默认位）；
+  // 一台外部 agent 都没配时，默认就是内置 Friday——这时它确实是唯一能用的。
+  const pick = list.find(a => !a.builtin) || list[0]
+  sessionForm.agent = pick ? pick.name : ''
 }
 async function submitSession() {
   if (!sessionForm.agent) { toast('请先在「设置 → 智能体」添加并开启 agent', true); return }
+  const builtin = isBuiltinAgent(sessionForm.agent)
   try {
     const r = await api('POST', '/api/acp/threads', {
       workspaceId: sessionFor.value, agent: sessionForm.agent,
@@ -703,12 +718,17 @@ async function submitSession() {
     sessionFor.value = ''
     await load()
     select(r.thread.id)
-    // 后端已经把这台 agent 上次用过的选择抄到新会话上（capChoices），启动时就照它重放；
-    // 说清沿用了哪几项，用户才知道不用重新点一遍，也知道哪一项没被沿用。
-    const carried = Object.keys(r.thread.capChoices || {})
-    toast(carried.length
-      ? `已创建会话，沿用上次这台智能体的${carried.map(capNameById).join('、')}`
-      : '已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
+    // 内置会话没有会话级能力项（模型/权限都在全局设置里），别说"就绪后即可切模型"。
+    if (builtin) {
+      toast('已创建会话（内置 Friday：模型与权限用全局设置，工作区档位不下发）')
+    } else {
+      // 后端已经把这台 agent 上次用过的选择抄到新会话上（capChoices），启动时就照它重放；
+      // 说清沿用了哪几项，用户才知道不用重新点一遍，也知道哪一项没被沿用。
+      const carried = Object.keys(r.thread.capChoices || {})
+      toast(carried.length
+        ? `已创建会话，沿用上次这台智能体的${carried.map(capNameById).join('、')}`
+        : '已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
+    }
   } catch (e) { toast('创建会话失败：' + e.message, true) }
 }
 
@@ -1197,6 +1217,12 @@ function removePreview(p) {
                 <div v-if="sessionFor === ws.id" class="ag-form ws-session-form">
                   <label class="meta">智能体工具</label>
                   <SelectBox v-model="sessionForm.agent" :options="agentOptions" aria-label="选择智能体" />
+                  <!-- 内置那条要说清差别：它没有会话级模型/审批档位，工作区档位也不下发。
+                       不写这句，选了它才发现切不了模型，读起来就像功能坏了。 -->
+                  <p v-if="isBuiltinAgent(sessionForm.agent)" class="meta ws-session-hint">
+                    内置 Friday 用「设置 → 模型服务 / 权限」的全局配置：没有会话级的模型与审批档位，
+                    工作区档位不下发（改动仍会记录并可还原）。
+                  </p>
                   <p class="meta ws-session-hint" :title="ws.dirs[0]">
                     主目录：{{ base(ws.dirs[0]) }}（工作区的第一个源文件夹；要换去「编辑工作区」）
                   </p>
@@ -1257,7 +1283,7 @@ function removePreview(p) {
           <div class="ag-head-txt">
             <b>{{ current.title || '新会话' }}</b>
             <span class="meta" :title="(currentWs ? currentWs.name + ' · ' : '') + current.cwd">
-              <template v-if="currentWs">{{ currentWs.name }} · </template>{{ current.agent }} · {{ current.cwd }}
+              <template v-if="currentWs">{{ currentWs.name }} · </template>{{ current.agent }}<template v-if="isBuiltinThread">（内置，模型与权限走全局设置）</template> · {{ current.cwd }}
               · {{ stateLabel[current.state] || current.state }}
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>

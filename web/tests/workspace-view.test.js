@@ -1395,3 +1395,71 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(headMeta()).toContain('审批档位未下发')
   })
 })
+
+describe('工作区清单里的内置 Friday', () => {
+  // 后端 Normalized 会把内置条目注入清单最前（config.yaml 里没有它）
+  function withBuiltin() {
+    data.acp = { ...config, agents: [{ name: 'friday', command: '', builtin: true, enabled: true }, ...config.agents] }
+  }
+
+  it('内置那条出现在下拉里并标注内置，默认仍选用户自己配的那台', async () => {
+    withBuiltin()
+    data.threads = []
+    await show()
+    await newSession('proj-a')
+    const opts = (await openOptions('选择智能体')).findAll('.selbox-opt')
+    expect(opts.map(o => o.text())).toEqual(['friday（内置）', 'codex', 'opencode'])
+    api.mockClear()
+    await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'codex' })
+  })
+
+  it('一台外部 agent 都没配时，默认就是内置那条（不装 agent 也能开工作区会话）', async () => {
+    data.acp = { enabled: true, agents: [{ name: 'friday', command: '', builtin: true, enabled: true }] }
+    data.threads = []
+    await show()
+    await newSession('proj-a')
+    expect(selectedText('选择智能体')).toBe('friday（内置）')
+    api.mockClear()
+    await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'friday' })
+  })
+
+  it('选中内置那条先说清没有会话级档位，创建后的提示也不提"切模型"', async () => {
+    withBuiltin()
+    data.threads = []
+    await show()
+    await newSession('proj-a')
+    await pickOption('选择智能体', 'friday（内置）')
+    const hints = wrapper.findAll('.ws-session-hint').map(h => h.text())
+    expect(hints.join('\n')).toContain('没有会话级的模型与审批档位')
+    api.mockClear()
+    await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('模型与权限用全局设置'))
+    expect(toast).not.toHaveBeenCalledWith(expect.stringContaining('即可切模型'))
+  })
+
+  it('内置会话的头部标明它是内置那条（解释为什么没有能力 chips）', async () => {
+    withBuiltin()
+    data.threads = [{ ...copy(thread), id: 'thB', agent: 'friday', title: '内置这条' }]
+    await show()
+    await pickSession('内置这条')
+    expect(headMeta()).toContain('friday（内置，模型与权限走全局设置）')
+    // 档位没下发的那句仍按既有形态出现（不新加一颗开关）
+    expect(headMeta()).not.toContain('undefined')
+  })
+
+  it('新建工作区的默认目录仍取外部 agent 配的那份（内置那条没有默认目录）', async () => {
+    withBuiltin()
+    await show()
+    await wrapper.get('[aria-label="新建工作区"]').trigger('click')
+    expect(wrapper.text()).toContain('/home/u/proj') // 预填自 codex.workspace，没被清单第一条的内置条目带掉
+    await wrapper.findAll('button').find(b => b.text() === '创建').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces', { name: '', dirs: ['/home/u/proj'] })
+    expect(selectedText('选择智能体')).toBe('codex')
+  })
+})

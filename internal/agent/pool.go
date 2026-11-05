@@ -53,6 +53,7 @@ const (
 	OriginTask       = "task"       // 心跳与智能任务（含目标运行）
 	OriginPlan       = "plan"       // 计划模式的每一步
 	OriginSummarizer = "summarizer" // 上下文引擎的摘要/归档调用
+	OriginAcp        = "acp"        // 工作区里跑内置 Friday 的那条会话（智能体空间）
 )
 
 // WithOrigin 标记本次请求的来源渠道；空值按 unknown 记账。

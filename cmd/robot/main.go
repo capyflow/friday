@@ -457,12 +457,18 @@ func main() {
 	// 智能体（ACP）对话空间：独立于 Brain 的平行入口，thread 投影落盘
 	// （重启不失历史），进程空闲回收、session/load 重接。默认关闭
 	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
-	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
+	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp.Normalized() },
+		approver, "acp-threads.json")
 	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
+	// 内置 Friday 也进智能体清单（工作区新建会话时可选 "friday"）：一轮对话经进程内的
+	// ACP 适配器交给这个 Brain，所以外部 agent 那套会话编排、轮前快照、改动还原、
+	// 停止与重接对内置会话同样成立。差别写在 builtin.go 顶部（模型/权限是全局的）。
+	acpMgr.SetBuiltin(brain)
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
-		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",
-			len(cfg.Acp.Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+		// 内置条目不算进配置里的 agent 数（它是代码给的，用户没配过）
+		log.Printf("[智能体] 已启用（%d 个 agent + 内置 Friday，并发 %d，空闲 %ds 回收）",
+			len(cfg.Acp.WithoutBuiltin().Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
 	}
 
 	// 内置终端：服务端 PTY + 界面里的 xterm.js，只服务本机回环（admin 层硬闸，

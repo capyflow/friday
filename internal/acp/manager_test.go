@@ -2295,27 +2295,45 @@ func TestHandshakeBudgetCoversColdStart(t *testing.T) {
 	}
 	m := newTestManager(t, &cfg, nil, nil)
 	c := m.cfgFn().Normalized()
+	// 按名字取条目：归一化后清单最前是注入的内置 friday，下标不再指向日志里那两台。
+	fakeCfg := agentFromCfg(t, c, "fake")
+	localCfg := agentFromCfg(t, c, "local")
 
-	if got := m.handshakeBudget(c.Agents[0]); got != time.Duration(config.AcpColdStartHandshakeSeconds)*time.Second {
+	if got := m.handshakeBudget(fakeCfg); got != time.Duration(config.AcpColdStartHandshakeSeconds)*time.Second {
 		t.Fatalf("npx 首次应按冷启动预算，实际 %v", got)
 	}
-	if got := m.handshakeBudget(c.Agents[1]); got != 5*time.Second {
+	if got := m.handshakeBudget(localCfg); got != 5*time.Second {
 		t.Fatalf("绝对路径命令不该吃冷启动预算，实际 %v", got)
 	}
+	// 内置条目不 exec，永远不该吃冷启动预算
+	if got := m.handshakeBudget(agentFromCfg(t, c, config.BuiltinAgentName)); got != 5*time.Second {
+		t.Fatalf("内置条目应按常规握手值，实际 %v", got)
+	}
 	m.markWarm("fake")
-	if got := m.handshakeBudget(c.Agents[0]); got != 5*time.Second {
+	if got := m.handshakeBudget(fakeCfg); got != 5*time.Second {
 		t.Fatalf("起过一次后应回落到握手值，实际 %v", got)
 	}
 	// 显式写了更大的覆盖值时不能被"回落"缩掉
-	big := c.Agents[0]
+	big := fakeCfg
 	big.HandshakeTimeoutSeconds = 120
 	if got := m.handshakeBudget(big); got != 120*time.Second {
 		t.Fatalf("条目覆盖比冷启动预算更大时应以覆盖为准，实际 %v", got)
 	}
 	// 总预算（Options 一次性拉起用）要盖住握手 + 建会话
-	if got := m.dialBudget(c.Agents[1]); got <= 5*time.Second+time.Duration(cfg.SessionTimeoutSeconds)*time.Second {
+	if got := m.dialBudget(localCfg); got <= 5*time.Second+time.Duration(cfg.SessionTimeoutSeconds)*time.Second {
 		t.Fatalf("dialBudget 应大于握手+建会话之和，实际 %v", got)
 	}
+}
+
+// agentFromCfg 按名字取一条 agent 配置（归一化后的清单最前是内置 friday，
+// 老用例的 Agents[0]/[1] 下标已经不可靠）。
+func agentFromCfg(t *testing.T, c config.AcpConfig, name string) config.AcpAgentConfig {
+	t.Helper()
+	a, ok := c.Agent(name)
+	if !ok {
+		t.Fatalf("清单里没有 %q: %+v", name, c.Agents)
+	}
+	return a
 }
 
 // 建会话超时不该再长得像"agent 坏了"：说清是谁、多久、去哪调（V-2）。

@@ -137,3 +137,25 @@ describe('设置 → 智能体', () => {
     expect(wrapper.findAll('.acp-agent')[0].find('.acp-agent-body').exists()).toBe(false)
   })
 })
+
+describe('内置 friday 条目', () => {
+  it('不进可编辑清单，改为一句说明；保存时也不回传它', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: true, agents: [
+        { name: 'friday', command: '', builtin: true },
+        { name: 'codex', command: 'npx', args: ['-y', 'x'] },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      return { message: '已保存' }
+    })
+    await show()
+    const rows = wrapper.findAll('.acp-agent')
+    expect(rows).toHaveLength(1) // 只有可编辑的那台（内置那条 command 为空，摊开就是一片空框）
+    expect(rows[0].text()).toContain('codex')
+    expect(wrapper.get('.acp-builtin-hint').text()).toContain('friday（内置）')
+    await wrapper.findAll('button').find(b => b.text().includes('保存')).trigger('click')
+    await flushPromises()
+    const saved = api.mock.calls.find(([method, url]) => method === 'POST' && url === '/api/acp/config')[2]
+    expect(saved.acp.agents.map(a => a.name)).toEqual(['codex'])
+  })
+})

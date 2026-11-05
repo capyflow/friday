@@ -354,7 +354,8 @@ context:
 #                              # skill 表多的 agent（opencode 实测列命令就要 9s+）在 10s 里
 #                              # 连会话都建不出来。npx 这类现拉包的命令首次握手自动放宽到 90s
 #   showThought: true          # 是否显示 agent 思考流
-#   agents:
+#   agents:                    # 只写外部 agent。内置那台 friday 不用配、也不该写在这里：
+#                              # 它由程序注入到「工作区 → 新建会话」的清单最前，写回配置时会被剔掉
 #     - name: codex
 #       command: npx           # 无 TTY 环境下 npx 未必可解析，建议绝对路径
 #       args: ["-y", "@zed-industries/codex-acp"]

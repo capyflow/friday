@@ -76,13 +76,24 @@ func TestAcpUpgradeUpdatesLaunchConfiguration(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("升级失败: %d %s", rec.Code, rec.Body.String())
 	}
-	got := s.cfg.Snapshot().Acp.Agents[0]
+	got, ok := s.cfg.Snapshot().Acp.Agent("upgrade-test")
+	if !ok {
+		t.Fatalf("升级后清单里找不到 upgrade-test: %+v", s.cfg.Snapshot().Acp.Agents)
+	}
 	want := filepath.Join("acp", "agents", "upgrade-test", "2.0.0", "agent")
 	if got.Command != want || len(got.Args) != 1 || got.Args[0] != "--new" || got.Version != "2.0.0" {
 		t.Fatalf("升级后启动配置未更新: %+v", got)
 	}
 	if got.Env["CUSTOM"] != "kept" || got.Workspace != "/custom/workspace" {
 		t.Fatalf("升级覆盖了用户配置: %+v", got)
+	}
+	// 写回的 config.yaml 里不该出现内置条目（friday 是代码注入的，用户没配过它）
+	data, err = os.ReadFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "builtin") || strings.Contains(string(data), "friday") {
+		t.Fatalf("内置条目被写进 config.yaml:\n%s", data)
 	}
 }
 
