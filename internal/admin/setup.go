@@ -15,7 +15,12 @@ import (
 	vhttp "github.com/capyflow/vortexv3/server/http"
 )
 
-func localSetupRequest(r *http.Request) bool {
+// localSetupRequest 保留首次设置里的叫法，判断本身在 localRequest。
+func localSetupRequest(r *http.Request) bool { return localRequest(r) }
+
+// localRequest 判断"这是不是本机发起的请求"：远端地址一律不算，浏览器侧还要看
+// Host 与 Origin 是否同源。首次设置用它，内置终端也用它（后者是硬闸：非本机不服务）。
+func localRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return false

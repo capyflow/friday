@@ -74,6 +74,8 @@
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
 //	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
+//	GET    /api/terminal      内置终端可用状态（enabled/上限/活跃数，需登录）
+//	GET    /api/terminal/ws   内置终端（WebSocket，一条连接一个 PTY；只接受本机回环，需登录）
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
@@ -147,6 +149,7 @@ import (
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/terminal"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/tools"
 	"github.com/capyflow/friday/internal/trace"
@@ -216,6 +219,7 @@ type Server struct {
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
 	acp           *acp.Manager             // 智能体（ACP）管理器（可为 nil）
+	terminal      *terminal.Manager        // 内置终端管理器（可为 nil：不挂载 /api/terminal*）
 	mcpUpdateMu   sync.Mutex
 	acpUpdateMu   sync.Mutex
 	skillUpdateMu sync.Mutex
@@ -248,7 +252,10 @@ type Options struct {
 	Approver    *approval.Queue
 	Mcp         *mcp.Manager
 	// Acp 智能体管理器（可为 nil：不挂载 /api/acp*，侧栏入口由前端按配置隐藏）。
-	Acp           *acp.Manager
+	Acp *acp.Manager
+	// Terminal 内置终端管理器（可为 nil：不挂载 /api/terminal*）。它只服务本机回环，
+	// 见 terminal.go 的硬闸说明。
+	Terminal      *terminal.Manager
 	HeartbeatFile string
 	Notifications *notification.Center
 	// Pricer/Guard 支撑成本面板与软限额接口（可为 nil：不挂载 /api/cost*）。
@@ -287,6 +294,7 @@ func New(o Options) *Server {
 		approver:      o.Approver,
 		mcp:           o.Mcp,
 		acp:           o.Acp,
+		terminal:      o.Terminal,
 		heartbeatFile: o.HeartbeatFile,
 		info:          o.Info,
 		startedAt:     time.Now(),
@@ -402,6 +410,12 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))
+	}
+	if s.terminal != nil {
+		// 终端要长连接：token 走 ?token=（浏览器 WebSocket 加不了请求头），
+		// 所以用 wrapMedia 这层"头或查询参数都认"的鉴权。
+		root.AddRouter([]string{http.MethodGet}, "/api/terminal", s.wrap(s.handleTerminalInfo))
+		root.AddRouter([]string{http.MethodGet}, "/api/terminal/ws", s.wrapMedia(s.handleTerminalWS))
 	}
 	// 运行看板：只读聚合；具体动作仍走各自接口。
 	root.AddRouter([]string{http.MethodGet}, "/api/runs", s.wrap(s.handleRuns))

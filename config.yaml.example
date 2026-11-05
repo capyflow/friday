@@ -149,6 +149,16 @@ admin:
   # username: aaron
   # password: your-password-at-least-6-chars
 
+# 内置终端：在 app 里开一个真的交互式 shell（服务端 PTY，界面用 xterm.js 渲染）。
+# 人在这里敲的命令不经过 exec_command 的白名单/审批——它是给你自己用的，不是给 agent 用的。
+# 硬边界（配置关不掉）：只有本机回环能连上，远程/Docker 部署里这个入口直接不可用，
+# 并且要登录态。一条连接一个终端：断开（含刷新页面）就收掉那条 shell 的进程组，
+# 正在跑的命令会被终止。目前只支持 macOS/Linux——Windows 要接 ConPTY，还没做。
+# terminal:
+#   enabled: true
+#   maxSessions: 4            # 同时可开的终端数
+#   shell: ""                 # 留空按 $SHELL → /bin/zsh → /bin/bash → /bin/sh
+
 # 钉钉通道：让小五住进你的钉钉（Stream 模式，WebSocket 接入，无需公网 IP）。
 # 接入步骤：https://open-dev.dingtalk.com 创建企业内部应用 → 消息接收模式选"Stream 模式"
 # → 开通"企业内部机器人"能力 → 把 AppKey/AppSecret 填到下面 → 重启服务。

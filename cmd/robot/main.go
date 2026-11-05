@@ -67,6 +67,7 @@ import (
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/terminal"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/usage"
@@ -464,6 +465,18 @@ func main() {
 			len(cfg.Acp.Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
 	}
 
+	// 内置终端：服务端 PTY + 界面里的 xterm.js，只服务本机回环（admin 层硬闸，
+	// 配置关不掉那条判断）。关掉的是"能不能开新终端"，不是那道闸。
+	termCfgFn := func() terminal.Config {
+		t := cfg.Snapshot().Terminal
+		return terminal.Config{Enabled: t.IsEnabled(), MaxSessions: t.MaxSessions, Shell: t.Shell}
+	}
+	termMgr := terminal.NewManager(termCfgFn)
+	defer termMgr.CloseAll() // 内核退出时收掉进程组，别留下挂在已关 PTY 上的 shell
+	if tc := termCfgFn(); tc.Enabled {
+		log.Printf("[终端] 内置终端可用（本机回环，并发 %d；远程部署不服务）", tc.Max())
+	}
+
 	// 成本闸门：价格表（默认 pricing.json，后台可编辑、热加载）+ 软限额判定。
 	// 没有价格表不影响使用——预算按 token 判定，金额留空并在后台提示补价。
 	pricer, pricerErr := cost.NewPricer(cfg.Cost.PricingFile)
@@ -584,6 +597,7 @@ func main() {
 			Approver:      approver,
 			Mcp:           mcpMgr,
 			Acp:           acpMgr,
+			Terminal:      termMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
 			Notifications: notices,
 			Pricer:        pricer,
