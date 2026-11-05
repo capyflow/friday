@@ -46,7 +46,7 @@ afterEach(() => {
 })
 
 describe('侧栏的使用模式开关', () => {
-  it('生活模式没有「工作区」入口，工作模式才有', async () => {
+  it('生活模式只有聊天、没有「工作区」；工作模式反过来没有聊天、有「工作区」', async () => {
     await showApp()
     expect(navViews()).not.toContain('agent')
     expect(navViews()).toContain('chat')
@@ -54,6 +54,17 @@ describe('侧栏的使用模式开关', () => {
     await modeButton('工作模式').trigger('click')
     expect(store.mode).toBe('work')
     expect(navViews()).toContain('agent')
+    // 工作模式里跟小五干活走工作区（新建会话时选内置 friday 或外部 agent）：
+    // 两处都能聊就是两份上下文，用户得自己记住该在哪边说话
+    expect(navViews()).not.toContain('chat')
+  })
+
+  it('切到工作模式落在工作区，切回生活模式落在聊天', async () => {
+    await showApp()
+    await modeButton('工作模式').trigger('click')
+    expect(store.view).toBe('agent')
+    await modeButton('生活模式').trigger('click')
+    expect(store.view).toBe('chat')
   })
 
   it('模式开关标出当前在哪一侧', async () => {
@@ -73,10 +84,11 @@ describe('侧栏的使用模式开关', () => {
     expect(store.view).toBe('chat')
   })
 
-  it('回复进行中照样能切模式：每条会话各留一份现场，切走那一轮继续在后台跑', async () => {
+  it('回复进行中照样能切模式：聊天页不随模式换归属，也不拦这一跳', async () => {
     await showApp()
     // 过去 store.chatBusy 会拦住这一跳（切模式会换掉对话归属，半截回答会掉到看不见的
-    // 地方）。现在聊天页按会话存现场，标志位已经删掉——这里守的是"别再拦回去"。
+    // 地方）。现在聊天页只在生活模式、恒为主会话，切模式只是把它藏起来（v-show），
+    // 那一轮继续在后台收字——标志位已经删掉，这里守的是"别再拦回去"。
     expect(store.chatBusy).toBeUndefined()
     await modeButton('工作模式').trigger('click')
     expect(store.mode).toBe('work')

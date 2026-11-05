@@ -8,15 +8,13 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
-import { ago, fmtTokens } from '../format.js'
-import { getPref, removePref, setPref } from '../prefs.js'
+import { fmtTokens } from '../format.js'
 import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
-import DirPickerDialog from './DirPickerDialog.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -26,10 +24,16 @@ import DirPickerDialog from './DirPickerDialog.vue'
 // 每块带 round（属于第几次 LLM 调用）：同一轮内思考与正文各自只占一块，
 // 分片交错到达也不会把回答切成碎块。
 // bot 的 turn 是本轮问答的 token 汇总 { in, out, ms? }，done 帧带来、历史接口同样回带。
+const messages = reactive([])
+const input = ref('')
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
-const clearing = ref(false)        // 正在清除上下文（这一条会话的瞬时闸门）
+const phase = ref('idle')          // 对话阶段：idle（空闲）| streaming（回复中）| paused（已暂停可继续）
+const pausedTurn = ref(null)       // 暂停现场镜像 { question, partial }（服务端为准）
+const busy = computed(() => phase.value === 'streaming')
+const clearing = ref(false)
 const menuOpen = ref(false)
 const popOpen = ref(false)
+const mode = ref(null)             // null | 'plan' | 'goal'
 const scroller = ref(null)
 const composerEl = ref(null)
 const fileInput = ref(null)
@@ -37,64 +41,18 @@ const moreWrap = ref(null)
 const popWrap = ref(null)
 const titleEl = ref(null)
 const rotatorEl = ref(null)
-const imageURLs = new Set()        // 本次登录期间创建过的 object URL（回收用）
+const pendingImages = reactive([]) // { file, url }
+const imageURLs = new Set()
+let request = null
 let disposed = false
+let messagesVersion = 0
 const SIZE_LIMIT = 5 * 1024 * 1024
 
-/* ---------- 使用模式与会话归属 ---------- */
-// 会话本体在后端（internal/web/sessions.go）：生活模式只有主会话（key 固定 web，
-// 和钉钉/飞书/心跳共用同一份上下文），工作模式可以在左侧栏里新建多条独立会话。
-// 这里只管三件事：当前对话归属哪个 key、那份列表、以及每条会话各自的现场。
-const SESSION_PREF = 'friday-chat-session'
-const workMode = computed(() => store.mode === 'work')
-const sessions = ref([])                    // 工作会话列表（不含主会话，也不含后台会话）
-const sessionKey = ref(workMode.value ? '' : 'web') // 当前对话归属的会话 key
-const edit = reactive({ key: '', title: '' })       // 会话行内改名
-const creating = ref(false)                          // 新建会话表单（名字 + 项目目录都可选）
-const sessionForm = reactive({ title: '', dir: '' })
-const dirDialog = ref(null)                          // 共用的目录选择弹窗
-const noSession = computed(() => workMode.value && !sessionKey.value)
-const activeSession = computed(() => sessions.value.find(s => s.key === sessionKey.value) || null)
-const headTitle = computed(() => workMode.value ? (activeSession.value?.title || '工作会话') : '小五')
-
-/* ---------- 每条会话一份现场 ---------- */
-// 进行中的那一轮写的是它自己那份记录，所以切会话、切生活/工作模式都不必打断回复：
-// 切走的那条继续在后台收字，切回来就是当时的进度（与「工作区」页同一个口径）。
-// 记录里装的是这条会话的全部易失状态：时间线、阶段、暂停现场、上下文占比、
-// 草稿、模式 chip、待发的附件，以及那一轮的 AbortController。
-const records = reactive({})
-function recordOf(key) {
-  if (!key) return null
-  let rec = records[key]
-  if (!rec) {
-    rec = records[key] = reactive({
-      messages: [], phase: 'idle', pausedTurn: null, ctx: null,
-      draft: '', mode: null, images: [], controller: null, version: 0,
-    })
-  }
-  return rec
-}
-// 当前显示的那份现场。记录只在选中时建（applySession / bootstrap），所以这里不建，
-// 免得渲染期往 reactive 里写东西。
-const cur = computed(() => (sessionKey.value ? records[sessionKey.value] || null : null))
-const messages = computed(() => (cur.value ? cur.value.messages : []))
-const phase = computed(() => (cur.value ? cur.value.phase : 'idle'))
-const busy = computed(() => phase.value === 'streaming')
-const ctxSnap = computed(() => (cur.value ? cur.value.ctx : null))
-const pendingImages = computed(() => (cur.value ? cur.value.images : []))
-const mode = computed({
-  get: () => (cur.value ? cur.value.mode : null),
-  set: v => { if (cur.value) cur.value.mode = v },
-})
-const input = computed({
-  get: () => (cur.value ? cur.value.draft : ''),
-  set: v => { if (cur.value) cur.value.draft = v },
-})
-// 会话行上的「回复中」：读的是每条会话自己那份记录，不依赖服务端状态（那只在轮末刷新）。
-function generating(key) {
-  const rec = records[key]
-  return !!(rec && rec.phase === 'streaming')
-}
+/* ---------- 会话归属 ---------- */
+// 这一页就是生活模式的那条主会话：key 固定 web，和钉钉/飞书/心跳共用同一份上下文。
+// 工作模式不再有这个入口——在工作模式里跟小五干活走「工作区」（新建会话时选内置 friday
+// 或外部 agent），两处都能聊就会有两份上下文，用户得自己记住该在哪边说话。
+const MAIN_SESSION = 'web'
 
 const MODE_TEXT = {
   plan: ['计划模式', '描述你的任务，向小五请求制定计划…'],
@@ -104,156 +62,15 @@ const SUGGESTS = ['10 分钟后提醒我喝水', '记个待办：买牛奶', '�
 const PHRASES = ['提醒、待办、天气，都可以交给我', '说一句话，就能帮你安排好',
                  '本地运行，数据只属于你', '到点了，我会主动提醒你']
 
-// welcome 是"这条会话还没内容"的空态；工作模式下一条会话都没有时走另一套
-// 空态（见 noSession），别把"还没建会话"画成"建好了但没说话"。
-const welcome = computed(() => !noSession.value && messages.value.length === 0)
-const canSendNew = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
+const welcome = computed(() => messages.length === 0)
+const canSendNew = computed(() => !!input.value.trim() || pendingImages.length > 0)
 const sendDisabled = computed(() => clearing.value || (phase.value === 'idle' && !canSendNew.value))
 const sendLabel = computed(() =>
   phase.value === 'streaming' ? '暂停回复'
     : phase.value === 'paused' && !canSendNew.value ? '继续上次任务'
     : '发送')
-const placeholder = computed(() => {
-  if (noSession.value) return '先新建一条会话再开工'
-  return mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'
-})
-
-// rowMeta 是会话行的小字：说过话就报条数与"多久之前动过"，一条都还没有就明说
-// "还没有内容"（这时后端回的是创建时刻，拿它算"多少个月"没意义）；选了项目目录
-// 就把目录名带上，一眼能看出这条会话在哪个项目里干活。
-function rowMeta(s) {
-  const parts = [s.messages ? `${s.messages} 条${ago(s.updatedAt) ? ' · ' + ago(s.updatedAt) : ''}` : '还没有内容']
-  if (s.dir) parts.push(baseName(s.dir))
-  return parts.join(' · ')
-}
-
-// baseName 取目录最后一段（行上铺全路径太长，完整路径在 title 里）
-function baseName(p) {
-  const segs = (p || '').replace(/\/+$/, '').split('/')
-  return segs[segs.length - 1] || p
-}
-
-async function loadSessions() {
-  try {
-    const r = await api('GET', '/api/sessions')
-    sessions.value = (r.sessions || []).filter(s => s.kind === 'work')
-  } catch (e) {
-    sessions.value = []
-    toast('会话列表加载失败：' + e.message, true)
-  }
-  return sessions.value
-}
-
-// showRecord 切到某条会话的现场。正在跑的那条不重拉历史：历史接口只有已落盘的
-// 部分，覆盖回去会把实时进度打回半截。空闲的那条按 key 重拉——主会话会被钉钉/
-// 飞书/心跳这些别的渠道写消息，拿着旧缓存看就是"少了几轮"。
-async function showRecord(key) {
-  menuOpen.value = false
-  const rec = recordOf(key)
-  if (!rec) return
-  if (rec.phase !== 'streaming') await loadHistory(rec, key)
-  loadCtx(rec, key)
-}
-
-// applySession 落到某条会话并记住它（下次回到工作模式接着这条）。
-// 只有工作模式才记：生活模式恒为主会话，把 web 写进去会把上次的选择顶掉。
-async function applySession(key) {
-  recordOf(key) // 现场先建好，模板这一帧就能拿到（不是"还没选中会话"的空壳）
-  sessionKey.value = key
-  if (workMode.value) {
-    if (key) setPref(SESSION_PREF, key)
-    else removePref(SESSION_PREF)
-  }
-  await showRecord(key)
-}
-
-// pickSession 决定工作模式下当前哪条会话：优先上次选的那条（还在列表里才算，
-// 被删了就换最近活动的），一条都没有就留空让页面明说"还没有会话"。
-async function pickSession() {
-  const list = await loadSessions()
-  const remembered = list.find(s => s.key === getPref(SESSION_PREF))
-  await applySession(remembered ? remembered.key : (list[0]?.key || ''))
-}
-
-// 切会话/新建会话/改名都不看"有没有别的会话在跑"：每条会话自己一份现场，
-// 后台那一轮不受影响（会话行上会标出它还在生成）。
-async function selectSession(key) {
-  if (key === sessionKey.value) return
-  await applySession(key)
-}
-
-async function createSession() {
-  try {
-    const r = await api('POST', '/api/sessions', {
-      title: sessionForm.title.trim(), dir: sessionForm.dir,
-    })
-    sessionForm.title = ''
-    sessionForm.dir = ''
-    creating.value = false
-    await loadSessions()
-    await applySession(r.session?.key || '')
-    toast(r.session?.dir ? '已新建会话，读写都在 ' + baseName(r.session.dir) + ' 里' : '已新建会话，直接开说')
-    composerEl.value?.focus?.()
-  } catch (e) {
-    // 目录不合法（被删了、指到了文件）后端会说要什么，表单留着照着改
-    toast(e.message, true)
-  }
-}
-
-// openSessionForm 打开新建会话表单：名字与项目目录都是可选的。
-function openSessionForm() {
-  sessionForm.title = ''
-  sessionForm.dir = ''
-  creating.value = true
-}
-
-function pickSessionDir() {
-  dirDialog.value?.open(path => { sessionForm.dir = path }, sessionForm.dir || '')
-}
-
-async function removeSession(s) {
-  const name = s.title || '新会话'
-  if (!confirm('删除会话「' + name + '」？这段上下文和它的调用轨迹一起清掉，找不回来。')) return
-  try {
-    await api('DELETE', '/api/sessions/' + encodeURIComponent(s.key))
-  } catch (e) { toast(e.message, true); return }
-  toast('已删除会话「' + name + '」')
-  // 现场跟着删：正在跑的那一轮先取消（会话已经没了，留着只会往不存在的归属上写字），
-  // 附件预览的 object URL 也一并回收。
-  const rec = records[s.key]
-  if (rec) {
-    rec.controller?.abort()
-    delete records[s.key]
-    releaseUnusedImages()
-  }
-  const rest = sessions.value.filter(x => x.key !== s.key)
-  sessions.value = rest
-  // 删的是当前这条：接着落到剩下的第一条（都删完就回到"还没有会话"）。
-  if (s.key === sessionKey.value) await applySession(rest[0]?.key || '')
-}
-
-function startRename(s) {
-  edit.key = s.key
-  edit.title = s.hasTitle ? s.title : '' // 自动取的名不预填：清空就是"继续自动取名"
-}
-
-async function commitRename() {
-  if (!edit.key) return
-  const key = edit.key
-  const title = edit.title.trim()
-  edit.key = ''
-  try {
-    const r = await api('POST', '/api/sessions/' + encodeURIComponent(key), { title })
-    const i = sessions.value.findIndex(s => s.key === key)
-    if (i >= 0 && r.session) sessions.value[i] = { ...sessions.value[i], ...r.session }
-  } catch (e) { toast(e.message, true) }
-}
-
-// 切模式 = 换归属：生活模式回主会话，工作模式按上面的规则挑一条工作会话。
-watch(() => store.mode, async m => {
-  if (m === 'work') await pickSession()
-  else await applySession('web')
-})
+const placeholder = computed(() =>
+  (mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'))
 
 /* ---------- 滚动 ---------- */
 function nearBottom() {
@@ -348,55 +165,40 @@ function histBlocks(m) {
       : { kind: 'text', text: b.text || '', round: 0 })
 }
 
-// loadHistory 按 key 拉历史，写进那条会话自己的记录（rec）。rec.version 是这条记录的
-// 代数：期间又切走/又发了一轮就不该再覆盖（旧请求的回包晚到也会落错地方）。
-async function loadHistory(rec, key) {
-  if (!rec || !key) return // 工作模式还没选中会话：没有历史可拉，也不该去问后端要 web 的
-  const version = rec.version
+async function loadHistory() {
+  const version = messagesVersion
   let list = []
   let paused = null
   try {
-    const r = await api('GET', '/api/chat/history?session=' + encodeURIComponent(key))
+    const r = await api('GET', '/api/chat/history?session=' + MAIN_SESSION)
     list = r.messages || []
     paused = r.paused || null
   } catch (e) { /* 拉取失败按空会话处理 */ }
-  if (disposed || version !== rec.version || rec.phase === 'streaming') return
-  rec.messages.splice(0, rec.messages.length, ...list.map(m => ({
+  if (disposed || version !== messagesVersion) return
+  messages.splice(0, messages.length, ...list.map(m => ({
     role: m.role === 'user' ? 'user' : 'bot', text: m.text, blocks: histBlocks(m),
     turn: m.turn || null,
   })))
   // 恢复暂停现场：渲染被暂停的问答，发送键变为"继续"。
   if (paused && paused.question) {
     const partial = paused.partial || ''
-    rec.messages.push({ role: 'user', text: paused.question })
-    rec.messages.push({ role: 'bot', text: partial, paused: true, blocks: histBlocks({ text: partial }) })
-    rec.phase = 'paused'
-    rec.pausedTurn = paused
-  } else {
-    rec.phase = 'idle'
-    rec.pausedTurn = null
+    messages.push({ role: 'user', text: paused.question })
+    messages.push({ role: 'bot', text: partial, paused: true, blocks: histBlocks({ text: partial }) })
+    phase.value = 'paused'
+    pausedTurn.value = paused
   }
-  if (rec.messages.length && sessionKey.value === key) nextTick(() => stick(true))
+  if (messages.length) nextTick(() => stick(true))
 }
 
 /* ---------- 附件：归一化压缩 + 预览 + 上传 ---------- */
 function removePreview(p) {
-  const rec = cur.value
-  if (!rec) return
-  // 回复中也允许撤：发出去的那批已经挪进 messages（URL 由那边保着），
-  // 这里剩下的是这轮新选的，撤掉不影响正在跑的那次请求。
-  const i = rec.images.indexOf(p)
-  if (i >= 0) { rec.images.splice(i, 1); releaseUnusedImages() }
+  const i = pendingImages.indexOf(p)
+  // 回复中也允许撤：发出去的那批已经挪进 draft/messages（URL 由那边保着），
+  // pendingImages 里剩下的是这轮新选的，撤掉不影响正在跑的那次请求。
+  if (i >= 0) { pendingImages.splice(i, 1); releaseUnusedImages() }
 }
-// 回收没人引用的 object URL。判断范围是**所有**会话的现场——别的会话还带着预览，
-// 当前这条撤掉一张不该把人家那张也 revoke 掉。
 function releaseUnusedImages() {
-  const used = new Set()
-  for (const rec of Object.values(records)) {
-    if (!rec) continue
-    for (const p of rec.images) used.add(p.url)
-    for (const m of rec.messages) for (const url of m.images || []) used.add(url)
-  }
+  const used = new Set([...pendingImages.map(p => p.url), ...messages.flatMap(m => m.images || [])])
   for (const url of imageURLs) {
     if (!used.has(url)) { URL.revokeObjectURL(url); imageURLs.delete(url) }
   }
@@ -439,24 +241,22 @@ async function normalizeImage(file) {
 }
 
 async function addImageFiles(files) {
-  const rec = cur.value
-  if (!rec) return
   for (const f of files) {
     // 回复中也允许加：发出去的那批在 sendChat 里已经快照走人，这里新加的
-    // 只挂在这条会话的待发送附件上，等下一条消息用（清历史/离开页面仍会回收 URL）。
-    if (clearing.value || disposed || noSession.value) break
+    // 只挂在 pendingImages，等下一条消息用（清历史/离开页面仍会回收 URL）。
+    if (clearing.value || disposed) break
     if (!imageSupported.value) { toast('当前模型不支持图片输入', true); break }
-    if (rec.images.length >= 4) { toast('一条消息最多 4 张图片', true); break }
+    if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (!f.type.startsWith('image/')) { toast('仅支持图片文件', true); continue }
     let r
     try { r = await normalizeImage(f) } catch { r = null }
-    if (clearing.value || disposed || cur.value !== rec) break
+    if (clearing.value || disposed) break
     if (!r) { toast('图片无法解码，已跳过', true); continue }
-    if (rec.images.length >= 4) { toast('一条消息最多 4 张图片', true); break }
+    if (pendingImages.length >= 4) { toast('一条消息最多 4 张图片', true); break }
     if (r.down) toast('图片过大，已降采样：' + r.note)
     const url = URL.createObjectURL(r.file)
     imageURLs.add(url)
-    rec.images.push({ file: r.file, url })
+    pendingImages.push({ file: r.file, url })
   }
 }
 
@@ -507,10 +307,9 @@ function setPop(open) {
     nextTick(() => { const el = document.getElementById('addPopover'); if (el) popIn(el) })
   }
 }
-// 回复中这条会话的输入框是禁的（对话页没有排队），凡是往输入框里写东西的入口这时都要说清原因，
-// 别让人对着一个点不动的按钮猜。限制只针对**这一条会话**：换一条会话、换个模式都不受影响。
-// 权限模式与「添加图片」不受这条限制。
-const BUSY_INPUT_HINT = '这条会话正在回复：等这轮跑完（或先点停止）再改这里的输入'
+// 回复中输入框是禁的（对话页没有排队），凡是往输入框里写东西的入口这时都要说清原因，
+// 别让人对着一个点不动的按钮猜。权限模式与「添加图片」不受这条限制。
+const BUSY_INPUT_HINT = '小五正在回复：等这轮跑完（或先点停止）再改输入'
 function setMode(m) {
   if (busy.value || clearing.value) return
   mode.value = mode.value === m ? null : m
@@ -563,7 +362,7 @@ async function setPerm(m) {
 function onPermSync(e) { if (e.detail) permMode.value = e.detail }
 
 /* ---------- 上下文占用（chip 常驻 composer，点开看数字、达阈值可手动压缩） ---------- */
-// ctxSnap 是每条会话自己那份（在记录里，见上面的现场声明）：这里只留弹层开关。
+const ctxSnap = ref(null)   // /api/context 快照；null = 上下文治理未启用或没取到（此时不显示 chip）
 const ctxOpen = ref(false)
 const ctxBusy = ref(false)
 const ctxWrap = ref(null)
@@ -583,15 +382,11 @@ const ctxCompactHint = computed(() => {
   if (!s.canCompact) return `未达归档阈值（${ctxSoftPct.value}%），现在没有可归档的历史`
   return '归档旧块并重写活跃历史，旧内容仍可用检索找回'
 })
-// loadCtx 取某条会话的上下文占比，写进它自己的记录（默认就是当前这条）。
-// 后台那一轮结束时也要刷自己那份，不能把数字写到用户已经切走的那条会话上。
-async function loadCtx(rec = cur.value, key = sessionKey.value) {
-  if (!rec) return
-  if (!key) { rec.ctx = null; return }
+async function loadCtx() {
   try {
-    const s = await api('GET', '/api/context?session=' + encodeURIComponent(key))
-    rec.ctx = s && s.enabled ? s : null
-  } catch (_) { rec.ctx = null }
+    const s = await api('GET', '/api/context?session=' + MAIN_SESSION)
+    ctxSnap.value = s && s.enabled ? s : null
+  } catch (_) { ctxSnap.value = null }
 }
 function toggleCtx() {
   if (clearing.value) return
@@ -651,12 +446,11 @@ function goModelSettings() {
   store.settingsOpen = true
 }
 async function compactCtx() {
-  const rec = cur.value
-  if (ctxBusy.value || busy.value || !rec) return
+  if (ctxBusy.value || busy.value) return
   ctxBusy.value = true
   try {
-    const r = await api('POST', '/api/context/compact', { session: sessionKey.value })
-    if (r.after && r.after.enabled) rec.ctx = r.after
+    const r = await api('POST', '/api/context/compact', { session: MAIN_SESSION })
+    if (r.after && r.after.enabled) ctxSnap.value = r.after
     toast(r.message || '上下文已压缩')
   } catch (e) { toast('压缩失败：' + e.message, true) } finally { ctxBusy.value = false }
 }
@@ -672,7 +466,7 @@ function onSendClick() {
 
 async function pauseChat() {
   if (phase.value !== 'streaming') return
-  try { await api('POST', '/api/chat/stop', { session: sessionKey.value }) }
+  try { await api('POST', '/api/chat/stop', { session: MAIN_SESSION }) }
   catch (e) { if (!disposed) toast(e.message, true) }
   // 服务端取消后以 {paused:true} 收尾流，状态在 streamTurn 的帧处理里落定
 }
@@ -687,24 +481,16 @@ function newBot() {
 // streamTurn 跑一次 SSE 对话（发送与继续共用）：userMsg 为乐观插入的用户气泡
 //（继续时为 null）；prepare 在建立连接前上传图片返回附件 ID；出错时按 draft
 // 恢复输入现场（继续失败则回到"已暂停"状态）。
-// streamTurn 跑一次 SSE 对话（发送与继续共用）：rec/key 是这一轮归属的那条会话现场
-//（切走也不换：写的一直是它自己那份）；userMsg 为乐观插入的用户气泡（继续时为 null）；
-// prepare 在建立连接前上传图片返回附件 ID；出错时按 draft 恢复输入现场
-//（继续失败则回到"已暂停"状态）。
-async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
-  rec.version++
+async function streamTurn({ url, body, userMsg, draft, prepare }) {
+  messagesVersion++
   const controller = new AbortController()
-  rec.controller = controller
+  request = controller
   const typing = reactive({ role: 'typing' })
   let submitted = false
   let bot = null
-  // 这一轮的现场是不是正摊在屏幕上：滚动、气泡入场动画、聚焦这类"看得见才有意义"
-  // 的动作只在是的时候做；写数据则一直写 rec，切走了也照收。
-  const visible = () => !disposed && sessionKey.value === key
-  const scroll = force => { if (visible()) nextTick(() => stick(force)) }
   const removeTyping = () => {
-    const i = rec.messages.indexOf(typing)
-    if (i >= 0) rec.messages.splice(i, 1)
+    const i = messages.indexOf(typing)
+    if (i >= 0) messages.splice(i, 1)
   }
   let reader
   try {
@@ -713,11 +499,11 @@ async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
       if (disposed || controller.signal.aborted) return
       body = { ...body, attachments: ids }
     }
-    if (userMsg) rec.messages.push(userMsg)
-    rec.messages.push(typing)
+    if (userMsg) messages.push(userMsg)
+    messages.push(typing)
     submitted = true
-    if (visible()) popLastBubble()
-    scroll(true)
+    popLastBubble()
+    nextTick(() => stick(true))
     const res = await fetch(url, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -744,7 +530,7 @@ async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
     let turnTotal = null // done 帧带回的本轮 token 汇总，循环结束后才挂到 bot 上
     const ensureBot = () => {
       removeTyping()
-      if (!bot) { bot = newBot(); rec.messages.push(bot) }
+      if (!bot) { bot = newBot(); messages.push(bot) }
       return bot
     }
     const handle = ev => {
@@ -753,30 +539,30 @@ async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
       if (data.error) throw new Error(data.error)
       if (data.thinking) {
         pushThinking(ensureBot(), data.thinking)
-        scroll()
+        nextTick(() => stick())
       }
       if (data.step) {
         const b = ensureBot()
         if (data.step.kind === 'round') finishRound(b, data.step.detail)
         else pushToolStep(b, data.step)
-        scroll()
+        nextTick(() => stick())
       }
       if (data.plan) {
         ensureBot().plan = data.plan
         watchPlan(data.plan.id)
-        scroll()
+        nextTick(() => stick())
       }
       if (data.delta) {
         pushText(ensureBot(), data.delta)
-        scroll()
+        nextTick(() => stick())
       }
       if (data.paused) {
         // 对话被暂停：保留已生成部分，发送键变为"继续"。
         paused = true
         removeTyping()
         if (bot) { bot.paused = true; bot.streaming = false }
-        rec.phase = 'paused'
-        rec.pausedTurn = {
+        phase.value = 'paused'
+        pausedTurn.value = {
           question: (draft && draft.text) || (userMsg && userMsg.text) || '',
           partial: data.partial || (bot && bot.text) || '',
         }
@@ -807,40 +593,39 @@ async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
     if (!done && !paused) throw new Error('回复连接已中断')
     if (!bot && !paused) {
       bot = { role: 'bot', text: '……', blocks: [{ kind: 'text', text: '……' }] }
-      rec.messages.push(bot)
+      messages.push(bot)
     }
     if (bot && turnTotal) bot.turn = turnTotal
-    // 本轮结束（含被暂停）：刷新这条会话自己的上下文占比（不是当前屏幕那份）
-    loadCtx(rec, key)
+    // 本轮结束（含被暂停）：上下文占比刷新，chip 与弹窗里的数字跟着这一轮走
+    loadCtx()
     if (!paused) {
       // 正常完成：清掉历史暂停标记（任务已续完或已放弃），回到空闲。
-      rec.phase = 'idle'
-      rec.pausedTurn = null
+      phase.value = 'idle'
+      pausedTurn.value = null
       if (bot) bot.streaming = false
-      for (const m of rec.messages) { if (m.paused) m.paused = false }
+      for (const m of messages) { if (m.paused) m.paused = false }
     }
-    scroll()
+    nextTick(() => stick())
     // 调用轨迹收进了设置弹窗：节挂载着才会收到，未挂载时无监听者、空抛无害
     window.dispatchEvent(new CustomEvent('friday:trace-refresh'))
   } catch (e) {
     if (disposed || controller.signal.aborted || !store.loggedIn) return
     if (draft) {
-      // 输入现场回到**这条**会话的记录里：用户可能已经切走了，回来还能重试
-      rec.draft = draft.text
-      rec.mode = draft.mode
-      rec.images.push(...draft.images)
-      if (visible()) composerEl.value && composerEl.value.focus()
+      input.value = draft.text
+      mode.value = draft.mode
+      pendingImages.push(...draft.images)
+      composerEl.value && composerEl.value.focus()
     } else {
-      rec.phase = 'paused' // 继续失败：回到可继续状态
+      phase.value = 'paused' // 继续失败：回到可继续状态
     }
     if (submitted) {
       // 未收到回复时撤销乐观消息；已有部分输出则保留，方便检查失败前的结果。
       if (!bot && userMsg) {
-        const i = rec.messages.indexOf(userMsg)
-        if (i >= 0) rec.messages.splice(i, 1)
+        const i = messages.indexOf(userMsg)
+        if (i >= 0) messages.splice(i, 1)
       }
-      rec.messages.push({ role: 'err', text: e.message + (draft ? '，输入和图片已保留，可以重试。' : '') })
-      if (visible()) popLastBubble()
+      messages.push({ role: 'err', text: e.message + (draft ? '，输入和图片已保留，可以重试。' : '') })
+      popLastBubble()
     } else { toast(e.message + (draft ? '，输入和图片已保留，可以重试。' : ''), true) }
   } finally {
     if (reader) {
@@ -848,28 +633,23 @@ async function streamTurn({ rec, key, url, body, userMsg, draft, prepare }) {
       reader.releaseLock()
     }
     removeTyping()
-    if (bot && rec.phase !== 'paused') {
+    if (bot && phase.value !== 'paused') {
       // 本轮已了结（完成或出错断流）：漏收尾的工具块不会再有结果事件了，就地收掉
       bot.streaming = false
       closeRunningTools(bot)
     }
-    if (rec.controller === controller) rec.controller = null
-    if (rec.phase === 'streaming') rec.phase = 'idle' // 兜底归位
-    // 工作模式：会话名按首条提问自动取，消息数与"多久之前"也在动，跑完一轮补一次列表。
-    if (workMode.value && !disposed) loadSessions()
-    if (visible()) nextTick(() => composerEl.value && composerEl.value.focus())
+    if (request === controller) request = null
+    if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
+    if (!disposed) nextTick(() => composerEl.value && composerEl.value.focus())
   }
 }
 
 async function sendChat(presetText) {
-  const rec = cur.value
-  const key = sessionKey.value
-  if (!rec || clearing.value || disposed || rec.phase === 'streaming') return
-  if (noSession.value) { toast('先新建一条会话再开工', true); return }
+  if (clearing.value || disposed || phase.value === 'streaming') return
   const draft = {
-    text: typeof presetText === 'string' ? presetText : rec.draft,
-    mode: rec.mode,
-    images: [...rec.images],
+    text: typeof presetText === 'string' ? presetText : input.value,
+    mode: mode.value,
+    images: [...pendingImages],
   }
   const text = draft.text.trim()
   if (!text && !draft.images.length) return
@@ -884,18 +664,17 @@ async function sendChat(presetText) {
   const raw = text
   setPop(false)
   // 暂停期间发新问题 = 中止上次任务、开启下一段对话（服务端同步丢弃暂停现场）。
-  rec.phase = 'streaming'
-  rec.pausedTurn = null
-  for (const m of rec.messages) { if (m.paused) m.paused = false }
-  rec.mode = null
-  rec.draft = ''
+  phase.value = 'streaming'
+  pausedTurn.value = null
+  for (const m of messages) { if (m.paused) m.paused = false }
+  mode.value = null
+  input.value = ''
   // 把预览交给此次请求，保留 URL 直到对应消息/草稿被移除。
-  rec.images.splice(0, rec.images.length)
+  pendingImages.splice(0, pendingImages.length)
   const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   await streamTurn({
-    rec, key,
     url: '/api/chat',
-    body: { message: raw, session: key, mode: reqMode },
+    body: { message: raw, session: MAIN_SESSION, mode: reqMode },
     userMsg: user,
     draft,
     prepare: async signal => uploadImages(draft.images, signal),
@@ -914,15 +693,9 @@ const planTimers = new Map()
 async function refreshPlan(id) {
   try {
     const r = await api('GET', '/api/plans/' + encodeURIComponent(id))
-    // 计划卡挂在**哪条会话**上都得跟着刷新：切走的那条仍在执行，轮询不该只盯屏幕上这份
-    let found = false
-    for (const rec of Object.values(records)) {
-      const target = rec.messages.find(m => m.plan && m.plan.id === id)
-      if (!target) continue
-      found = true
-      if (r.plan) target.plan = { ...target.plan, ...r.plan }
-    }
-    if (!found) stopWatchingPlan(id)
+    const target = messages.find(m => m.plan && m.plan.id === id)
+    if (target && r.plan) target.plan = { ...target.plan, ...r.plan }
+    if (!target) stopWatchingPlan(id)
     else if (PLAN_DONE_STATES.includes(r.plan?.state)) stopWatchingPlan(id)
   } catch (e) { /* 计划状态刷新失败不打断聊天，下一轮轮询再试 */ }
 }
@@ -970,11 +743,9 @@ async function stepAction(id, n, action) {
 onUnmounted(() => { for (const id of planTimers.keys()) stopWatchingPlan(id) })
 
 async function resumeChat() {
-  const rec = cur.value
-  const key = sessionKey.value
-  if (!rec || rec.phase !== 'paused' || clearing.value || disposed) return
-  rec.phase = 'streaming'
-  await streamTurn({ rec, key, url: '/api/chat/resume', body: { session: key } })
+  if (phase.value !== 'paused' || clearing.value || disposed) return
+  phase.value = 'streaming'
+  await streamTurn({ url: '/api/chat/resume', body: { session: MAIN_SESSION } })
 }
 
 /* ---------- 更多菜单 ---------- */
@@ -1007,11 +778,15 @@ function onKeydown(e) {
     store.fullscreen = false
   }
 }
-// bootstrap 起手：生活模式落到主会话（web）那份现场；工作模式先挑一条工作会话。
-// 两条路都走 applySession，历史与占用按那条 key 拉——不能拿主会话的历史开台。
+// bootstrap 起手：生活模式直接拉主会话历史；工作模式先挑一条工作会话，历史与
+// 占用由 applySession 按那条 key 拉——不能拿主会话的历史开台。
+// bootstrap 起手：这一页恒为主会话，拉它的历史与上下文占用。
+// 切到工作模式不会走到这里——聊天页常驻不卸载，切模式只是把它藏起来，
+// 进行中的那一轮继续在后台收字。
 function bootstrap() {
-  if (workMode.value) return pickSession()
-  return applySession('web')
+  loadHistory()
+  loadCtx()
+  return Promise.resolve()
 }
 onMounted(() => {
   document.addEventListener('click', onDocClick)
@@ -1024,9 +799,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   disposed = true
-  // 每条会话自己的那一轮都要取消：组件卸载意味着登录态没了或页面要走，
-  // 留着只会往已经没人看的现场上写字。
-  for (const rec of Object.values(records)) rec.controller?.abort()
+  request?.abort()
   imageURLs.forEach(url => URL.revokeObjectURL(url))
   imageURLs.clear()
   document.removeEventListener('click', onDocClick)
@@ -1038,21 +811,18 @@ onUnmounted(() => {
 
 function goTraces() { menuOpen.value = false; store.settingsSection = 'trace'; store.settingsOpen = true }
 async function clearContext() {
-  const rec = cur.value
-  if (!rec || busy.value || clearing.value || noSession.value) return
+  if (busy.value || clearing.value) return
   menuOpen.value = false
   ctxOpen.value = false
   clearing.value = true
-  rec.version++ // 让这条会话在途的历史请求作废（回来时不该再覆盖已清空的现场）
+  messagesVersion++
   try {
-    const r = await api('POST', '/api/context/clear', { session: sessionKey.value })
+    const r = await api('POST', '/api/context/clear', { session: MAIN_SESSION })
     if (disposed) return
-    rec.messages.splice(0, rec.messages.length)
-    rec.phase = 'idle'
-    rec.pausedTurn = null
+    messages.splice(0, messages.length)
     releaseUnusedImages()
-    rec.ctx = null
-    loadCtx(rec, sessionKey.value) // 清空后占比归零，chip 要立刻反映，不能等下一次问答
+    ctxSnap.value = null
+    loadCtx() // 清空后占比归零，chip 要立刻反映，不能等下一次问答
     toast(r.message || '上下文已清除')
   } catch (e) { if (!disposed) toast(e.message, true) }
   finally { clearing.value = false }
@@ -1060,71 +830,9 @@ async function clearContext() {
 </script>
 
 <template>
-  <section id="view-chat" class="view" :class="{ 'chat-split': workMode }">
-    <!-- 工作模式的会话栏：一条会话一段上下文。交互跟工作区页那套列表一致——
-         点行切换、双击改名（留空回到按首条提问自动取名）、行尾 × 删除。 -->
-    <aside v-if="workMode" class="ag-rail">
-      <div class="ag-rail-head" data-tauri-drag-region>
-        <b>会话</b>
-        <div class="ag-rail-acts">
-          <button class="ib-btn" :class="{ active: creating }" aria-label="新建会话"
-                  title="新建会话" @click="openSessionForm">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- 新建会话：名字与项目目录都是可选的。目录建好后不可换（换 = 再建一条），
-           跟工作区会话"主目录创建后不可切"是同一条纪律 -->
-      <div v-if="creating" class="ag-form">
-        <label class="meta">名字（留空按第一句提问自动取）</label>
-        <input v-model="sessionForm.title" aria-label="会话名字" placeholder="比如 季度 OKR">
-        <label class="meta">项目目录（可选）</label>
-        <p v-if="sessionForm.dir" class="ws-dir" :title="sessionForm.dir">
-          <span class="ws-dir-txt">{{ sessionForm.dir }}</span>
-          <span class="ag-del" role="button" aria-label="不指定目录" title="不指定目录"
-                @click="sessionForm.dir = ''">×</span>
-        </p>
-        <button v-else type="button" class="ag-ws-pick" title="选择项目目录" @click="pickSessionDir">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          <span>选择目录…</span>
-        </button>
-        <p class="meta ag-ws-hint">选了目录，这条会话读写文件、交代项目约定（AGENTS.md / README.md）都在这个目录里；
-          不选就沿用日常目录。建好后不能换。</p>
-        <div class="ag-form-acts">
-          <button class="btn sm primary" @click="createSession">创建</button>
-          <button class="btn sm" @click="creating = false">取消</button>
-        </div>
-      </div>
-      <div class="ag-list">
-        <div v-for="s in sessions" :key="s.key" class="ag-item" role="button" tabindex="0"
-             :class="{ active: s.key === sessionKey }"
-             @click="selectSession(s.key)" @keydown.enter.prevent="selectSession(s.key)">
-          <span class="ag-item-main">
-            <span class="ag-title">
-              <input v-if="edit.key === s.key" v-model="edit.title" class="ag-title-edit"
-                     aria-label="会话名" placeholder="留空按首条提问自动取名"
-                     @click.stop @keydown.enter.prevent="commitRename" @blur="commitRename">
-              <span v-else @dblclick.stop="startRename(s)" :title="'双击改名：' + (s.title || '新会话')">{{ s.title || '新会话' }}</span>
-            </span>
-            <!-- 行上不铺会话 key：说了几条、多久之前动过（key 只在设置页的会话列表里看） -->
-            <span class="meta">{{ rowMeta(s) }}</span>
-          </span>
-          <!-- 后台那一轮也标出来：切走之后这条还在收字，行上不说就没人知道它没结束 -->
-          <span v-if="generating(s.key)" class="ag-gen"
-                :title="s.key === sessionKey ? '这一轮正在回复' : '这一轮还在后台跑，切到别的会话不会打断它'"
-          >回复中</span>
-          <span class="ag-del" role="button" :aria-label="'删除会话 ' + (s.title || '新会话')"
-                title="删除会话" @click.stop="removeSession(s)">×</span>
-        </div>
-        <div v-if="!sessions.length" class="ag-empty meta">还没有会话，点上面的 + 建一条。</div>
-      </div>
-    </aside>
-
+  <section id="view-chat" class="view">
     <div id="chatHead" data-tauri-drag-region>
-      <div class="title">{{ headTitle }}</div>
+      <div class="title">小五</div>
       <button class="btn icon" :class="{ active: store.fullscreen }"
               :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
               :title="store.fullscreen ? '退出全屏（Esc）' : '全屏对话（Esc 退出）'"
@@ -1150,23 +858,12 @@ async function clearContext() {
     </div>
 
     <div ref="scroller" id="chatScroller">
-      <!-- 工作模式一条会话都还没有：明说没有会话，给一个建会话的入口，
-           不拿主会话顶上，也不凭空造一条空会话摆在那儿 -->
-      <div v-if="noSession" class="welcome">
+      <!-- 欢迎态（主会话还没内容） -->
+      <div v-if="welcome" class="welcome">
         <div class="welcome-logo">五</div>
-        <h3 class="welcome-title">工作模式还没有会话</h3>
-        <p class="welcome-sub">一条会话一段上下文，互不串。建一条就能开工。</p>
+        <h3 class="welcome-title" ref="titleEl">你好，我是小五</h3>
+        <p class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
         <div class="welcome-suggests">
-          <button class="suggest" :disabled="clearing" @click="openSessionForm">新建第一条会话</button>
-        </div>
-      </div>
-      <!-- 欢迎态（这条会话还没内容） -->
-      <div v-else-if="welcome" class="welcome">
-        <div class="welcome-logo">五</div>
-        <h3 class="welcome-title" ref="titleEl">{{ workMode ? '这条会话还是空的' : '你好，我是小五' }}</h3>
-        <p v-if="workMode" class="welcome-sub">说点什么开始——这段上下文只属于这条会话<template v-if="activeSession?.dir">，文件读写都在 {{ baseName(activeSession.dir) }} 里</template>。</p>
-        <p v-else class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
-        <div v-if="!workMode" class="welcome-suggests">
           <button v-for="s in SUGGESTS" :key="s" class="suggest" :disabled="busy || clearing" @click="sendChat(s)">{{ s }}</button>
         </div>
       </div>
@@ -1243,7 +940,7 @@ async function clearContext() {
 
     <div id="chatFoot">
       <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
-                    :busy="phase === 'streaming'" :disabled="clearing || noSession"
+                    :busy="phase === 'streaming'" :disabled="clearing"
                     :send-label="sendLabel" :send-disabled="sendDisabled"
                     @primary="onSendClick" @stop="onSendClick" @paste="onPaste">
         <template #previews>
@@ -1407,6 +1104,5 @@ async function clearContext() {
         </div>
     </div>
     <FilePreviewDrawer ref="fileDrawer" />
-    <DirPickerDialog ref="dirDialog" />
   </section>
 </template>

@@ -7,7 +7,7 @@ import { getPref, setPref } from './prefs.js'
 const MODE_KEY = 'friday-mode'
 export const MODE_LABELS = [
   { id: 'life', label: '生活', hint: '生活模式：一条主会话，提醒、待办、闲聊都接在同一个上下文里' },
-  { id: 'work', label: '工作', hint: '工作模式：聊天可以开多条会话（各一份上下文），智能体工作区也在这里' },
+  { id: 'work', label: '工作', hint: '工作模式：在工作区里把活交给智能体（内置 friday 或外部 agent），每个会话一份上下文；内置终端也在这里' },
 ]
 
 export const store = reactive({
