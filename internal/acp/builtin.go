@@ -26,8 +26,8 @@ import (
 	"sync"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/capyflow/vortexagent/llm"
+	acp "github.com/coder/acp-go-sdk"
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/config"

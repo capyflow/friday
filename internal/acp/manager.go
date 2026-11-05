@@ -535,7 +535,6 @@ func (m *Manager) inheritChoices(agent string, ws *Workspace) map[string]string 
 	return out
 }
 
-
 // handoffSummary 从会话投影整理交接摘要。只使用 Friday 看得见的消息（用户原话、
 // agent 最终回答与系统备注），不做模型调用；标注“可能遗漏 agent 未上报的细节”。
 func handoffSummary(msgs []Entry) string {
