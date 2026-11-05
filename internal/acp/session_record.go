@@ -351,6 +351,10 @@ func (m *Manager) Handoff(id, agent string) (Thread, error) {
 		cur.HandoffFrom = fromID
 		if sameAgent && len(choices) > 0 {
 			cur.CapChoices = choices
+		} else if !sameAgent {
+			// CreateSession 会按「新会话沿用这台 agent 上次的选择」给新会话播种目标
+			// agent 的旧档位；交接换人明说「按工作区默认档」，这里显式清掉，别让文案撒谎。
+			cur.CapChoices = nil
 		}
 	}
 	m.mu.Unlock()

@@ -2765,7 +2765,16 @@ func TestHandoffTargetAgent(t *testing.T) {
 		t.Fatalf("同 agent 应沿用选择: %+v", same)
 	}
 
-	// 换 agent：摘要带过去，选择不带，note 说清交给谁
+	// 换 agent：摘要带过去，选择不带，note 说清交给谁。
+	// 目标 agent 自己上一次的选择也不带：交接明说「按工作区默认档」，
+	// 不能被 CreateSession 的「沿用上次选择」偷偷播种进来。
+	oth, err := m.CreateSession("other", th.WorkspaceID, th.Cwd, "other 的历史会话")
+	if err != nil {
+		t.Fatalf("建 other 历史会话失败: %v", err)
+	}
+	m.mu.Lock()
+	m.threads[oth.ID].CapChoices = map[string]string{"model": "m-other"}
+	m.mu.Unlock()
 	got, err := m.Handoff(th.ID, " other ")
 	if err != nil {
 		t.Fatalf("换 agent 交接失败: %v", err)
@@ -2775,6 +2784,9 @@ func TestHandoffTargetAgent(t *testing.T) {
 	}
 	if _, ok := got.CapChoices["model"]; ok {
 		t.Errorf("换 agent 不该搬模型选择: %+v", got.CapChoices)
+	}
+	if len(got.CapChoices) != 0 {
+		t.Errorf("换 agent 应落回工作区默认档（连 other 上次的继承也不带）: %+v", got.CapChoices)
 	}
 	if !strings.Contains(got.Handoff, "先看下这个项目") {
 		t.Errorf("摘要应照样带过去: %q", got.Handoff)
