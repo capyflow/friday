@@ -38,8 +38,11 @@ const (
 )
 
 // 快照/变更里不进入遍历的重目录（git 仓库的忽略规则另算）。
+// .friday 是 Friday 自己的落盘目录（交接摘要、会话记录）：它的 .gitignore 是
+// “* + !/.gitignore”，所以 .friday/.gitignore 永远以未跟踪文件的形式留在
+// git status 里；不跳过它，非 git 项目里它会被备份、甚至当成 agent 改过的文件。
 var snapshotSkipDirs = map[string]bool{
-	".git": true, ".hg": true, ".svn": true,
+	".git": true, ".hg": true, ".svn": true, ".friday": true,
 	"node_modules": true, "vendor": true, ".venv": true, "venv": true,
 	"__pycache__": true, ".next": true, "dist": true, "build": true, "target": true,
 }
@@ -102,12 +105,14 @@ type fileMeta struct {
 }
 
 type snapshotMeta struct {
-	Kind      string              `json:"kind"` // git | copy
-	Workspace string              `json:"workspace"`
-	Baseline  string              `json:"baseline,omitempty"`
-	Prefix    string              `json:"prefix,omitempty"` // 工作区在 git 仓库里的路径前缀
-	Start     map[string]fileMeta `json:"start,omitempty"`
-	Note      string              `json:"note,omitempty"`
+	Kind        string              `json:"kind"` // git | copy
+	Workspace   string              `json:"workspace"`
+	Baseline    string              `json:"baseline,omitempty"`
+	StartHead   string              `json:"startHead,omitempty"`   // 轮前 HEAD：用来分辨轮内是提交还是切了分支
+	StartBranch string              `json:"startBranch,omitempty"` // 轮前分支名（detached 时为空）
+	Prefix      string              `json:"prefix,omitempty"`      // 工作区在 git 仓库里的路径前缀
+	Start       map[string]fileMeta `json:"start,omitempty"`
+	Note        string              `json:"note,omitempty"`
 }
 
 type turnSnapshot struct {
@@ -181,17 +186,23 @@ func (s *turnSnapshot) prepareGit() error {
 	} else {
 		return fmt.Errorf("git stash create: %w", err)
 	}
-	// 干净工作区 stash create 为空：HEAD 就是基线。脏工作区却拿到空值说明
-	// 基线不可信，宁可回退目录副本。
+	// stash create 只覆盖跟踪文件：工作区只有未跟踪文件时它本来就该返回空，
+	// 这不是失败——未跟踪文件由下面的 Start 备份单独记录，HEAD 就是合法基线。
+	// 判据必须带 -uno：不带的话 Friday 自己留下的 .friday/.gitignore 永远让
+	// status 非空，于是每个“干净开局”的轮次都会误判成“git 没能生成快照”，
+	// 退化成目录副本扫描——既不看 .gitignore，也把切分支当成 agent 改了几百个文件。
 	if baseline == "" {
-		if dirty, _ := gitOutput(s.meta.Workspace, "status", "--porcelain", "--", "."); strings.TrimSpace(dirty) != "" {
-			return errors.New("工作区有改动但 git 没能生成快照")
+		if dirty, _ := gitOutput(s.meta.Workspace, "status", "--porcelain", "-uno", "--", "."); strings.TrimSpace(dirty) != "" {
+			return errors.New("跟踪文件有改动但 git 没能生成快照")
 		}
 		baseline = strings.TrimSpace(head)
 	}
 	prefix, _ := gitOutput(s.meta.Workspace, "rev-parse", "--show-prefix")
+	branch, _ := gitOutput(s.meta.Workspace, "symbolic-ref", "--short", "-q", "HEAD")
 	s.meta.Kind = "git"
 	s.meta.Baseline = baseline
+	s.meta.StartHead = strings.TrimSpace(head)
+	s.meta.StartBranch = strings.TrimSpace(branch)
 	s.meta.Prefix = strings.TrimSpace(prefix)
 	s.meta.Start = map[string]fileMeta{}
 
@@ -207,7 +218,7 @@ func (s *turnSnapshot) prepareGit() error {
 	unbacked := 0
 	for _, rel := range untracked {
 		rel, err := cleanRel(rel)
-		if err != nil || rel == "" {
+		if err != nil || rel == "" || relHasSkipDir(rel) {
 			continue
 		}
 		src := filepath.Join(s.meta.Workspace, filepath.FromSlash(rel))
@@ -236,7 +247,7 @@ func (s *turnSnapshot) prepareGit() error {
 func (s *turnSnapshot) prepareCopy() error {
 	s.meta.Kind = "copy"
 	s.meta.Start = map[string]fileMeta{}
-	files, note, err := scanWorkspace(s.meta.Workspace)
+	files, note, err := workspaceFileMetas(s.meta.Workspace)
 	if err != nil {
 		return err
 	}
@@ -281,13 +292,18 @@ func (s *turnSnapshot) Finish() *TurnChanges {
 		At:       time.Now(),
 		VCS:      s.meta.Kind,
 		Snapshot: true,
-		Note:     s.meta.Note,
 	}
 	var files map[string]*FileChange
 	if s.meta.Kind == "git" {
 		files = s.finishGit()
 	} else {
 		files = s.finishCopy()
+	}
+	// 轮内切分支会把还原基线换成当前 HEAD，note 也在这一步才补齐：
+	// 元数据要落回磁盘，Changes()/Revert() 之后读到的才是算完的口径。
+	ch.Note = s.meta.Note
+	if err := s.writeMeta(); err != nil {
+		ch.Note = joinNote(ch.Note, "快照元数据更新失败："+err.Error())
 	}
 	for _, f := range files {
 		s.fillDiff(f)
@@ -318,8 +334,23 @@ func (s *turnSnapshot) Finish() *TurnChanges {
 
 func (s *turnSnapshot) finishGit() map[string]*FileChange {
 	out := map[string]*FileChange{}
+	// 轮内 HEAD 动了要分两种情况：提交（沿同一条线往前）算 agent 干的活，
+	// 切分支/回退不算——否则一次 checkout 就把整条分支差异报成“本轮改动几百个文件”。
+	switched := false
+	baseline := s.meta.Baseline
+	if cur, move := s.headMove(); move == "switch" {
+		baseline = cur
+		switched = true
+		s.meta.Baseline = cur // 还原目标也跟着换：只还原本分支上的未提交改动
+		s.meta.Note = joinNote(s.meta.Note, fmt.Sprintf("本轮工作区从 %s 切到了 %s（切分支/回退），分支之间的差异不计入本轮改动；切换后如果有提交，那些提交也不在统计里，还原只针对工作区里的未提交改动",
+			s.refLabel(s.meta.StartBranch, s.meta.StartHead), s.refLabel(s.currentBranch(), cur)))
+	} else if move == "commit" {
+		n, _ := gitOutput(s.meta.Workspace, "rev-list", "--count", s.meta.StartHead+".."+cur)
+		s.meta.Note = joinNote(s.meta.Note, fmt.Sprintf("本轮提交了 %s 个 commit（%s → %s）；「还原本轮」只恢复文件内容，不会撤销提交",
+			strings.TrimSpace(n), shortRef(s.meta.StartHead), shortRef(cur)))
+	}
 	// --relative 让输出路径相对工作区，而不是仓库根（工作区可能是仓库子目录）。
-	raw, err := gitOutput(s.meta.Workspace, "diff", "--name-status", "-z", "--no-renames", "--relative", s.meta.Baseline, "--", ".")
+	raw, err := gitOutput(s.meta.Workspace, "diff", "--name-status", "-z", "--no-renames", "--relative", baseline, "--", ".")
 	if err == nil {
 		parts := strings.Split(raw, "\x00")
 		for i := 0; i+1 < len(parts); i += 2 {
@@ -348,7 +379,9 @@ func (s *turnSnapshot) finishGit() map[string]*FileChange {
 	end := map[string]fileMeta{}
 	for _, raw := range untracked {
 		rel, err := cleanRel(raw)
-		if err != nil || rel == "" {
+		// 跳过目录的口径要和轮前备份一致，否则 .friday/.gitignore 这类
+		// 轮前就没进 Start 的文件会被当成“本轮新增”。
+		if err != nil || rel == "" || relHasSkipDir(rel) {
 			continue
 		}
 		abs := filepath.Join(s.meta.Workspace, filepath.FromSlash(rel))
@@ -365,9 +398,13 @@ func (s *turnSnapshot) finishGit() map[string]*FileChange {
 		}
 		out[rel] = &FileChange{Path: rel, Status: "added", NewHash: meta.Hash}
 	}
-	for rel := range s.meta.Start {
-		if _, ok := end[rel]; !ok && out[rel] == nil {
-			out[rel] = &FileChange{Path: rel, Status: "deleted"}
+	// 轮前是未跟踪、现在不见了 → 视为本轮删除。切了分支时这条不成立：
+	// 那些文件可能在新分支里变成跟踪文件，或者本来就不属于这条分支。
+	if !switched {
+		for rel := range s.meta.Start {
+			if _, ok := end[rel]; !ok && out[rel] == nil {
+				out[rel] = &FileChange{Path: rel, Status: "deleted"}
+			}
 		}
 	}
 	for rel, f := range out {
@@ -379,9 +416,106 @@ func (s *turnSnapshot) finishGit() map[string]*FileChange {
 	return out
 }
 
+// headMove 判断本轮期间 HEAD 有没有移动、怎么移动的：
+//   - "commit"：还在同一条分支上，且轮前 HEAD 是当前 HEAD 的祖先，这轮往前提交了；
+//   - "switch"：分支名变了，或者轮前 HEAD 已经不是当前 HEAD 的祖先（rebase/reset）；
+//   - ""：没变，或读不出来（按没变处理，不阻塞统计主流程）。
+func (s *turnSnapshot) headMove() (string, string) {
+	if s.meta.StartHead == "" {
+		return "", ""
+	}
+	out, err := gitOutput(s.meta.Workspace, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return "", ""
+	}
+	cur := strings.TrimSpace(out)
+	if cur == "" || cur == s.meta.StartHead {
+		return cur, ""
+	}
+	// 必须先看分支名：切到一个“包含轮前提交”的下游分支时，祖先判断也会成立，
+	// 但那条分支的历史差异不是本轮改的。
+	if s.currentBranch() != s.meta.StartBranch {
+		return cur, "switch"
+	}
+	if _, err := gitOutput(s.meta.Workspace, "merge-base", "--is-ancestor", s.meta.StartHead, cur); err == nil {
+		return cur, "commit"
+	}
+	return cur, "switch"
+}
+
+func (s *turnSnapshot) currentBranch() string {
+	out, _ := gitOutput(s.meta.Workspace, "symbolic-ref", "--short", "-q", "HEAD")
+	return strings.TrimSpace(out)
+}
+
+func (s *turnSnapshot) refLabel(branch, head string) string {
+	if branch != "" {
+		return branch
+	}
+	return shortRef(head)
+}
+
+func shortRef(ref string) string {
+	if len(ref) > 8 {
+		return ref[:8]
+	}
+	return ref
+}
+
+// workspaceFileMetas 给出副本快照要跟踪的文件。git 仓库里必须问 git 而不是裸扫目录：
+// 裸扫会把 bin/、生成物、嵌套 worktree 这些被 .gitignore 掉的东西算进来，既撑爆备份
+// 额度（结果真正改的文件反而没备份、不能还原），也会把一次 checkout 报成几百个改动。
+func workspaceFileMetas(workspace string) (map[string]fileMeta, string, error) {
+	if files, note, ok := gitWorkspaceFileMetas(workspace); ok {
+		return files, note, nil
+	}
+	return scanWorkspace(workspace)
+}
+
+// gitWorkspaceFileMetas 在“能问 git”时按 git 的口径列文件（跟踪 + 未跟踪且没被忽略）。
+// ok=false 表示这里不是可用的 git 仓库，调用方退回目录扫描。
+func gitWorkspaceFileMetas(workspace string) (map[string]fileMeta, string, bool) {
+	inside, err := gitOutput(workspace, "rev-parse", "--is-inside-work-tree")
+	if err != nil || strings.TrimSpace(inside) != "true" {
+		return nil, "", false
+	}
+	paths, err := gitList(workspace, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ".")
+	if err != nil {
+		return nil, "", false
+	}
+	files := map[string]fileMeta{}
+	note := ""
+	for _, raw := range paths {
+		rel, cerr := cleanRel(raw)
+		if cerr != nil || rel == "" || relHasSkipDir(rel) {
+			continue
+		}
+		if len(files) >= snapshotMaxFiles {
+			return files, fmt.Sprintf("文件超过 %d 个，仅记录前 %d 个", snapshotMaxFiles, snapshotMaxFiles), true
+		}
+		meta, merr := fileMetaOf(filepath.Join(workspace, filepath.FromSlash(rel)))
+		if merr != nil {
+			continue // 读不到（已删除/无权限）：交给“消失即删除”那条判定
+		}
+		files[rel] = meta
+	}
+	return files, note, true
+}
+
+// relHasSkipDir 只看目录段，末段是文件名：叫 build 的文件不该被当成 build/ 目录跳过。
+func relHasSkipDir(rel string) bool {
+	parts := strings.Split(rel, "/")
+	for _, seg := range parts[:len(parts)-1] {
+		if snapshotSkipDirs[seg] {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *turnSnapshot) finishCopy() map[string]*FileChange {
 	out := map[string]*FileChange{}
-	end, note, err := scanWorkspace(s.meta.Workspace)
+	end, note, err := workspaceFileMetas(s.meta.Workspace)
 	if err != nil {
 		s.meta.Note = joinNote(s.meta.Note, "扫描工作区失败："+err.Error())
 		return out

@@ -288,3 +288,167 @@ func TestTurnSnapshotCopyFlagsOversizedFiles(t *testing.T) {
 		t.Fatalf("超限文件应拒绝还原并点名: %v", err)
 	}
 }
+
+// 只有未跟踪文件的工作区是常态（Friday 自己就会留下未跟踪的 .friday/.gitignore）：
+// 这时 git stash create 本来就该返回空，快照不能因此退化成目录副本。
+// 一旦退化，既不看 .gitignore，又会把构建产物、嵌套 worktree 报进「本轮改动」。
+func TestSnapshotKeepsGitBaselineWithOnlyUntrackedDirt(t *testing.T) {
+	dir := initTestRepo(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".friday"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".friday", ".gitignore"), []byte("*\n!/.gitignore\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("gen/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".gitignore")
+	gitTest(t, dir, "commit", "-qm", "ignore gen")
+
+	s, err := beginTurnSnapshot(dir, t.TempDir(), "th-un", "t1")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if s.meta.Kind != "git" {
+		t.Fatalf("只有未跟踪文件时仍应用 git 基线，kind=%s note=%s", s.meta.Kind, s.meta.Note)
+	}
+	for rel := range s.meta.Start {
+		if strings.HasPrefix(rel, ".friday/") {
+			t.Fatalf("Friday 自己的目录不该进快照: %s", rel)
+		}
+	}
+	// 轮内：改一个跟踪文件，同时被忽略的 gen/ 里冒出一堆构建产物
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\nTWO\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "gen"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gen", "out.bin"), []byte("build output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := s.Finish()
+	if len(ch.Files) != 1 || ch.Files[0].Path != "a.txt" || ch.Files[0].Status != "modified" {
+		t.Fatalf("只该报 a.txt，实际: %+v", ch.Files)
+	}
+}
+
+// 轮内切分支不是 agent 改文件：整条分支差异不能算进本轮，还原目标也要跟着换成
+// 当前 HEAD，否则「还原本轮」会把新分支上的文件写回旧分支的内容。
+func TestSnapshotBranchSwitchNotCountedAsChanges(t *testing.T) {
+	dir := initTestRepo(t)
+	base := strings.TrimSpace(gitTest(t, dir, "rev-parse", "--abbrev-ref", "HEAD"))
+	gitTest(t, dir, "checkout", "-qb", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("feature one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-qm", "feature work")
+	gitTest(t, dir, "checkout", "-q", base)
+
+	s, err := beginTurnSnapshot(dir, t.TempDir(), "th-sw", "t1")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gitTest(t, dir, "checkout", "-q", "feature")
+	// 切完之后只改这一个文件，同一个路径在两条分支上的内容也不同
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\nSWITCHED\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := s.Finish()
+	if len(ch.Files) != 1 || ch.Files[0].Path != "a.txt" {
+		t.Fatalf("切分支只该报切换后真实改动的 a.txt，实际: %+v", ch.Files)
+	}
+	if !strings.Contains(ch.Note, "切到了") {
+		t.Fatalf("note 应说明切了分支，实际: %q", ch.Note)
+	}
+	if !strings.Contains(ch.Files[0].Diff, "+SWITCHED") {
+		t.Fatalf("diff 应相对切换后的分支算，实际:\n%s", ch.Files[0].Diff)
+	}
+}
+
+// 轮内自己 commit 算 agent 干的活：要出现在本轮改动里，同时 note 说清还原不撤提交。
+func TestSnapshotCountsCommitsMadeDuringTurn(t *testing.T) {
+	dir := initTestRepo(t)
+	headBefore := strings.TrimSpace(gitTest(t, dir, "rev-parse", "HEAD"))
+	s, err := beginTurnSnapshot(dir, t.TempDir(), "th-cm", "t1")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\nCOMMITTED\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", "a.txt")
+	gitTest(t, dir, "commit", "-qm", "agent commit")
+	ch := s.Finish()
+	if len(ch.Files) != 1 || ch.Files[0].Path != "a.txt" {
+		t.Fatalf("提交的改动应算本轮，实际: %+v", ch.Files)
+	}
+	if !strings.Contains(ch.Note, "commit") {
+		t.Fatalf("note 应提示本轮有提交，实际: %q", ch.Note)
+	}
+	if _, err := s.Revert(); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(b) != "one\ntwo\nthree\n" {
+		t.Fatalf("a.txt 应还原成轮前内容: %q", b)
+	}
+	if head := strings.TrimSpace(gitTest(t, dir, "rev-parse", "HEAD")); head == headBefore {
+		t.Fatal("还原不该撤销提交，HEAD 却回到了轮前")
+	}
+}
+
+// 没有提交的 git 仓库只能走目录副本，但文件清单仍应按 git 口径取：
+// 被 .gitignore 掉的构建产物不该进快照，更不该被报成 agent 改动。
+func TestCopySnapshotInGitRepoSkipsIgnoredJunk(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("gen/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", "a.txt", ".gitignore")
+	if err := os.MkdirAll(filepath.Join(dir, "gen"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gen", "old.bin"), []byte("old build\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".friday"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".friday", "t1.md"), []byte("摘要\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := beginTurnSnapshot(dir, t.TempDir(), "th-cg", "t1")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if s.meta.Kind != "copy" {
+		t.Fatalf("没有提交的仓库应走目录副本，kind=%s", s.meta.Kind)
+	}
+	for rel := range s.meta.Start {
+		if strings.HasPrefix(rel, "gen/") {
+			t.Fatalf("被忽略的构建产物不该进快照: %s", rel)
+		}
+		if strings.HasPrefix(rel, ".friday/") {
+			t.Fatalf("Friday 自己的目录不该进快照: %s", rel)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gen", "new.bin"), []byte("new build\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := s.Finish()
+	if len(ch.Files) != 1 || ch.Files[0].Path != "a.txt" {
+		t.Fatalf("只该报 a.txt，实际: %+v", ch.Files)
+	}
+}
