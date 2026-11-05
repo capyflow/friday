@@ -32,6 +32,7 @@ import (
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 // 会话种类。聊天页的会话栏只列 life 与 work；internal（心跳/计划/目标这些后台
@@ -58,16 +59,22 @@ const (
 type sessionMeta struct {
 	// Title 是用户手起的名字（空 = 没起过，列表里回落到首条提问自动取名）。
 	Title string `json:"title,omitempty"`
+	// Dir 是这条会话的工作目录（绝对路径；空 = 沿用日常目录）。建会话时选定后
+	// 不可换：项目上下文只在会话首轮注入一次，中途换目录等于让已经交代过的约定
+	// 变成假的——与工作区会话"主目录创建后不可切"是同一条纪律。
+	Dir string `json:"dir,omitempty"`
 	// CreatedAt 是建会话的时刻：会话还没说过话时没有活跃时间，列表靠它排序。
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ChatSession 是会话列表接口对外返回的一条会话。
 type ChatSession struct {
-	Key       string    `json:"key"`
-	Title     string    `json:"title"`
-	Kind      string    `json:"kind"`
-	Messages  int       `json:"messages"`
+	Key      string `json:"key"`
+	Title    string `json:"title"`
+	Kind     string `json:"kind"`
+	Messages int    `json:"messages"`
+	// Dir 是工作会话选定的工作目录；主会话与后台会话为空（它们沿用进程的工作目录）。
+	Dir string `json:"dir,omitempty"`
 	// CreatedAt 只有工作会话带（注册表里记的建立时刻）。
 	CreatedAt time.Time `json:"createdAt,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt,omitempty"`
@@ -175,20 +182,45 @@ func newWorkSessionKey(now time.Time) string {
 	return fmt.Sprintf("%s%s-%s", workKeyPrefix, now.Format("20060102-150405"), hex.EncodeToString(b[:]))
 }
 
-// CreateWorkSession 新建一条工作会话：只登记，不预先拉模型。
-// 会话真正的内容从用户发的第一条消息开始。
-func (c *Chat) CreateWorkSession(ctx context.Context, title string) (ChatSession, error) {
+// ErrBadDir 标记"用户给的目录不合法"（不存在、不是目录、~ 展不开）。接口层据此
+// 回 400 并把原因原样说给用户，而不是报成服务端故障。
+var ErrBadDir = errors.New("工作目录不可用")
+
+// CreateWorkSession 新建一条工作会话：只登记，不预先拉模型——会话真正的内容从
+// 用户发的第一条消息开始。dir 是这条会话的工作目录，建的时候选定、之后不可换
+// （留空 = 沿用进程的日常目录）；目录不存在或不是目录就直接拒掉，不建半条会话。
+func (c *Chat) CreateWorkSession(ctx context.Context, title, dir string) (ChatSession, error) {
+	dir, err := workdir.Normalize(dir)
+	if err != nil {
+		return ChatSession{}, fmt.Errorf("%w: %w", ErrBadDir, err)
+	}
 	key := newWorkSessionKey(time.Now())
 	c.mu.Lock()
-	c.work[key] = sessionMeta{Title: strings.TrimSpace(title), CreatedAt: time.Now()}
+	c.work[key] = sessionMeta{Title: strings.TrimSpace(title), Dir: dir, CreatedAt: time.Now()}
 	if err := c.saveWorkLocked(); err != nil {
 		delete(c.work, key)
 		c.mu.Unlock()
 		return ChatSession{}, err
 	}
 	c.mu.Unlock()
-	log.Printf("[网页] 新建工作会话 %s", key)
+	log.Printf("[网页] 新建工作会话 %s（工作目录=%s）", key, orDefaultDirName(dir))
 	return c.sessionView(ctx, key), nil
+}
+
+// SessionDir 返回这条会话的工作目录：主会话与没登记过的 key 返回空串，
+// 调用方据此决定要不要把目录挂进请求 ctx（空 = 用进程的日常目录）。
+func (c *Chat) SessionDir(key string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.work[agent.CurrentKey(strings.TrimSpace(key))].Dir
+}
+
+// orDefaultDirName 把"没指定目录"翻成日志里读得懂的一句。
+func orDefaultDirName(dir string) string {
+	if dir == "" {
+		return "日常目录（未指定）"
+	}
+	return dir
 }
 
 // RenameWorkSession 改工作会话的名字；title 传空表示回到自动取名
@@ -290,7 +322,7 @@ func (c *Chat) ListSessions(ctx context.Context) []ChatSession {
 	}
 
 	for key, meta := range work {
-		view := ChatSession{Key: key, Kind: SessionKindWork, CreatedAt: meta.CreatedAt,
+		view := ChatSession{Key: key, Kind: SessionKindWork, Dir: meta.Dir, CreatedAt: meta.CreatedAt,
 			HasTitle: meta.Title != ""}
 		view.Title = meta.Title
 		if info, ok := poolIdx[key]; ok {
@@ -332,7 +364,8 @@ func (c *Chat) sessionView(ctx context.Context, key string) ChatSession {
 	if !ok {
 		return ChatSession{Key: key, Title: newSessionTitle, Kind: SessionKindWork}
 	}
-	view := ChatSession{Key: key, Kind: SessionKindWork, CreatedAt: meta.CreatedAt, HasTitle: meta.Title != ""}
+	view := ChatSession{Key: key, Kind: SessionKindWork, Dir: meta.Dir, CreatedAt: meta.CreatedAt,
+		HasTitle: meta.Title != ""}
 	view.Title = meta.Title
 	if c.brain != nil {
 		for _, s := range c.brain.Pool().List() {

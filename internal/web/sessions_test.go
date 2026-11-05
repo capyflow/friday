@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +16,23 @@ import (
 	"github.com/capyflow/vortexagent/llm"
 
 	"github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
-// newSessionChat 造一个带会话登记表的 Chat（会话池按测试临时目录落盘，
-// 每个用例一份独立路径，避免用例之间互相看到对方的会话）。
-func newSessionChat(t *testing.T) (*Chat, string) {
+// newSessionChat 造一个带会话登记表的 Chat，返回会话表路径与数据目录
+// （每个用例一份独立目录，避免用例之间互相看到对方的会话；重启用例要按
+// 同一套路径再建一次，所以目录也得交出去）。
+func newSessionChat(t *testing.T) (*Chat, string, string) {
 	t.Helper()
 	dir := t.TempDir()
-	file := filepath.Join(dir, "work-sessions.json")
+	return newSessionChatIn(t, dir), dir, filepath.Join(dir, "work-sessions.json")
+}
+
+// newSessionChatIn 在给定数据目录里起一个 Chat（重启场景复用同一个目录）。
+func newSessionChatIn(t *testing.T, dir string) *Chat {
+	t.Helper()
 	return New(agent.NewBrain(newTestAgent(t), newTestPool(t, dir), nil), dir,
-		filepath.Join(dir, "paused.json"), file), file
+		filepath.Join(dir, "paused.json"), filepath.Join(dir, "work-sessions.json"))
 }
 
 // readWork 读登记表原文（断言落盘内容，而不是只看内存态）。
@@ -82,10 +90,10 @@ func findSession(list []ChatSession, key string) *ChatSession {
 
 // TestCreateWorkSessionPersists 新建会话写进登记表，标题回落到「新会话」。
 func TestCreateWorkSessionPersists(t *testing.T) {
-	c, file := newSessionChat(t)
+	c, _, file := newSessionChat(t)
 	ctx := context.Background()
 
-	session, err := c.CreateWorkSession(ctx, "")
+	session, err := c.CreateWorkSession(ctx, "", "")
 	if err != nil {
 		t.Fatalf("新建会话失败: %v", err)
 	}
@@ -117,9 +125,9 @@ func TestCreateWorkSessionPersists(t *testing.T) {
 
 // TestRenameWorkSession 改名写盘；清空名字回到自动取名。
 func TestRenameWorkSession(t *testing.T) {
-	c, file := newSessionChat(t)
+	c, _, file := newSessionChat(t)
 	ctx := context.Background()
-	session, err := c.CreateWorkSession(ctx, "")
+	session, err := c.CreateWorkSession(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,9 +162,9 @@ func TestRenameWorkSession(t *testing.T) {
 
 // TestDeleteWorkSessionClearsEverything 删除会话把登记表、历史与暂停现场一起带走。
 func TestDeleteWorkSessionClearsEverything(t *testing.T) {
-	c, file := newSessionChat(t)
+	c, _, file := newSessionChat(t)
 	ctx := context.Background()
-	session, err := c.CreateWorkSession(ctx, "删我")
+	session, err := c.CreateWorkSession(ctx, "删我", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +203,8 @@ func TestDeleteWorkSessionClearsEverything(t *testing.T) {
 
 // TestDeleteRejectsRunningSession 正在回复的会话要你先停，不能删到一半。
 func TestDeleteRejectsRunningSession(t *testing.T) {
-	c, _ := newSessionChat(t)
-	session, err := c.CreateWorkSession(context.Background(), "")
+	c, _, _ := newSessionChat(t)
+	session, err := c.CreateWorkSession(context.Background(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +220,7 @@ func TestDeleteRejectsRunningSession(t *testing.T) {
 
 // TestResolveSessionKey 发消息只放行主会话与登记过的会话。
 func TestResolveSessionKey(t *testing.T) {
-	c, _ := newSessionChat(t)
+	c, _, _ := newSessionChat(t)
 	ctx := context.Background()
 
 	if key, err := c.resolveSessionKey(""); err != nil || key != agent.SessionWeb {
@@ -228,7 +236,7 @@ func TestResolveSessionKey(t *testing.T) {
 		}
 	}
 
-	session, err := c.CreateWorkSession(ctx, "")
+	session, err := c.CreateWorkSession(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,14 +247,14 @@ func TestResolveSessionKey(t *testing.T) {
 
 // TestListSessionsKinds 列表分主会话/工作会话/后台会话，工作会话按最近活动倒序。
 func TestListSessionsKinds(t *testing.T) {
-	c, _ := newSessionChat(t)
+	c, _, _ := newSessionChat(t)
 	ctx := context.Background()
 
-	first, err := c.CreateWorkSession(ctx, "第一个")
+	first, err := c.CreateWorkSession(ctx, "第一个", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.CreateWorkSession(ctx, "第二个")
+	second, err := c.CreateWorkSession(ctx, "第二个", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,11 +288,11 @@ func TestWorkSessionsSurviveRestart(t *testing.T) {
 	ctx := context.Background()
 
 	c := New(agent.NewBrain(ag, pool, nil), dir, filepath.Join(dir, "paused.json"), file)
-	session, err := c.CreateWorkSession(ctx, "重启还要在")
+	session, err := c.CreateWorkSession(ctx, "重启还要在", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.CreateWorkSession(ctx, ""); err != nil {
+	if _, err := c.CreateWorkSession(ctx, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,9 +319,9 @@ func TestWorkSessionsSurviveRestart(t *testing.T) {
 
 // TestSessionTitleTruncated 首条提问太长时标题截断，会话栏一行放得下。
 func TestSessionTitleTruncated(t *testing.T) {
-	c, _ := newSessionChat(t)
+	c, _, _ := newSessionChat(t)
 	ctx := context.Background()
-	session, err := c.CreateWorkSession(ctx, "")
+	session, err := c.CreateWorkSession(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,4 +333,98 @@ func TestSessionTitleTruncated(t *testing.T) {
 	if len(runes) != sessionTitleMax+1 || !strings.HasSuffix(got.Title, "…") {
 		t.Fatalf("标题应截到 %d 字加省略号: %q", sessionTitleMax, got.Title)
 	}
+}
+
+// TestWorkSessionCarriesDir 建会话时选的目录跟着会话存下来、重启还在，并且真的
+// 决定了首轮的项目上下文从哪个目录读 AGENTS.md——这是"工作模式指定项目目录"
+// 的实际落点：不选就是平时的行为，选了这条会话读写文件与交代约定都在那儿。
+func TestWorkSessionCarriesDir(t *testing.T) {
+	dataDir := t.TempDir()
+	c := newSessionChatIn(t, dataDir)
+	proj := t.TempDir()
+	if err := os.WriteFile(filepath.Join(proj, "AGENTS.md"), []byte("这个项目一律用 make 构建。"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	session, err := c.CreateWorkSession(ctx, "带目录的会话", proj)
+	if err != nil {
+		t.Fatalf("带目录建会话失败: %v", err)
+	}
+	if session.Dir != proj {
+		t.Fatalf("建完回带的会话应含目录: %+v", session)
+	}
+	if got := findSession(c.ListSessions(ctx), session.Key); got == nil || got.Dir != proj {
+		t.Fatalf("列表应带目录: %+v", got)
+	}
+	if c.SessionDir(session.Key) != proj {
+		t.Fatalf("SessionDir 应读出目录: %q", c.SessionDir(session.Key))
+	}
+
+	// 走一次真实对话：会话首轮注入的系统消息必须来自这条会话的目录。
+	sctx := workdir.With(agent.WithSessionKey(ctx, session.Key), c.SessionDir(session.Key))
+	if _, err := c.brain.AskWith(sctx, "开始干活", nil, nil); err != nil {
+		t.Fatalf("对话失败: %v", err)
+	}
+	var system string
+	for _, m := range c.brain.Pool().History(ctx, session.Key) {
+		if m.Role == llm.RoleSystem {
+			system += firstLineText(m) + "\n" + systemBody(m)
+		}
+	}
+	if !strings.Contains(system, "这个项目一律用 make 构建") {
+		t.Fatalf("首轮应注入这条会话目录下的项目上下文，实际: %q", system)
+	}
+
+	// 主会话与没登记的 key 都是空串：调用方据此不挂 ctx，行为与以往一致。
+	if c.SessionDir(agent.SessionWeb) != "" || c.SessionDir("work-没建过") != "" {
+		t.Fatal("只有工作会话该有会话级目录")
+	}
+
+	restarted := newSessionChatIn(t, dataDir)
+	if restarted.SessionDir(session.Key) != proj {
+		t.Fatalf("重启后目录应还在: %q", restarted.SessionDir(session.Key))
+	}
+}
+
+// TestCreateWorkSessionRejectsBadDir 目录不存在 / 是文件时不建会话，
+// 错误里带着下一步（在「选择目录」里重选，或留空沿用日常目录）。
+func TestCreateWorkSessionRejectsBadDir(t *testing.T) {
+	c, _, file := newSessionChat(t)
+	ctx := context.Background()
+	missing := filepath.Join(t.TempDir(), "没这个目录")
+
+	_, err := c.CreateWorkSession(ctx, "", missing)
+	if !errors.Is(err, ErrBadDir) || !strings.Contains(err.Error(), "重选") {
+		t.Fatalf("目录不存在应报 ErrBadDir 并给下一步: %v", err)
+	}
+	if len(c.ListSessions(ctx)) != 1 {
+		t.Fatalf("目录不合法时不该留下半条会话: %+v", c.ListSessions(ctx))
+	}
+	if readWork(t, file) != nil {
+		t.Fatalf("被拒的目录不该写进登记表: %v", readWork(t, file))
+	}
+
+	// 指到文件也不行。
+	proj := t.TempDir()
+	aFile := filepath.Join(proj, "a.txt")
+	if err := os.WriteFile(aFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateWorkSession(ctx, "", aFile); !errors.Is(err, ErrBadDir) {
+		t.Fatalf("指到文件应拒绝: %v", err)
+	}
+}
+
+// systemBody 取一条消息里除首行以外的正文（项目上下文的首行是标题，
+// 约定正文在后面几行）。
+func systemBody(m llm.Message) string {
+	text := firstLineText(m)
+	var b strings.Builder
+	for _, part := range m.Content {
+		if part.Type == llm.ContentText {
+			b.WriteString(part.Text)
+		}
+	}
+	return strings.TrimPrefix(b.String(), text)
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 // Brain 持有 Agent 与会话池，按会话 key 串行化提问。
@@ -40,8 +41,8 @@ type Brain struct {
 	memMu  sync.RWMutex      // 保护长期记忆仓库指针
 	memory *memory.WikiStore // 长期记忆（可为 nil：不注入速览）
 
-	projMu     sync.RWMutex // 保护工作目录（切工作模式时会变）
-	projectDir string       // 当前工作目录：AGENTS.md / README.md 从这里找（空=不注入）
+	projMu     sync.RWMutex // 保护进程级默认工作目录（会话自己带了目录时不读这里，见 projectDirFor）
+	projectDir string       // 默认工作目录：AGENTS.md / README.md 从这里找（空=不注入）
 }
 
 // NewBrain 创建对话大脑。pool 为会话池（含持久化存储），ctx 为上下文引擎
@@ -81,21 +82,31 @@ func (b *Brain) memoryWarmup() string {
 		"需要细节或原文时调用 recall 查整页；不要在回复里复述这一段，也不必声明「我看了记忆」。"
 }
 
-// SetProjectDir 注入当前工作目录（启动时一次；未来的"工作模式"切目录时再调一次）。
-// 传空串等于关掉项目上下文注入。
+// SetProjectDir 注入进程级默认工作目录（启动时一次）。它只是兜底：会话自带目录时
+// （工作模式里建会话时选的）以 ctx 上的为准，见 projectDirFor。传空串等于关掉
+// 项目上下文注入。
 func (b *Brain) SetProjectDir(dir string) {
 	b.projMu.Lock()
 	b.projectDir = strings.TrimSpace(dir)
 	b.projMu.Unlock()
 }
 
+// projectDirFor 返回这一次请求该按哪个目录交代项目约定：会话指定的目录优先，
+// 没指定才回落到进程级默认值。并发会话各拿各的目录，所以心跳或另一条工作会话
+// 不会把这里的值抢走（改进程级全局字段就会）。
+func (b *Brain) projectDirFor(ctx context.Context) string {
+	if dir := workdir.From(ctx); dir != "" {
+		return dir
+	}
+	b.projMu.RLock()
+	defer b.projMu.RUnlock()
+	return b.projectDir
+}
+
 // projectWarmup 生成会话开始时注入的项目上下文（工作目录下的 AGENTS.md 全文 +
 // README.md 摘要）。没有这两个文件时返回空串，不注入。
-func (b *Brain) projectWarmup() string {
-	b.projMu.RLock()
-	dir := b.projectDir
-	b.projMu.RUnlock()
-	return projectContext(dir)
+func (b *Brain) projectWarmup(ctx context.Context) string {
+	return projectContext(b.projectDirFor(ctx))
 }
 
 // SetSkills 注入技能仓库与自动匹配配置（启动时调用一次）。技能是按次生效的，
@@ -227,7 +238,7 @@ func (b *Brain) AskWith(ctx context.Context, text string, imgs []llm.Content, on
 	// 不是每轮拼进提问，避免每轮重复计费，也不会污染用户看到的问题文本。
 	if len(sess.Messages()) == 0 {
 		// 项目约定先垫（它框定"在哪个目录、按什么规矩干活"），再垫个人记忆速览。
-		if pc := b.projectWarmup(); pc != "" {
+		if pc := b.projectWarmup(ctx); pc != "" {
 			sess.Add(llm.NewTextMessage(llm.RoleSystem, pc))
 		}
 		if warm := b.memoryWarmup(); warm != "" {

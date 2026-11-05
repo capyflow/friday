@@ -34,7 +34,7 @@
 //	GET    /api/context       会话上下文占用快照（活跃区估算 token/窗口/比例，需登录）
 //	POST   /api/context/compact 手动压缩一次上下文（归档旧块并重写活跃历史，需登录）
 //	GET    /api/sessions      网页会话列表（主会话 + 工作会话 + 后台会话，带显示名，需登录）
-//	POST   /api/sessions      新建工作会话 {"title"?}（工作模式用，需登录）
+//	POST   /api/sessions      新建工作会话 {"title"?,"dir"?}（工作模式用，需登录）
 //	POST   /api/sessions/:key 改工作会话名 {"title"}（留空回到自动取名，需登录）
 //	DELETE /api/sessions/:key 删除工作会话（连带历史与调用轨迹，需登录）
 //	GET    /admin /traces     旧地址，重定向回 /

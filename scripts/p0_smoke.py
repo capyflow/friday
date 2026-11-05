@@ -64,10 +64,31 @@ class FakeModel(BaseHTTPRequestHandler):
         # an external model or guessing provider tool-call dialects.
         text = "smoke-ok"
         wants_time = "时间" in str(content) or "几点" in str(content)
+        # 读项目标记：模型只给一个相对文件名，能不能读到取决于这次请求带的会话
+        # 工作目录（会话选了项目目录时，相对路径与允许根都按那个目录走）。
+        wants_read = any("读项目" in str(message.get("content", "")) for message in messages
+                         if isinstance(message, dict) and message.get("role") == "user")
         has_tool_result = any(message.get("role") == "tool" for message in messages if isinstance(message, dict))
+        tool_result_text = next((str(message.get("content", "")) for message in messages
+                                 if isinstance(message, dict) and message.get("role") == "tool"), "")
         if has_tool_result:
             with self.server.stats_lock:
                 self.server.tool_results += 1
+        if wants_read and not has_tool_result and body.get("tools"):
+            with self.server.stats_lock:
+                self.server.tool_calls += 1
+            call = {"index": 0, "id": "call_smoke_read", "type": "function",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": "P0_SESSION_MARKER.txt"})}}
+            raw = json.dumps({"choices": [{"delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}],
+                              "usage": None}, ensure_ascii=False)
+            data = f"data: {raw}\n\ndata: [DONE]\n\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if wants_time and not has_tool_result and body.get("tools"):
             with self.server.stats_lock:
                 self.server.tool_calls += 1
@@ -85,6 +106,8 @@ class FakeModel(BaseHTTPRequestHandler):
             return
         if wants_time:
             text = "当前时间工具链路已返回 smoke-ok"
+        if wants_read:
+            text = "工具回包：" + tool_result_text[:200]
         if body.get("stream"):
             raw = json.dumps({"choices": [{"delta": {"content": text}, "finish_reason": None}]}, ensure_ascii=False)
             data = f"data: {raw}\n\ndata: [DONE]\n\n".encode()
@@ -323,6 +346,22 @@ def run(binary: str, output_dir: str | None) -> dict:
         expect(not any(item.get("key") == drop_key for item in sessions), "deleted session is still listed")
         status, body = api.request("DELETE", "/api/sessions/web", expected=(400,))
         expect(status == 400, "the main session was deletable")
+
+        # A session can be anchored to a project directory: inside that session a
+        # bare relative filename resolves there, and the same request in the main
+        # session still cannot see it.
+        proj = root / "proj"
+        proj.mkdir()
+        (proj / "P0_SESSION_MARKER.txt").write_text("session-dir-ok\n", encoding="utf-8")
+        status, body = api.request("POST", "/api/sessions", {"dir": str(proj / "没有这个项目目录")}, expected=(400,))
+        expect(status == 400 and "重选" in json.dumps(body, ensure_ascii=False),
+               "a missing project dir should be refused with the next step")
+        dir_key = api.json("POST", "/api/sessions", {"dir": str(proj)}).get("session", {}).get("key", "")
+        expect(dir_key, "session with a project dir was not created")
+        echoed = sse_chat(api, "读项目标记文件", session=dir_key)
+        expect("session-dir-ok" in echoed, f"project dir did not become the relative base: {echoed}")
+        elsewhere = sse_chat(api, "读项目标记文件")
+        expect("session-dir-ok" not in elsewhere, f"the marker leaked into the main session: {elsewhere}")
         result["checks"].append("chat-sessions")
 
         task = api.json("POST", "/api/tasks", {"text": "smoke task", "in": "60s", "status": "paused"})
@@ -375,6 +414,8 @@ def run(binary: str, output_dir: str | None) -> dict:
         renamed = next((item for item in restored_sessions if item.get("key") == work_key), {})
         expect(renamed.get("title") == "renamed smoke session", "renamed work session was not restored")
         expect(any(item.get("key") == keep_key for item in restored_sessions), "idle work session was not restored")
+        anchored = next((item for item in restored_sessions if item.get("key") == dir_key), {})
+        expect(anchored.get("dir") == str(proj), "the session's project dir was not restored")
         expect(not any(item.get("key") == drop_key for item in restored_sessions), "deleted session came back after restart")
         restored_notice = api2.json("GET", "/api/notifications").get("notifications", [])
         persisted = next((item for item in restored_notice if item.get("id") == notice["id"]), None)

@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatView from '../src/components/ChatView.vue'
 import { api } from '../src/api.js'
-import { setMode, store } from '../src/store.js'
+import { setMode, store, toast } from '../src/store.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 vi.mock('../src/anim.js', () => ({ gsap: {}, animate: false, bubbleIn: vi.fn(), popIn: vi.fn() }))
+vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()), toast: vi.fn() }))
 vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()), toast: vi.fn() }))
 
 let wrapper
@@ -25,7 +26,8 @@ function sessionList() {
 }
 
 async function mountChat() {
-  wrapper = mount(ChatView)
+  // teleport stub 成原地渲染：目录选择弹窗的内容才能被 wrapper 查到
+  wrapper = mount(ChatView, { global: { stubs: { teleport: true } } })
   await flushPromises()
   return wrapper
 }
@@ -52,15 +54,21 @@ beforeEach(() => {
     { key: 'work-20261105-100000-aa', title: '写周报', kind: 'work', messages: 4, updatedAt: '2026-11-05T02:00:00Z', hasTitle: true },
     { key: 'work-20261105-090000-bb', title: '整理发票', kind: 'work', messages: 2, updatedAt: '2026-11-05T01:00:00Z', hasTitle: true },
   ]
+  toast.mockClear()
   api.mockReset().mockImplementation((method, path, body) => {
     if (path.startsWith('/api/chat/history')) {
       return Promise.resolve({ session: path.split('=')[1] || 'web', messages: [] })
     }
     if (path === '/api/context') return Promise.resolve({ enabled: false })
+    if (path.startsWith('/api/acp/dirs')) {
+      return Promise.resolve({ path: '/Users/demo/proj-a', parent: '/Users/demo',
+        dirs: [{ name: 'proj-b', path: '/Users/demo/proj-b' }] })
+    }
     if (method === 'GET' && path === '/api/sessions') return Promise.resolve(sessionList())
     if (method === 'POST' && path === '/api/sessions') {
-      // 后端建好就回带，列表里也立刻看得见（自动名还没内容时是「新会话」）
-      const created = { key: 'work-20261105-110000-cc', title: '新会话', kind: 'work', messages: 0 }
+      // 后端建好就回带，列表里也立刻看得见（没起名时标题回落「新会话」）
+      const created = { key: 'work-20261105-110000-cc', title: body?.title || '新会话',
+        kind: 'work', messages: 0, ...(body?.dir ? { dir: body.dir } : {}) }
       workSessions = [created, ...workSessions]
       return Promise.resolve({ session: created })
     }
@@ -155,19 +163,55 @@ describe('工作模式的会话栏', () => {
     expect(wrapper.get('#chatHead .title').text()).toBe('整理发票')
   })
 
-  it('新建会话直接选中它，第一条消息就发进这条', async () => {
+  it('新建走表单：名字与目录都可留空，建好直接选中这条', async () => {
     await mountChat()
     setMode('work')
     await flushPromises()
     await wrapper.get('[aria-label="新建会话"]').trigger('click')
+    expect(wrapper.find('.ag-form').exists()).toBe(true)
+    expect(api.mock.calls.filter(c => c[0] === 'POST' && c[1] === '/api/sessions')).toHaveLength(0)
+
+    await wrapper.get('[aria-label="会话名字"]').setValue('季度复盘')
+    await wrapper.findAll('.ag-form button').find(b => b.text() === '创建').trigger('click')
     await flushPromises()
-    expect(api.mock.calls).toContainEqual(['POST', '/api/sessions', {}])
-    expect(wrapper.get('#chatHead .title').text()).toBe('新会话')
+    expect(api.mock.calls).toContainEqual(['POST', '/api/sessions', { title: '季度复盘', dir: '' }])
+    expect(wrapper.find('.ag-form').exists()).toBe(false)
+    expect(wrapper.get('#chatHead .title').text()).toBe('季度复盘')
     // 刚建的会话一条都还没有：行上说"还没有内容"，不拿创建时刻算"多久之前"
     expect(sessionRows()[0].text()).toContain('还没有内容')
     expect(sessionRows()[1].text()).toContain('4 条')
-    await send('这条是季度复盘')
+    await send('先把本周结论写三行')
     expect(sentBody().session).toBe('work-20261105-110000-cc')
+  })
+
+  it('表单里可以选项目目录，行上带出目录名', async () => {
+    await mountChat()
+    setMode('work')
+    await flushPromises()
+    await wrapper.get('[aria-label="新建会话"]').trigger('click')
+    await wrapper.findAll('.ag-form button').find(b => b.text().includes('选择目录')).trigger('click')
+    await flushPromises()
+    expect(api.mock.calls.map(([, path]) => path)).toContain('/api/acp/dirs')
+    await wrapper.findAll('button').find(b => b.text() === '使用此目录').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ws-dir-txt').text()).toBe('/Users/demo/proj-a')
+
+    await wrapper.findAll('.ag-form button').find(b => b.text() === '创建').trigger('click')
+    await flushPromises()
+    expect(api.mock.calls).toContainEqual(['POST', '/api/sessions', { title: '', dir: '/Users/demo/proj-a' }])
+    expect(sessionRows()[0].text()).toContain('proj-a')
+  })
+
+  it('目录不合法时后端怎么说就怎么显示，表单留着改', async () => {
+    await mountChat()
+    setMode('work')
+    await flushPromises()
+    api.mockImplementationOnce(() => Promise.reject(new Error('工作目录不可用: 目录不存在：/x（在「选择目录」里重选一个）')))
+    await wrapper.get('[aria-label="新建会话"]').trigger('click')
+    await wrapper.findAll('.ag-form button').find(b => b.text() === '创建').trigger('click')
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('重选一个'), true)
+    expect(wrapper.find('.ag-form').exists()).toBe(true)
   })
 
   it('删除当前会话后落到剩下的第一条', async () => {
@@ -211,11 +255,13 @@ describe('工作模式下还没有会话', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('点空态里的按钮建第一条，之后就能正常发', async () => {
+  it('点空态里的按钮开表单，建第一条之后就能正常发', async () => {
     await mountChat()
     setMode('work')
     await flushPromises()
     await wrapper.get('.welcome .suggest').trigger('click')
+    expect(wrapper.find('.ag-form').exists()).toBe(true)
+    await wrapper.findAll('.ag-form button').find(b => b.text() === '创建').trigger('click')
     await flushPromises()
     await send('开工')
     expect(sentBody().session).toBe('work-20261105-110000-cc')

@@ -4,9 +4,12 @@
 package admin
 
 import (
+	"errors"
 	"strings"
 
 	vhttp "github.com/capyflow/vortexv3/server/http"
+
+	"github.com/capyflow/friday/internal/web"
 )
 
 // handleListSessions 返回全部网页会话（主会话 + 工作会话 + 后台入口会话），
@@ -18,18 +21,24 @@ func (s *Server) handleListSessions(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"sessions": s.chat.ListSessions(ctx.Context())})
 }
 
-// handleSessionCreate 新建一条工作会话：{"title":"可选"}。
-// 名字留空就等第一条提问自动取名，跟工作区里建会话一个口径。
+// handleSessionCreate 新建一条工作会话：{"title":"可选","dir":"可选"}。
+// 名字留空就等第一条提问自动取名，跟工作区里建会话一个口径；目录留空则这条会话
+// 沿用日常目录（进程的工作目录），选了就必须是本机已存在的目录——它是这条会话
+// 读写文件与交代项目约定的地方，建好后不可换（换 = 再建一条）。
 func (s *Server) handleSessionCreate(ctx *vhttp.Context) error {
 	if s.chat == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "聊天服务未启用"})
 	}
 	var req struct {
 		Title string `json:"title"`
+		Dir   string `json:"dir"`
 	}
-	_ = ctx.UnmarshalBody(&req) // 空 body = 不起名
-	session, err := s.chat.CreateWorkSession(ctx.Context(), req.Title)
+	_ = ctx.UnmarshalBody(&req) // 空 body = 不起名、不指定目录
+	session, err := s.chat.CreateWorkSession(ctx.Context(), req.Title, req.Dir)
 	if err != nil {
+		if errors.Is(err, web.ErrBadDir) {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"session": session})

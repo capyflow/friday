@@ -27,6 +27,7 @@ import (
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/trace"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 const (
@@ -572,6 +573,11 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 	defer cancel()
 	rctx = agent.WithSessionKey(rctx, key)
 	rctx = agent.WithOrigin(rctx, agent.OriginWeb)
+	// 这条会话选了工作目录就随请求带下去：首轮的项目上下文从那儿读 AGENTS.md，
+	// 文件工具也把那个目录当作允许根（没选就是平时的行为）。
+	if dir := c.SessionDir(key); dir != "" {
+		rctx = workdir.With(rctx, dir)
+	}
 	rctx = agent.WithSkillSink(rctx, sink)
 	trace.Begin(logx.IDFrom(rctx), "web", key, question)
 

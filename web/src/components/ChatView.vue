@@ -16,6 +16,7 @@ import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
+import DirPickerDialog from './DirPickerDialog.vue'
 
 // 消息：{ role: 'user'|'bot'|'err'|'typing', text, images?, streaming?, paused?, plan?, turn? }
 // bot 的 blocks 是时间线内容块（按到达顺序）：
@@ -58,6 +59,9 @@ const workMode = computed(() => store.mode === 'work')
 const sessions = ref([])                    // 工作会话列表（不含主会话，也不含后台会话）
 const sessionKey = ref(workMode.value ? '' : 'web') // 当前对话归属的会话 key
 const edit = reactive({ key: '', title: '' })       // 会话行内改名
+const creating = ref(false)                          // 新建会话表单（名字 + 项目目录都可选）
+const sessionForm = reactive({ title: '', dir: '' })
+const dirDialog = ref(null)                          // 共用的目录选择弹窗
 const noSession = computed(() => workMode.value && !sessionKey.value)
 const activeSession = computed(() => sessions.value.find(s => s.key === sessionKey.value) || null)
 const headTitle = computed(() => workMode.value ? (activeSession.value?.title || '工作会话') : '小五')
@@ -88,12 +92,19 @@ const placeholder = computed(() => {
   return mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'
 })
 
-// rowMeta 是会话行的小字：说过话就报条数与"多久之前动过"；一条都还没有就明说
-// "还没有内容"——这时后端回的是创建时刻，拿它算"多少个月"没意义。
+// rowMeta 是会话行的小字：说过话就报条数与"多久之前动过"，一条都还没有就明说
+// "还没有内容"（这时后端回的是创建时刻，拿它算"多少个月"没意义）；选了项目目录
+// 就把目录名带上，一眼能看出这条会话在哪个项目里干活。
 function rowMeta(s) {
-  if (!s.messages) return '还没有内容'
-  const when = ago(s.updatedAt)
-  return `${s.messages} 条${when ? ' · ' + when : ''}`
+  const parts = [s.messages ? `${s.messages} 条${ago(s.updatedAt) ? ' · ' + ago(s.updatedAt) : ''}` : '还没有内容']
+  if (s.dir) parts.push(baseName(s.dir))
+  return parts.join(' · ')
+}
+
+// baseName 取目录最后一段（行上铺全路径太长，完整路径在 title 里）
+function baseName(p) {
+  const segs = (p || '').replace(/\/+$/, '').split('/')
+  return segs[segs.length - 1] || p
 }
 
 async function loadSessions() {
@@ -152,12 +163,32 @@ async function selectSession(key) {
 async function createSession() {
   if (busy.value) { toast(BUSY_INPUT_HINT, true); return }
   try {
-    const r = await api('POST', '/api/sessions', {})
+    const r = await api('POST', '/api/sessions', {
+      title: sessionForm.title.trim(), dir: sessionForm.dir,
+    })
+    sessionForm.title = ''
+    sessionForm.dir = ''
+    creating.value = false
     await loadSessions()
     await applySession(r.session?.key || '')
-    toast('已新建会话，直接开说')
+    toast(r.session?.dir ? '已新建会话，读写都在 ' + baseName(r.session.dir) + ' 里' : '已新建会话，直接开说')
     composerEl.value?.focus?.()
-  } catch (e) { toast('新建会话失败：' + e.message, true) }
+  } catch (e) {
+    // 目录不合法（被删了、指到了文件）后端会说要什么，表单留着照着改
+    toast(e.message, true)
+  }
+}
+
+// openSessionForm 打开新建会话表单：名字与项目目录都是可选的。
+function openSessionForm() {
+  if (busy.value) { toast(BUSY_INPUT_HINT, true); return }
+  sessionForm.title = ''
+  sessionForm.dir = ''
+  creating.value = true
+}
+
+function pickSessionDir() {
+  dirDialog.value?.open(path => { sessionForm.dir = path }, sessionForm.dir || '')
 }
 
 async function removeSession(s) {
@@ -966,11 +997,36 @@ async function clearContext() {
       <div class="ag-rail-head" data-tauri-drag-region>
         <b>会话</b>
         <div class="ag-rail-acts">
-          <button class="ib-btn" aria-label="新建会话" :title="busy ? BUSY_INPUT_HINT : '新建会话'"
-                  :disabled="busy" @click="createSession">
+          <button class="ib-btn" :class="{ active: creating }" aria-label="新建会话"
+                  :title="busy ? BUSY_INPUT_HINT : '新建会话'"
+                  :disabled="busy" @click="openSessionForm">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
+        </div>
+      </div>
+
+      <!-- 新建会话：名字与项目目录都是可选的。目录建好后不可换（换 = 再建一条），
+           跟工作区会话"主目录创建后不可切"是同一条纪律 -->
+      <div v-if="creating" class="ag-form">
+        <label class="meta">名字（留空按第一句提问自动取）</label>
+        <input v-model="sessionForm.title" aria-label="会话名字" placeholder="比如 季度 OKR">
+        <label class="meta">项目目录（可选）</label>
+        <p v-if="sessionForm.dir" class="ws-dir" :title="sessionForm.dir">
+          <span class="ws-dir-txt">{{ sessionForm.dir }}</span>
+          <span class="ag-del" role="button" aria-label="不指定目录" title="不指定目录"
+                @click="sessionForm.dir = ''">×</span>
+        </p>
+        <button v-else type="button" class="ag-ws-pick" title="选择项目目录" @click="pickSessionDir">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>选择目录…</span>
+        </button>
+        <p class="meta ag-ws-hint">选了目录，这条会话读写文件、交代项目约定（AGENTS.md / README.md）都在这个目录里；
+          不选就沿用日常目录。建好后不能换。</p>
+        <div class="ag-form-acts">
+          <button class="btn sm primary" @click="createSession">创建</button>
+          <button class="btn sm" @click="creating = false">取消</button>
         </div>
       </div>
       <div class="ag-list">
@@ -1029,14 +1085,14 @@ async function clearContext() {
         <h3 class="welcome-title">工作模式还没有会话</h3>
         <p class="welcome-sub">一条会话一段上下文，互不串。建一条就能开工。</p>
         <div class="welcome-suggests">
-          <button class="suggest" :disabled="clearing" @click="createSession">新建第一条会话</button>
+          <button class="suggest" :disabled="clearing" @click="openSessionForm">新建第一条会话</button>
         </div>
       </div>
       <!-- 欢迎态（这条会话还没内容） -->
       <div v-else-if="welcome" class="welcome">
         <div class="welcome-logo">五</div>
         <h3 class="welcome-title" ref="titleEl">{{ workMode ? '这条会话还是空的' : '你好，我是小五' }}</h3>
-        <p v-if="workMode" class="welcome-sub">说点什么开始——这段上下文只属于这条会话。</p>
+        <p v-if="workMode" class="welcome-sub">说点什么开始——这段上下文只属于这条会话<template v-if="activeSession?.dir">，文件读写都在 {{ baseName(activeSession.dir) }} 里</template>。</p>
         <p v-else class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
         <div v-if="!workMode" class="welcome-suggests">
           <button v-for="s in SUGGESTS" :key="s" class="suggest" :disabled="busy || clearing" @click="sendChat(s)">{{ s }}</button>
@@ -1279,5 +1335,6 @@ async function clearContext() {
         </div>
     </div>
     <FilePreviewDrawer ref="fileDrawer" />
+    <DirPickerDialog ref="dirDialog" />
   </section>
 </template>

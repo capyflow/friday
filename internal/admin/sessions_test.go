@@ -4,6 +4,8 @@ package admin
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,4 +132,43 @@ func sessionNamed(v any, key, title string) bool {
 		}
 	}
 	return false
+}
+
+// TestSessionCreateWithWorkDir 建会话时可以带一个工作目录：带上了就原样回带并
+// 存进登记表，带错了（不存在/是文件）是 400 并说明下一步，不是 500。
+func TestSessionCreateWithWorkDir(t *testing.T) {
+	_, handler, token, _ := runtimeTestServer(t)
+	proj := t.TempDir()
+
+	code, body := acpCall(t, handler, token, "POST", "/api/sessions",
+		map[string]any{"title": "改这个项目", "dir": proj})
+	session, _ := body["session"].(map[string]any)
+	key, _ := session["key"].(string)
+	if code != http.StatusOK || session["dir"] != proj {
+		t.Fatalf("带目录建会话应 200 并回带目录，实际 %d: %v", code, body)
+	}
+
+	code, body = acpCall(t, handler, token, "GET", "/api/sessions", nil)
+	list, _ := body["sessions"].([]any)
+	var found bool
+	for _, raw := range list {
+		item, _ := raw.(map[string]any)
+		if item["key"] == key {
+			found = item["dir"] == proj
+		}
+	}
+	if !found {
+		t.Fatalf("列表里这条会话应带目录: %v", list)
+	}
+
+	for _, bad := range []string{filepath.Join(proj, "没这个目录"), filepath.Join(proj, "a.txt")} {
+		if err := os.WriteFile(filepath.Join(proj, "a.txt"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, body = acpCall(t, handler, token, "POST", "/api/sessions", map[string]any{"dir": bad})
+		errText, _ := body["error"].(string)
+		if code != http.StatusBadRequest || errText == "" {
+			t.Fatalf("目录 %q 应 400 并说明原因，实际 %d: %v", bad, code, body)
+		}
+	}
 }
