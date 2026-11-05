@@ -591,7 +591,7 @@ func main() {
 			}
 			log.Printf("[管理后台] 已按启动配置设置管理员账号 %s（每次启动以配置/环境变量为准）", user)
 		}
-		chat := web.New(brain, "uploads", cfg.PausedFile, cfg.WorkSessionsFile)
+		chat := web.New(brain, "uploads", cfg.PausedFile)
 		chat.EnablePlans(planPlanner, planRunner)
 		chat.EnableGoals(eng, func() (bool, string) { return guard.ProactiveAllowed("目标运行") })
 		current := cfg.Snapshot()

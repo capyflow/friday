@@ -1,6 +1,6 @@
 <script setup>
-// 会话管理：生活模式的主会话、工作模式新建的会话，以及心跳/计划/目标这些
-// 后台入口会话都在这一张表里，支持按条清除上下文（聊天页只列前两类）。
+// 会话管理：生活模式的主会话与心跳/计划/目标这些后台入口会话都在这一张表里，
+// 支持按条清除上下文（聊天页只列主会话那一条）。
 import { onMounted, ref } from 'vue'
 import { api } from '../../api.js'
 import { fmtDT } from '../../format.js'
@@ -8,7 +8,7 @@ import { toast } from '../../store.js'
 import EmptyState from '../art/EmptyState.vue'
 
 const sessions = ref([])
-const KIND_LABEL = { life: '生活 · 主会话', work: '工作会话', internal: '后台入口' }
+const KIND_LABEL = { life: '生活 · 主会话', internal: '后台入口' }
 
 async function load() {
   try { sessions.value = (await api('GET', '/api/sessions')).sessions || [] }

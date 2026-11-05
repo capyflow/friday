@@ -26,7 +26,7 @@ func newChat(t *testing.T, file string) *Chat {
 	dir := t.TempDir()
 	pool := agent.NewSessionPool(nil)
 	ag := vxagent.New(vxagent.Options{Provider: noopProvider{}, Model: "m"})
-	return New(agent.NewBrain(ag, pool, nil), dir, file, filepath.Join(dir, "work-sessions.json"))
+	return New(agent.NewBrain(ag, pool, nil), dir, file)
 }
 
 func readTurns(t *testing.T, file string) map[string]*PausedTurn {

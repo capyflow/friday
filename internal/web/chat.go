@@ -27,7 +27,6 @@ import (
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/trace"
-	"github.com/capyflow/friday/internal/workdir"
 )
 
 const (
@@ -38,16 +37,14 @@ const (
 
 var uploadNameRe = regexp.MustCompile(`^[0-9a-f]{32}\.(png|jpg|webp)$`)
 
-// Chat 是网页聊天服务：经 Brain 与 agent 对话。会话分两种模式（见 sessions.go）：
-// 生活模式只有主会话 web（不传 session 就是它），工作模式可以在聊天页新建多条
-// 独立会话，每条各自的上下文。
+// Chat 是网页聊天服务：经 Brain 与 agent 对话。网页聊天只有唯一的主会话
+// web（不传 session 就是它），后台入口（心跳/计划/目标）各有自己的会话 key。
 // 支持对话暂停/继续：暂停取消进行中的生成（及时止损），被中断的问答记录在
 // paused 中可一键继续；暂停期间发新问题则丢弃暂停记录、开启新对话。
 type Chat struct {
-	brain        *agent.Brain
-	uploadsDir   string
-	pausedFile   string // 暂停现场落盘路径（空 = 仅内存，重启丢）
-	sessionsFile string // 工作会话注册表落盘路径（空 = 会话只活在内存里，重启清零）
+	brain      *agent.Brain
+	uploadsDir string
+	pausedFile string // 暂停现场落盘路径（空 = 仅内存，重启丢）
 
 	planner  *plan.Planner // 计划模式（nil = 未启用）
 	runner   *plan.Runner
@@ -57,7 +54,6 @@ type Chat struct {
 	mu     sync.Mutex
 	runs   map[string]*chatRun    // 会话 key → 进行中的对话（可暂停）
 	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（落盘，刷新/重启后仍可继续）
-	work   map[string]sessionMeta // 工作会话注册表（sessions.go，落盘 sessionsFile）
 }
 
 // EnablePlans 打开计划模式（规划轮 + 步骤执行器）。
@@ -87,21 +83,17 @@ type chatRun struct {
 }
 
 // New 创建网页聊天服务。uploadsDir 为图片上传目录（随服务启动清理过期文件）；
-// pausedFile 为暂停现场落盘路径（空则仅内存）；sessionsFile 为工作会话注册表
-// 落盘路径（空则工作会话不持久化，重启后列表回到只剩主会话）。
-func New(brain *agent.Brain, uploadsDir, pausedFile, sessionsFile string) *Chat {
+// pausedFile 为暂停现场落盘路径（空则仅内存）。
+func New(brain *agent.Brain, uploadsDir, pausedFile string) *Chat {
 	c := &Chat{
-		brain:        brain,
-		uploadsDir:   uploadsDir,
-		pausedFile:   pausedFile,
-		sessionsFile: sessionsFile,
-		runs:         map[string]*chatRun{},
-		paused:       map[string]*PausedTurn{},
-		work:         map[string]sessionMeta{},
+		brain:      brain,
+		uploadsDir: uploadsDir,
+		pausedFile: pausedFile,
+		runs:       map[string]*chatRun{},
+		paused:     map[string]*PausedTurn{},
 	}
 	c.sweepUploads()
 	c.loadPaused()
-	c.loadWork()
 	return c
 }
 
@@ -304,7 +296,7 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 
 	// 会话归属：不带 session 就是生活模式的主会话；工作模式带 work-* 的 key，
 	// 且必须是「新建会话」登记过的——不能靠发一次消息凭空造出一条会话来。
-	key, err := c.resolveSessionKey(req.Session)
+	key, err := resolveSessionKey(req.Session)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
@@ -403,7 +395,7 @@ func (c *Chat) HandleResume(ctx *vhttp.Context) error {
 		Session string `json:"session"`
 	}
 	_ = ctx.UnmarshalBody(&req) // 空 body 视为继续主会话
-	key, err := c.resolveSessionKey(req.Session)
+	key, err := resolveSessionKey(req.Session)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
@@ -428,7 +420,7 @@ func (c *Chat) HandleStop(ctx *vhttp.Context) error {
 		Session string `json:"session"`
 	}
 	_ = ctx.UnmarshalBody(&req) // 空 body 视为停主会话
-	key, err := c.resolveSessionKey(req.Session)
+	key, err := resolveSessionKey(req.Session)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
@@ -573,11 +565,6 @@ func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Conte
 	defer cancel()
 	rctx = agent.WithSessionKey(rctx, key)
 	rctx = agent.WithOrigin(rctx, agent.OriginWeb)
-	// 这条会话选了工作目录就随请求带下去：首轮的项目上下文从那儿读 AGENTS.md，
-	// 文件工具也把那个目录当作允许根（没选就是平时的行为）。
-	if dir := c.SessionDir(key); dir != "" {
-		rctx = workdir.With(rctx, dir)
-	}
 	rctx = agent.WithSkillSink(rctx, sink)
 	trace.Begin(logx.IDFrom(rctx), "web", key, question)
 

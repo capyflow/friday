@@ -40,8 +40,7 @@ func runtimeTestServer(t *testing.T) (*Server, http.Handler, string, string) {
 	s.configPath = path
 	s.regFn = func() *vxagent.Registry { return reg }
 	s.approver = approval.New(string(approval.ModeConfirm), nil, 0)
-	s.chat = web.New(brain, filepath.Join(dir, "uploads"), filepath.Join(dir, "paused.json"),
-		filepath.Join(dir, "work-sessions.json"))
+	s.chat = web.New(brain, filepath.Join(dir, "uploads"), filepath.Join(dir, "paused.json"))
 	// 路由在 Handler() 构建时按已装配的依赖挂载，故装配完成后才取 handler。
 	return s, s.Handler(), testAuthToken(t, s), path
 }
