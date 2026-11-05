@@ -168,7 +168,14 @@ func (m *Manager) Start(cols, rows int, cwd string) (*Session, error) {
 	cmd.Dir = dir
 	// TERM 必须是 xterm 系，否则界面里跑 vim/top 会当成 dumb terminal；
 	// 其余环境照搬内核进程，用户自己的 PATH/HOME/别名配置才照常生效。
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	// 字符集是唯一要改的：GUI 起的外壳没有 LANG/LC_*，落到 C 会让中文串行（见 ensureUTF8）。
+	env := append(os.Environ(), "TERM=xterm-256color")
+	inherited := effectiveLocale(env)
+	env, locale := ensureUTF8(env)
+	cmd.Env = env
+	if locale != "" {
+		log.Printf("[终端] 继承的字符集不是 UTF-8（%s），这条 shell 按 %s 起", localeLabel(inherited), locale)
+	}
 
 	m.mu.Lock()
 	if len(m.active) >= cfg.Max() {
@@ -325,6 +332,107 @@ func resolveShell(cfg string) (string, error) {
 func executable(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// ---- 字符集：终端子进程必须跑在 UTF-8 里 ----
+//
+// 为什么要在代码里补：从 Dock/Finder 或 GUI 父进程起的外壳没有 LANG/LC_*，子 shell 落到
+// C/POSIX。C 下 zsh 的行编辑器按"字节"数宽度，而提示符里的多字节字符（➭、中文路径、
+// 中文命令）按字节算就错位：重画时把光标停在半个字符里，剩下的续字节（0x80-0xBF）单独
+// 落到屏幕上，界面里就是一片 <0080> 方框加串行——按 Ctrl-C 中断后尤其明显。
+// 真实终端模拟器都会替子进程定好 UTF-8，这里同理：继承的已经是 UTF-8 就不动。
+
+// localeEnvVars 是影响子进程字符集的变量，按 libc 的优先级排（LC_ALL 压过一切）。
+var localeEnvVars = []string{"LC_ALL", "LC_CTYPE", "LANG"}
+
+// utf8LocaleFallbacks 是本机没有现成 UTF-8 locale 时依次挑的候选。
+var utf8LocaleFallbacks = []string{"C.UTF-8", "en_US.UTF-8", "zh_CN.UTF-8"}
+
+// effectiveLocale 按 LC_ALL > LC_CTYPE > LANG 找出 env 里生效的字符集（没有返回空串）。
+func effectiveLocale(env []string) string {
+	for _, want := range localeEnvVars {
+		for _, kv := range env {
+			k, v, ok := strings.Cut(kv, "=")
+			if ok && k == want && v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// isUTF8 判断 locale 值是否 UTF-8 编码（en_US.UTF-8、zh_CN.utf8、macOS 的裸 "UTF-8" 都算）。
+func isUTF8(locale string) bool {
+	u := strings.ToUpper(locale)
+	return strings.Contains(u, "UTF-8") || strings.Contains(u, "UTF8")
+}
+
+// localeLabel 给日志用：没设过 LANG/LC_* 时说白，别印成一个空括号。
+func localeLabel(locale string) string {
+	if locale == "" {
+		return "环境里没有 LANG/LC_*"
+	}
+	return locale
+}
+
+// pickUTF8 挑一个本机确实存在的 UTF-8 locale：先试现有 locale 的语言换个编码
+// （zh_CN.GBK → zh_CN.UTF-8），再按候选顺序取第一个存在的；都没有返回空串。
+func pickUTF8(current string) string {
+	var want []string
+	if i := strings.IndexAny(current, ".@"); i > 0 {
+		want = append(want, current[:i]+".UTF-8")
+	}
+	want = append(want, utf8LocaleFallbacks...)
+	avail := availableLocales()
+	for _, name := range want {
+		if avail[strings.ToLower(name)] {
+			return name
+		}
+	}
+	return ""
+}
+
+// availableLocales 返回本机 locale -a 里存在的 locale（键小写；查不到就是空表）。
+// 只查一次并缓存：每开一个终端都 fork 一次 locale 不值当。
+var availableLocales = sync.OnceValue(func() map[string]bool {
+	out, err := exec.Command("locale", "-a").Output()
+	if err != nil {
+		// Windows（ConPTY 那条路）没有 locale 命令，Linux 精简镜像也可能没有；
+		// 查不到就照搬继承的环境，不改字符集，别把终端开不起来。
+		log.Printf("[终端] 查不到本机可用字符集（locale -a 失败: %v），沿用继承的 LANG/LC_*", err)
+		return map[string]bool{}
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			set[strings.ToLower(name)] = true
+		}
+	}
+	return set
+})
+
+// ensureUTF8 把继承来的环境整成 UTF-8 的：已经是 UTF-8 就原样返回；否则换掉
+// LANG/LC_ALL/LC_CTYPE（留着一个非 UTF-8 的 LC_CTYPE 照样会压住 LANG，所以三个一起换）。
+// 第二个返回值是补上的 locale 名，没改动时为空串。
+func ensureUTF8(env []string) ([]string, string) {
+	cur := effectiveLocale(env)
+	if isUTF8(cur) {
+		return env, ""
+	}
+	loc := pickUTF8(cur)
+	if loc == "" {
+		return env, ""
+	}
+	drop := map[string]bool{"LANG": true, "LC_ALL": true, "LC_CTYPE": true}
+	out := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok && drop[k] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	// LANG 给按规范读环境变量的程序，LC_ALL 兜住 LC_* 分项——两个都写才是"这条 shell 就是 UTF-8"。
+	return append(out, "LANG="+loc, "LC_ALL="+loc), loc
 }
 
 // resolveCwd 定下终端的起始目录：空 = 内核工作目录；给了就必须存在且是目录。
