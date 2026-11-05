@@ -179,3 +179,92 @@ func TestResolveShellFallback(t *testing.T) {
 		t.Fatal("配置里写了本机没有的 shell 名应报错，不该悄悄回落")
 	}
 }
+
+// TestEnsureUTF8 覆盖"继承的字符集不是 UTF-8 就补一个"这条规则：已经是 UTF-8 的
+// 一律不动；要补时把 LANG/LC_ALL/LC_CTYPE 三个旧值一并换掉（留着 LC_CTYPE=C 会压住
+// LANG，所以旧的必须消失）。
+func TestEnsureUTF8(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+		mut  bool // 期望改动环境
+	}{
+		{name: "LC_ALL 已是 UTF-8", env: []string{"LC_ALL=en_US.UTF-8", "LANG=C"}},
+		{name: "LANG 已是小写 utf8", env: []string{"LANG=zh_CN.utf8"}},
+		{name: "LC_CTYPE 是 UTF-8 也算", env: []string{"LC_CTYPE=C.UTF-8", "LANG=C"}},
+		{name: "GUI 启动没有 locale 变量", env: []string{"PATH=/bin"}, mut: true},
+		{name: "LC_ALL=C 压着一切", env: []string{"LANG=en_US.UTF-8", "LC_ALL=C"}, mut: true},
+		{name: "只剩非 UTF-8 的 LC_CTYPE", env: []string{"LC_CTYPE=C"}, mut: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, loc := ensureUTF8(c.env)
+			if !c.mut {
+				if len(got) != len(c.env) || loc != "" {
+					t.Fatalf("已是 UTF-8 不该改动: %v（补了 %q）", got, loc)
+				}
+				return
+			}
+			if loc == "" {
+				t.Skipf("本机没有可用的 UTF-8 locale，这条规则在此机上无从验证（env=%v）", c.env)
+			}
+			if !isUTF8(effectiveLocale(got)) {
+				t.Fatalf("补完仍不是 UTF-8: %v（挑到 %q）", got, loc)
+			}
+			// 旧的 LANG/LC_ALL/LC_CTYPE 只能剩下我们补的那两个，别留一个非 UTF-8 的在旁边压着
+			for _, kv := range got {
+				k, v, _ := strings.Cut(kv, "=")
+				switch k {
+				case "LANG", "LC_ALL":
+					if v != loc {
+						t.Fatalf("%s 应是被补的 %q，实际 %q（全量 %v）", k, loc, v, got)
+					}
+				case "LC_CTYPE":
+					t.Fatalf("旧的 LC_CTYPE 没换掉: %q（全量 %v）", kv, got)
+				}
+			}
+		})
+	}
+}
+
+// TestPickUTF8KeepsLanguage 现有 locale 只换编码不换语言：zh_CN.GBK 应先看 zh_CN.UTF-8。
+// 本机没装那个 locale 时挑不到，属正常，只验证"挑到的一定是 UTF-8 且语言没跑偏"。
+func TestPickUTF8KeepsLanguage(t *testing.T) {
+	loc := pickUTF8("zh_CN.GBK")
+	if loc == "" {
+		t.Skip("本机没有任何候选 UTF-8 locale")
+	}
+	if !isUTF8(loc) {
+		t.Fatalf("挑出来的不是 UTF-8: %q", loc)
+	}
+	if avail := availableLocales(); !avail[strings.ToLower(loc)] {
+		t.Fatalf("挑出来的 locale 本机不存在: %q", loc)
+	}
+}
+
+// TestShellRunsInUTF8Locale 是真 PTY 上的回归闸：把测试进程的 LC_ALL 按成 C
+// （GUI 启动的外壳就是这个处境），起终端后 shell 里 `locale charmap` 必须回 UTF-8。
+// 少了 ensureUTF8 这一步，zsh 的行编辑器按字节数宽度，界面里的中文和提示符箭头会
+// 画成一片 <0080> 方框——这条用例就是把那个缺陷按住的。
+func TestShellRunsInUTF8Locale(t *testing.T) {
+	if pickUTF8("C") == "" {
+		t.Skip("本机没有可用的 UTF-8 locale")
+	}
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LANG", "")
+	t.Setenv("LC_CTYPE", "")
+
+	m := managerOf(t, testConfig())
+	s, err := m.Start(80, 24, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Write([]byte("locale charmap\n")); err != nil {
+		t.Fatal(err)
+	}
+	out := readUntil(t, s, "UTF-8", 10*time.Second)
+	if !strings.Contains(out, "UTF-8") {
+		t.Fatalf("shell 的字符集应是 UTF-8，locale charmap 实际回: %q", out)
+	}
+}

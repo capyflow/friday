@@ -20,10 +20,11 @@ import { startNotifications, stopNotifications } from './notifications.js'
 import { desktopInvoke, openExternal } from './open-url.js'
 
 // 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页。
-// modes 标出这一页在哪种使用模式下出现：「工作区」是外部智能体干活的地方，只在
-// 工作模式露出；聊天页两种模式都在，它自己按模式决定是一条主会话还是多条会话。
+// modes 标出这一页在哪种使用模式下出现：「聊天」只在生活模式——工作模式里跟小五干活
+// 的地方是工作区（会话可以选内置 friday，也可以选外部 agent），两处都放就是两套入口、
+// 两份上下文，用户得自己记住该在哪边说话。
 const NAV = [
-  { id: 'chat', icon: 'i-chat', label: '聊天', modes: ['life', 'work'] },
+  { id: 'chat', icon: 'i-chat', label: '聊天', modes: ['life'] },
   { id: 'agent', icon: 'i-acp', label: '工作区', modes: ['work'] },
   { id: 'terminal', icon: 'i-terminal', label: '终端', modes: ['work'] },
   { id: 'runs', icon: 'i-run', label: '运行', modes: ['life', 'work'] },
@@ -33,13 +34,15 @@ const NAV = [
 ]
 const navItems = computed(() => NAV.filter(n => n.modes.includes(store.mode)))
 
-// switchMode 切生活/工作模式：模式存本地（下次打开还在原来那侧），切完如果当前页
-// 在新模式下不出现就回聊天页。回复进行中也能切——聊天页每条会话各留一份现场，
-// 切走那一轮继续在后台收字，切回来就是当时的进度（会话行上标着「回复中」）。
+// switchMode 切生活/工作模式：模式存本地（下次打开还在原来那侧）。当前页在新模式下
+// 不出现就落到那侧的主入口——生活落聊天，工作落工作区。
+// 切模式不打断进行中的回复：聊天页常驻不卸载（v-show），那一轮继续在后台收字。
 function switchMode(next) {
   if (store.mode === next) return
   setMode(next)
-  if (!NAV.some(n => n.id === store.view && n.modes.includes(next))) store.view = 'chat'
+  if (!NAV.some(n => n.id === store.view && n.modes.includes(next))) {
+    store.view = next === 'work' ? 'agent' : 'chat'
+  }
 }
 
 /* ---------- 主题（两个入口：这里的快捷切换 + 设置 → 外观，经 friday:theme 同步） ---------- */
