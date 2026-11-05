@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -170,7 +171,13 @@ func writeSessionRecord(a recordArgs) string {
 	ensureFridayIgnore(a.Thread.Cwd)
 	text := sessionRecordText(a)
 	if len(text) > recordFileMax {
+		// 裸字节截断可能落在多字节字符中间，切出非法 UTF-8：回退到完整 rune 边界。
+		// 截断提示放在裁剪之后追加——上一道的「已达上限」提示可能正好被这次裁剪切掉。
 		text = text[:recordFileMax]
+		for len(text) > 0 && !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+		text += "\n\n…（记录文件已达大小上限被截断，更早的内容仍在 Friday 会话里）\n"
 	}
 	if err := os.WriteFile(abs, []byte(text), 0o600); err != nil {
 		log.Printf("[智能体] 会话记录写入失败 %s: %v", abs, err)

@@ -198,11 +198,16 @@ func questionDetail(agent string, groups []approval.QuestionGroup) string {
 		}
 		fmt.Fprintf(&b, "%d. %s\n", i+1, head)
 		for j, o := range g.Options {
+			// a-z 用字母编号，超出 26 个回退成数字，别让 rune 加法溢出成 {、| 这类符号。
+			mark := string(rune('a' + j))
+			if j >= 26 {
+				mark = fmt.Sprintf("%d", j+1)
+			}
 			if o.Description != "" {
-				fmt.Fprintf(&b, "   %c) %s —— %s\n", rune('a'+j), o.Label, clipLine(o.Description, 120))
+				fmt.Fprintf(&b, "   %s) %s —— %s\n", mark, o.Label, clipLine(o.Description, 120))
 				continue
 			}
-			fmt.Fprintf(&b, "   %c) %s\n", rune('a'+j), o.Label)
+			fmt.Fprintf(&b, "   %s) %s\n", mark, o.Label)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
