@@ -48,6 +48,8 @@ let changesByTurn
 let workspaceMemory
 let checkRuns
 let checkSuggestions
+// 后端在新会话上抄来的"上次这台 agent 的选择"（capChoices）：用例设它来演沿用场景
+let inheritChoices
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
@@ -65,6 +67,7 @@ beforeEach(() => {
   filesByDir = { '': [] }
   changesByTurn = {}
   workspaceMemory = {}
+  inheritChoices = null
   checkRuns = []
   checkSuggestions = [{ label: 'npm test', command: 'npm test', source: 'package.json 的 scripts.test' }]
   api.mockReset().mockImplementation(server)
@@ -239,6 +242,7 @@ async function server(method, url, body) {
     const t = {
       id: 'th' + (data.threads.length + 1), workspaceId: ws.id, agent: body.agent,
       cwd: body.cwd || ws.dirs[0], title: body.title, state: 'idle', messages: [],
+      ...(inheritChoices ? { capChoices: { ...inheritChoices } } : {}),
     }
     data.threads.push(t)
     return json({ thread: t })
@@ -681,6 +685,23 @@ describe('会话：在工作区里创建与删除', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'opencode' })
     expect(wrapper.get('.ag-head-txt b').text()).toBe('新会话') // 建好即进对话页，标题等首轮
+  })
+
+  it('新建会话会说明沿用了上次这台 agent 的哪几项选择', async () => {
+    inheritChoices = { model: 'builtin/b', thought_level: 'high' }
+    await show()
+    await newSession('proj-a')
+    await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith('已创建会话，沿用上次这台智能体的模型、思考强度')
+  })
+
+  it('没有可沿用的选择时提示照旧说"正在启动 agent"', async () => {
+    await show()
+    await newSession('proj-a')
+    await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
+    await flushPromises()
+    expect(toast).toHaveBeenCalledWith('已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
   })
 
   it('新建会话只留组头一个入口：按钮是开关，列出会话的底部不再有第二个按钮', async () => {

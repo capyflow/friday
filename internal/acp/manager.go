@@ -445,6 +445,9 @@ func (m *Manager) CreateSession(agentName, workspaceID, cwd, title string) (Thre
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 		State:       StateIdle,
+		// 新会话直接沿用上次用这台 agent 时的选择（模型/思考强度等），建完就能开工，
+		// 不必每条新会话重新点一遍 chips。会话建立时按这份记录重放，见 reapplyChoices。
+		CapChoices: m.inheritChoices(agentCfg.Name, ws),
 	}
 	m.mu.Lock()
 	m.threads[th.ID] = th
@@ -457,6 +460,46 @@ func (m *Manager) CreateSession(agentName, workspaceID, cwd, title string) (Thre
 	}
 	log.Printf("[智能体] 新建会话 %s（工作区=%s，agent=%s，主目录=%s）", th.ID, ws.Name, th.Agent, th.Cwd)
 	return *th, nil
+}
+
+// inheritChoices 给新会话播种"上次用这台 agent 时的选择"：拿最近一条用过该 agent、
+// 且手动选过能力的会话（按 updatedAt 最新）那份 capChoices 抄一份。这份记录本来就
+// 存在投影里（每条会话自己那份），以前只是新建时给的是空表，于是每条新会话都要
+// 重新点一遍模型和思考强度。
+//
+// 审批模式只有一个例外：工作区定成「只读」时不继承。只读是"这个工作区不改东西"的
+// 明确意图，把上次用的「全自动」静默带进新会话等于替用户撤了这道设置；而「每次都问」
+// 「自动」谈的是打扰程度，不是安全边界，那种工作区里沿用手选的档就是用户要的效果。
+// 抄来的取值若这版 agent 不认，重放时照旧逐项跳过，不会把会话建不起来。
+func (m *Manager) inheritChoices(agent string, ws *Workspace) map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *Thread
+	for _, id := range m.order {
+		th := m.threads[id]
+		if th == nil || th.Agent != agent || len(th.CapChoices) == 0 {
+			continue
+		}
+		if best == nil || th.UpdatedAt.After(best.UpdatedAt) {
+			best = th
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	readOnly := NormalizeWorkspacePolicy(ws.Policy) == WorkspacePolicyReadOnly
+	out := make(map[string]string, len(best.CapChoices))
+	for k, v := range best.CapChoices {
+		if k == CapKindApprovalMode && readOnly {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	log.Printf("[智能体] 新会话沿用 %s 上次的选择（来自会话 %s）", agent, best.ID)
+	return out
 }
 
 // Handoff 从一条会话生成交接摘要，并在同一工作区/agent/主目录下新开一条

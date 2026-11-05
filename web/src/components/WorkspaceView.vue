@@ -169,6 +169,8 @@ const capWrap = ref(null)
 
 const CAP_LABEL = { model: '模型', thought_level: '思考强度', approval_mode: '审批模式' }
 function capLabel(cap) { return CAP_LABEL[cap.kind] || cap.name }
+// capNameById 按能力 id 给中文名（新建会话的提示里要说清沿用了哪几项）。
+function capNameById(id) { return id.startsWith('other:') ? '其他设置' : (CAP_LABEL[id] || id) }
 function capCurrentName(cap) {
   return (cap.values || []).find(v => v.value === cap.currentValue)?.name || cap.currentValue
 }
@@ -701,7 +703,12 @@ async function submitSession() {
     sessionFor.value = ''
     await load()
     select(r.thread.id)
-    toast('已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
+    // 后端已经把这台 agent 上次用过的选择抄到新会话上（capChoices），启动时就照它重放；
+    // 说清沿用了哪几项，用户才知道不用重新点一遍，也知道哪一项没被沿用。
+    const carried = Object.keys(r.thread.capChoices || {})
+    toast(carried.length
+      ? `已创建会话，沿用上次这台智能体的${carried.map(capNameById).join('、')}`
+      : '已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
   } catch (e) { toast('创建会话失败：' + e.message, true) }
 }
 
