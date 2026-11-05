@@ -13,6 +13,9 @@ const cfg = reactive({
 })
 const busy = ref(false)
 const catalog = ref([])
+// 后端会在工作区清单里注入一台内置 friday（不来自 config.yaml）。本页的可编辑清单
+// 不收它，但要说一句——不然「工作区里能选、设置里找不到」看着像漏配。
+const hasBuiltin = ref(false)
 const installing = ref('') // 正在安装的目录条目 id
 const installOutput = ref('') // 安装失败时的命令输出（后端 output 字段）
 const msg = reactive({ text: '', cls: '' })
@@ -143,7 +146,9 @@ async function load() {
       sessionTimeoutSeconds: a.sessionTimeoutSeconds ?? 60,
       showThought: a.showThought !== false,
     })
-    cfg.agents = (a.agents || []).map(x => ({
+    const list = a.agents || []
+    hasBuiltin.value = list.some(x => x.builtin)
+    cfg.agents = list.filter(x => !x.builtin).map(x => ({
       ...blankAgent(), name: x.name, command: x.command,
       argsText: (x.args || []).join(', '), envText: envText(x.env),
       workspace: x.workspace || '', enabled: x.enabled !== false,
@@ -243,6 +248,10 @@ onMounted(load)
     </div>
 
     <div class="acp-agents">
+      <p v-if="hasBuiltin" class="meta acp-builtin-hint">
+        工作区的「新建会话」里还多一台 <b>friday（内置）</b>：一轮对话直接交给内置大脑，
+        模型与权限用本页上方的全局设置。它是代码给的，不写进 config.yaml，所以不在下面这份可编辑清单里。
+      </p>
       <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent">
         <div class="acp-agent-head">
           <button class="acp-agent-toggle" type="button" :aria-expanded="a.open ? 'true' : 'false'"
@@ -313,6 +322,7 @@ onMounted(load)
   border-radius: 8px; background: var(--bg); color: var(--fg); }
 .acp-env { margin-top: 8px; }
 .acp-agents { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.acp-builtin-hint { width: 100%; max-width: 76ch; margin: 0; font-size: 11.5px; line-height: 1.55; }
 .acp-agent { width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
              display: flex; flex-direction: column; gap: 10px; }
 .acp-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

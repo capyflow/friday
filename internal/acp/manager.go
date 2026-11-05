@@ -343,6 +343,30 @@ type Manager struct {
 	// spawn 可被测试替换（fake agent 注入）。
 	spawn func(cfg config.AcpAgentConfig, workspace string, handshake time.Duration,
 		onPermission permissionHook, onExit func()) (*agentProc, error)
+	// spawnBuiltin 是内置条目（config.BuiltinAgentName）的连接构造方式：同样可替换。
+	spawnBuiltin func(cfg config.AcpAgentConfig, workspace string, handshake time.Duration,
+		onPermission permissionHook, onExit func()) (*agentProc, error)
+	// builtinBrain 是内置 Friday 的对话大脑（启动装配经 SetBuiltin 注入）。
+	// 为 nil 时内置条目仍然出现在清单里，但拉起会给出明确错误——不静默退化成一台
+	// 不存在的 agent。
+	builtinBrain BuiltinRunner
+}
+
+// SetBuiltin 注入内置对话大脑：让工作区里的「friday」这一项真的能跑起来
+// （见 builtin.go 的进程内 ACP 适配器）。没调用过就是「清单里有、点了会报错」。
+func (m *Manager) SetBuiltin(brain BuiltinRunner) {
+	m.mu.Lock()
+	m.builtinBrain = brain
+	m.mu.Unlock()
+}
+
+// ctor 按条目类型选连接构造方式：内置条目走进程内管道，其余拉子进程。
+func (m *Manager) ctor(cfg config.AcpAgentConfig) func(config.AcpAgentConfig, string, time.Duration,
+	permissionHook, func()) (*agentProc, error) {
+	if cfg.Builtin {
+		return m.spawnBuiltin
+	}
+	return m.spawn
 }
 
 // threadLock 返回该 thread 的串行锁（Send 全程持有，C3）。
@@ -371,7 +395,9 @@ func (m *Manager) List() []Thread {
 		}
 		cp := *th
 		cp.Messages = nil
-		if _, ok := m.cfgFn().Agent(th.Agent); !ok {
+		// Normalized：内置条目（friday）是代码注入的、不在 config.yaml 里，
+		// 拿原始清单判存在会把每条内置会话都显示成「已失联」。
+		if _, ok := m.cfgFn().Normalized().Agent(th.Agent); !ok {
 			cp.State = StateOrphaned
 		} else if cp.State == StateRunning && m.live[id] == nil {
 			cp.State = StateIdle
@@ -393,7 +419,7 @@ func (m *Manager) Get(id string) (Thread, bool) {
 	}
 	cp := *th
 	cp.Messages = append([]Entry{}, th.Messages...)
-	if _, ok := m.cfgFn().Agent(th.Agent); !ok {
+	if _, ok := m.cfgFn().Normalized().Agent(th.Agent); !ok {
 		cp.State = StateOrphaned
 	}
 	return cp, true
@@ -593,6 +619,14 @@ func (m *Manager) Delete(id string) bool {
 	if ps != nil && empty {
 		m.killProc(ps.key, "最后一个会话已删除")
 	}
+	// 内置会话的模型上下文在 SessionPool 里另有一份（按会话 key 落盘）。删掉这条会话
+	// 就把它一起清掉，否则 acp-<id> 那份历史会留在数据目录里没人再列得出它。
+	// 放在 m.mu 之外调用：Brain.Reset 要拿会话锁，别在管理器锁里等它。
+	if th.Agent == config.BuiltinAgentName && m.builtinBrain != nil && th.SessionID != "" {
+		if err := m.builtinBrain.Reset(builtinSessionKey(th.SessionID)); err != nil {
+			log.Printf("[智能体] 内置会话 %s 的上下文清理失败: %v", id, err)
+		}
+	}
 	if base := m.snapshotBase(); base != "" {
 		_ = os.RemoveAll(filepath.Join(base, id))
 	}
@@ -623,6 +657,7 @@ func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path st
 		m.registryOff = true // 无 HOME 环境只保留内置目录
 	}
 	m.spawn = spawnAgent
+	m.spawnBuiltin = m.startBuiltin
 	m.lastCfg = cfgFn().Normalized()
 	n := m.lastCfg.MaxConcurrent
 	if n <= 0 {
@@ -722,7 +757,7 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 	}
 	hooks.status("正在启动 agent " + agentCfg.Name + "…")
 	handshake := m.handshakeBudget(agentCfg)
-	proc, err := m.spawn(agentCfg, th.Cwd, handshake,
+	proc, err := m.ctor(agentCfg)(agentCfg, th.Cwd, handshake,
 		m.permissionHookFor(key, agentCfg.Name),
 		func() { m.onProcExit(key) })
 	if err != nil {
@@ -1344,6 +1379,12 @@ func (m *Manager) workspaceBrief(th *Thread, proc *agentProc) (string, string) {
 			b.WriteString("- " + d + "（主目录，本会话的 cwd）\n")
 		case supported:
 			b.WriteString("- " + d + "（扩展目录，已下发）\n")
+		case proc != nil && proc.builtin:
+			// 内置条目没有 additionalDirectories 这条下发通道（见 builtin.go 的
+			// 能力声明），说得具体些：它的读取范围=会话主目录 + config 的 file.allowDirs。
+			b.WriteString("- " + d +
+				"（属于本工作区，但内置 Friday 读不到它：内置对话的读取范围是会话主目录与 config.yaml 的 file.allowDirs。" +
+				"要动这个目录，请把工作区主目录换成它，或把它加进 file.allowDirs）\n")
 		default:
 			// 不吹牛：列出来是为了让 agent 知道"它属于本工作区但现在够不到"
 			b.WriteString("- " + d + "（属于本工作区，但当前 agent 不支持多目录，未下发——不要尝试访问）\n")
@@ -1573,6 +1614,14 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		if !sink.sawNothing() {
 			return
 		}
+		if agentCfg.Builtin {
+			// 内置会话没有"到终端跑一次 friday"这一步可行动作：它的等待全在模型调用上，
+			// 所以把线索指向密钥/额度与「设置 → 模型服务」。
+			hooks.status(fmt.Sprintf("内置 %s 收到这一轮后 %d 秒没有任何回音："+
+				"多半在等模型响应，也可能是密钥或额度不可用（设置 → 模型服务）。可以先停止这一轮。",
+				th.Agent, int(turnSilenceNotice/time.Second)))
+			return
+		}
 		hooks.status(fmt.Sprintf("%s 收到这一轮后 %d 秒没有任何回音：可能在等模型响应，也可能卡在登录/额度。"+
 			"可以先停止这一轮，或到终端跑一次 %s 看它是否可用。",
 			th.Agent, int(turnSilenceNotice/time.Second), th.Agent))
@@ -1690,7 +1739,17 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		result.Answer = sink.allText()
 		result.StopReason = "cancelled"
 	default:
-		runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, firstLine(lv.proc.stderrTail(4)))
+		// 内置会话没有子进程，也没有"连接中断"这一说：把大脑给的原始错误直接端出来，
+		// 附一个空的 stderr 只会让人去查根本没存在过的日志。外部 agent 同理——
+		// stderr 为空时不写这段，免得报错里出现"（stderr: ）"。
+		tail := firstLine(lv.proc.stderrTail(4))
+		if agentCfg.Builtin {
+			runErr = fmt.Errorf("内置 %s 这一轮失败: %v", th.Agent, promptErr)
+		} else if tail == "" {
+			runErr = fmt.Errorf("agent 连接中断: %v", promptErr)
+		} else {
+			runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, tail)
+		}
 		result.StopReason = "error"
 		errText = runErr.Error()
 	}
@@ -1721,10 +1780,14 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	// 记账：维度 acp:<agent>。金额恒缺失（配额在对面，实测 cost.amount=0），
 	// 成本页按现有未知模型口径显示。
-	usage.Record(usage.Call{
-		Model: "acp:" + th.Agent, Session: "acp:" + id, Origin: "agent",
-		In: result.In, Out: result.Out,
-	})
+	// 内置会话不在这里记：那一轮的 token 由框架逐次模型调用记在 origin=acp 桶里
+	// （带真实模型名），这里再记一次就是双份账。
+	if !agentCfg.Builtin {
+		usage.Record(usage.Call{
+			Model: "acp:" + th.Agent, Session: "acp:" + id, Origin: "agent",
+			In: result.In, Out: result.Out,
+		})
+	}
 
 	log.Printf("[智能体] 轮次结束 thread=%s agent=%s 用时=%s 原因=%s tokens=%d/%d",
 		id, th.Agent, elapsed.Round(time.Second), result.StopReason, result.In, result.Out)
@@ -1757,7 +1820,12 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 	}
 	if crashed {
 		text := "本轮失败：" + truncateRunes(errText, 160)
-		text += "。下次发消息将重新拉起进程并尝试重接会话。"
+		if th.Agent == config.BuiltinAgentName {
+			// 内置会话没有"重新拉起进程"这一步，别指向一个不存在的进程
+			text += "。下一轮会直接重新调用内置对话（模型与权限看「设置 → 模型服务 / 权限」）。"
+		} else {
+			text += "。下次发消息将重新拉起进程并尝试重接会话。"
+		}
 		th.Messages = append(th.Messages, Entry{Role: "note", At: time.Now(), Text: text})
 	}
 }
@@ -1899,6 +1967,11 @@ func resolveCapSource(lv *live, capID string) (source, configID string) {
 func (m *Manager) applyCapability(lv *live, th *Thread, capID, value string) error {
 	source, configID := resolveCapSource(lv, capID)
 	if source == "" {
+		// 内置条目压根没有会话级能力项（模型与权限是全局的），这句要指出去哪儿改，
+		// 只说"该 agent 不支持"会让人以为是哪台外部工具没配好。
+		if lv.proc != nil && lv.proc.builtin {
+			return fmt.Errorf("内置 %s 的模型与权限是全局设置（设置 → 模型服务 / 运行上限与权限），没有会话级配置项", th.Agent)
+		}
 		return fmt.Errorf("能力项 %q 不存在或该 agent 不支持", capID)
 	}
 	// 切思考强度前把会话模型显式设置一遍（best-effort）：跨版本重接的会话
@@ -2057,6 +2130,19 @@ func (m *Manager) applyWorkspacePolicy(lv *live, th *Thread) {
 		policy = NormalizeWorkspacePolicy(ws.Policy)
 	}
 	m.mu.Unlock()
+
+	// 内置 Friday 没有会话级审批档位：它的模型与权限来自全局配置（设置 → 模型服务 /
+	// 权限、tools.exec.mode），而那份配置是进程级的——两条工作区会话各设一档会互相
+	// 打架。这里明确写"没下发"，不拿"改动仍会记录"糊过去：只读工作区里内置会话仍能
+	// 写文件（每次写照旧走审批卡），要知道这一点才能决定选不选内置条目。
+	if lv.proc != nil && lv.proc.builtin {
+		m.setPolicyState(th, policyState{note: fmt.Sprintf(
+			"内置 Friday 的模型与权限是全局设置（设置 → 模型服务 / 运行上限与权限），"+
+				"工作区档位「%s」不下发给它：改动仍会记录并可还原，写文件与执行命令照旧逐条走审批卡，"+
+				"但它不会因此变成只读。要按档位约束，请选一台上报审批模式的外部 agent。",
+			policyLabel(policy))})
+		return
+	}
 
 	var approval *Capability
 	for _, cap := range normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()) {
@@ -2237,7 +2323,7 @@ func (m *Manager) Test(name string) error {
 		return err
 	}
 	defer os.RemoveAll(ws)
-	proc, err := m.spawn(agentCfg, ws, m.handshakeBudget(agentCfg), nil, nil)
+	proc, err := m.ctor(agentCfg)(agentCfg, ws, m.handshakeBudget(agentCfg), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -2249,6 +2335,9 @@ func (m *Manager) Test(name string) error {
 // Reload 配置热更新：杀掉配置变化/被删除/被停用 agent 的存活进程（上下文由
 // session/load 在下次打开时尝试恢复），并发槽位按新值重建。
 func (m *Manager) Reload(cfg config.AcpConfig) {
+	// 按归一化后的清单比较：内置条目是 Normalized 注入的，原始清单里查不到
+	// 「friday」，不归一化的话每次保存配置都会把内置会话的连接当成"agent 已删除"回收掉。
+	cfg = cfg.Normalized()
 	var toKill []*procState
 	var unwarm []string
 	m.mu.Lock()

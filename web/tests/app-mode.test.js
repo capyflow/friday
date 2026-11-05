@@ -32,7 +32,7 @@ function modeButton(mode) {
 beforeEach(() => {
   localStorage.clear()
   Object.assign(store, { loggedIn: true, username: 'owner', view: 'chat', mode: 'life',
-    chatBusy: false, settingsOpen: false, setupStatus: null, unread: 0 })
+    settingsOpen: false, setupStatus: null, unread: 0 })
   api.mockReset().mockImplementation((_method, url) => Promise.resolve(url === '/api/setup/status'
     ? { accountRequired: false, providerRequired: false }
     : { authenticated: true, username: 'owner', sessions: [] }))
@@ -73,12 +73,14 @@ describe('侧栏的使用模式开关', () => {
     expect(store.view).toBe('chat')
   })
 
-  it('内置管家正在回复时先不切模式，并说明为什么', async () => {
+  it('回复进行中照样能切模式：每条会话各留一份现场，切走那一轮继续在后台跑', async () => {
     await showApp()
-    store.chatBusy = true
+    // 过去 store.chatBusy 会拦住这一跳（切模式会换掉对话归属，半截回答会掉到看不见的
+    // 地方）。现在聊天页按会话存现场，标志位已经删掉——这里守的是"别再拦回去"。
+    expect(store.chatBusy).toBeUndefined()
     await modeButton('工作模式').trigger('click')
-    expect(store.mode).toBe('life')
-    expect(toast).toHaveBeenCalledWith(expect.stringContaining('正在回复'), true)
+    expect(store.mode).toBe('work')
+    expect(toast).not.toHaveBeenCalledWith(expect.stringContaining('正在回复'), true)
   })
 
   it('模式记在本地：重新加载页面读回原来那一侧', async () => {

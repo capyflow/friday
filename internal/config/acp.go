@@ -37,6 +37,17 @@ const (
 	AcpPermissionTimeoutSeconds = 30 * 60
 )
 
+// BuiltinAgentName 是内置 Friday 在智能体清单里的名字（thread.Agent 的值）。
+const BuiltinAgentName = "friday"
+
+// BuiltinAgent 返回内置 Friday 的 agent 条目：它不来自 config.yaml，由 Normalized
+// 注入，让「工作区 → 新建会话」的 agent 清单里出现 friday 这一项。Command 为空是
+// 有意的——内置条目不拉起子进程，由 acp.Manager 用进程内适配器把这一轮交给内置
+// Brain 跑（见 internal/acp/builtin.go）。
+func BuiltinAgent() AcpAgentConfig {
+	return AcpAgentConfig{Name: BuiltinAgentName, Builtin: true}
+}
+
 // AcpConfig 是智能体层配置（config.yaml acp 段）。
 type AcpConfig struct {
 	// Enabled 总开关（默认关闭）。关闭时不拉起任何 agent，thread 接口拒绝新消息。
@@ -82,6 +93,10 @@ type AcpAgentConfig struct {
 	// Version 安装时登记的版本戳（M-4）：registry 条目安装/升级时写入，目录页
 	// 据此提示「有新版本」。仅元数据，不影响启动。
 	Version string `yaml:"version,omitempty" json:"version,omitempty"`
+	// Builtin 标出这是代码内置的 agent（内置 Friday），不是用户配置的外部进程：
+	// 由 Normalized 注入、不写回 config.yaml、设置页不可编辑或删除。
+	// 同名配置条目存在时以配置为准（用户可以真的配一台叫 friday 的外部 agent）。
+	Builtin bool `yaml:"builtin,omitempty" json:"builtin,omitempty"`
 }
 
 // IsEnabled 返回该 agent 是否启用（缺省启用）。
@@ -101,6 +116,36 @@ func (c AcpConfig) Normalized() AcpConfig {
 	if c.SessionTimeoutSeconds <= 0 {
 		c.SessionTimeoutSeconds = AcpDefaultSessionSeconds
 	}
+	c.Agents = withBuiltinAgent(c.Agents)
+	return c
+}
+
+// withBuiltinAgent 把内置 Friday 排在 agent 清单最前：工作区新建会话时它就在那里，
+// 不必先装一台外部 agent 才能用。清单里已有同名条目（用户自己配的 friday）就不注入、
+// 不重复，配置说了算。
+//
+// 注意返回的是新切片：调用者那份 Agents 的底层数组不动（Normalized 常在共享快照上跑）。
+func withBuiltinAgent(in []AcpAgentConfig) []AcpAgentConfig {
+	for _, a := range in {
+		if a.Name == BuiltinAgentName {
+			return in
+		}
+	}
+	out := make([]AcpAgentConfig, 0, len(in)+1)
+	return append(out, append([]AcpAgentConfig{BuiltinAgent()}, in...)...)
+}
+
+// WithoutBuiltin 剔除内置条目（写回 config.yaml 前用）：内置 Friday 是代码给的，
+// 不该落到用户的配置文件里——那里每一条都该是「要拉起的外部进程」。
+func (c AcpConfig) WithoutBuiltin() AcpConfig {
+	out := make([]AcpAgentConfig, 0, len(c.Agents))
+	for _, a := range c.Agents {
+		if a.Builtin {
+			continue
+		}
+		out = append(out, a)
+	}
+	c.Agents = out
 	return c
 }
 
@@ -147,7 +192,7 @@ func (c AcpConfig) Validate() error {
 			return fmt.Errorf("config: acp.agents 条目 name 重复: %q", a.Name)
 		}
 		seen[a.Name] = true
-		if a.Command == "" {
+		if a.Command == "" && !a.Builtin {
 			return fmt.Errorf("config: acp.agents[%s].command 不能为空", a.Name)
 		}
 		if a.HandshakeTimeoutSeconds < 0 {
@@ -168,6 +213,9 @@ func (c AcpConfig) Validate() error {
 // 的注释与结构；acp 段不存在时追加）。cfg 须已通过 Validate。以 yaml.Node 方式
 // 编辑，临时文件 + rename 原子写回。
 func UpdateAcp(path string, cfg AcpConfig) error {
+	// 内置条目（Normalized 注入的 friday）不落盘：设置页保存的是整份清单，
+	// 不剔除就会把代码给的内置 agent 写进用户的 config.yaml（而它没有 command）。
+	cfg = cfg.WithoutBuiltin()
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
 	data, err := readFileLocked(path)

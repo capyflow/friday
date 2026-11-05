@@ -67,6 +67,7 @@ import (
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/skill"
 	"github.com/capyflow/friday/internal/task"
+	"github.com/capyflow/friday/internal/terminal"
 	"github.com/capyflow/friday/internal/todo"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/usage"
@@ -456,7 +457,8 @@ func main() {
 	// 智能体（ACP）对话空间：独立于 Brain 的平行入口，thread 投影落盘
 	// （重启不失历史），进程空闲回收、session/load 重接。默认关闭
 	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
-	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
+	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp.Normalized() },
+		approver, "acp-threads.json")
 	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
 	// 系统提示桥：审批卡入队、一轮结束这两个时刻，人通常已经切到别的窗口，
 	// 页面里的卡片和气泡等于没发生。走通知中心的 PostOnce（按 key 幂等，同一
@@ -466,10 +468,27 @@ func main() {
 			log.Printf("[智能体] 系统提示未落档: %v", err)
 		}
 	})
+	// 内置 Friday 也进智能体清单（工作区新建会话时可选 "friday"）：一轮对话经进程内的
+	// ACP 适配器交给这个 Brain，所以外部 agent 那套会话编排、轮前快照、改动还原、
+	// 停止与重接对内置会话同样成立。差别写在 builtin.go 顶部（模型/权限是全局的）。
+	acpMgr.SetBuiltin(brain)
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
-		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",
-			len(cfg.Acp.Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+		// 内置条目不算进配置里的 agent 数（它是代码给的，用户没配过）
+		log.Printf("[智能体] 已启用（%d 个 agent + 内置 Friday，并发 %d，空闲 %ds 回收）",
+			len(cfg.Acp.WithoutBuiltin().Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+	}
+
+	// 内置终端：服务端 PTY + 界面里的 xterm.js，只服务本机回环（admin 层硬闸，
+	// 配置关不掉那条判断）。关掉的是"能不能开新终端"，不是那道闸。
+	termCfgFn := func() terminal.Config {
+		t := cfg.Snapshot().Terminal
+		return terminal.Config{Enabled: t.IsEnabled(), MaxSessions: t.MaxSessions, Shell: t.Shell}
+	}
+	termMgr := terminal.NewManager(termCfgFn)
+	defer termMgr.CloseAll() // 内核退出时收掉进程组，别留下挂在已关 PTY 上的 shell
+	if tc := termCfgFn(); tc.Enabled {
+		log.Printf("[终端] 内置终端可用（本机回环，并发 %d；远程部署不服务）", tc.Max())
 	}
 
 	// 成本闸门：价格表（默认 pricing.json，后台可编辑、热加载）+ 软限额判定。
@@ -592,6 +611,7 @@ func main() {
 			Approver:      approver,
 			Mcp:           mcpMgr,
 			Acp:           acpMgr,
+			Terminal:      termMgr,
 			HeartbeatFile: cfg.Heartbeat.File,
 			Notifications: notices,
 			Pricer:        pricer,

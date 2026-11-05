@@ -241,14 +241,14 @@ def await_value(query, predicate, message, timeout=10):
     raise Failure(message)
 
 
-def sse_chat(api: API, message: str, attachments=None, session="web") -> str:
+def sse_chat(api: API, message: str, attachments=None, session="web", path="/api/chat") -> str:
     body = {"message": message, "session": session}
     if attachments:
         body["attachments"] = attachments
     payload = json.dumps(body, ensure_ascii=False).encode()
     conn = http.client.HTTPConnection("127.0.0.1", api.port, timeout=8)
     headers = api.headers(content_type=True)
-    conn.request("POST", "/api/chat", payload, headers)
+    conn.request("POST", path, payload, headers)
     response = conn.getresponse()
     if response.status != 200:
         conn.close()
@@ -363,6 +363,38 @@ def run(binary: str, output_dir: str | None) -> dict:
         elsewhere = sse_chat(api, "读项目标记文件")
         expect("session-dir-ok" not in elsewhere, f"the marker leaked into the main session: {elsewhere}")
         result["checks"].append("chat-sessions")
+
+        # 工作区的新建会话清单里还有一台内置 Friday：不装任何外部 agent 也能把活
+        # 交给它，跑在工作区目录里（轮前快照、改动还原、投影与 SSE 都走 ACP 那套）。
+        acp_cfg = api.json("POST", "/api/acp/config", {"acp": {"enabled": True, "agents": []}})
+        listed = acp_cfg.get("body", acp_cfg).get("acp", {}).get("agents", [])
+        expect(listed and listed[0].get("name") == "friday" and listed[0].get("builtin") is True,
+               f"内置 friday 没出现在 agent 清单最前: {listed}")
+        raw_cfg = (data_dir / "config.yaml").read_text(encoding="utf-8")
+        expect("builtin" not in raw_cfg and "friday" not in raw_cfg,
+               "内置条目被写进了 config.yaml")
+        acp_ws = api.json("POST", "/api/acp/workspaces", {"name": "p0-acp", "dirs": [str(proj)]})
+        ws_id = acp_ws.get("workspace", {}).get("id", "")
+        expect(ws_id, "acp workspace was not created")
+        acp_th = api.json("POST", "/api/acp/threads", {"workspaceId": ws_id, "agent": "friday"})
+        th_id = acp_th.get("thread", {}).get("id", "")
+        expect(th_id, "acp thread on the builtin agent was not created")
+        streamed = sse_chat(api, "内置会话冒烟", path=f"/api/acp/threads/{th_id}/chat")
+        expect("smoke-ok" in streamed, f"builtin acp turn streamed nothing usable: {streamed[:80]}")
+        detail = api.json("GET", f"/api/acp/threads/{th_id}").get("thread", {})
+        expect(any(m.get("role") == "assistant" and "smoke-ok" in m.get("text", "")
+                   for m in detail.get("messages", [])),
+               "builtin acp turn is missing from the thread projection")
+        expect("内置" in detail.get("policyNote", ""),
+               f"工作区档位对内置会话要明说没下发: {detail.get('policyNote')!r}")
+        caps = api.json("GET", f"/api/acp/threads/{th_id}/options").get("capabilities", None)
+        expect(caps == [], f"内置会话不该有会话级能力项: {caps}")
+        # 内置那条的工作区会话不能污染主会话（它的上下文在 acp-* 那份池内会话里）
+        main_texts = [item.get("text", "") for item in
+                      api.json("GET", "/api/chat/history?session=web").get("messages", [])]
+        expect(not any("内置会话冒烟" in text for text in main_texts),
+               "工作区内置会话漏进了主会话历史")
+        result["checks"].append("acp-builtin")
 
         task = api.json("POST", "/api/tasks", {"text": "smoke task", "in": "60s", "status": "paused"})
         tasks = task.get("tasks", [])

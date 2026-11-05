@@ -97,9 +97,8 @@ function acpStopLabel(t) {
 
 // 跳到某条 ACP 会话：工作区收在「工作模式」下，这一跳顺带把模式切过去
 // （生活模式侧栏没有这个入口，切完还要能落回聊天页之外的页面）。
-// 内置管家正在回复时先不切——切模式会换掉聊天页的会话归属，半截回答会掉到看不见的地方。
+// 内置管家正在回复时同样直接切：聊天页每条会话各留一份现场，那一轮在后台继续。
 function openAcp(t) {
-  if (store.chatBusy) { toast('小五正在回复：等这轮跑完再切到工作模式看会话', true); return }
   setMode('work')
   store.acpOpenThread = t.threadId
   store.view = 'agent'

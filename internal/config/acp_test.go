@@ -106,6 +106,11 @@ mcp:
 	if !contains(text, "provider:") || !contains(text, "mcp:") {
 		t.Fatalf("其他段丢失:\n%s", text)
 	}
+	// 内置条目不落盘：它是代码给的（Normalized 注入），config.yaml 里每一条都该是
+	// "要拉起的外部进程"，留下 builtin 那条会让下次读取出现两份 friday。
+	if contains(text, "builtin") || contains(text, "friday") {
+		t.Fatalf("内置条目被写进 config.yaml:\n%s", text)
+	}
 	// 回读一致
 	cfg, err := Load(path)
 	if err != nil {
@@ -114,10 +119,12 @@ mcp:
 	if !cfg.Acp.Enabled || cfg.Acp.MaxConcurrent != 3 || cfg.Acp.IdleKillSeconds != 300 {
 		t.Fatalf("全局参数不符: %+v", cfg.Acp)
 	}
-	if len(cfg.Acp.Agents) != 2 {
-		t.Fatalf("agent 数不符: %+v", cfg.Acp.Agents)
+	// Load 已经归一化（清单最前是注入的内置 friday），所以按名字取那两台外部 agent，
+	// 不按下标——内置排最前是这次有意定的顺序，用例不该假装它不在。
+	if len(cfg.Acp.Agents) != 3 || !cfg.Acp.Agents[0].Builtin {
+		t.Fatalf("agent 清单不符（内置应注入且只注入一次）: %+v", cfg.Acp.Agents)
 	}
-	a := cfg.Acp.Agents[0]
+	a := agentByName(t, cfg.Acp.Agents, "codex")
 	if a.Command != "npx" || len(a.Args) != 2 || a.Env["A"] != "B" || a.Workspace != "~/proj" {
 		t.Fatalf("codex 条目不符: %+v", a)
 	}
@@ -125,8 +132,8 @@ mcp:
 	if a.HandshakeTimeoutSeconds != 90 || a.SessionTimeoutSeconds != 120 {
 		t.Fatalf("codex 的超时覆盖未写回: %+v", a)
 	}
-	if !cfg.Acp.Agents[1].DegradeResume {
-		t.Fatalf("degradeResume 未写回: %+v", cfg.Acp.Agents[1])
+	if !agentByName(t, cfg.Acp.Agents, "opencode").DegradeResume {
+		t.Fatalf("degradeResume 未写回: %+v", cfg.Acp.Agents)
 	}
 	// 二次覆盖（改动 agent 清单后旧条目不残留）
 	next.Agents = []AcpAgentConfig{{Name: "only", Command: "x"}}
@@ -137,9 +144,54 @@ mcp:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Acp.Agents) != 1 || cfg.Acp.Agents[0].Name != "only" {
+	if len(cfg.Acp.Agents) != 2 || agentByName(t, cfg.Acp.Agents, "only").Command != "x" {
 		t.Fatalf("二次覆盖不符: %+v", cfg.Acp.Agents)
 	}
+}
+
+func TestAcpBuiltinAgentInjection(t *testing.T) {
+	c := AcpConfig{Enabled: true, Agents: []AcpAgentConfig{{Name: "codex", Command: "npx"}}}
+	n := c.Normalized()
+	if len(n.Agents) != 2 || n.Agents[0].Name != BuiltinAgentName || !n.Agents[0].Builtin {
+		t.Fatalf("内置条目应注入到清单最前: %+v", n.Agents)
+	}
+	if _, ok := n.Agent(BuiltinAgentName); !ok {
+		t.Fatal("内置条目应可按名字查到（会话绑定与孤儿判定都靠它）")
+	}
+	// 归一化要幂等：cfgFn 拿到的清单常已经被归一化过一次，再注入就滚成两条 friday。
+	if again := n.Normalized(); len(again.Agents) != 2 {
+		t.Fatalf("归一化应幂等: %+v", again.Agents)
+	}
+	// 不改调用者那份（Normalized 在共享快照上跑）。
+	if len(c.Agents) != 1 {
+		t.Fatalf("Normalized 不该改调用者的清单: %+v", c.Agents)
+	}
+	// 内置条目没有 command，Validate 不该因此报错。
+	if err := n.Validate(); err != nil {
+		t.Fatalf("内置条目不该被当成缺 command: %v", err)
+	}
+	if got := len(n.WithoutBuiltin().Agents); got != 1 {
+		t.Fatalf("WithoutBuiltin 应剔掉内置条目: %+v", n.WithoutBuiltin().Agents)
+	}
+	// 用户自己配了一台叫 friday 的外部 agent：以配置为准，不再注入内置条目。
+	user := AcpConfig{Enabled: true,
+		Agents: []AcpAgentConfig{{Name: BuiltinAgentName, Command: "my-friday"}}}.Normalized()
+	if len(user.Agents) != 1 || user.Agents[0].Builtin || user.Agents[0].Command != "my-friday" {
+		t.Fatalf("同名配置条目应压过内置注入: %+v", user.Agents)
+	}
+}
+
+// agentByName 从清单里取一条。内置条目排在最前是有意的顺序，所以测试按名字找
+// 外部那几台，别按下标。
+func agentByName(t *testing.T, list []AcpAgentConfig, name string) AcpAgentConfig {
+	t.Helper()
+	for _, a := range list {
+		if a.Name == name {
+			return a
+		}
+	}
+	t.Fatalf("清单里没有 %q: %+v", name, list)
+	return AcpAgentConfig{}
 }
 
 func contains(s, sub string) bool {

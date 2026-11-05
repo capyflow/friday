@@ -39,6 +39,10 @@ type agentProc struct {
 	// 没声明就只传 cwd——多出的目录不发给它，也不假装生效（前端会明说"只用主目录"）。
 	extraRoots bool
 	bridge     *bridge
+	// builtin 标出这条连接是对接内置 Friday 的（进程内 io.Pipe，没有子进程）：
+	// 报错文案与「没回音」提示要说人话（ stderr 恒为空、也谈不上"未登录"），
+	// 工作区说明里的目录措辞同样不同。
+	builtin bool
 
 	stderrMu   sync.Mutex
 	stderrMemo string // kill 时缓存的 stderr 尾部（文件随即删除，报错仍可引用）

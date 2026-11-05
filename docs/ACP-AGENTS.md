@@ -195,3 +195,35 @@ MCP 调用被 C1 的 15s 超时逼着立即返回，才需要 submit/check 轮�
   零消息新线程因此在「选中/创建」时即启动 agent（冷启动期间 composer 显示加载 chip）；
   加载失败（并发槽位满、agent 起不来）toast 报错、按钮不卡死，下次选中重试。协议没有
   「不建会话查清单」的方法，这是「随时可切」的必要代价；进程照常 600s 空闲回收。
+
+## 十三、内置 Friday 作为一台 agent（进程内适配器）
+
+「工作区 → 新建会话」的清单里除了外部 agent，还有一台 `friday`：一轮对话直接交给内置
+大脑（`internal/agent.Brain`），但**仍走完整 ACP 协议**——两条 io.Pipe 代替子进程的
+stdin/stdout，对面接 `acp.NewAgentSideConnection`（`internal/acp/builtin.go`）。于是
+会话归属、轮前快照、改动还原、投影时间线、SSE 帧、停止与 session/load 重接全部复用
+Manager 既有的编排，`agentProc` 与协议逻辑零改动。
+
+- **条目来源**：`config.AcpConfig.Normalized()` 注入（排在清单最前，`Builtin: true`），
+  不写进 config.yaml——`UpdateAcp` 写回前用 `WithoutBuiltin()` 剔除；用户在配置里自己
+  写了一台同名 `friday` 时以配置为准，不再注入。`Manager.List/Get/Reload` 一律按
+  归一化后的清单查 agent，否则内置会话会被显示成「agent 已删除」并在每次保存配置时被
+  当成失联连接回收。
+- **会话与上下文**：ACP sessionId → 池内 key `acp-<id>`（`builtinSessionKey` 纯函数派生），
+  因此 `session/load` 是真的重接（历史在 sessionstore 里，重启仍在），不需要向 client
+  重放对话——Friday 自己的时间线另有投影，重放等于把同一段写两遍。删除会话时连带
+  `Brain.Reset(key)`，不给数据目录留没人认领的 `friday-acp-*.json`。
+- **能力边界（明说，不假装等价）**：模型与权限是**进程级全局**的（设置 → 模型服务 /
+  权限），所以 initialize 不回 configOptions、也不回 models/modes——两条工作区会话各选
+  一个模型会互相打架。工作区默认审批档位因此不下发，`PolicyNote` 写清"没下发"以及它
+  实际是什么行为；`SetSessionConfigOption/SetSessionMode` 被调到时直接报错指回全局设置。
+  不声明 `additionalDirectories`：内置文件工具的读取范围=会话主目录（`workdir.With`）+
+  `file.allowDirs`，工作区说明按这套措辞描述其余目录。
+- **事件映射**：`llm.Delta` → agent_message_chunk / agent_thought_chunk；`agent.Step`
+  （kind=tool）→ tool_call(in_progress) + tool_call_update(completed/failed)。内置链路的
+  Step 没有 toolCallId，适配器按工具名 FIFO 配对 run/ok，让同一次调用在前端并成一行。
+  取消由 SDK 的 per-session 取消句柄驱动（session/cancel → Prompt 的 ctx 被取消）→
+  stopReason=cancelled，不算失败。
+- **记账**：`usage.Record` 只在外部 agent 那侧记 `acp:<agent>`；内置会话的 token 由框架
+  逐次模型调用记在 `origin=acp`（新增常量）并带真实模型名，Manager 再记一次就是双份账。
+- **测试握手**：设置页「测试」对内置条目同样可用，但不 exec、不跑轮次，只建连接。

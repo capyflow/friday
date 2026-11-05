@@ -8,6 +8,7 @@ import { auroraDrift, shellIn } from './anim.js'
 import LoginView from './components/LoginView.vue'
 import ChatView from './components/ChatView.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
+import TerminalView from './components/TerminalView.vue'
 import RunsView from './components/RunsView.vue'
 import AutoView from './components/AutoView.vue'
 import BlinkoView from './components/BlinkoView.vue'
@@ -24,6 +25,7 @@ import { desktopInvoke, openExternal } from './open-url.js'
 const NAV = [
   { id: 'chat', icon: 'i-chat', label: '聊天', modes: ['life', 'work'] },
   { id: 'agent', icon: 'i-acp', label: '工作区', modes: ['work'] },
+  { id: 'terminal', icon: 'i-terminal', label: '终端', modes: ['work'] },
   { id: 'runs', icon: 'i-run', label: '运行', modes: ['life', 'work'] },
   { id: 'auto', icon: 'i-auto', label: '自动化', modes: ['life', 'work'] },
   { id: 'blinko', icon: 'i-blinko', label: '闪念', modes: ['life', 'work'] },
@@ -32,11 +34,10 @@ const NAV = [
 const navItems = computed(() => NAV.filter(n => n.modes.includes(store.mode)))
 
 // switchMode 切生活/工作模式：模式存本地（下次打开还在原来那侧），切完如果当前页
-// 在新模式下不出现就回聊天页。回复进行中不切——切模式会换掉聊天页的会话归属，
-// 半截回答会掉进另一边看不见的地方。
+// 在新模式下不出现就回聊天页。回复进行中也能切——聊天页每条会话各留一份现场，
+// 切走那一轮继续在后台收字，切回来就是当时的进度（会话行上标着「回复中」）。
 function switchMode(next) {
   if (store.mode === next) return
-  if (store.chatBusy) { toast('小五正在回复：等这轮跑完（或先点停止）再切模式', true); return }
   setMode(next)
   if (!NAV.some(n => n.id === store.view && n.modes.includes(next))) store.view = 'chat'
 }
@@ -56,7 +57,13 @@ const host = ref(location.host)
    别的导航也不卸载，进行中的 SSE、滚动位置与选中的会话都保留。
    导航 id 仍是 'agent'（设置页的「智能体」同一口径），只是展示名改成「工作区」。 */
 const workspaceReady = ref(false)
-watch(() => store.view, v => { if (v === 'agent') workspaceReady.value = true }, { immediate: true })
+// 终端页同样懒挂载、挂载后常驻：切走不卸载就不会断开 WebSocket，也不会把那条
+// shell 的进程组收掉（内核侧是按连接收尾的）。
+const terminalReady = ref(false)
+watch(() => store.view, v => {
+  if (v === 'agent') workspaceReady.value = true
+  if (v === 'terminal') terminalReady.value = true
+}, { immediate: true })
 
 function toggleUserPop() { userPopOpen.value = !userPopOpen.value }
 function onDocClick(e) {
@@ -153,6 +160,7 @@ async function logout() {
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
     <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4a1.75 1.75 0 0 1 0 3.5h-3a1.75 1.75 0 0 0 0 3.5h4"/></symbol>
     <symbol id="i-acp" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9 17h6"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
     <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
   </svg>
 
@@ -225,6 +233,7 @@ async function logout() {
            Transition 在挂载同帧应用入场初始态，消除闪帧 -->
       <Transition name="view"><ChatView v-show="store.view === 'chat'" /></Transition>
       <Transition name="view"><WorkspaceView v-if="workspaceReady" /></Transition>
+      <Transition name="view"><TerminalView v-if="terminalReady" /></Transition>
       <Transition name="view"><RunsView v-if="store.view === 'runs'" /></Transition>
       <Transition name="view"><AutoView v-if="store.view === 'auto'" /></Transition>
       <Transition name="view"><BlinkoView v-if="store.view === 'blinko'" /></Transition>

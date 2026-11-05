@@ -15,8 +15,6 @@ export const store = reactive({
   username: '',
   view: 'chat',
   mode: getPref(MODE_KEY) === 'work' ? 'work' : 'life',
-  // 聊天页有没有正在跑的一轮：切模式会换掉对话归属，回复进行中先别切（App 据此拦住）。
-  chatBusy: false,
   settingsOpen: false,
   settingsSection: '',  // 下次打开设置时定位的 section id，一次性：SettingsModal 读走即清零
   setupStatus: null,

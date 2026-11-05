@@ -62,9 +62,12 @@ func (s *Server) handleAcpConfigSet(ctx *vhttp.Context) error {
 	if next.Enabled {
 		enabled = "开启"
 	}
+	// 计数只算配置里的外部 agent：内置那条是代码注入的，用户没配过它，
+	// 把它算进"N 个 agent"会让人以为保存时写进了 config.yaml。
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
-		"message": "智能体配置已保存（功能" + enabled + "，" + fmt.Sprint(len(next.Agents)) + " 个 agent），并已写回 config.yaml",
-		"acp":     next,
+		"message": "智能体配置已保存（功能" + enabled + "，" +
+			fmt.Sprint(len(next.WithoutBuiltin().Agents)) + " 个 agent），并已写回 config.yaml",
+		"acp": next,
 	})
 }
 

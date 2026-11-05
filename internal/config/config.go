@@ -43,8 +43,10 @@ type Config struct {
 	Heartbeat   HeartbeatConfig   `yaml:"heartbeat"`
 	Mcp         McpConfig         `yaml:"mcp"`
 	Acp         AcpConfig         `yaml:"acp"`
-	Persona     PersonaConfig     `yaml:"persona"`
-	Cost        CostConfig        `yaml:"cost"`
+	// Terminal 内置终端（app 里的交互式 shell）。
+	Terminal TerminalConfig `yaml:"terminal"`
+	Persona  PersonaConfig  `yaml:"persona"`
+	Cost     CostConfig     `yaml:"cost"`
 	// Agent 内置管家的运行参数（对话轮数上限）。
 	Agent        AgentConfig `yaml:"agent"`
 	SystemPrompt string      `yaml:"systemPrompt"`
@@ -67,6 +69,21 @@ type Config struct {
 	// Plan 计划模式参数。
 	Plan PlanConfig `yaml:"plan"`
 }
+
+// TerminalConfig 是内置终端的配置（app 里开一个真的交互式 shell）。
+type TerminalConfig struct {
+	// Enabled 总开关（默认开启）。它只管"能不能开新终端"：远程部署的硬闸在
+	// admin 层——非本机回环的连接一律拒绝，这个配置关不掉那条判断。
+	Enabled *bool `yaml:"enabled"`
+	// MaxSessions 同时可开的终端数（<=0 用默认 4）。
+	MaxSessions int `yaml:"maxSessions"`
+	// Shell 指定用哪个 shell；空则按 $SHELL → zsh → bash → sh。
+	// 写了个本机没有的路径会直接报错，不悄悄换一个（用户以为自己在 zsh 里跑）。
+	Shell string `yaml:"shell"`
+}
+
+// IsEnabled 返回内置终端是否开启（缺省开启）。
+func (t TerminalConfig) IsEnabled() bool { return t.Enabled == nil || *t.Enabled }
 
 // HardwareConfig 控制硬件输出能力。Friday 当前与硬件分离（纯软件形态）：
 // enabled=false（默认）时不注册 speak_now / display_now / play_audio / play_effect
