@@ -73,6 +73,28 @@ describe('运行看板', () => {
     expect(wrapper.text()).not.toContain('执行命令 rm -rf build')
   })
 
+  it('问答卡在看看板上也按选项作答，不给批准/拒绝', async () => {
+    const q = { id: 9, tool: '智能体提问', summary: '范围怎么定？', kind: 'question',
+      detail: '智能体 zcode 在等你回答（1 个问题）', createdAt: now,
+      options: [{ id: 'opt_min', name: '最小影响面', kind: 'allow_once' },
+        { id: 'reject', name: '拒绝', kind: 'reject_once' }] }
+    const data = { ...runs(), approvals: [q], counts: { ...runs().counts, approvals: 1 } }
+    api.mockResolvedValueOnce(data)
+      .mockResolvedValueOnce({ ...data, approvals: [], counts: { ...data.counts, approvals: 0 } })
+      .mockResolvedValueOnce({ ...data, approvals: [], counts: { ...data.counts, approvals: 0 } })
+    await show()
+    const labels = wrapper.findAll('.run-actions button').map(b => b.text())
+    expect(labels).toContain('最小影响面')
+    expect(labels).not.toContain('批准')
+
+    const pick = wrapper.findAll('.run-actions button').find(b => b.text() === '最小影响面')
+    await pick.trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/approvals/9', { choose: 'opt_min' })
+    expect(toast).toHaveBeenCalledWith('已回答，agent 继续')
+  })
+
   it('ACP 打开会跳到工作区并带上目标会话；停止需要二次确认', async () => {
     await show()
     const open = wrapper.findAll('button').find(b => b.text() === '打开')

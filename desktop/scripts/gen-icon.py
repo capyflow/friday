@@ -7,6 +7,10 @@
 保证 macOS/Windows 图标格式完全兼容）。
 
 用法：gen-icon.py --out <目录>
+
+品牌标基准：白底圆角方块 + 中心黑点，圆角 = 边长 28%、圆点 = 边长 44%。同一套几何还出现在
+外壳启动页 ui/index.html 的 #logo、网页端 style.css 的 .brand-mark、以及 index.html 的 favicon；
+改一处就要同步那三处（icons/ 目录本身是构建产物，被 gitignore）。
 """
 
 import argparse
@@ -16,68 +20,47 @@ import zlib
 from pathlib import Path
 
 BASE = 1024
-# 品牌色：靛蓝 → 紫 → 紫红 对角渐变（与弹窗/占位页一致）
-GRADIENT_STOPS = [
-    (0.00, (99, 102, 241)),   # #6366F1
-    (0.55, (139, 92, 246)),   # #8B5CF6
-    (1.00, (196, 132, 252)),  # #C484FC
-]
-INK = (67, 56, 202)       # #4338CA 五官色
-WHITE = (255, 255, 255)
+MARGIN = 92                      # 内容占画布 82%（macOS 图标惯例：四周留透明边）
+PLATE = BASE - 2 * MARGIN        # 840
+PLATE_RADIUS = round(PLATE * 0.22)
+DOT_RATIO = 0.44                 # 圆点直径 = 底板边长 44%（与外壳启动页 #logo 同一比例）
+PLATE_CORNER_RATIO = 0.28        # 圆角 = 底板边长 28%（同上）
+PLATE_RADIUS = round(PLATE * PLATE_CORNER_RATIO)
+PLATE_FILL = (255, 255, 255)     # 白底
+PLATE_EDGE = (222, 222, 228)     # 外圈 3px 发丝边：纯白块在浅色桌面上会糊掉
+DOT_FILL = (24, 24, 27)          # #18181B 中心黑点
+DOT_R = PLATE * DOT_RATIO / 2
 
 
-def in_rounded_rect(x: float, y: float, l: float, t: float, r: float, b: float, rad: float) -> bool:
-    cx = min(max(x, l + rad), r - rad)
-    cy = min(max(y, t + rad), b - rad)
-    return (x - cx) ** 2 + (y - cy) ** 2 <= rad * rad
+def sd_rounded_box(px: float, py: float, half: float, rad: float) -> float:
+    """居中圆角方块的带符号距离（负=在内）。"""
+    qx = abs(px) - (half - rad)
+    qy = abs(py) - (half - rad)
+    return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - rad
 
 
-def gradient(t: float) -> tuple[int, int, int]:
-    for (t0, c0), (t1, c1) in zip(GRADIENT_STOPS, GRADIENT_STOPS[1:]):
-        if t <= t1:
-            k = (t - t0) / (t1 - t0)
-            return tuple(round(a + (b - a) * k) for a, b in zip(c0, c1))
-    return GRADIENT_STOPS[-1][1]
+def coverage(dist: float) -> float:
+    """把 1px 边缘按距离折成覆盖率，1024 原尺寸下也不出现锯齿硬边。"""
+    return max(0.0, min(1.0, 0.5 - dist))
 
 
 def base_pixel(x: int, y: int) -> tuple[int, int, int, int]:
-    """1024 底图：渐变 squircle + 顶部光泽 + 柔和投影 + 白色机器人脸。"""
-    m, rad = 64, 224
-    if not in_rounded_rect(x, y, m, m, BASE - m, BASE - m, rad):
+    """1024 底图：白底圆角方块 + 中心黑点，四角透明。"""
+    px = x + 0.5 - BASE / 2
+    py = y + 0.5 - BASE / 2
+    half = PLATE / 2
+    dp = sd_rounded_box(px, py, half, PLATE_RADIUS)
+    alpha = coverage(dp)
+    if alpha <= 0:
         return (0, 0, 0, 0)
-    c = gradient((x + y) / (2 * BASE))
-
-    # 顶部光泽：自上而下淡出的高光，让底色有玻璃感
-    sheen = max(0.0, 1.0 - y / 460) * 0.10
-    c = tuple(round(v + (255 - v) * sheen) for v in c)
-
-    # 脸下方的柔和投影（高斯衰减椭圆），把主体从背景上"托"起来
-    sd = ((x - 512) / 252) ** 2 + ((y - 776) / 54) ** 2
-    if sd < 4.0:
-        a = 78 * math.exp(-1.5 * sd) / 255
-        c = tuple(round(v * (1 - a) + 40 * a) for v in c)
-
-    # 五官先于头部判断（深色画在白色脸底之上）
-    # 眼睛（竖椭圆，友好感）
-    for cx in (420, 604):
-        if ((x - cx) / 38) ** 2 + ((y - 500) / 56) ** 2 <= 1.0:
-            return (*INK, 255)
-    # 微笑
-    if in_rounded_rect(x, y, 482, 578, 542, 598, 10):
-        return (*INK, 255)
-    # 天线球（深色点缀）
-    if (x - 512) ** 2 + (y - 236) ** 2 <= 34 ** 2:
-        return (*INK, 255)
-    # 天线杆（连接球与头顶）
-    if in_rounded_rect(x, y, 492, 256, 532, 360, 16):
-        return (*WHITE, 255)
-    # 两侧耳罩（探出头侧，保持轮廓可见）
-    if in_rounded_rect(x, y, 248, 440, 304, 560, 26) or in_rounded_rect(x, y, 720, 440, 776, 560, 26):
-        return (*WHITE, 255)
-    # 头部
-    if in_rounded_rect(x, y, 296, 336, 728, 664, 108):
-        return (*WHITE, 255)
-    return (*c, 255)
+    # 底板色：最外缘 3px 混入发丝边（纯白块在浅色桌面上会糊掉），往里立刻回到白
+    d_in = -dp
+    t = max(0.0, min(1.0, 1.0 - d_in / 3.0))
+    rgb = [round(p + (e - p) * t) for p, e in zip(PLATE_FILL, PLATE_EDGE)]
+    # 中心黑点
+    ac = coverage(math.hypot(px, py) - DOT_R)
+    rgb = [round(c + (d - c) * ac) for c, d in zip(rgb, DOT_FILL)]
+    return (*rgb, round(alpha * 255))
 
 
 def render_base() -> bytes:

@@ -844,7 +844,7 @@ async function clearContext() {
     <div ref="scroller" id="chatScroller">
       <!-- 欢迎态（空会话） -->
       <div v-if="welcome" class="welcome">
-        <div class="welcome-logo">五</div>
+        <div class="brand-mark welcome-logo"></div>
         <h3 class="welcome-title" ref="titleEl">你好，我是小五</h3>
         <p class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
         <div class="welcome-suggests">

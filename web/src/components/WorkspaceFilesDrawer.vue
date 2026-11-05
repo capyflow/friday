@@ -55,6 +55,9 @@ const currentFile = ref('')
 const revertArm = ref(false)
 const reverting = ref(false)
 let revertTimer = null
+// changeGen：抽屉是页面级单例，切会话/切项目时组件不重建。改动详情按 turn 单拉，
+// 慢回包必须能被后一次拉取作废，否则上一项目的 diff 会盖到当前面板上。
+let changeGen = 0
 
 const mem = reactive({ pages: [], loading: false, error: '', saved: '', editing: null,
   draft: { id: '', title: '', body: '' }, saving: false, confirmDelete: '' })
@@ -312,6 +315,7 @@ function openMemory(draft = {}) {
 function close() {
   openState.value = false
   revertArm.value = false
+  resetChangesCache()
   stopCheckPolling()
   if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus()
 }
@@ -489,11 +493,17 @@ async function loadPreview(e) {
 async function loadChanges(turnId) {
   const th = props.thread
   if (!th) return
+  const gen = ++changeGen
   changeError.value = ''
   changeLoading.value = true
   revertArm.value = false
   try {
-    const id = turnId || activeTurnId.value || changeTurns.value[0]?.turnId || ''
+    // 显式指定哪一轮（时间线「本轮改动 N 个文件」）就照那一轮拉；没指定时只认
+    // 当前会话里真实存在的轮次——缓存的 activeTurnId 可能属于上一个项目/上一会话，
+    // 或已被刚跑完的新一轮顶掉，这时一律落到最近一轮。
+    const ids = changeTurns.value.map(c => c.turnId)
+    const remembered = ids.includes(activeTurnId.value) ? activeTurnId.value : ''
+    const id = turnId || remembered || ids[0] || ''
     if (!id) {
       changeDetail.value = null
       activeTurnId.value = ''
@@ -502,16 +512,30 @@ async function loadChanges(turnId) {
     }
     activeTurnId.value = id
     const r = await api('GET', `/api/acp/threads/${th.id}/changes?turn=${encodeURIComponent(id)}`)
+    if (gen !== changeGen) return
     changeDetail.value = r.changes || null
     const files = changeDetail.value?.files || []
     const first = files.find(f => !f.binary && f.diff) || files[0]
     currentFile.value = first?.path || ''
   } catch (e) {
+    if (gen !== changeGen) return
     changeDetail.value = null
     changeError.value = e.message || String(e)
   } finally {
-    changeLoading.value = false
+    if (gen === changeGen) changeLoading.value = false
   }
+}
+
+// 本轮改动的面板态属于「当前这条会话的当前这次打开」：切会话/切项目、以及关抽屉
+// 都要清掉，否则重开时 switchTab 会以为缓存还有效，把上一个项目的文件列表留在屏上。
+function resetChangesCache() {
+  changeGen++
+  changeDetail.value = null
+  activeTurnId.value = ''
+  currentFile.value = ''
+  changeError.value = ''
+  changeLoading.value = false
+  revertArm.value = false
 }
 
 // 轮次下拉直接给出选中的 turnId（不是原生 select 的 change 事件）：先记下来再按那一轮拉 diff
@@ -627,12 +651,12 @@ onUnmounted(() => {
 })
 
 watch(() => [props.thread?.id, props.workspaceId], () => {
+  // 缓存属于上一条会话/上一个项目，先无条件作废：抽屉关着时也要清，否则重开
+  // 「本轮改动」还会看到上个项目那一轮的文件。
+  resetChangesCache()
   if (!openState.value) return
   if (!props.thread) { close(); return }
   resetTree()
-  changeDetail.value = null
-  activeTurnId.value = ''
-  currentFile.value = ''
   mem.editing = null
   mem.saved = ''
   if (tab.value === 'changes') loadChanges('')

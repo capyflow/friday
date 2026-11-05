@@ -288,3 +288,42 @@ func TestTurnSnapshotCopyFlagsOversizedFiles(t *testing.T) {
 		t.Fatalf("超限文件应拒绝还原并点名: %v", err)
 	}
 }
+
+// Friday 自己的 .friday 目录（会话记录等）不算 agent 的改动：非 git 项目没有
+// .gitignore 可依赖，快照必须整个跳过它，否则会被备份、还会报进「本轮改动」。
+func TestSnapshotSkipsFridayOwnDir(t *testing.T) {
+	dir := t.TempDir()
+	recordDir := filepath.Join(dir, sessionDirRel)
+	if err := os.MkdirAll(recordDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recordDir, "t1.md"), []byte("旧摘要\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := beginTurnSnapshot(dir, filepath.Join(t.TempDir(), "snaps"), "th1", "t1")
+	if err != nil {
+		t.Fatalf("快照失败: %v", err)
+	}
+	// agent 真的改了工作区文件，同时改了 .friday 里的东西
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recordDir, "t1.md"), []byte("新摘要\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := snap.Finish()
+	var got []string
+	for _, f := range ch.Files {
+		got = append(got, f.Path)
+	}
+	joined := strings.Join(got, ",")
+	if strings.Contains(joined, ".friday") {
+		t.Errorf("Friday 自己的目录被当成 agent 改动: %s", joined)
+	}
+	if !strings.Contains(joined, "a.txt") {
+		t.Errorf("真实改动不该被漏掉: %s", joined)
+	}
+}

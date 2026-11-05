@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/notification"
 	"github.com/capyflow/friday/internal/task"
 	"github.com/capyflow/friday/internal/todo"
@@ -321,4 +323,46 @@ func jsonGet(t *testing.T, data []byte, path ...string) string {
 		}
 	}
 	return ""
+}
+
+// TestApprovalQuestionDecideHTTP 问答卡走同一条审批接口，但用 {"choose"} 回答：
+// 列表要带出 kind/options（前端据此换卡片形状），乱填的选项要 400 且卡片仍在。
+func TestApprovalQuestionDecideHTTP(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	s.approver = approval.New("confirm", nil, time.Minute)
+	handler := s.Handler() // 审批路由按 approver 是否装配来挂，取 handler 前要先生好
+	card := s.approver.RequestCard(approval.Card{
+		Tool: "智能体提问", Summary: "范围怎么定？", Kind: approval.KindQuestion,
+		Options: []approval.Option{{ID: "opt_a", Name: "方案 A", Kind: "allow_once"}},
+		Questions: []approval.QuestionGroup{{Header: "范围", Question: "范围怎么定？",
+			Options: []approval.QuestionOption{{Label: "方案 A", Description: "只拦新上传"}}}},
+	}, 0)
+
+	r := setupTestRequest(handler, "GET", "/api/approvals", nil, "127.0.0.1:1234", "localhost", "", token)
+	if r.Code != http.StatusOK {
+		t.Fatalf("列表失败: %d %s", r.Code, r.Body)
+	}
+	for _, want := range []string{`"kind":"question"`, `"opt_a"`, `只拦新上传`} {
+		if !bytes.Contains(r.Body.Bytes(), []byte(want)) {
+			t.Errorf("列表缺少 %s: %s", want, r.Body)
+		}
+	}
+
+	path := "/api/approvals/" + strconv.FormatInt(card.ID(), 10)
+	r = setupTestRequest(handler, "POST", path, []byte(`{"choose":"nope"}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code == http.StatusOK {
+		t.Fatalf("不存在的选项不该被接受: %s", r.Body)
+	}
+	if !bytes.Contains(r.Body.Bytes(), []byte("这张卡没有这个选项")) {
+		t.Errorf("失效原因要说得清: %s", r.Body)
+	}
+
+	r = setupTestRequest(handler, "POST", path, []byte(`{"choose":"opt_a"}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code != http.StatusOK {
+		t.Fatalf("作答失败: %d %s", r.Code, r.Body)
+	}
+	out, err := card.WaitDecision()
+	if err != nil || out.OptionID != "opt_a" {
+		t.Fatalf("应取回选中的选项: %+v %v", out, err)
+	}
 }

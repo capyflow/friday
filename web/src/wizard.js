@@ -86,7 +86,7 @@ const app = createApp({
   template: `
   <div id="authView">
     <section class="auth-box setup-box">
-      <div class="auth-logo">五</div>
+      <div class="brand-mark auth-logo"></div>
 
       <template v-if="step === 'loading'">
         <h1>正在准备初始设置…</h1>

@@ -158,7 +158,7 @@ if [ "$OS" = "Darwin" ]; then
   echo "     或看数据目录日志的新行：grep '\\[启动\\] Friday' ~/Library/Application\\ Support/Friday/friday-kernel.log | tail -1"
   echo "     （Info.plist 的版本串只在显式 --version 时才跟着变，别拿它判断新旧）"
   if [ -n "$DMG_FOUND" ]; then
-    echo "  分发/归档用 dmg：$DMG_FOUND（内容与上面的 .app 逐文件相同，只多一个 Applications 快捷方式）"
+    echo "  分发/归档用 dmg：${DMG_FOUND}（内容与上面的 .app 逐文件相同，只多一个 Applications 快捷方式）"
   else
     echo "  本次只出了 .app（--bundles app）：分发时要 dmg 就补一句 --bundles dmg"
   fi

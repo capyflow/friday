@@ -110,6 +110,7 @@ type fakeAgent struct {
 	modelDefault string
 	newReq       map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
 	loadReq      map[string]any // 最近一次 session/load 的 params
+	permReplies  []string       // client 对权限请求的回包原文（查 selected 的 optionId）
 
 	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
@@ -120,6 +121,16 @@ func (f *fakeAgent) recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.methods...)
+}
+
+// permReply 返回最近一次权限请求的回包原文（client → agent 的 result）。
+func (f *fakeAgent) permReply() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.permReplies) == 0 {
+		return ""
+	}
+	return f.permReplies[len(f.permReplies)-1]
 }
 
 // resetOptions 在 resetOnSession 时把选项打回初始默认；另外首次调用时记下默认值。
@@ -246,7 +257,11 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			return
 		}
 		if len(msg.ID) > 0 && msg.Method == "" {
-			continue // client 对我们请求的响应（权限答复等），不需要处理
+			// client 对我们请求的响应：权限答复要能断言（问答卡回的是 optionId）
+			f.mu.Lock()
+			f.permReplies = append(f.permReplies, string(msg.Result))
+			f.mu.Unlock()
+			continue
 		}
 		f.mu.Lock()
 		f.methods = append(f.methods, msg.Method)
@@ -423,19 +438,30 @@ func defaultScript(fc *fakeConn, sid string) string {
 
 // sendPermissionRequest 由脚本调用：向 client 发一次权限请求并等它被处理。
 func (fc *fakeConn) sendPermissionRequest(sid, title string) {
+	fc.w.send(permissionRequest(fc, sid, title, []any{
+		map[string]any{"optionId": "allow", "kind": "allow_once", "name": "允许"},
+		map[string]any{"optionId": "reject", "kind": "reject_once", "name": "拒绝"},
+	}, map[string]any{"command": "执行 " + title}))
+}
+
+// sendQuestionRequest 模拟 agent 借权限通道问用户（zcode 的 AskUserQuestion 形状）：
+// 选项是答案本身，rawInput 带 questions 正文。
+func (fc *fakeConn) sendQuestionRequest(sid, title string, options []any, rawInput map[string]any) {
+	fc.w.send(permissionRequest(fc, sid, title, options, rawInput))
+}
+
+func permissionRequest(fc *fakeConn, sid, title string, options []any, rawInput map[string]any) map[string]any {
 	fc.w.mu.Lock()
 	fc.w.seq++
 	reqID, _ := json.Marshal(fc.w.seq)
 	fc.w.mu.Unlock()
-	fc.w.send(map[string]any{"jsonrpc": "2.0", "id": reqID,
+	return map[string]any{"jsonrpc": "2.0", "id": reqID,
 		"method": "session/request_permission", "params": map[string]any{
 			"sessionId": sid,
-			"options": []any{
-				map[string]any{"optionId": "allow", "kind": "allow_once", "name": "允许"},
-				map[string]any{"optionId": "reject", "kind": "reject_once", "name": "拒绝"},
-			},
-			"toolCall": map[string]any{"toolCallId": "t9", "title": title, "kind": "execute"},
-		}})
+			"options":   options,
+			"toolCall": map[string]any{"toolCallId": "t9", "title": title,
+				"kind": "execute", "rawInput": rawInput},
+		}}
 }
 
 // ---------- 测试装配 ----------
@@ -1895,7 +1921,7 @@ func TestHandoffCreatesContinuationThread(t *testing.T) {
 		t.Fatalf("首轮失败: %v", err)
 	}
 
-	nt, err := m.Handoff(th.ID)
+	nt, err := m.Handoff(th.ID, "")
 	if err != nil {
 		t.Fatalf("交接失败: %v", err)
 	}
@@ -1936,7 +1962,7 @@ func TestHandoffCreatesContinuationThread(t *testing.T) {
 func TestHandoffRejectsEmptyThread(t *testing.T) {
 	m := newTestManager(t, nil, nil, &fakeAgent{promptScript: defaultScript})
 	th := mustThread(t, m)
-	if _, err := m.Handoff(th.ID); err == nil {
+	if _, err := m.Handoff(th.ID, ""); err == nil {
 		t.Fatal("空会话不应允许交接")
 	}
 }
@@ -2385,5 +2411,362 @@ func TestSilenceWatchdogStaysQuietWhenAgentTalks(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(statuses(), "\n"), "没有任何回音") {
 		t.Fatalf("有产出就不该报静默: %v", statuses())
+	}
+}
+
+// ---------- 系统提示桥（审批待处理 / 一轮结束） ----------
+
+// noticeLog 收集 notifier 投递的 key+text，供断言。
+type noticeLog struct {
+	mu    sync.Mutex
+	keys  []string
+	texts []string
+}
+
+func (n *noticeLog) fn() func(key, text string) {
+	return func(key, text string) {
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		n.keys = append(n.keys, key)
+		n.texts = append(n.texts, text)
+	}
+}
+
+// find 返回第一条正文含 substr 的 key。
+func (n *noticeLog) find(substr string) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, t := range n.texts {
+		if strings.Contains(t, substr) {
+			return n.keys[i], true
+		}
+	}
+	return "", false
+}
+
+// body 按 key 取正文（找不到返回空串）。
+func (n *noticeLog) body(key string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, k := range n.keys {
+		if k == key {
+			return n.texts[i]
+		}
+	}
+	return ""
+}
+
+func (n *noticeLog) count() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.keys)
+}
+
+// TestNoticeOnApprovalAndTurnEnd 人在别的窗口时，这两件事必须各弹一次：
+// 审批卡入队（带卡片编号做身份）、一轮结束（带轮 id 做身份）。
+func TestNoticeOnApprovalAndTurnEnd(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.sendPermissionRequest(sid, "写 a.go")
+		f.permSent <- struct{}{}
+		time.Sleep(300 * time.Millisecond) // 等测试 goroutine 点批准
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+	notices := &noticeLog{}
+	m.SetNotifier(notices.fn())
+
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "审批入队", func() bool { return len(approver.Pending()) == 1 })
+		approver.Decide(approver.Pending()[0].ID, true)
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "改一下 a.go", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	key, ok := notices.find("在等你批准")
+	if !ok {
+		t.Fatalf("审批卡入队应投一条提示: %+v", notices.texts)
+	}
+	if _, ok := notices.find("在等你批准"); !ok {
+		t.Fatalf("审批卡入队应投一条提示: %+v", notices.texts)
+	}
+	if !strings.HasPrefix(key, "acp:"+th.ID+":approval:") {
+		t.Errorf("审批提示的 key 应带会话与卡片身份，实际 %q", key)
+	}
+	if body := notices.body(key); !strings.Contains(body, "写 a.go") {
+		t.Errorf("提示正文应带上要批准的操作摘要，实际 %q", body)
+	}
+
+	doneKey, ok := notices.find("这一轮跑完了")
+	if !ok {
+		t.Fatalf("轮末应投一条提示: %+v", notices.texts)
+	}
+	if !strings.HasPrefix(doneKey, "acp:"+th.ID+":t") || !strings.HasSuffix(doneKey, ":done") {
+		t.Errorf("轮末提示的 key 应绑定这一轮，实际 %q", doneKey)
+	}
+	if got := notices.count(); got != 2 {
+		t.Errorf("应只有审批+轮末两条，实际 %d 条: %+v", got, notices.texts)
+	}
+}
+
+// TestNoticeSkippedWhenUserStops 「停止」是人自己按的，他就在页面上，别再弹一条。
+func TestNoticeSkippedWhenUserStops(t *testing.T) {
+	f := &fakeAgent{}
+	f.cancelSeen = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("开头…")}))
+		<-f.cancelSeen
+		return "cancelled"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	notices := &noticeLog{}
+	m.SetNotifier(notices.fn())
+
+	done := make(chan TurnResult, 1)
+	go func() {
+		res, err := m.Send(context.Background(), th.ID, "长任务", nil, TurnHooks{})
+		if err != nil {
+			t.Errorf("取消不应算失败: %v", err)
+		}
+		done <- res
+	}()
+	waitFor(t, 2*time.Second, "turn 已进入可停止状态", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		lv := m.live[th.ID]
+		// turnDone 挂上才算"这一轮在跑"：在那之前 Stop 只会发取消、不会记 stopping，
+		// 收尾就按连接断开结算（用例要验的是"用户按停止"那条路）。
+		return lv != nil && lv.turnDone != nil
+	})
+	if !m.Stop(th.ID) {
+		t.Fatal("Stop 应成功发出取消")
+	}
+	res := <-done
+	if res.StopReason != "cancelled" {
+		t.Fatalf("应为 cancelled: %+v", res)
+	}
+	if _, ok := notices.find("这一轮"); ok {
+		t.Errorf("用户主动停止不该投系统提示: %+v", notices.texts)
+	}
+}
+
+// TestNoticeOnClientDisconnect 页面关闭/连接断掉这一类收尾要提示，并把已经改动的
+// 文件数带上——人回来时得知道盘上已经动了什么、结果没回到哪一条会话。
+func TestNoticeOnClientDisconnect(t *testing.T) {
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("跑一会儿…")}))
+		time.Sleep(2 * time.Second)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	notices := &noticeLog{}
+	m.SetNotifier(notices.fn())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = m.Send(ctx, th.ID, "别跑完", nil, TurnHooks{})
+	}()
+	waitFor(t, 2*time.Second, "turn 启动", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.live[th.ID] != nil
+	})
+	cancel() // 客户端断开（不是用户按停止）
+	<-done
+
+	key, ok := notices.find("这一轮没跑完")
+	if !ok {
+		t.Fatalf("断开收尾应投一条提示: %+v", notices.texts)
+	}
+	if !strings.HasPrefix(key, "acp:"+th.ID+":t") || !strings.HasSuffix(key, ":done") {
+		t.Errorf("提示 key 应绑定这一轮，实际 %q", key)
+	}
+}
+
+// ---------- 问答卡（agent 借权限通道问用户） ----------
+
+// questionOptions 是 zcode AskUserQuestion 那种形状：选项就是答案。
+var questionOptions = []any{
+	map[string]any{"optionId": "opt_min", "kind": "allow_once", "name": "最小影响面"},
+	map[string]any{"optionId": "opt_full", "kind": "allow_once", "name": "全量封堵"},
+	map[string]any{"optionId": "reject", "kind": "reject_once", "name": "拒绝"},
+}
+
+var questionRawInput = map[string]any{"questions": []any{
+	map[string]any{"header": "范围", "question": "本轮修复的范围怎么定？", "multiSelect": false,
+		"options": []any{
+			map[string]any{"label": "最小影响面", "description": "只拦新上传"},
+			map[string]any{"label": "全量封堵", "description": "含存量盘点与校验"},
+		}},
+}}
+
+func TestQuestionCardShapeAndOptionReply(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.sendQuestionRequest(sid, "本轮修复的范围怎么定？", questionOptions, questionRawInput)
+		f.permSent <- struct{}{}
+		time.Sleep(400 * time.Millisecond) // 等测试 goroutine 选项作答
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "问答卡入队", func() bool { return len(approver.Pending()) == 1 })
+		it := approver.Pending()[0]
+		if it.Kind != approval.KindQuestion {
+			t.Errorf("这类请求应入队成问答卡，实际 kind=%q", it.Kind)
+		}
+		if len(it.Options) != 3 {
+			t.Errorf("按钮应是 agent 给的 3 个选项，实际 %+v", it.Options)
+		}
+		if len(it.Questions) != 1 || it.Questions[0].Header != "范围" ||
+			len(it.Questions[0].Options) != 2 {
+			t.Errorf("问题正文应结构化（含 header 与每项说明），实际 %+v", it.Questions)
+		}
+		if strings.Contains(it.Detail, "{") {
+			t.Errorf("卡片正文不该是 JSON 原文: %q", it.Detail)
+		}
+		if !approver.DecideOption(it.ID, "opt_full") {
+			t.Error("按 optionId 作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "定个范围", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	reply := f.permReply()
+	if !strings.Contains(reply, `"optionId":"opt_full"`) {
+		t.Fatalf("应把选中的 optionId 原样回给 agent，实际 %s", reply)
+	}
+}
+
+// 没答（本轮先结束、卡被撤）时回 cancelled，不替用户挑一条——agent 那边那三条
+// 选项的含义只有它自己知道，随便选一条等于编答案。
+func TestQuestionCardUnansweredRepliesCancelled(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.sendQuestionRequest(sid, "这个怎么处理？", questionOptions, questionRawInput)
+		time.Sleep(150 * time.Millisecond) // 等人作答前本轮先收尾（撤卡路径）
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	if _, err := m.Send(context.Background(), th.ID, "快点结束", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(t, 2*time.Second, "权限答复已发出", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.permReplies) > 0
+	})
+	if !strings.Contains(f.permReply(), "cancelled") {
+		t.Fatalf("未回答应回 cancelled，实际 %s", f.permReply())
+	}
+	if len(approver.Pending()) != 0 {
+		t.Error("问答卡也应随本轮结束被撤下")
+	}
+}
+
+// 真的授权请求（只有规范 allow/reject 选项、正文是命令）不得被误判成问答卡，
+// 否则普通授权会变成一堆按钮。
+func TestPlainPermissionStaysApprovalCard(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.sendPermissionRequest(sid, "执行 rm -rf ./tmp")
+		f.permSent <- struct{}{}
+		time.Sleep(400 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-f.permSent
+		waitFor(t, 2*time.Second, "授权卡入队", func() bool { return len(approver.Pending()) == 1 })
+		it := approver.Pending()[0]
+		if it.Kind != "" {
+			t.Errorf("普通授权不该带 kind=%q", it.Kind)
+		}
+		if len(it.Options) != 0 {
+			t.Errorf("授权卡不该带选项按钮，实际 %+v", it.Options)
+		}
+		approver.Decide(it.ID, true)
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "清理临时目录", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-done
+}
+
+// TestHandoffTargetAgent 交接可以换 agent：摘要只是文本，跨 agent 带得动；
+// 模型/审批档位的取值各家不同，换人时不搬（同 agent 才沿用）。
+func TestHandoffTargetAgent(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Agents = append(cfg.Agents, config.AcpAgentConfig{Name: "other", Command: "other-bin"})
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, &cfg, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "先看下这个项目", nil, TurnHooks{}); err != nil {
+		t.Fatalf("首轮失败: %v", err)
+	}
+	m.mu.Lock()
+	m.threads[th.ID].CapChoices = map[string]string{"model": "m-a"}
+	m.mu.Unlock()
+
+	// 留空 = 交给原来那台，选择照搬
+	same, err := m.Handoff(th.ID, "")
+	if err != nil {
+		t.Fatalf("同 agent 交接失败: %v", err)
+	}
+	if same.Agent != th.Agent || same.CapChoices["model"] != "m-a" {
+		t.Fatalf("同 agent 应沿用选择: %+v", same)
+	}
+
+	// 换 agent：摘要带过去，选择不带，note 说清交给谁
+	got, err := m.Handoff(th.ID, " other ")
+	if err != nil {
+		t.Fatalf("换 agent 交接失败: %v", err)
+	}
+	if got.Agent != "other" || got.Cwd != th.Cwd || got.WorkspaceID != th.WorkspaceID {
+		t.Fatalf("续会话应换 agent、留同一主目录: old=%+v new=%+v", th, got)
+	}
+	if _, ok := got.CapChoices["model"]; ok {
+		t.Errorf("换 agent 不该搬模型选择: %+v", got.CapChoices)
+	}
+	if !strings.Contains(got.Handoff, "先看下这个项目") {
+		t.Errorf("摘要应照样带过去: %q", got.Handoff)
+	}
+	if len(got.Messages) != 1 || !strings.Contains(got.Messages[0].Text, "上一个由 fake 跑，这次交给 other") {
+		t.Errorf("交接说明要说清换了 agent: %+v", got.Messages)
+	}
+
+	if _, err := m.Handoff(th.ID, "ghost"); err == nil ||
+		!strings.Contains(err.Error(), "没有叫") {
+		t.Fatalf("未知 agent 要给可读原因，实际 %v", err)
 	}
 }

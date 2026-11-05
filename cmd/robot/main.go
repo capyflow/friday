@@ -458,6 +458,14 @@ func main() {
 	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
 	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp }, approver, "acp-threads.json")
 	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
+	// 系统提示桥：审批卡入队、一轮结束这两个时刻，人通常已经切到别的窗口，
+	// 页面里的卡片和气泡等于没发生。走通知中心的 PostOnce（按 key 幂等，同一
+	// 事件不重复打扰），桌面弹原生通知、浏览器走网页通知，内容都留在通知中心。
+	acpMgr.SetNotifier(func(key, text string) {
+		if _, err := notices.PostOnce(key, text, nil); err != nil {
+			log.Printf("[智能体] 系统提示未落档: %v", err)
+		}
+	})
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
 		log.Printf("[智能体] 已启用（%d 个 agent，并发 %d，空闲 %ds 回收）",

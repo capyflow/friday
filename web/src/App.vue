@@ -152,7 +152,7 @@ async function logout() {
 
   <div v-else id="app" :class="{ 'focus-mode': store.fullscreen }">
     <aside id="sidebar">
-      <div class="brand" data-tauri-drag-region><div class="avatar">五</div><b>小五</b></div>
+      <div class="brand" data-tauri-drag-region><span class="brand-mark"></span><b>小五</b></div>
       <nav id="nav" aria-label="主导航">
         <button v-for="n in NAV" :key="n.id" class="nav-item" :class="{ active: store.view === n.id }"
                 :data-view="n.id" @click="store.view = n.id">

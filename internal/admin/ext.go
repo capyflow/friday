@@ -352,15 +352,17 @@ func (s *Server) handleListApprovals(ctx *vhttp.Context) error {
 }
 
 // handleDecideApproval 审批一条待处理操作：body {"approve": true|false,
-// "remember": true|false}。remember=true 为"批准并记住"——本进程内相同工具
-// 与参数的后续调用免审批（权限层 Remember 语义），拒绝时忽略该字段。
+// "remember": true|false}，或问答卡专用的 {"choose": "<optionId>"}（必须是这张
+// 卡列出的选项）。remember=true 为"批准并记住"——本进程内相同工具与参数的后续
+// 调用免审批（权限层 Remember 语义），拒绝时忽略该字段。
 func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	if s.approver == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "审批机制未启用"})
 	}
 	var req struct {
-		Approve  bool `json:"approve"`
-		Remember bool `json:"remember"`
+		Approve  bool   `json:"approve"`
+		Remember bool   `json:"remember"`
+		Choose   string `json:"choose"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
@@ -369,6 +371,14 @@ func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	id, err := strconv.ParseInt(ctx.GinContext().Param("id"), 10, 64)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "非法的审批 ID"})
+	}
+	choose := strings.TrimSpace(req.Choose)
+	if choose != "" {
+		if !s.approver.DecideOption(id, choose) {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "这张卡没有这个选项，或它不是问答卡（可能已超时或已处理）"})
+		}
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已回答，agent 继续"})
 	}
 	if !s.approver.DecideWith(id, req.Approve, req.Remember) {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到待审批操作（可能已超时或已处理）"})

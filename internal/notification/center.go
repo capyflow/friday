@@ -266,12 +266,35 @@ func (c *Center) SetWebEnabled(enabled bool) { c.mu.Lock(); c.webEnabled = enabl
 // 它不复用 Enqueue 的"任务 ID + 触发时刻"去重键，也不进投递队列——工作循环
 // 只取 pending/processing，这里直接落终态，因此不会被重试逻辑反复搬运。
 // delivered 是已经推过的通道名；为空时状态记为 silent（只留档、未打扰）。
+// 与 PostOnce 的分工：手动告警每次都是新事件（键里带时刻，永不重号），且沿历史
+// 行为只进通知中心、不走桌面提示桥；需要"人不在页面上也得弹一下"的走 PostOnce。
 func (c *Center) PostManual(text string, delivered []string) (Notice, error) {
+	return c.postManual("manual:"+text+":"+time.Now().Format(time.RFC3339Nano),
+		text, delivered, false)
+}
+
+// PostOnce 记录一条有身份的手动通知：key 就是它的身份（如
+// acp:<会话>:<轮>:done），同一个 key 只落一条、只提示一次——重复触发不该再
+// 打扰用户一遍，也不该在通知中心堆出两条一样的。
+//
+// 它同时走桌面提示桥（装配了才发）：调用方是智能体这类"用户在别的窗口干活，
+// 这一下得把他叫回来"的场景。发完不标失败重试：桥失败只说明系统通知没开或
+// 外壳拒绝，内容仍在通知中心。
+func (c *Center) PostOnce(key, text string, delivered []string) (Notice, error) {
+	if strings.TrimSpace(key) == "" {
+		return Notice{}, fmt.Errorf("通知标识为空")
+	}
+	return c.postManual("once:"+key, text, delivered, true)
+}
+
+// postManual 是两条手动通知的共同落档路径。pushDesktop 决定是否走桌面提示桥；
+// 已存在同键通知就直接返回既有记录，不再提示第二次。
+func (c *Center) postManual(key, text string, delivered []string, pushDesktop bool) (Notice, error) {
 	if strings.TrimSpace(text) == "" {
 		return Notice{}, fmt.Errorf("通知正文为空")
 	}
 	now := time.Now()
-	sum := sha256.Sum256([]byte("manual:" + text + ":" + now.Format(time.RFC3339Nano)))
+	sum := sha256.Sum256([]byte(key))
 	status := "silent"
 	if len(delivered) > 0 {
 		status = "delivered"
@@ -287,9 +310,22 @@ func (c *Center) PostManual(text string, delivered []string) (Notice, error) {
 		Push:        true,
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if pushDesktop {
+		if existing, ok := c.notices[n.ID]; ok {
+			c.mu.Unlock()
+			return existing, nil
+		}
+	}
 	if err := c.putLocked(n); err != nil {
+		c.mu.Unlock()
 		return Notice{}, err
+	}
+	desktopDispatch := c.desktopDispatch
+	c.mu.Unlock()
+	if pushDesktop && desktopDispatch != nil {
+		if err := desktopDispatch(n); err != nil {
+			log.Printf("[通知] 桌面提示转交失败，内容保留在通知中心: %v", err)
+		}
 	}
 	return n, nil
 }

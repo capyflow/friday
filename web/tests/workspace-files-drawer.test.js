@@ -70,3 +70,128 @@ describe('文件抽屉 · 本轮改动', () => {
     expect(w.get('.wfd-turn-label').text()).toContain('最近一轮 · 2 个文件')
   })
 })
+
+// 抽屉是挂在页面-level 的单例（WorkspaceView 只渲染一个 ref），切项目/切会话时
+// 组件不重建，只换 props。以下三条守的是「本轮改动」面板跟着当前会话走：
+// 关着抽屉换会话/跑新一轮时，缓存必须作废，不能把上一个项目的文件列表留在屏上。
+const threadB = { id: 'thB', workspaceId: 'wsB', agent: 'codex', cwd: '/home/u/other' }
+const messagesB = [
+  { role: 'bot', text: 'B 项目的一轮', changes: { turnId: 'tB1', at: '2026-11-04T09:00:00Z',
+    files: [{ path: 'other.go', status: 'M', diff: '@@ -1 +1 @@\n-old\n+new' }] } },
+]
+
+// changesFor：按「会话 id + 轮 id」回包，故意让 A/B 两个项目的文件不重名，
+// 这样面板里出现哪个名字就说明它读的是哪个项目。
+function changesFor(method, url) {
+  if (url.includes('/files')) return { path: '', entries: [] }
+  const m = url.match(/threads\/([^/]+)\/changes\?turn=(.*)$/)
+  if (!m) return {}
+  const [, th, turn] = m
+  const src = th === 'thB' ? messagesB[0].changes
+    : (turn === 't1' ? messages[0].changes : messages[1].changes)
+  return { changes: { ...src, turnId: turn || src.turnId, snapshot: true, files: src.files } }
+}
+
+async function openChangesTab(w) {
+  await w.findAll('.wfd-tabs button').find(b => b.text().includes('本轮改动')).trigger('click')
+  await flushPromises()
+}
+
+describe('文件抽屉 · 切项目/切会话', () => {
+  beforeEach(() => {
+    api.mockReset()
+    api.mockImplementation(async (method, url) => changesFor(method, url))
+  })
+
+  it('关着抽屉换到另一个项目的会话，重开后本轮改动是新项目的', async () => {
+    const w = mount(WorkspaceFilesDrawer, {
+      props: { thread, messages, workspaceId: 'ws1' },
+      global: { stubs: { teleport: true } },
+    })
+    w.vm.open('changes')
+    await flushPromises()
+    expect(w.text()).toContain('b.go')
+    w.vm.close()
+
+    await w.setProps({ thread: threadB, messages: messagesB, workspaceId: 'wsB' })
+    api.mockClear()
+    w.vm.open('files') // 会话头部的「工作区文件」按钮：默认落在文件 tab
+    await flushPromises()
+    await openChangesTab(w)
+
+    expect(api).toHaveBeenCalledWith('GET', '/api/acp/threads/thB/changes?turn=tB1')
+    expect(w.text()).toContain('other.go')
+    expect(w.text()).not.toContain('b.go')
+  })
+
+  it('同一项目里换会话，也不会沿用上一条会话那一轮的改动', async () => {
+    const w = mount(WorkspaceFilesDrawer, {
+      props: { thread, messages, workspaceId: 'ws1' },
+      global: { stubs: { teleport: true } },
+    })
+    w.vm.open('changes')
+    await flushPromises()
+    w.vm.close()
+
+    // 同 cwd、不同会话 id，且那条会话只跑过一轮（t1）
+    const threadSame = { ...thread, id: 'thSame' }
+    await w.setProps({ thread: threadSame, messages: [messages[0]] })
+    api.mockClear()
+    w.vm.open('files')
+    await flushPromises()
+    await openChangesTab(w)
+
+    expect(api).toHaveBeenCalledWith('GET', '/api/acp/threads/thSame/changes?turn=t1')
+    expect(w.text()).toContain('a.go')
+    expect(w.text()).not.toContain('b.go')
+  })
+
+  it('关着抽屉又跑完一轮，重开后落在最近一轮而不是缓存那轮', async () => {
+    const w = mount(WorkspaceFilesDrawer, {
+      props: { thread, messages: [messages[0]], workspaceId: 'ws1' },
+      global: { stubs: { teleport: true } },
+    })
+    w.vm.open('changes')
+    await flushPromises()
+    expect(w.text()).toContain('a.go')
+    w.vm.close()
+
+    await w.setProps({ messages }) // 本轮结束后投影里多了 t2
+    api.mockClear()
+    w.vm.open('files')
+    await flushPromises()
+    await openChangesTab(w)
+
+    expect(api).toHaveBeenCalledWith('GET', '/api/acp/threads/th1/changes?turn=t2')
+    expect(w.text()).toContain('c.go')
+  })
+
+  it('切会话时上一会话的改动回包晚到也不能盖掉当前面板', async () => {
+    let release
+    const gate = new Promise(resolve => { release = resolve })
+    api.mockImplementation(async (method, url) => {
+      if (url.includes('/threads/th1/changes')) {
+        await gate
+        return changesFor(method, url)
+      }
+      return changesFor(method, url)
+    })
+    const w = mount(WorkspaceFilesDrawer, {
+      props: { thread, messages, workspaceId: 'ws1' },
+      global: { stubs: { teleport: true } },
+    })
+    w.vm.open('changes') // A 会话的这一请求故意不返回
+    await flushPromises()
+
+    // 抽屉开着就切到 B 会话：watcher 立刻按 B 重拉，B 先回包
+    await w.setProps({ thread: threadB, messages: messagesB, workspaceId: 'wsB' })
+    await flushPromises()
+    expect(w.text()).toContain('other.go')
+
+    // 此时 A 的迟到回包才落地，不能把面板改回 A 项目的文件
+    release()
+    await flushPromises()
+    expect(w.text()).toContain('other.go')
+    expect(w.text()).not.toContain('b.go')
+  })
+})

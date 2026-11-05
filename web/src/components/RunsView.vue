@@ -75,6 +75,12 @@ function decideApproval(a, approve) {
     approve ? '已批准' : '已拒绝')
 }
 
+// answerApproval 回答问答卡（agent 在问用户，不是请求授权）：回它给的 optionId。
+function answerApproval(a, optionID) {
+  act('a' + a.id, () => api('POST', '/api/approvals/' + a.id, { choose: optionID }),
+    '已回答，agent 继续')
+}
+
 function stopAcp(t) {
   if (confirmAcp.value !== t.threadId) { armOnce(confirmAcp, t.threadId); return }
   confirmAcp.value = ''
@@ -208,8 +214,14 @@ onUnmounted(() => {
               <span class="meta">{{ since(a.createdAt) }}前 · 等待你决定</span>
             </div>
             <div class="run-actions">
-              <button class="btn sm primary" type="button" :disabled="busy['a' + a.id]" @click="decideApproval(a, true)">批准</button>
-              <button class="btn sm danger" type="button" :disabled="busy['a' + a.id]" @click="decideApproval(a, false)">拒绝</button>
+              <template v-if="a.kind === 'question'">
+                <button v-for="o in a.options || []" :key="o.id" class="btn sm" type="button"
+                        :disabled="busy['a' + a.id]" @click="answerApproval(a, o.id)">{{ o.name }}</button>
+              </template>
+              <template v-else>
+                <button class="btn sm primary" type="button" :disabled="busy['a' + a.id]" @click="decideApproval(a, true)">批准</button>
+                <button class="btn sm danger" type="button" :disabled="busy['a' + a.id]" @click="decideApproval(a, false)">拒绝</button>
+              </template>
             </div>
           </article>
         </section>

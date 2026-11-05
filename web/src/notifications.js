@@ -6,6 +6,7 @@ import { getPref, setPref } from './prefs.js'
 
 export const notificationSettings = reactive({ status: '未开启', busy: false })
 let timer = null
+let syncTimer = null
 let polling = false
 let seen = new Set()
 let currentUser = ''
@@ -27,8 +28,12 @@ export async function enableSystemNotifications() {
   try {
     const invoke = desktopInvoke()
     if (invoke) {
+      notificationSettings.status = '正在请求系统授权…'
       const granted = await invoke('enable_notifications')
-      notificationSettings.status = granted ? '系统通知已开启' : '系统未授权，请使用通知中心'
+      if (granted) { notificationSettings.status = '系统通知已开启'; return }
+      // 未授权说明系统此前已经拒过（或授权框被抑制），再点也不会弹——
+      // 只能把用户送到系统设置里改，见 openSystemNotificationSettings。
+      await openSystemNotificationSettings(invoke)
       return
     }
     if (!('Notification' in window)) { notificationSettings.status = '当前浏览器不支持，请使用通知中心'; return }
@@ -39,6 +44,39 @@ export async function enableSystemNotifications() {
   } catch { notificationSettings.status = '系统通知暂不可用，请使用通知中心' }
   finally { notificationSettings.busy = false }
 }
+
+// 打开系统通知设置面板（外壳里写死的深链，前端不传 URL）。打不开就把手动
+// 路径说清楚，别让用户对着一句「系统未授权」猜下一步该做什么。
+async function openSystemNotificationSettings(invoke) {
+  try {
+    await invoke('open_notification_settings')
+    notificationSettings.status = '已打开系统通知设置，找到 Friday 允许通知'
+    watchSystemPermission(invoke)
+  } catch {
+    notificationSettings.status = '系统未授权，请在系统设置的通知里允许 Friday'
+  }
+}
+
+// 用户在系统设置里拨开关时，应用是被动方，只能回来看：每 2 秒查一次系统权限
+// （sync_notifications 只读权限、不请求授权，不会弹系统框），最多 90 秒；
+// 查到已授权就由外壳落开启位并把状态收尾。退出登录/切页会 bump lifecycle，
+// 这里靠它停掉遗留轮询。
+function watchSystemPermission(invoke) {
+  stopSync()
+  const epoch = lifecycle
+  let ticks = 0
+  syncTimer = setInterval(async () => {
+    if (lifecycle !== epoch || ++ticks > 45) { stopSync(); return }
+    let granted = false
+    try { granted = await invoke('sync_notifications') } catch { stopSync(); return }
+    if (lifecycle !== epoch) return
+    if (!granted) return
+    stopSync()
+    notificationSettings.status = '系统通知已开启'
+  }, 2000)
+}
+
+function stopSync() { if (syncTimer) clearInterval(syncTimer); syncTimer = null }
 
 export async function pollNotifications() {
   if (!store.loggedIn) { store.unread = 0; currentUser = ''; seen = new Set(); return }
@@ -85,4 +123,4 @@ export function startNotifications() {
   timer = setInterval(pollNotifications, 5000)
 }
 
-export function stopNotifications() { generation++; lifecycle++; polling = false; if (timer) clearInterval(timer); timer = null }
+export function stopNotifications() { generation++; lifecycle++; polling = false; stopSync(); if (timer) clearInterval(timer); timer = null }

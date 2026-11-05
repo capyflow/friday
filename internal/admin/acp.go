@@ -477,10 +477,19 @@ func (s *Server) handleAcpThreadChangesRevert(ctx *vhttp.Context) error {
 	})
 }
 
-// handleAcpThreadHandoff 从当前会话生成交接摘要并新开一条同工作区/agent/主目录的
-// “续”会话：POST /api/acp/threads/:id/handoff。旧会话保留，摘要随后续首轮下发。
+// handleAcpThreadHandoff 从当前会话生成交接摘要并新开一条同工作区/主目录的
+// “续”会话：POST /api/acp/threads/:id/handoff，body {"agent":"codex"}（留空或
+// 缺省 = 交给原来那台）。旧会话保留，摘要随后续首轮下发。
 func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
-	th, err := s.acp.Handoff(ctx.GinContext().Param("id"))
+	// 空 body（老前端发 {}）与非法 body 都不拦：这里只是可选的目标 agent，
+	// 拿不到就按"同 agent"走，不把它变成一次报错。
+	var req struct {
+		Agent string `json:"agent"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		req.Agent = ""
+	}
+	th, err := s.acp.Handoff(ctx.GinContext().Param("id"), strings.TrimSpace(req.Agent))
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}

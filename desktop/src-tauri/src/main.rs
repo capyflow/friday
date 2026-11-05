@@ -135,6 +135,11 @@ impl NativeNotifications {
         Ok(())
     }
 
+    /// 应用内的「用户已显式开启」位（不含系统权限）。
+    fn is_enabled(&self) -> bool {
+        !self.load_failed && self.history.lock().unwrap().enabled
+    }
+
     fn enabled<F>(&self, check_permission: F) -> Result<bool, String>
     where
         F: FnOnce() -> Result<bool, String>,
@@ -412,6 +417,81 @@ async fn notifications_enabled(
     })
     .await
     .map_err(|_| "无法查询系统通知权限".to_string())?
+}
+
+/// 系统通知设置面板的深链。macOS 上此前点过「不允许」后，系统不会再弹授权框，
+/// 应用内怎么点都改不了权限，只能把用户送到系统设置里；Ventura 起面板标识是
+/// Notifications-Settings.extension（本机 26.5 实测落到「通知」面板）。
+/// Windows 用 ms-settings；Linux 各桌面没有统一入口，返回 None 让调用方
+/// 给出手动路径，不假装成功。
+#[cfg(target_os = "macos")]
+fn notification_settings_url() -> Option<&'static str> {
+    Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+}
+#[cfg(target_os = "windows")]
+fn notification_settings_url() -> Option<&'static str> {
+    Some("ms-settings:notifications")
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn notification_settings_url() -> Option<&'static str> {
+    None
+}
+
+/// 打开系统的通知设置面板。走独立命令而不是放宽 open_url：那个命令只放行
+/// http/https，是页面内容能直接调的入口，放开协议等于给它「打开任意 URL
+/// scheme」的能力（file://、各家应用的自定义 scheme）。深链在这里是写死的
+/// 常量，不接受前端传参。
+#[tauri::command]
+#[allow(deprecated)] // 与 open_url 同一取舍：本机只缓存了 shell 插件，没有 opener
+async fn open_notification_settings(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
+    let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
+    if !trusted_notification_origin(window.label(), current.as_str(), addr.as_deref()) {
+        return Err("当前窗口不能打开系统通知设置".into());
+    }
+    let url = notification_settings_url()
+        .ok_or("当前系统没有统一的通知设置面板，请手动打开系统通知设置并允许 Friday")?;
+    let cloned = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cloned
+            .shell()
+            .open(url, None)
+            .map_err(|e| format!("打开系统通知设置失败：{e}"))
+    })
+    .await
+    .map_err(|_| "打开系统通知设置未完成".to_string())?
+}
+
+/// 用户被送到系统设置之后，前端轮询这个命令收尾：只查系统权限、不请求授权
+/// （绝不弹系统框），已授权就把应用内的显式开启位落盘，重复轮询不重复写文件。
+/// 启动时的 notifications_enabled 不走这里——那条链路要保持「显式开启 + 系统
+/// 权限」两个条件同时成立，不能在后台悄悄把开启位置成 true。
+#[tauri::command]
+async fn sync_notifications(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<bool, String> {
+    let addr = app.state::<Kernel>().addr.lock().unwrap().clone();
+    let current = window.url().map_err(|_| "无法确认当前窗口来源")?;
+    if !trusted_notification_origin(window.label(), current.as_str(), addr.as_deref()) {
+        return Err("当前窗口不能同步系统通知权限".into());
+    }
+    let cloned = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !native_permission_granted(&cloned)? {
+            return Ok(false);
+        }
+        let notifications = cloned.state::<NativeNotifications>();
+        if !notifications.is_enabled() {
+            notifications.enable()?;
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "系统通知权限同步未完成".to_string())?
 }
 
 /// 首装向导：弹出原生目录选择框（仅浏览选择，不落任何状态）。
@@ -841,6 +921,8 @@ fn main() {
             prefs_save,
             enable_notifications,
             notifications_enabled,
+            open_notification_settings,
+            sync_notifications,
             pick_data_dir_dialog,
             apply_data_dir,
             open_url
@@ -1486,6 +1568,36 @@ mod tests {
             "http://127.0.0.1:18080",
             None
         ));
+    }
+
+    /// 通知设置深链是写死的常量，只能走独立命令：open_url 的 http/https 白名单
+    /// 是页面内容能直接调的入口，为它放开 scheme 等于交出「打开任意 URL」的能力。
+    #[test]
+    fn notification_settings_url_is_a_non_http_deep_link() {
+        let url = notification_settings_url().unwrap_or_default();
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                url,
+                "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+            );
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(url, "ms-settings:notifications");
+        } else {
+            assert_eq!(url, "", "Linux 没有统一面板，必须回 None 让前端给手动路径");
+        }
+        assert!(!url.starts_with("http"), "深链不该被 open_url 的 http 白名单放行");
+    }
+
+    /// sync_notifications 靠这个位判断要不要重写文件：轮询期间不能每次都落盘。
+    #[test]
+    fn is_enabled_tracks_only_the_explicit_opt_in() {
+        let path = fixture_path();
+        let state = NativeNotifications::load(path.clone());
+        assert!(!state.is_enabled());
+        state.enable().unwrap();
+        assert!(state.is_enabled());
+        // 重新从盘上读回来仍然是已开启（开启位是持久状态，不是运行时标志）
+        assert!(NativeNotifications::load(path).is_enabled());
     }
 
     #[test]

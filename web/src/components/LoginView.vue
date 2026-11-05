@@ -28,7 +28,7 @@ async function submit() {
 <template>
   <div id="authView">
     <div class="auth-box">
-      <div class="auth-logo">五</div>
+      <div class="brand-mark auth-logo"></div>
       <h1>小五</h1>
       <div class="sub">你的私人 AI 生活管家</div>
       <form @submit.prevent="submit">

@@ -32,6 +32,10 @@ const DefaultTimeout = 5 * time.Minute
 // ErrDisabled 表示 exec 已被禁用。
 var ErrDisabled = errors.New("exec 工具已被禁用（tools.exec.mode=off）")
 
+// KindQuestion 是问答卡的 Kind 值：agent 在问用户（选项由 agent 自己给），
+// 不是请求授权。空 Kind 按授权卡处理，老调用方不受影响。
+const KindQuestion = "question"
+
 // ErrDenied 表示操作被用户拒绝或审批超时。
 var ErrDenied = errors.New("用户未批准")
 
@@ -54,6 +58,28 @@ func DenyPatterns() []string {
 	return out
 }
 
+// Option 是问答卡上的一个可选项，来自 agent 自己给的 permission options。
+// ID 是回传给 agent 的 optionId——协议只认它给过的那些，不能自己编。
+type Option struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// QuestionOption / QuestionGroup 是问题正文的结构化形态：前端按它排版，
+// 不再把 rawInput 的 JSON 糊在卡上。
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type QuestionGroup struct {
+	Header      string           `json:"header,omitempty"`
+	Question    string           `json:"question,omitempty"`
+	MultiSelect bool             `json:"multiSelect,omitempty"`
+	Options     []QuestionOption `json:"options,omitempty"`
+}
+
 // Item 是一条待审批操作（管理后台展示用）。
 type Item struct {
 	ID        int64     `json:"id"`
@@ -61,6 +87,13 @@ type Item struct {
 	Summary   string    `json:"summary"` // 一句话摘要（如"执行命令 uname -a"）
 	Detail    string    `json:"detail"`  // 详情（命令全文 / 文件内容预览）
 	CreatedAt time.Time `json:"createdAt"`
+	// Kind 区分两种卡：空值按授权（批准/拒绝），"question" 是 agent 在问用户，
+	// 按钮来自 Options，点哪条就把那条的 optionId 回给 agent。
+	Kind string `json:"kind,omitempty"`
+	// Options 与 Questions 只在问答卡上有值：前者是可回传的选项，后者是排版
+	// 用的问题正文（可能比选项更细，例如带每项说明）。
+	Options   []Option        `json:"options,omitempty"`
+	Questions []QuestionGroup `json:"questions,omitempty"`
 }
 
 // decision 是审批结果：是否批准，以及是否"批准并记住"（本进程内相同工具
@@ -68,6 +101,7 @@ type Item struct {
 type decision struct {
 	allow    bool
 	remember bool
+	optionID string // 问答卡：用户选中的 optionId（授权卡恒为空）
 }
 
 // request 是待审批请求的内部形态，携带结果回传通道。
@@ -178,18 +212,39 @@ type Pending struct {
 	doneOne sync.Once
 }
 
+// Card 是一次入队的完整形态。授权卡只填 Tool/Summary/Detail；问答卡额外给
+// Kind="question" + Options（按钮，回传用它们的 ID）+ Questions（正文排版）。
+type Card struct {
+	Tool      string
+	Summary   string
+	Detail    string
+	Kind      string
+	Options   []Option
+	Questions []QuestionGroup
+}
+
 // RequestCancelable 入队一次审批并立即返回句柄（不阻塞）。timeout<=0 用队列
 // 默认。与 RequestAlways 同一语义（无视模式强制入队），只是把「等结果」拆成
 // 了独立步骤，让调用方能在等待期间按业务事件撤卡。
 func (q *Queue) RequestCancelable(tool, summary, detail string, timeout time.Duration) *Pending {
+	return q.RequestCard(Card{Tool: tool, Summary: summary, Detail: detail}, timeout)
+}
+
+// RequestCard 入队一张授权卡或问答卡，语义同 RequestCancelable（无视队列模式
+// 强制入队——智能体的权限闸门是对话空间的独立闸门）。
+func (q *Queue) RequestCard(card Card, timeout time.Duration) *Pending {
 	q.mu.Lock()
 	if timeout <= 0 {
 		timeout = q.timeout
 	}
 	q.seq++
 	req := &request{
-		item: Item{ID: q.seq, Tool: tool, Summary: summary, Detail: detail, CreatedAt: time.Now()},
-		ch:   make(chan decision, 1),
+		item: Item{
+			ID: q.seq, Tool: card.Tool, Summary: card.Summary, Detail: card.Detail,
+			CreatedAt: time.Now(), Kind: card.Kind,
+			Options: card.Options, Questions: card.Questions,
+		},
+		ch: make(chan decision, 1),
 	}
 	q.pending[req.item.ID] = req
 	q.mu.Unlock()
@@ -205,9 +260,27 @@ func (q *Queue) RequestCancelable(tool, summary, detail string, timeout time.Dur
 // Done 返回结算信号：Wait 返回前关闭（无论批准、拒绝、超时还是 Cancel）。
 func (p *Pending) Done() <-chan struct{} { return p.done }
 
+// ID 是这张卡的审批编号（队列内单调递增）。业务侧拿它给系统通知做幂等键：
+// 同一张卡只该提示一次，而同一轮里的两张卡是两个编号、各提示一次。
+func (p *Pending) ID() int64 { return p.req.item.ID }
+
+// Outcome 是一次审批的完整结算：批准与否、是否"批准并记住"、问答卡选中的 optionId。
+type Outcome struct {
+	Allow    bool
+	Remember bool
+	OptionID string
+}
+
 // Wait 阻塞等待审批结果：批准返回 (true, nil)；拒绝、超时或被 Cancel 返回
-// (false, ErrDenied)。
+// (false, ErrDenied)。问答卡要拿选中项请用 WaitDecision。
 func (p *Pending) Wait() (bool, error) {
+	out, err := p.WaitDecision()
+	return out.Allow, err
+}
+
+// WaitDecision 阻塞等完整结算。拒绝/超时/撤卡返回 ErrDenied（Outcome 里的
+// OptionID 仍带回用户选的那条，供调用方区分"选了拒绝选项"与"没答"）。
+func (p *Pending) WaitDecision() (Outcome, error) {
 	defer p.doneOne.Do(func() { close(p.done) })
 	timer := time.NewTimer(p.timeout)
 	defer timer.Stop()
@@ -215,15 +288,15 @@ func (p *Pending) Wait() (bool, error) {
 	case d := <-p.req.ch:
 		p.q.remove(p.req.item.ID)
 		if !d.allow {
-			return false, ErrDenied
+			return Outcome{OptionID: d.optionID}, ErrDenied
 		}
-		return true, nil
+		return Outcome{Allow: true, Remember: d.remember, OptionID: d.optionID}, nil
 	case <-p.cancel:
 		p.q.remove(p.req.item.ID)
-		return false, ErrDenied
+		return Outcome{}, ErrDenied
 	case <-timer.C:
 		p.q.remove(p.req.item.ID)
-		return false, ErrDenied
+		return Outcome{}, ErrDenied
 	}
 }
 
@@ -305,5 +378,28 @@ func (q *Queue) DecideWith(id int64, approve, remember bool) bool {
 		return false
 	}
 	req.ch <- decision{allow: approve, remember: remember}
+	return true
+}
+
+// DecideOption 回答一张问答卡：optionID 必须是这张卡给过的选项，否则返回 false
+// ——把乱填的 id 回传给 agent 只会换来一句"选项不存在"。授权卡（Kind 非
+// question）同样返回 false：它要的是批准/拒绝，不是选项。
+func (q *Queue) DecideOption(id int64, optionID string) bool {
+	q.mu.Lock()
+	req, ok := q.pending[id]
+	valid := false
+	if ok && req.item.Kind == KindQuestion {
+		for _, o := range req.item.Options {
+			if o.ID == optionID {
+				valid = true
+				break
+			}
+		}
+	}
+	q.mu.Unlock()
+	if !valid {
+		return false
+	}
+	req.ch <- decision{allow: true, optionID: optionID}
 	return true
 }

@@ -38,8 +38,10 @@ const (
 )
 
 // 快照/变更里不进入遍历的重目录（git 仓库的忽略规则另算）。
+// .friday 是 Friday 自己的落盘目录（交接摘要等）：非 git 项目里没有 .gitignore 可依赖，
+// 不跳过的话它会被备份、甚至被当成"agent 改过的文件"报进本轮改动。
 var snapshotSkipDirs = map[string]bool{
-	".git": true, ".hg": true, ".svn": true,
+	".git": true, ".hg": true, ".svn": true, ".friday": true,
 	"node_modules": true, "vendor": true, ".venv": true, "venv": true,
 	"__pycache__": true, ".next": true, "dist": true, "build": true, "target": true,
 }

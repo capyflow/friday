@@ -31,7 +31,7 @@ async function createAccount() {
 <template>
   <div id="authView">
     <section class="auth-box setup-box" :aria-busy="busy">
-      <div class="auth-logo">五</div>
+      <div class="brand-mark auth-logo"></div>
       <h1>欢迎使用小五</h1>
       <p class="sub">先创建你的管理员账号</p>
       <form v-if="status.localSetupAllowed" class="form-col" @submit.prevent="createAccount">
