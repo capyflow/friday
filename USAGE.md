@@ -216,7 +216,8 @@ DELETE /api/sessions/<key>                       删除工作会话
 - agent 用 AskUserQuestion 这类工具问用户时走的是问答卡，不是授权卡：ACP 只有权限通道能承载
   用户选择，所以 agent 把答案编码成选项发过来。Friday 按 agent 给的选项原样画按钮（点哪条就把
   那条的 optionId 回给它），正文按「分组 · 题干 · 每项说明」排版，不再糊 rawInput 的 JSON；
-  判定规则见 `internal/acp/question.go`（有 questions 正文 / 选项多于两个 / 自定义 optionId 任一命中）。
+  判定规则见 `internal/acp/question.go`（rawInput 带 questions 正文 / 工具名命中提问类 / 选项全是
+  「<label>:yes:no」这种答题对 / 有选项不像授权答复，任一命中；判不准宁可留在授权卡）。
   没答（超时或本轮结束撤卡）一律回 `cancelled`，不替用户挑一条。运行看板「待审批」里同样按选项作答。
 - 这两个时刻会额外投一条系统通知（人在别的窗口也看得见）：审批卡入队时报「哪个 agent 在等你批准 +
   要做什么」，一轮结束时报「跑完/没跑完 + 改了 N 个文件 + 用时」；用户自己按停止的不弹（他就在页面上）。
