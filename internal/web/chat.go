@@ -37,14 +37,16 @@ const (
 
 var uploadNameRe = regexp.MustCompile(`^[0-9a-f]{32}\.(png|jpg|webp)$`)
 
-// Chat 是网页聊天服务：经 Brain 与 agent 对话（网页会话 key 固定 web，
-// 可通过请求体 session 字段切换到其他会话查看/续聊）。
+// Chat 是网页聊天服务：经 Brain 与 agent 对话。会话分两种模式（见 sessions.go）：
+// 生活模式只有主会话 web（不传 session 就是它），工作模式可以在聊天页新建多条
+// 独立会话，每条各自的上下文。
 // 支持对话暂停/继续：暂停取消进行中的生成（及时止损），被中断的问答记录在
 // paused 中可一键继续；暂停期间发新问题则丢弃暂停记录、开启新对话。
 type Chat struct {
-	brain      *agent.Brain
-	uploadsDir string
-	pausedFile string // 暂停现场落盘路径（空 = 仅内存，重启丢）
+	brain        *agent.Brain
+	uploadsDir   string
+	pausedFile   string // 暂停现场落盘路径（空 = 仅内存，重启丢）
+	sessionsFile string // 工作会话注册表落盘路径（空 = 会话只活在内存里，重启清零）
 
 	planner  *plan.Planner // 计划模式（nil = 未启用）
 	runner   *plan.Runner
@@ -54,6 +56,7 @@ type Chat struct {
 	mu     sync.Mutex
 	runs   map[string]*chatRun    // 会话 key → 进行中的对话（可暂停）
 	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（落盘，刷新/重启后仍可继续）
+	work   map[string]sessionMeta // 工作会话注册表（sessions.go，落盘 sessionsFile）
 }
 
 // EnablePlans 打开计划模式（规划轮 + 步骤执行器）。
@@ -83,17 +86,21 @@ type chatRun struct {
 }
 
 // New 创建网页聊天服务。uploadsDir 为图片上传目录（随服务启动清理过期文件）；
-// pausedFile 为暂停现场落盘路径（空则仅内存）。
-func New(brain *agent.Brain, uploadsDir, pausedFile string) *Chat {
+// pausedFile 为暂停现场落盘路径（空则仅内存）；sessionsFile 为工作会话注册表
+// 落盘路径（空则工作会话不持久化，重启后列表回到只剩主会话）。
+func New(brain *agent.Brain, uploadsDir, pausedFile, sessionsFile string) *Chat {
 	c := &Chat{
-		brain:      brain,
-		uploadsDir: uploadsDir,
-		pausedFile: pausedFile,
-		runs:       map[string]*chatRun{},
-		paused:     map[string]*PausedTurn{},
+		brain:        brain,
+		uploadsDir:   uploadsDir,
+		pausedFile:   pausedFile,
+		sessionsFile: sessionsFile,
+		runs:         map[string]*chatRun{},
+		paused:       map[string]*PausedTurn{},
+		work:         map[string]sessionMeta{},
 	}
 	c.sweepUploads()
 	c.loadPaused()
+	c.loadWork()
 	return c
 }
 
@@ -294,8 +301,12 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 		req.Message = fmt.Sprintf("（用户发来了 %d 张图片）", len(imgs))
 	}
 
-	// 全局单对话：所有渠道共用同一个主会话，网页端不支持切换到其他会话。
-	key := agent.SessionWeb
+	// 会话归属：不带 session 就是生活模式的主会话；工作模式带 work-* 的 key，
+	// 且必须是「新建会话」登记过的——不能靠发一次消息凭空造出一条会话来。
+	key, err := c.resolveSessionKey(req.Session)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
 	// 暂停期间发新问题 = 中止被暂停的对话、开启下一段（用户"及时止损"）。
 	c.clearPaused(key)
 
@@ -384,8 +395,17 @@ func (r *resultSink) Plan() *plan.Plan {
 // HandleResume 继续被暂停的对话（POST /api/chat/resume，SSE 流式，协议同 /api/chat）：
 // 把原问题与已生成的部分回答重新注入会话后让模型接着完成。
 // 继续过程同样可暂停（部分回答在原有基础上累加）。
+// body {"session":"<key>"} 可选，缺省继续主会话——暂停现场按会话各存一份，
+// 在 A 会话暂停的，不能在 B 会话点继续。
 func (c *Chat) HandleResume(ctx *vhttp.Context) error {
-	key := agent.SessionWeb
+	var req struct {
+		Session string `json:"session"`
+	}
+	_ = ctx.UnmarshalBody(&req) // 空 body 视为继续主会话
+	key, err := c.resolveSessionKey(req.Session)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
 	turn := c.takePaused(key)
 	if turn == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有可继续的暂停对话"})
@@ -399,10 +419,18 @@ func (c *Chat) HandleResume(ctx *vhttp.Context) error {
 	})
 }
 
-// HandleStop 暂停当前进行中的对话（POST /api/chat/stop）：取消后端生成
-// （token 即刻停止），已生成的部分回答保存为暂停现场，可 POST /api/chat/resume 继续。
+// HandleStop 暂停当前进行中的对话（POST /api/chat/stop，body 可带 {"session":"<key>"}，
+// 缺省停主会话）：取消后端生成（token 即刻停止），已生成的部分回答保存为暂停现场，
+// 可 POST /api/chat/resume 继续。
 func (c *Chat) HandleStop(ctx *vhttp.Context) error {
-	key := agent.SessionWeb
+	var req struct {
+		Session string `json:"session"`
+	}
+	_ = ctx.UnmarshalBody(&req) // 空 body 视为停主会话
+	key, err := c.resolveSessionKey(req.Session)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
 	c.mu.Lock()
 	run := c.runs[key]
 	if run != nil {

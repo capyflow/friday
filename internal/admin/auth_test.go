@@ -139,7 +139,7 @@ func TestUploadReadAcceptsQueryToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	uploads := t.TempDir()
-	s.chat = web.New(nil, uploads, filepath.Join(uploads, "paused.json"))
+	s.chat = web.New(nil, uploads, filepath.Join(uploads, "paused.json"), filepath.Join(uploads, "work-sessions.json"))
 	name := "0123456789abcdef0123456789abcdef.png"
 	if err := os.WriteFile(filepath.Join(uploads, name), []byte("png-bytes"), 0o644); err != nil {
 		t.Fatal(err)

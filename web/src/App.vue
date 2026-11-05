@@ -1,6 +1,6 @@
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { store, hideModal, toast, toastState, modalState } from './store.js'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { store, hideModal, toast, toastState, modalState, setMode, MODE_LABELS } from './store.js'
 import { api } from './api.js'
 import { setToken, hydrateToken } from './auth.js'
 import { initTheme, setTheme } from './theme.js'
@@ -18,15 +18,28 @@ import SetupView from './components/SetupView.vue'
 import { startNotifications, stopNotifications } from './notifications.js'
 import { desktopInvoke, openExternal } from './open-url.js'
 
-// 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页
+// 运行状态 / 调用轨迹 / 记忆收进设置弹窗（运行观测、数据与系统），侧栏只留日常高频页。
+// modes 标出这一页在哪种使用模式下出现：「工作区」是外部智能体干活的地方，只在
+// 工作模式露出；聊天页两种模式都在，它自己按模式决定是一条主会话还是多条会话。
 const NAV = [
-  { id: 'chat', icon: 'i-chat', label: '聊天' },
-  { id: 'agent', icon: 'i-acp', label: '工作区' },
-  { id: 'runs', icon: 'i-run', label: '运行' },
-  { id: 'auto', icon: 'i-auto', label: '自动化' },
-  { id: 'blinko', icon: 'i-blinko', label: '闪念' },
-  { id: 'notifications', icon: 'i-bell', label: '通知' },
+  { id: 'chat', icon: 'i-chat', label: '聊天', modes: ['life', 'work'] },
+  { id: 'agent', icon: 'i-acp', label: '工作区', modes: ['work'] },
+  { id: 'runs', icon: 'i-run', label: '运行', modes: ['life', 'work'] },
+  { id: 'auto', icon: 'i-auto', label: '自动化', modes: ['life', 'work'] },
+  { id: 'blinko', icon: 'i-blinko', label: '闪念', modes: ['life', 'work'] },
+  { id: 'notifications', icon: 'i-bell', label: '通知', modes: ['life', 'work'] },
 ]
+const navItems = computed(() => NAV.filter(n => n.modes.includes(store.mode)))
+
+// switchMode 切生活/工作模式：模式存本地（下次打开还在原来那侧），切完如果当前页
+// 在新模式下不出现就回聊天页。回复进行中不切——切模式会换掉聊天页的会话归属，
+// 半截回答会掉进另一边看不见的地方。
+function switchMode(next) {
+  if (store.mode === next) return
+  if (store.chatBusy) { toast('小五正在回复：等这轮跑完（或先点停止）再切模式', true); return }
+  setMode(next)
+  if (!NAV.some(n => n.id === store.view && n.modes.includes(next))) store.view = 'chat'
+}
 
 /* ---------- 主题（两个入口：这里的快捷切换 + 设置 → 外观，经 friday:theme 同步） ---------- */
 const theme = ref(initTheme() || 'dark')
@@ -153,8 +166,14 @@ async function logout() {
   <div v-else id="app" :class="{ 'focus-mode': store.fullscreen }">
     <aside id="sidebar">
       <div class="brand" data-tauri-drag-region><div class="avatar">五</div><b>小五</b></div>
+      <!-- 使用模式：生活（一条主会话）/ 工作（多条会话 + 智能体工作区） -->
+      <div class="ws-seg mode-seg" role="group" aria-label="使用模式">
+        <button v-for="m in MODE_LABELS" :key="m.id" :class="{ on: store.mode === m.id }"
+                :aria-label="m.label + '模式'" :aria-pressed="store.mode === m.id"
+                :title="m.hint" @click="switchMode(m.id)">{{ m.label }}</button>
+      </div>
       <nav id="nav" aria-label="主导航">
-        <button v-for="n in NAV" :key="n.id" class="nav-item" :class="{ active: store.view === n.id }"
+        <button v-for="n in navItems" :key="n.id" class="nav-item" :class="{ active: store.view === n.id }"
                 :data-view="n.id" @click="store.view = n.id">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="'#' + n.icon"/></svg>

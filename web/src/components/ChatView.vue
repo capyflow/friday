@@ -8,7 +8,8 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
-import { fmtTokens } from '../format.js'
+import { ago, fmtTokens } from '../format.js'
+import { getPref, removePref, setPref } from '../prefs.js'
 import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
@@ -48,6 +49,23 @@ let disposed = false
 let messagesVersion = 0
 const SIZE_LIMIT = 5 * 1024 * 1024
 
+/* ---------- 使用模式与会话归属 ---------- */
+// 会话本体在后端（internal/web/sessions.go）：生活模式只有主会话（key 固定 web，
+// 和钉钉/飞书/心跳共用同一份上下文），工作模式可以在左侧栏里新建多条独立会话。
+// 这里只管三件事：当前对话归属哪个 key、那份列表、以及换会话时把现场清干净。
+const SESSION_PREF = 'friday-chat-session'
+const workMode = computed(() => store.mode === 'work')
+const sessions = ref([])                    // 工作会话列表（不含主会话，也不含后台会话）
+const sessionKey = ref(workMode.value ? '' : 'web') // 当前对话归属的会话 key
+const edit = reactive({ key: '', title: '' })       // 会话行内改名
+const noSession = computed(() => workMode.value && !sessionKey.value)
+const activeSession = computed(() => sessions.value.find(s => s.key === sessionKey.value) || null)
+const headTitle = computed(() => workMode.value ? (activeSession.value?.title || '工作会话') : '小五')
+
+// 回复进行中不让切会话/切模式：这个组件只有一条 SSE 通道和一个消息数组，
+// 换归属会把半截回答挪到看不见的地方。App 读 store.chatBusy 拦住侧栏的模式开关。
+watch(busy, v => { store.chatBusy = v })
+
 const MODE_TEXT = {
   plan: ['计划模式', '描述你的任务，向小五请求制定计划…'],
   goal: ['目标模式', '描述你的目标，成果定义越清晰效果越好…'],
@@ -56,14 +74,128 @@ const SUGGESTS = ['10 分钟后提醒我喝水', '记个待办：买牛奶', '�
 const PHRASES = ['提醒、待办、天气，都可以交给我', '说一句话，就能帮你安排好',
                  '本地运行，数据只属于你', '到点了，我会主动提醒你']
 
-const welcome = computed(() => messages.length === 0)
+// welcome 是"这条会话还没内容"的空态；工作模式下一条会话都没有时走另一套
+// 空态（见 noSession），别把"还没建会话"画成"建好了但没说话"。
+const welcome = computed(() => !noSession.value && messages.length === 0)
 const canSendNew = computed(() => !!input.value.trim() || pendingImages.length > 0)
 const sendDisabled = computed(() => clearing.value || (phase.value === 'idle' && !canSendNew.value))
 const sendLabel = computed(() =>
   phase.value === 'streaming' ? '暂停回复'
     : phase.value === 'paused' && !canSendNew.value ? '继续上次任务'
     : '发送')
-const placeholder = computed(() => (mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'))
+const placeholder = computed(() => {
+  if (noSession.value) return '先新建一条会话再开工'
+  return mode.value ? MODE_TEXT[mode.value][1] : '和小五说点什么…'
+})
+
+// rowMeta 是会话行的小字：说过话就报条数与"多久之前动过"；一条都还没有就明说
+// "还没有内容"——这时后端回的是创建时刻，拿它算"多少个月"没意义。
+function rowMeta(s) {
+  if (!s.messages) return '还没有内容'
+  const when = ago(s.updatedAt)
+  return `${s.messages} 条${when ? ' · ' + when : ''}`
+}
+
+async function loadSessions() {
+  try {
+    const r = await api('GET', '/api/sessions')
+    sessions.value = (r.sessions || []).filter(s => s.kind === 'work')
+  } catch (e) {
+    sessions.value = []
+    toast('会话列表加载失败：' + e.message, true)
+  }
+  return sessions.value
+}
+
+// resetConversation 换会话 = 换整段现场：消息、输入、附件预览、暂停态与上下文
+// 快照全部清掉，再按新 key 拉历史。进行中的回复由调用方挡在门外。
+async function resetConversation() {
+  messagesVersion++
+  messages.splice(0, messages.length)
+  // 草稿跟着会话走：写给这条会话的半截话，不该在下条会话里点发送时冒出来
+  input.value = ''
+  releaseUnusedImages()
+  pausedTurn.value = null
+  phase.value = 'idle'
+  ctxSnap.value = null
+  menuOpen.value = false
+  if (noSession.value) return
+  await loadHistory()
+  loadCtx()
+}
+
+// applySession 落到某条会话并记住它（下次回到工作模式接着这条）。
+// 只有工作模式才记：生活模式恒为主会话，把 web 写进去会把上次的选择顶掉。
+async function applySession(key) {
+  sessionKey.value = key
+  if (workMode.value) {
+    if (key) setPref(SESSION_PREF, key)
+    else removePref(SESSION_PREF)
+  }
+  await resetConversation()
+}
+
+// pickSession 决定工作模式下当前哪条会话：优先上次选的那条（还在列表里才算，
+// 被删了就换最近活动的），一条都没有就留空让页面明说"还没有会话"。
+async function pickSession() {
+  const list = await loadSessions()
+  const remembered = list.find(s => s.key === getPref(SESSION_PREF))
+  await applySession(remembered ? remembered.key : (list[0]?.key || ''))
+}
+
+async function selectSession(key) {
+  if (key === sessionKey.value) return
+  if (busy.value) { toast(BUSY_INPUT_HINT, true); return }
+  await applySession(key)
+}
+
+async function createSession() {
+  if (busy.value) { toast(BUSY_INPUT_HINT, true); return }
+  try {
+    const r = await api('POST', '/api/sessions', {})
+    await loadSessions()
+    await applySession(r.session?.key || '')
+    toast('已新建会话，直接开说')
+    composerEl.value?.focus?.()
+  } catch (e) { toast('新建会话失败：' + e.message, true) }
+}
+
+async function removeSession(s) {
+  const name = s.title || '新会话'
+  if (!confirm('删除会话「' + name + '」？这段上下文和它的调用轨迹一起清掉，找不回来。')) return
+  try {
+    await api('DELETE', '/api/sessions/' + encodeURIComponent(s.key))
+  } catch (e) { toast(e.message, true); return }
+  toast('已删除会话「' + name + '」')
+  const rest = sessions.value.filter(x => x.key !== s.key)
+  sessions.value = rest
+  // 删的是当前这条：接着落到剩下的第一条（都删完就回到"还没有会话"）。
+  if (s.key === sessionKey.value) await applySession(rest[0]?.key || '')
+}
+
+function startRename(s) {
+  if (busy.value) { toast(BUSY_INPUT_HINT, true); return }
+  edit.key = s.key
+  edit.title = s.hasTitle ? s.title : '' // 自动取的名不预填：清空就是"继续自动取名"
+}
+
+async function commitRename() {
+  if (!edit.key) return
+  const key = edit.key
+  const title = edit.title.trim()
+  edit.key = ''
+  try {
+    const r = await api('POST', '/api/sessions/' + encodeURIComponent(key), { title })
+    const i = sessions.value.findIndex(s => s.key === key)
+    if (i >= 0 && r.session) sessions.value[i] = { ...sessions.value[i], ...r.session }
+  } catch (e) { toast(e.message, true) }
+}
+
+// 切模式 = 换归属：生活模式回主会话，工作模式按上面的规则挑一条工作会话。
+watch(() => store.mode, async m => {
+  if (m === 'work') await pickSession()
+  else await applySession('web')
+})
 
 /* ---------- 滚动 ---------- */
 function nearBottom() {
@@ -160,10 +292,12 @@ function histBlocks(m) {
 
 async function loadHistory() {
   const version = messagesVersion
+  const key = sessionKey.value
+  if (!key) return // 工作模式还没选中会话：没有历史可拉，也不该去问后端要 web 的
   let list = []
   let paused = null
   try {
-    const r = await api('GET', '/api/chat/history?session=web')
+    const r = await api('GET', '/api/chat/history?session=' + encodeURIComponent(key))
     list = r.messages || []
     paused = r.paused || null
   } catch (e) { /* 拉取失败按空会话处理 */ }
@@ -376,8 +510,9 @@ const ctxCompactHint = computed(() => {
   return '归档旧块并重写活跃历史，旧内容仍可用检索找回'
 })
 async function loadCtx() {
+  if (!sessionKey.value) { ctxSnap.value = null; return }
   try {
-    const s = await api('GET', '/api/context?session=web')
+    const s = await api('GET', '/api/context?session=' + encodeURIComponent(sessionKey.value))
     ctxSnap.value = s && s.enabled ? s : null
   } catch (_) { ctxSnap.value = null }
 }
@@ -442,7 +577,7 @@ async function compactCtx() {
   if (ctxBusy.value || busy.value) return
   ctxBusy.value = true
   try {
-    const r = await api('POST', '/api/context/compact', { session: 'web' })
+    const r = await api('POST', '/api/context/compact', { session: sessionKey.value })
     if (r.after && r.after.enabled) ctxSnap.value = r.after
     toast(r.message || '上下文已压缩')
   } catch (e) { toast('压缩失败：' + e.message, true) } finally { ctxBusy.value = false }
@@ -459,7 +594,7 @@ function onSendClick() {
 
 async function pauseChat() {
   if (phase.value !== 'streaming') return
-  try { await api('POST', '/api/chat/stop', { session: 'web' }) }
+  try { await api('POST', '/api/chat/stop', { session: sessionKey.value }) }
   catch (e) { if (!disposed) toast(e.message, true) }
   // 服务端取消后以 {paused:true} 收尾流，状态在 streamTurn 的帧处理里落定
 }
@@ -633,12 +768,15 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
     }
     if (request === controller) request = null
     if (phase.value === 'streaming') phase.value = 'idle' // 兜底归位
+    // 工作模式：会话名按首条提问自动取，消息数与"多久之前"也在动，跑完一轮补一次列表。
+    if (workMode.value && !disposed) loadSessions()
     if (!disposed) nextTick(() => composerEl.value && composerEl.value.focus())
   }
 }
 
 async function sendChat(presetText) {
   if (clearing.value || disposed || phase.value === 'streaming') return
+  if (noSession.value) { toast('先新建一条会话再开工', true); return }
   const draft = {
     text: typeof presetText === 'string' ? presetText : input.value,
     mode: mode.value,
@@ -667,7 +805,7 @@ async function sendChat(presetText) {
   const user = reactive({ role: 'user', text: raw, images: draft.images.map(p => p.url) })
   await streamTurn({
     url: '/api/chat',
-    body: { message: raw, session: 'web', mode: reqMode },
+    body: { message: raw, session: sessionKey.value, mode: reqMode },
     userMsg: user,
     draft,
     prepare: async signal => uploadImages(draft.images, signal),
@@ -738,7 +876,7 @@ onUnmounted(() => { for (const id of planTimers.keys()) stopWatchingPlan(id) })
 async function resumeChat() {
   if (phase.value !== 'paused' || clearing.value || disposed) return
   phase.value = 'streaming'
-  await streamTurn({ url: '/api/chat/resume', body: { session: 'web' } })
+  await streamTurn({ url: '/api/chat/resume', body: { session: sessionKey.value } })
 }
 
 /* ---------- 更多菜单 ---------- */
@@ -771,14 +909,21 @@ function onKeydown(e) {
     store.fullscreen = false
   }
 }
+// bootstrap 起手：生活模式直接拉主会话历史；工作模式先挑一条工作会话，历史与
+// 占用由 applySession 按那条 key 拉——不能拿主会话的历史开台。
+function bootstrap() {
+  if (workMode.value) return pickSession()
+  loadHistory()
+  loadCtx()
+  return Promise.resolve()
+}
 onMounted(() => {
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onKeydown)
   window.addEventListener('friday:perm', onPermSync)
   window.addEventListener('friday:setup-refresh', loadModels) // 设置页保存模型库后 chip 跟上
-  loadHistory()
+  bootstrap()
   loadPerm()
-  loadCtx()
   loadModels()
 })
 onUnmounted(() => {
@@ -795,13 +940,13 @@ onUnmounted(() => {
 
 function goTraces() { menuOpen.value = false; store.settingsSection = 'trace'; store.settingsOpen = true }
 async function clearContext() {
-  if (busy.value || clearing.value) return
+  if (busy.value || clearing.value || noSession.value) return
   menuOpen.value = false
   ctxOpen.value = false
   clearing.value = true
   messagesVersion++
   try {
-    const r = await api('POST', '/api/context/clear', { session: 'web' })
+    const r = await api('POST', '/api/context/clear', { session: sessionKey.value })
     if (disposed) return
     messages.splice(0, messages.length)
     releaseUnusedImages()
@@ -814,9 +959,44 @@ async function clearContext() {
 </script>
 
 <template>
-  <section id="view-chat" class="view">
+  <section id="view-chat" class="view" :class="{ 'chat-split': workMode }">
+    <!-- 工作模式的会话栏：一条会话一段上下文。交互跟工作区页那套列表一致——
+         点行切换、双击改名（留空回到按首条提问自动取名）、行尾 × 删除。 -->
+    <aside v-if="workMode" class="ag-rail">
+      <div class="ag-rail-head" data-tauri-drag-region>
+        <b>会话</b>
+        <div class="ag-rail-acts">
+          <button class="ib-btn" aria-label="新建会话" :title="busy ? BUSY_INPUT_HINT : '新建会话'"
+                  :disabled="busy" @click="createSession">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="ag-list">
+        <div v-for="s in sessions" :key="s.key" class="ag-item" role="button" tabindex="0"
+             :class="{ active: s.key === sessionKey }"
+             @click="selectSession(s.key)" @keydown.enter.prevent="selectSession(s.key)">
+          <span class="ag-item-main">
+            <span class="ag-title">
+              <input v-if="edit.key === s.key" v-model="edit.title" class="ag-title-edit"
+                     aria-label="会话名" placeholder="留空按首条提问自动取名"
+                     @click.stop @keydown.enter.prevent="commitRename" @blur="commitRename">
+              <span v-else @dblclick.stop="startRename(s)" :title="'双击改名：' + (s.title || '新会话')">{{ s.title || '新会话' }}</span>
+            </span>
+            <!-- 行上不铺会话 key：说了几条、多久之前动过（key 只在设置页的会话列表里看） -->
+            <span class="meta">{{ rowMeta(s) }}</span>
+          </span>
+          <span v-if="s.key === sessionKey && busy" class="ag-gen">回复中</span>
+          <span class="ag-del" role="button" :aria-label="'删除会话 ' + (s.title || '新会话')"
+                title="删除会话" @click.stop="removeSession(s)">×</span>
+        </div>
+        <div v-if="!sessions.length" class="ag-empty meta">还没有会话，点上面的 + 建一条。</div>
+      </div>
+    </aside>
+
     <div id="chatHead" data-tauri-drag-region>
-      <div class="title">小五</div>
+      <div class="title">{{ headTitle }}</div>
       <button class="btn icon" :class="{ active: store.fullscreen }"
               :aria-label="store.fullscreen ? '退出全屏对话' : '进入全屏对话'"
               :title="store.fullscreen ? '退出全屏（Esc）' : '全屏对话（Esc 退出）'"
@@ -842,12 +1022,23 @@ async function clearContext() {
     </div>
 
     <div ref="scroller" id="chatScroller">
-      <!-- 欢迎态（空会话） -->
-      <div v-if="welcome" class="welcome">
+      <!-- 工作模式一条会话都还没有：明说没有会话，给一个建会话的入口，
+           不拿主会话顶上，也不凭空造一条空会话摆在那儿 -->
+      <div v-if="noSession" class="welcome">
         <div class="welcome-logo">五</div>
-        <h3 class="welcome-title" ref="titleEl">你好，我是小五</h3>
-        <p class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
+        <h3 class="welcome-title">工作模式还没有会话</h3>
+        <p class="welcome-sub">一条会话一段上下文，互不串。建一条就能开工。</p>
         <div class="welcome-suggests">
+          <button class="suggest" :disabled="clearing" @click="createSession">新建第一条会话</button>
+        </div>
+      </div>
+      <!-- 欢迎态（这条会话还没内容） -->
+      <div v-else-if="welcome" class="welcome">
+        <div class="welcome-logo">五</div>
+        <h3 class="welcome-title" ref="titleEl">{{ workMode ? '这条会话还是空的' : '你好，我是小五' }}</h3>
+        <p v-if="workMode" class="welcome-sub">说点什么开始——这段上下文只属于这条会话。</p>
+        <p v-else class="welcome-sub">你的私人 AI 生活管家 · <span ref="rotatorEl">提醒、待办、天气，都可以交给我</span><span class="caret"></span></p>
+        <div v-if="!workMode" class="welcome-suggests">
           <button v-for="s in SUGGESTS" :key="s" class="suggest" :disabled="busy || clearing" @click="sendChat(s)">{{ s }}</button>
         </div>
       </div>
@@ -924,7 +1115,7 @@ async function clearContext() {
 
     <div id="chatFoot">
       <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
-                    :busy="phase === 'streaming'" :disabled="clearing"
+                    :busy="phase === 'streaming'" :disabled="clearing || noSession"
                     :send-label="sendLabel" :send-disabled="sendDisabled"
                     @primary="onSendClick" @stop="onSendClick" @paste="onPaste">
         <template #previews>

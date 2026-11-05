@@ -17,7 +17,7 @@ import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
-import { fmtTokens } from '../format.js'
+import { ago, fmtTokens } from '../format.js'
 import { getPref, setPref } from '../prefs.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
@@ -304,19 +304,6 @@ const recentThreads = computed(() => threads.value
   .slice(0, 30))
 function wsName(id) { return workspaces.value.find(w => w.id === id)?.name || '（工作区已删除）' }
 function missingDirs(ws) { return ws.missingDirs || [] }
-// 会话行上给"多久之前动过"，取代原来的目录名（列表里不铺路径）
-function ago(iso) {
-  const t = Date.parse(iso || '')
-  if (!t) return ''
-  const min = Math.floor((Date.now() - t) / 60000)
-  if (min < 1) return '刚刚'
-  if (min < 60) return min + ' 分钟'
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return hr + ' 小时'
-  const day = Math.floor(hr / 24)
-  if (day < 30) return day + ' 天'
-  return Math.floor(day / 30) + ' 个月'
-}
 // 目录路径太长，列表行只展示最后一段（完整路径在 title 里）
 function base(p) {
   const s = (p || '').replace(/\/+$/, '')

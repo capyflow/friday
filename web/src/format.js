@@ -30,6 +30,21 @@ export function prettyJSON(s) {
   try { return JSON.stringify(JSON.parse(s), null, 2) } catch (_) { return s }
 }
 
+// ago 把时刻翻成"多久之前"（会话列表的行内提示，只到月为止）。
+// 放在这里是因为工作区页与聊天页的会话栏都要用，别再各写一份。
+export function ago(iso) {
+  const t = Date.parse(iso || '')
+  if (!t) return ''
+  const min = Math.floor((Date.now() - t) / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return min + ' 分钟'
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return hr + ' 小时'
+  const day = Math.floor(hr / 24)
+  if (day < 30) return day + ' 天'
+  return Math.floor(day / 30) + ' 个月'
+}
+
 export function upStr(sec) {
   return sec >= 86400 ? Math.floor(sec / 86400) + '天' + Math.floor(sec % 86400 / 3600) + '小时'
     : sec >= 3600 ? Math.floor(sec / 3600) + '小时' + Math.floor(sec % 3600 / 60) + '分'

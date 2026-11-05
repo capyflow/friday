@@ -118,16 +118,25 @@ def start_fake() -> tuple[ThreadingHTTPServer, int]:
 class API:
     def __init__(self, port: int):
         self.port = port
+        self.token = ""
         self.cookie = ""
+
+    def headers(self, content_type=False):
+        # 登录态是 JWT：/api/setup 与 /api/login 在响应体里回 token，之后每个请求
+        # 带 Authorization: Bearer（cookie 早就不发了，留着只是给旧形态兜底）。
+        headers = {"Accept": "application/json", "Origin": f"http://127.0.0.1:{self.port}"}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        return headers
 
     def request(self, method, path, body=None, expected=None, timeout=4):
         payload = None if body is None else json.dumps(body, ensure_ascii=False).encode()
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        headers = {"Accept": "application/json", "Origin": f"http://127.0.0.1:{self.port}"}
-        if payload is not None:
-            headers["Content-Type"] = "application/json"
-        if self.cookie:
-            headers["Cookie"] = self.cookie
+        headers = self.headers(content_type=payload is not None)
         try:
             conn.request(method, path, payload, headers)
             response = conn.getresponse()
@@ -146,7 +155,10 @@ class API:
             raise Failure(f"{method} {path} returned invalid JSON") from exc
         if status >= 400:
             return status, value
-        return status, value.get("body", value)
+        unwrapped = value.get("body", value) if isinstance(value, dict) else value
+        if isinstance(unwrapped, dict) and unwrapped.get("token"):
+            self.token = unwrapped["token"]
+        return status, unwrapped
 
     def json(self, method, path, body=None, expected=(200,)):
         status, value = self.request(method, path, body, expected)
@@ -206,13 +218,13 @@ def await_value(query, predicate, message, timeout=10):
     raise Failure(message)
 
 
-def sse_chat(api: API, message: str, attachments=None) -> str:
-    body = {"message": message, "session": "web"}
+def sse_chat(api: API, message: str, attachments=None, session="web") -> str:
+    body = {"message": message, "session": session}
     if attachments:
         body["attachments"] = attachments
     payload = json.dumps(body, ensure_ascii=False).encode()
     conn = http.client.HTTPConnection("127.0.0.1", api.port, timeout=8)
-    headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{api.port}", "Cookie": api.cookie}
+    headers = api.headers(content_type=True)
     conn.request("POST", "/api/chat", payload, headers)
     response = conn.getresponse()
     if response.status != 200:
@@ -281,6 +293,38 @@ def run(binary: str, output_dir: str | None) -> dict:
         expect(fake.tool_calls == 1 and fake.tool_results == 1, "chat did not execute get_time tool")
         result["checks"].append("chat-sse")
 
+        # Life mode keeps the single main session; work mode can add independent
+        # sessions that share nothing but the same assistant behind them.
+        sessions = api.json("GET", "/api/sessions").get("sessions", [])
+        expect(any(item.get("key") == "web" and item.get("kind") == "life" for item in sessions),
+               "main session missing from the session list")
+        work_key = api.json("POST", "/api/sessions", {"title": "smoke work session"}).get("session", {}).get("key", "")
+        expect(work_key.startswith("work-"), "created session key lacks the work- prefix")
+        expect(sse_chat(api, "note this for the smoke run", session=work_key), "work session chat returned no text")
+        expect(api.json("GET", f"/api/chat/history?session={work_key}").get("messages"),
+               "work session history is not readable")
+        sessions = api.json("GET", "/api/sessions").get("sessions", [])
+        entry = next((item for item in sessions if item.get("key") == work_key), {})
+        expect(entry.get("kind") == "work" and entry.get("messages", 0) >= 2,
+               "work session is not listed with its messages")
+        main_texts = [item.get("text", "") for item in api.json("GET", "/api/chat/history?session=web").get("messages", [])]
+        expect(not any("note this for the smoke run" in text for text in main_texts),
+               "work session leaked into the main session")
+        status, body = api.request("POST", "/api/chat", {"message": "x", "session": "work-unregistered"}, expected=(400,))
+        expect(status == 400 and (body.get("body", body).get("error") or ""),
+               "an unregistered session key was accepted by chat")
+        api.json("POST", f"/api/sessions/{work_key}", {"title": "renamed smoke session"})
+        keep_key = api.json("POST", "/api/sessions", {}).get("session", {}).get("key", "")
+        drop_key = api.json("POST", "/api/sessions", {}).get("session", {}).get("key", "")
+        api.json("DELETE", f"/api/sessions/{drop_key}")
+        sessions = api.json("GET", "/api/sessions").get("sessions", [])
+        expect(any(item.get("key") == keep_key and item.get("title") == "新会话" for item in sessions),
+               "an unnamed session should fall back to the placeholder title")
+        expect(not any(item.get("key") == drop_key for item in sessions), "deleted session is still listed")
+        status, body = api.request("DELETE", "/api/sessions/web", expected=(400,))
+        expect(status == 400, "the main session was deletable")
+        result["checks"].append("chat-sessions")
+
         task = api.json("POST", "/api/tasks", {"text": "smoke task", "in": "60s", "status": "paused"})
         tasks = task.get("tasks", [])
         expect(tasks, "task creation returned no task")
@@ -327,6 +371,11 @@ def run(binary: str, output_dir: str | None) -> dict:
         expect(any(item.get("id") == todo_id and item.get("done") for item in restored), "completed todo was not restored")
         restored_tasks = api2.json("GET", "/api/tasks").get("tasks", [])
         expect(any(item.get("id") == paused_task_id and item.get("status") == "paused" for item in restored_tasks), "paused task was not restored")
+        restored_sessions = api2.json("GET", "/api/sessions").get("sessions", [])
+        renamed = next((item for item in restored_sessions if item.get("key") == work_key), {})
+        expect(renamed.get("title") == "renamed smoke session", "renamed work session was not restored")
+        expect(any(item.get("key") == keep_key for item in restored_sessions), "idle work session was not restored")
+        expect(not any(item.get("key") == drop_key for item in restored_sessions), "deleted session came back after restart")
         restored_notice = api2.json("GET", "/api/notifications").get("notifications", [])
         persisted = next((item for item in restored_notice if item.get("id") == notice["id"]), None)
         expect(persisted is not None and persisted.get("readAt"), "notification read state was not restored")

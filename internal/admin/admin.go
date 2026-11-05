@@ -33,6 +33,10 @@
 //	POST   /api/context/clear 清除对话上下文（需登录）
 //	GET    /api/context       会话上下文占用快照（活跃区估算 token/窗口/比例，需登录）
 //	POST   /api/context/compact 手动压缩一次上下文（归档旧块并重写活跃历史，需登录）
+//	GET    /api/sessions      网页会话列表（主会话 + 工作会话 + 后台会话，带显示名，需登录）
+//	POST   /api/sessions      新建工作会话 {"title"?}（工作模式用，需登录）
+//	POST   /api/sessions/:key 改工作会话名 {"title"}（留空回到自动取名，需登录）
+//	DELETE /api/sessions/:key 删除工作会话（连带历史与调用轨迹，需登录）
 //	GET    /admin /traces     旧地址，重定向回 /
 //	GET    /api/traces        调用轨迹列表（鉴权）
 //	GET    /api/traces/:id    单次调用轨迹详情（鉴权）
@@ -315,6 +319,9 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodGet}, "/api/context", s.wrap(s.handleContextUsage))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/compact", s.wrap(s.handleContextCompact))
 		root.AddRouter([]string{http.MethodGet}, "/api/sessions", s.wrap(s.handleListSessions))
+		root.AddRouter([]string{http.MethodPost}, "/api/sessions", s.wrap(s.handleSessionCreate))
+		root.AddRouter([]string{http.MethodPost}, "/api/sessions/:key", s.wrap(s.handleSessionRename))
+		root.AddRouter([]string{http.MethodDelete}, "/api/sessions/:key", s.wrap(s.handleSessionDelete))
 		root.AddRouter([]string{http.MethodGet}, "/api/chat/history", s.wrap(s.handleChatHistory))
 	}
 	if s.cfg != nil && s.regFn != nil && s.configPath != "" {

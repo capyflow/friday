@@ -1,5 +1,6 @@
 <script setup>
-// 会话管理：各入口独立会话，支持单条清除上下文。
+// 会话管理：生活模式的主会话、工作模式新建的会话，以及心跳/计划/目标这些
+// 后台入口会话都在这一张表里，支持按条清除上下文（聊天页只列前两类）。
 import { onMounted, ref } from 'vue'
 import { api } from '../../api.js'
 import { fmtDT } from '../../format.js'
@@ -7,6 +8,7 @@ import { toast } from '../../store.js'
 import EmptyState from '../art/EmptyState.vue'
 
 const sessions = ref([])
+const KIND_LABEL = { life: '生活 · 主会话', work: '工作会话', internal: '后台入口' }
 
 async function load() {
   try { sessions.value = (await api('GET', '/api/sessions')).sessions || [] }
@@ -26,10 +28,11 @@ onMounted(load)
 
 <template>
   <table v-if="sessions.length">
-    <thead><tr><th>会话</th><th>消息数</th><th>最后活跃</th><th></th></tr></thead>
+    <thead><tr><th>会话</th><th>归属</th><th>消息数</th><th>最后活跃</th><th></th></tr></thead>
     <tbody>
       <tr v-for="x in sessions" :key="x.key">
-        <td class="mono">{{ x.key }}</td>
+        <td>{{ x.title || x.key }}<br><span class="mono meta">{{ x.key }}</span></td>
+        <td class="meta">{{ KIND_LABEL[x.kind] || '未标记' }}</td>
         <td>{{ x.messages }}</td>
         <td class="meta">{{ fmtDT(x.updatedAt) }}</td>
         <td><button class="btn sm danger" @click="clear(x.key)">清除</button></td>
