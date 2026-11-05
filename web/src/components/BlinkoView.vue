@@ -1,9 +1,10 @@
 <script setup>
 // 闪念：笔记 + 待办的统一时间线（简易 Blinko）。与小五工具共用一份存储：
 // 右下角悬浮 + 打开编辑弹窗（正文即编辑区，标签经 # 按钮选择/新建），
-// 笔记支持 Markdown（弹窗内一排格式按钮在选区上插入语法），待办保留截止/提醒；
+// 笔记与待办正文都支持 Markdown（弹窗内一排格式按钮在选区上插入语法），
+// 待办保留截止/提醒；点卡片正文弹出详情看完整内容，列表正文有高度上限、超出截断；
 // 置顶固定顶部，已完成待办有专门视图。
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
 import { fmtDT } from '../format.js'
 import { toast } from '../store.js'
@@ -236,6 +237,26 @@ function onComposerKey(e) {
   if (e.key === 'Escape' && e.target === editorInput.value) { e.preventDefault(); closeDialog() }
 }
 
+/* ---------- 详情弹窗：点卡片正文查看完整内容（不做截断） ---------- */
+const detailEntry = ref(null)
+const detailBox = ref(null)
+const viewRoot = ref(null)
+function openCardDetail(ev, e) {
+  if (ev.target.closest('a')) return // 正文里的链接保持默认跳转
+  detailEntry.value = e
+  nextTick(() => detailBox.value?.focus())
+}
+function closeDetail() { detailEntry.value = null }
+function editFromDetail() {
+  const e = detailEntry.value
+  closeDetail()
+  if (e) openEdit(e)
+}
+function tagFromDetail(t) {
+  activeTag.value = activeTag.value === t ? '' : t
+  closeDetail()
+}
+
 /* ---------- 列表加载、过滤与时间线分组 ---------- */
 async function loadEntries() {
   try {
@@ -298,6 +319,16 @@ function matchFilter(e) {
 }
 
 const filtered = computed(() => entries.value.filter(matchFilter))
+
+/* 列表正文超出高度上限截断：量出真被截断的卡片，只给它们加底部渐隐 */
+async function markClipped() {
+  await nextTick()
+  if (disposed || !viewRoot.value) return
+  for (const el of viewRoot.value.querySelectorAll('.entry-clamp')) {
+    el.classList.toggle('clipped', el.scrollHeight > el.clientHeight + 1)
+  }
+}
+watch(filtered, markClipped)
 const pinnedEntries = computed(() => tab.value === 'done' ? [] : filtered.value.filter(e => e.pinned))
 const timelineEntries = computed(() => {
   const list = filtered.value.filter(e => tab.value === 'done' || !e.pinned)
@@ -348,12 +379,20 @@ function isOverdue(e) {
   return e.dueAt && !e.done && new Date(e.dueAt).getTime() < now.value
 }
 
-onMounted(() => { loadEntries(); clockTimer = setInterval(() => { now.value = Date.now() }, 60000) })
-onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clockTimer) })
+onMounted(() => {
+  loadEntries()
+  clockTimer = setInterval(() => { now.value = Date.now() }, 60000)
+  window.addEventListener('resize', markClipped)
+})
+onUnmounted(() => {
+  disposed = true
+  clearTimeout(msgTimer); clearInterval(clockTimer)
+  window.removeEventListener('resize', markClipped)
+})
 </script>
 
 <template>
-  <section class="view" id="view-blinko">
+  <section ref="viewRoot" class="view" id="view-blinko">
     <div class="view-inner">
       <h2>闪念 <span class="count">{{ countLine }}</span></h2>
 
@@ -385,15 +424,15 @@ onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clock
           <div class="entry-main">
             <input v-if="e.kind === 'todo'" type="checkbox" :checked="e.done" :disabled="pendingActions.has(e.id)"
                    :aria-label="'标记完成 ' + e.text" @change="toggle(e, $event.target.checked)">
-            <div class="entry-content">
-              <div v-if="e.kind === 'note'" class="entry-md" v-html="renderMD(e.text)"></div>
-              <div v-else class="entry-text" :class="{ done: e.done }">{{ e.text }}</div>
+            <div class="entry-content" title="查看详情" @click="openCardDetail($event, e)">
+              <div v-if="e.kind === 'note'" class="entry-md entry-clamp" v-html="renderMD(e.text)"></div>
+              <div v-else class="entry-md" :class="{ done: e.done }" v-html="renderMD(e.text)"></div>
               <div class="entry-meta">
                 <span v-if="isOverdue(e)" class="badge warn">已逾期</span>
                 <span v-else-if="e.dueAt && !e.done" class="badge repeat">截止 {{ fmtDT(e.dueAt) }}</span>
                 <span v-if="e.remindAt && !e.done" class="badge repeat">提醒 {{ fmtDT(e.remindAt) }}</span>
                 <span v-if="e.doneAt" class="meta">完成于 {{ fmtDT(e.doneAt) }}</span>
-                <button v-for="t in e.tags || []" :key="t" class="chip" type="button" @click="activeTag = activeTag === t ? '' : t">#{{ t }}</button>
+                <button v-for="t in e.tags || []" :key="t" class="chip" type="button" @click.stop="activeTag = activeTag === t ? '' : t">#{{ t }}</button>
               </div>
             </div>
           </div>
@@ -425,14 +464,14 @@ onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clock
         <div v-else class="dialog-kind meta">{{ form.kind === 'note' ? '笔记' : '待办' }} · 编辑</div>
 
         <div class="editor-box">
-          <div v-if="form.kind === 'note'" class="md-toolbar" role="group" aria-label="Markdown 格式">
+          <div class="md-toolbar" role="group" aria-label="Markdown 格式">
             <button v-for="tool in MD_TOOLS" :key="tool.id" type="button" :class="tool.cls"
                     :aria-label="tool.hint" :title="tool.hint" :disabled="submitting"
                     @click="runTool(tool.id)">{{ tool.text }}</button>
           </div>
           <textarea ref="editorInput" v-model="form.text" rows="6"
                     :aria-label="form.kind === 'note' ? '笔记内容' : '待办内容'"
-                    :placeholder="form.kind === 'note' ? '记个想法… 支持 Markdown' : '要做什么？'"
+                    :placeholder="form.kind === 'note' ? '记个想法… 支持 Markdown' : '要做什么？支持 Markdown'"
                     :disabled="submitting" @keydown="onComposerKey"></textarea>
         </div>
 
@@ -469,6 +508,34 @@ onUnmounted(() => { disposed = true; clearTimeout(msgTimer); clearInterval(clock
         </div>
 
         <div class="msg" :class="msg.cls" role="status">{{ msg.text }}</div>
+      </div>
+    </div>
+
+    <!-- 详情弹窗：完整正文 + 全部元信息 -->
+    <div v-if="detailEntry" class="blinko-mask" @click.self="closeDetail">
+      <div ref="detailBox" class="blinko-dialog detail-dialog" role="dialog" aria-modal="true" aria-label="闪念详情"
+           tabindex="-1" @keydown.esc.prevent="closeDetail">
+        <div class="dialog-kind meta">
+          {{ detailEntry.kind === 'note' ? '笔记' : '待办' }}
+          <span v-if="detailEntry.pinned" class="detail-pin" title="已置顶">★</span>
+        </div>
+        <div class="entry-md detail-body" :class="{ done: detailEntry.done }" v-html="renderMD(detailEntry.text)"></div>
+        <div class="entry-meta">
+          <span v-if="isOverdue(detailEntry)" class="badge warn">已逾期</span>
+          <span v-if="detailEntry.dueAt" class="badge repeat">截止 {{ fmtDT(detailEntry.dueAt) }}</span>
+          <span v-if="detailEntry.remindAt" class="badge repeat">提醒 {{ fmtDT(detailEntry.remindAt) }}</span>
+          <span v-if="detailEntry.doneAt" class="meta">完成于 {{ fmtDT(detailEntry.doneAt) }}</span>
+          <button v-for="t in detailEntry.tags || []" :key="t" class="chip" type="button"
+                  :title="'筛选 #' + t" @click="tagFromDetail(t)">#{{ t }}</button>
+        </div>
+        <div class="meta detail-time">创建于 {{ fmtDT(detailEntry.createdAt) }}</div>
+        <div class="dialog-foot">
+          <div class="foot-left"></div>
+          <div class="foot-right">
+            <button class="btn sm" type="button" @click="editFromDetail">编辑</button>
+            <button class="btn primary sm" type="button" @click="closeDetail">关闭</button>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -560,13 +627,24 @@ html[data-theme="dark"] .editor-box:focus-within { border-color: rgba(110,168,24
 .entry-card.is-done { opacity: .68; }
 .entry-main { flex: 1; min-width: 0; display: flex; gap: 9px; align-items: flex-start; }
 .entry-main > input[type="checkbox"] { margin-top: 4px; }
-.entry-content { flex: 1; min-width: 0; }
-.entry-text { font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-.entry-text.done { text-decoration: line-through; color: var(--muted-fg); }
+.entry-content { flex: 1; min-width: 0; cursor: pointer; }
 .entry-md { font-size: 13.5px; line-height: 1.65; min-width: 0; word-break: break-word; }
+.entry-md.done { text-decoration: line-through; color: var(--muted-fg); }
 .entry-md :deep(p) { margin: 0 0 6px; } .entry-md :deep(p:last-child) { margin-bottom: 0; }
 .entry-md :deep(pre) { margin: 6px 0; }
 .entry-md :deep(ul), .entry-md :deep(ol) { margin: 6px 0; padding-left: 20px; }
+/* 列表正文高度上限：超出截断，真被截断的卡片底部渐隐提示可点开详情 */
+.entry-clamp { max-height: 132px; overflow: hidden; }
+.entry-clamp.clipped { position: relative; }
+.entry-clamp.clipped::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 30px;
+  background: linear-gradient(180deg, transparent, var(--card)); pointer-events: none; }
+
+/* 详情弹窗：正文完整展示不截断 */
+.detail-dialog { width: min(560px, 100%); max-height: 74vh; overflow-y: auto; }
+.detail-dialog:focus { outline: none; }
+.detail-body { font-size: 14px; line-height: 1.7; }
+.detail-pin { margin-left: 6px; color: var(--accent); }
+.detail-time { margin-top: -4px; }
 .entry-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .entry-meta .chip { cursor: pointer; font-size: 11px; }
 .entry-actions { display: flex; gap: 4px; flex-shrink: 0; }

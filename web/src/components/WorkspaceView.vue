@@ -26,6 +26,7 @@ import ChatComposer from './ChatComposer.vue'
 import SelectBox from './SelectBox.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
+import ImageLightbox from './ImageLightbox.vue'
 
 const threads = ref([])
 const workspaces = ref([])     // 工作区（一组目录 + 挂在它下面的会话）
@@ -82,6 +83,7 @@ const pendingDelete = ref(null)
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 const filesDrawer = ref(null)      // 工作区文件/本轮改动抽屉（文件树 + diff + 还原）
+const imgLightbox = ref(null)      // 附件全图预览层（气泡上方的缩略图点开）
 
 /* 每个 thread 一份前端态：消息缓冲、进行中的一轮、能力清单、上下文水位、输入草稿、
    待发的图片。currentId 只是"现在显示哪一份"——切换 thread 不打断别的 thread 正在
@@ -201,23 +203,34 @@ function toggleCtx() {
   popOpen.value = false
   capOpen.value = ''
   ctxOpen.value = !ctxOpen.value
-  if (ctxOpen.value) nextTick(() => { const el = document.getElementById('agCtxPopover'); if (el) popIn(el) })
+  if (ctxOpen.value) {
+    handoffAgent.value = current.value?.agent || '' // 每次打开都回到"交给原来那台"
+    nextTick(() => { const el = document.getElementById('agCtxPopover'); if (el) popIn(el) })
+  }
 }
 
 // 总结并新开：ACP 没有压缩接口，只能由 Friday 整理可见时间线，旧会话保留，
 // 新会话下一轮带上交接摘要。水位低时也允许手动用（agent 不报水位则入口不出现）。
+// 目标 agent 可以换：摘要只是文本，跨 agent 也带得动；模型/审批档位各家取值不同，
+// 换人时后端不沿用（新会话回到工作区默认档）。
 const handoffBusy = ref(false)
+const handoffAgent = ref('')
+const handoffSwitching = computed(() =>
+  !!current.value && handoffAgent.value && handoffAgent.value !== current.value.agent)
 async function handoffSession() {
-  if (!currentId.value || busy.value || handoffBusy.value) return
+  if (!currentId.value || busy.value || handoffBusy.value || !handoffAgent.value) return
   const owner = currentId.value
+  const from = current.value?.agent || ''
+  const target = handoffAgent.value
   handoffBusy.value = true
   ctxOpen.value = false
   try {
-    const r = await api('POST', `/api/acp/threads/${owner}/handoff`, {})
+    const r = await api('POST', `/api/acp/threads/${owner}/handoff`, { agent: target })
     await load()
     if (r.thread?.id && currentId.value === owner) {
       select(r.thread.id)
-      toast('已新开续会话：交接摘要随下一轮发出')
+      toast(target === from ? '已新开续会话：交接摘要随下一轮发出'
+        : `已新开续会话并交给 ${target}：摘要随下一轮发出，模型与审批档位按工作区默认`)
     }
   } catch (e) {
     toast('交接失败：' + e.message, true)
@@ -380,7 +393,10 @@ function onDocClick(e) {
   if (threadMenu.value && !e.target.closest('.ag-menu-wrap')) closeThreadMenu()
   if (popOpen.value && popWrap.value && !popWrap.value.contains(e.target)) setPop(false)
   if (capOpen.value && capWrap.value && !capWrap.value.contains(e.target)) capOpen.value = ''
-  if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target)) ctxOpen.value = false
+  // 上下文弹层里嵌了下拉（交接目标 agent）：下拉的列表 Teleport 到 body，
+  // 点选项不能被当成"点了外面"把整个弹层收掉——那样选完就没法按"总结并新开"了。
+  if (ctxOpen.value && ctxWrap.value && !ctxWrap.value.contains(e.target) &&
+      !e.target.closest?.('.selbox-pop')) ctxOpen.value = false
 }
 /* Esc 的优先级：有弹层/菜单/弹窗就先收它们；都没有、焦点又在对话区、这一轮还在
    跑，就中断本轮。输入框自己会先处理（ChatComposer 里有 @keydown），它 preventDefault
@@ -1051,6 +1067,11 @@ function removePreview(p) {
   if (i >= 0) st.pending.splice(i, 1)
   URL.revokeObjectURL(p.url)
 }
+// 附件预览：发出去的那条按服务端地址（/api/upload/:id）看，待发的那条按本地 blob 看。
+// 一次把整组图交给预览层，多张可以左右翻。
+function previewImages(urls, at = 0) {
+  imgLightbox.value?.show(urls, at)
+}
 </script>
 
 <template>
@@ -1364,10 +1385,18 @@ function removePreview(p) {
                   </div>
                 </div>
                 <div v-else class="msg-col">
-                  <div class="bubble">
+                  <!-- 附件排在气泡上方（同 ZCode）：图不进气泡，一排缩略图点开看原图。
+                       只有服务端回得图（/api/upload/:id）才画；历史里图已丢失时退回
+                       下面那行「📷 ×N」的文字提示，不把"有附件"伪装成"看得到图"。 -->
+                  <div v-if="m.images && m.images.length" class="msg-imgs">
+                    <button v-for="(src, j) in m.images" :key="j" type="button" class="msg-img"
+                            :aria-label="'预览第 ' + (j + 1) + ' 张附件'" @click="previewImages(m.images, j)">
+                      <img :src="mediaURL(src)" alt="">
+                    </button>
+                  </div>
+                  <div v-if="m.text || (m.imgCount && !(m.images && m.images.length))" class="bubble">
                     {{ m.text }}
                     <span v-if="m.imgCount && !(m.images && m.images.length)" class="meta"> 📷 ×{{ m.imgCount }}</span>
-                    <img v-for="(src, j) in m.images || []" :key="j" class="chat-img" :src="mediaURL(src)" alt="">
                   </div>
                   <div class="msg-acts">
                     <CopyMessageButton :text="m.text" :kind="m.role === 'err' ? 'error' : 'question'" />
@@ -1409,8 +1438,9 @@ function removePreview(p) {
                 </ul>
               </div>
               <div v-if="pendingImages.length" id="attachPreviews">
-                <div v-for="p in pendingImages" :key="p.url" class="thumb">
-                  <img :src="p.url" alt="">
+                <div v-for="(p, pi) in pendingImages" :key="p.url" class="thumb">
+                  <button type="button" class="thumb-open" :aria-label="'预览第 ' + (pi + 1) + ' 张待发图片'"
+                          @click="previewImages(pendingImages.map(x => x.url), pi)"><img :src="p.url" alt=""></button>
                   <button class="rm" aria-label="移除图片" @click="removePreview(p)">×</button>
                 </div>
               </div>
@@ -1488,10 +1518,23 @@ function removePreview(p) {
               数字来自 agent 的 usage_update，上下文由 agent 的会话自己管理；ACP 协议不提供压缩或清除，重开会话会丢历史。
             </div>
             <div class="ctx-handoff pop-anim">
-              <button type="button" class="btn sm" :disabled="busy || handoffBusy" @click="handoffSession">
-                {{ handoffBusy ? '正在交接…' : '总结并新开' }}
-              </button>
-              <p class="meta">按可见时间线整理成交接摘要，新会话接着干；旧会话保留。建议水位高时使用。</p>
+              <div class="ctx-handoff-row">
+                <label class="meta" for="agHandoffAgent">交给</label>
+                <SelectBox id="agHandoffAgent" v-model="handoffAgent" :options="agentOptions"
+                           aria-label="交接目标智能体" compact />
+                <button type="button" class="btn sm" :disabled="busy || handoffBusy || !handoffAgent"
+                        @click="handoffSession">
+                  {{ handoffBusy ? '正在交接…' : '总结并新开' }}
+                </button>
+              </div>
+              <p class="meta">
+                <template v-if="handoffSwitching">
+                  换 {{ handoffAgent }} 接着干：摘要照样带过去，但模型与审批档位不沿用（各家用自己的取值），新会话按工作区默认档。
+                </template>
+                <template v-else>
+                  发给 agent 的是精简摘要，完整历史在各会话自己的记录文件（.friday/sessions/）里；旧会话保留，建议水位高时使用。
+                </template>
+              </p>
             </div>
           </div>
         </div>      </template>
@@ -1500,6 +1543,8 @@ function removePreview(p) {
   <FilePreviewDrawer ref="fileDrawer" />
   <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
                         :workspace-id="current?.workspaceId || ''" @reverted="onChangesReverted" />
+  <!-- 附件全图预览：气泡上方的缩略图与输入区待发缩略图共用一层 -->
+  <ImageLightbox ref="imgLightbox" />
   <!-- 删除确认：会话与工作区共用一张，标题和影响范围随目标变化。遮罩、Esc 与「取消」
        同义；破坏性动作不放 ✕，也不靠「再点一次」的带时限第二下。 -->
   <Teleport to="body">

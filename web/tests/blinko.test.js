@@ -117,9 +117,9 @@ describe('闪念：笔记与待办统一时间线', () => {
     await flushPromises()
     expect(editor().element.value).toBe('[百度](https://)')
     expect([editor().element.selectionStart, editor().element.selectionEnd]).toEqual([5, 13])
-    // 待办正文按纯文本展示，格式标记会露出来，所以不挂工具栏
+    // 待办与笔记一样支持 Markdown，格式条同样可用
     await button('.composer-tabs', '待办').trigger('click')
-    expect(wrapper.find('.md-toolbar').exists()).toBe(false)
+    expect(wrapper.find('.md-toolbar').exists()).toBe(true)
   })
 
   it('tabs 过滤：待办页只看未完成，已完成页按完成时间展示', async () => {
@@ -161,6 +161,46 @@ describe('闪念：笔记与待办统一时间线', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/entries/t1')
     expect(confirm).toHaveBeenCalled()
+  })
+
+  it('点卡片正文打开详情弹窗：完整正文与全部元信息，待办正文也渲染 Markdown', async () => {
+    const mdTodo = { id: 't3', kind: 'todo', text: '买 **牛奶**', done: false, tags: ['买菜'],
+      createdAt: '2026-10-10T10:00:00+08:00', dueAt: '2026-10-11T18:00:00+08:00', remindAt: '2026-10-11T17:00:00+08:00' }
+    await showBlinko({ ...fixture, entries: [mdTodo, note], tags: ['灵感', '买菜'] })
+    // 列表里待办正文走 Markdown：加粗渲染成 strong
+    const firstCard = wrapper.findAll('.entry-md')[0]
+    expect(firstCard.find('strong').exists()).toBe(true)
+    // 点正文打开详情：完整内容不截断，元信息齐全
+    await firstCard.trigger('click')
+    const detail = wrapper.get('[aria-label="闪念详情"]')
+    expect(detail.find('strong').exists()).toBe(true)
+    expect(detail.text()).toContain('买 牛奶')
+    expect(detail.text()).toContain('截止')
+    expect(detail.text()).toContain('提醒')
+    expect(detail.text()).toContain('创建于')
+    expect(detail.find('.detail-body .entry-clamp').exists()).toBe(false) // 详情正文不截断
+    // Esc 关闭
+    await detail.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.find('[aria-label="闪念详情"]').exists()).toBe(false)
+    // 再开一次，从详情转编辑：预填原文本
+    await wrapper.findAll('.entry-md')[0].trigger('click')
+    await button('.detail-dialog', '编辑').trigger('click')
+    expect(wrapper.find('[aria-label="闪念详情"]').exists()).toBe(false)
+    expect(wrapper.get('.blinko-dialog textarea').element.value).toBe('买 **牛奶**')
+  })
+
+  it('列表正文高度上限：短内容不截断，详情里链接点击保持默认跳转', async () => {
+    const longNote = { id: 'n2', kind: 'note', text: Array.from({ length: 40 }, (_, i) => `第${i + 1}行`).join('\n\n'),
+      tags: [], createdAt: '2026-10-10T11:00:00+08:00' }
+    await showBlinko({ ...fixture, entries: [longNote, note] })
+    // jsdom 不做布局，clamp 截断只验证样式挂上了，渐隐类由运行时测量决定
+    const longCard = wrapper.findAll('.entry-clamp')[0]
+    expect(longCard.classes()).toContain('entry-clamp')
+    // 详情正文不带截断样式
+    await wrapper.findAll('.entry-md')[0].trigger('click')
+    const detail = wrapper.get('[aria-label="闪念详情"]')
+    expect(detail.get('.detail-body').classes()).not.toContain('entry-clamp')
+    await detail.trigger('keydown', { key: 'Escape' })
   })
 
   it('编辑复用弹窗：预填内容与时间，保存完整替换并同步标签', async () => {

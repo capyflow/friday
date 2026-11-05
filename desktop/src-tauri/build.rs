@@ -9,6 +9,8 @@ fn main() {
             "prefs_save",
             "enable_notifications",
             "notifications_enabled",
+            "open_notification_settings",
+            "sync_notifications",
             "pick_data_dir_dialog",
             "apply_data_dir",
             "open_url",

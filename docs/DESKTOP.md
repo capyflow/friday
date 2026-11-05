@@ -68,8 +68,8 @@ sidecar 机制本身不提供父子进程生命周期绑定（Tauri 不自动杀
 ```
 desktop/
 ├── README.md                  # 本地开发 / 发布 / 扩展文档
-├── ui/index.html              # 启动占位页（监听 server-ready → 跳转内核地址）
-├── scripts/gen-icon.py        # 占位图标生成器（纯 stdlib 画 PNG，无需设计资源）
+├── ui/index.html              # 启动页（品牌标基准 + 监听 server-ready → 跳转内核地址）
+├── scripts/gen-icon.py        # 图标生成器（纯 stdlib 画 PNG：白底 + 中心黑点，无需设计资源）
 └── src-tauri/
     ├── Cargo.toml             # tauri 2 + shell / global-shortcut / single-instance 插件
     ├── tauri.conf.json        # externalBin(sidecar) + resources(config.yaml.example)
@@ -84,6 +84,12 @@ desktop/
 - sidecar 拉起内核，后台线程解析 `FRIDAY_ADDR=` → emit 事件；监听 `Terminated` → 错误页
 - 托盘「显示 Friday」/「退出 Friday」，关闭主窗口隐藏并继续运行；系统退出 → stdin 写 `/quit` → 3s 后 kill 兜底
 - 解析 `FRIDAY_NOTICE=`，显式授权后交给系统通知；准确内核来源的主窗口才有权限执行通知开启命令
+- 授权被拒（`enable_notifications` 返回 false）时，系统不会再弹授权框，外壳命令 `open_notification_settings`
+  直接用深链打开系统的通知设置面板（macOS `x-apple.systempreferences:com.apple.Notifications-Settings.extension`
+  实测落到「通知」面板；Windows `ms-settings:notifications`；Linux 没有统一入口，返回错误让前端给手动路径）。
+  之后前端每 2 秒调 `sync_notifications` 回查系统权限（只读权限、不请求授权，最多 90 秒），用户拨完开关
+  外壳就把开启位落盘并把状态收尾成「系统通知已开启」。两个命令都不放宽 `open_url` 的 http/https 白名单：
+  深链是外壳写死的常量，不接受前端传 URL
 - `tauri-plugin-global-shortcut` 注册全局快捷键（默认 **Alt+Space**，常量一行可改）→ 创建/切换弹窗：无边框+透明+置顶+不进任务栏，加载内核 `/palette`；失焦/Esc 隐藏（仅隐藏不销毁，消息列表跨多次唤起保留）
 - 弹窗落位：当前显示器水平居中、顶部 15% 处（`place_palette`），每次显示重算一次——隐藏期间可能换过显示器，老坐标会弹到不存在的屏幕上；小屏 + 高缩放时夹到下边界内，拿不到显示器信息则退回系统居中
 - 弹窗权限（`capabilities/palette.json`）额外放开 `allow-open-url`：回答里的外链交系统浏览器，避免在浮层内跳转回不到问答页
@@ -106,7 +112,7 @@ desktop/
 |------|----------|------|
 | 全局快捷键/弹窗 | 本方案第一个样例 | ✅ |
 | 系统托盘菜单 | tauri `tray-icon` feature | 已接入 |
-| 系统通知 | 显式授权、系统状态检查与通知中心兜底 | 已接入，跨平台系统联调待验收 |
+| 系统通知 | 显式授权、被拒后自动打开系统通知设置并回查权限、通知中心兜底 | 已接入，跨平台系统联调待验收 |
 | 外部链接（MCP 授权 / 正文外链） | 外壳命令 `open_url` 交给系统浏览器（WebView 不允许 `window.open`）；只放行 http/https | 已接入 |
 | 开机自启 | autostart 插件 | 低 |
 | 自动更新 | updater 插件（需签名密钥对） | 中 |

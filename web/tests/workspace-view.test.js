@@ -48,6 +48,7 @@ let changesByTurn
 let workspaceMemory
 let checkRuns
 let checkSuggestions
+let uploadSeq
 
 beforeEach(() => {
   // 视图选择与"已读"时刻是本地偏好（localStorage）：用例之间必须清干净，
@@ -67,6 +68,7 @@ beforeEach(() => {
   workspaceMemory = {}
   checkRuns = []
   checkSuggestions = [{ label: 'npm test', command: 'npm test', source: 'package.json 的 scripts.test' }]
+  uploadSeq = 0
   api.mockReset().mockImplementation(server)
   toast.mockClear()
   fetchMock = vi.fn()
@@ -220,9 +222,17 @@ async function server(method, url, body) {
   if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+\/handoff$/.test(url)) {
     const old = data.threads.find(t => t.id === url.split('/')[4])
     if (!old) throw new Error('未找到该会话')
+    // body {"agent": "..."} 可指定交接目标；留空 = 同 agent。未知/停用一律报错，
+    // 形状照 internal/admin/acp.go 的 handleAcpThreadHandoff。
+    const target = String(body.agent || old.agent).trim()
+    const hit = (data.acp.agents || []).find(a => a.name === target)
+    if (!hit || hit.enabled === false) throw new Error(`没有叫 "${target}" 的智能体（可在设置 → 智能体里添加）`)
     const nt = {
-      ...old, id: 'th' + (data.threads.length + 1), title: old.title + ' · 续',
-      state: 'idle', handoff: '交接摘要', messages: [{ role: 'note', text: '已从上一个会话交接上下文' }],
+      ...old, id: 'th' + (data.threads.length + 1), title: old.title + ' · 续', agent: target,
+      state: 'idle', handoff: '交接摘要',
+      messages: [{ role: 'note', text: hit.name === old.agent
+        ? '已从上一个会话交接上下文'
+        : `已从上一个会话交接上下文（上一个由 ${old.agent} 跑，这次交给 ${target}）` }],
     }
     data.threads.push(nt)
     return json({ thread: nt, message: '已新开续会话' })
@@ -247,6 +257,10 @@ async function server(method, url, body) {
     const id = url.split('/').pop()
     data.threads = data.threads.filter(t => t.id !== id)
     return json({ message: '已删除该对话' })
+  }
+  if (method === 'POST' && url === '/api/upload') {
+    uploadSeq += 1
+    return json({ id: 'up' + uploadSeq })
   }
   return json({ message: '已完成' })
 }
@@ -400,19 +414,24 @@ describe('工作区页：两级栏与投影', () => {
     expect(chip.text()).toContain('40%')
     await chip.trigger('click')
     expect(wrapper.get('#agCtxPopover').text()).toContain('占用约 12k / 窗口 30k tokens')
-    // 只读 + 一个“总结并新开”入口；没有压缩/清除
+    // 只读 + 一个“总结并新开”入口（带交接目标下拉）；没有压缩/清除
     expect(wrapper.get('#agCtxPopover').text()).toContain('总结并新开')
-    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(1)
+    // 没有压缩/清除这类动作键（协议不支持，只在说明文字里提到）
+    const acts = wrapper.findAll('#agCtxPopover button').map(b => b.text())
+    expect(acts.filter(t => /压缩|清除/.test(t))).toHaveLength(0)
+    expect(wrapper.findAll('#agCtxPopover button')).toHaveLength(2) // 下拉触发键 + 交接键
+    expect(wrapper.get('#agCtxPopover .selbox-trigger').text()).toContain('codex')
   })
 
   it('上下文弹层里总结并新开：建续会话、选中并带交接说明', async () => {
     data.threads = [{ ...thread, contextUsed: 24000, contextSize: 30000 }]
     await show()
     await wrapper.get('[aria-label="上下文使用率"]').trigger('click')
-    await wrapper.get('#agCtxPopover button').trigger('click')
+    // 弹层里第一个键现在是交接目标的下拉，按键文案找交接那颗
+    await wrapper.findAll('#agCtxPopover button').find(b => b.text() === '总结并新开').trigger('click')
     await flushPromises()
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/handoff', {})
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/handoff', { agent: 'codex' })
     expect(wrapper.get('.ag-head-txt b').text()).toContain('续')
     expect(wrapper.text()).toContain('已从上一个会话交接上下文')
   })
@@ -1374,3 +1393,102 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(headMeta()).toContain('审批档位未下发')
   })
 })
+
+// 附件展示：图排在用户气泡上方（同 ZCode），点缩略图看原图。
+// 守的是三件事——图不再进气泡、纯图消息不留空气泡、预览层能被 Esc 收掉。
+describe('工作区页：附件展示与预览', () => {
+  const withUserMsg = msg => {
+    data.threads = [{ ...copy(thread), messages: [msg, { role: 'assistant', text: '收到。' }] }]
+  }
+
+  it('附件缩略图排在气泡上方，气泡里不再夹图', async () => {
+    withUserMsg({ role: 'user', text: '看下这张图', files: ['u1', 'u2'], images: 2 })
+    await show()
+    const col = wrapper.get('.mrow.user .msg-col')
+    const kids = col.element.children
+    expect(kids[0].className).toContain('msg-imgs')
+    expect(kids[1].className).toContain('bubble')
+    expect(col.findAll('.bubble img').length).toBe(0)
+    expect(wrapper.findAll('.msg-img').length).toBe(2)
+    expect(wrapper.get('.msg-img img').attributes('src')).toBe('/api/upload/u1')
+  })
+
+  it('只发图片时不留一个空气泡', async () => {
+    withUserMsg({ role: 'user', text: '', files: ['u1'], images: 1 })
+    await show()
+    expect(wrapper.findAll('.msg-img').length).toBe(1)
+    expect(wrapper.find('.mrow.user .bubble').exists()).toBe(false)
+  })
+
+  it('历史里图片地址丢了就退回「📷 ×N」文字，不画空图框', async () => {
+    withUserMsg({ role: 'user', text: '那条带图的', images: 2 })
+    await show()
+    expect(wrapper.find('.msg-imgs').exists()).toBe(false)
+    expect(wrapper.get('.mrow.user .bubble').text()).toContain('📷 ×2')
+  })
+
+  it('点缩略图开全图预览，Esc 只收预览不停本轮', async () => {
+    withUserMsg({ role: 'user', text: '两张图', files: ['u1', 'u2'], images: 2 })
+    await show()
+    await wrapper.findAll('.msg-img')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.lb-img').attributes('src')).toBe('/api/upload/u2')
+    expect(wrapper.get('.lb-count').text()).toBe('2 / 2')
+
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(wrapper.find('.lb-mask').exists()).toBe(false)
+  })
+
+  it('待发缩略图也能点开预览，「移除」按钮照旧生效', async () => {
+    withUserMsg({ role: 'user', text: '准备发图' })
+    await show()
+    const ev = new window.Event('paste', { bubbles: true, cancelable: true })
+    ev.clipboardData = { files: [new File(['photo'], 'photo.png', { type: 'image/png' })] }
+    wrapper.get('textarea').element.dispatchEvent(ev)
+    await flushPromises()
+    expect(wrapper.get('.thumb-open img').attributes('src')).toBe('blob:x')
+
+    await wrapper.get('.thumb-open').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.lb-img').attributes('src')).toBe('blob:x')
+    await wrapper.get('.lb-close').trigger('click')
+
+    await wrapper.get('.thumb .rm').trigger('click')
+    expect(wrapper.find('.thumb').exists()).toBe(false)
+  })
+})
+
+  it('总结并新开可以换 agent：下拉选谁就交给谁，并提示档位不沿用', async () => {
+    data.threads = [{ ...thread, contextUsed: 24000, contextSize: 30000 }]
+    await show()
+    await wrapper.get('[aria-label="上下文使用率"]').trigger('click')
+    // 打开交接目标下拉，挑 opencode
+    await wrapper.get('#agCtxPopover .selbox-trigger').trigger('click')
+    await flushPromises()
+    const opt = wrapper.findAll('.selbox-opt').find(o => o.text().includes('opencode'))
+    await opt.trigger('click')
+    await flushPromises()
+    // 换了人就说明白：模型/审批档位不沿用
+    expect(wrapper.get('#agCtxPopover p.meta').text()).toContain('不沿用')
+
+    await wrapper.findAll('#agCtxPopover button').find(b => b.text() === '总结并新开').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/handoff', { agent: 'opencode' })
+    expect(wrapper.get('.ag-head-txt b').text()).toContain('续')
+    expect(wrapper.text()).toContain('这次交给 opencode')
+  })
+
+  it('交接目标被停用时报错说清去哪儿加，不静默换人', async () => {
+    data.acp = { ...config, agents: [{ name: 'codex', command: 'npx', enabled: true },
+      { name: 'opencode', command: 'opencode', enabled: false }] }
+    data.threads = [{ ...thread, contextUsed: 24000, contextSize: 30000 }]
+    await show()
+    await wrapper.get('[aria-label="上下文使用率"]').trigger('click')
+    await wrapper.get('#agCtxPopover .selbox-trigger').trigger('click')
+    await flushPromises()
+    const opt = wrapper.findAll('.selbox-opt').find(o => o.text().includes('opencode'))
+    expect(opt.attributes('aria-disabled')).toBe('true') // 停用的列出来但选不中
+    expect(toast).not.toHaveBeenCalled()
+  })

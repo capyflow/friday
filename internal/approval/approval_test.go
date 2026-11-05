@@ -278,3 +278,67 @@ func TestRequestCancelableApprove(t *testing.T) {
 		t.Fatal("Wait 返回后 Done 应已关闭")
 	}
 }
+
+// TestRequestCardQuestionDecideOption 问答卡：入队带选项与问题正文，按 optionId
+// 作答能取回该 id；乱填的 id、以及对授权卡作答都必须被拒（否则会把不存在的选项
+// 回传给 agent）。
+func TestRequestCardQuestionDecideOption(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	opts := []Option{{ID: "a", Name: "方案 A", Kind: "allow_once"}, {ID: "b", Name: "方案 B", Kind: "allow_once"}}
+	groups := []QuestionGroup{{Header: "范围", Question: "怎么定？",
+		Options: []QuestionOption{{Label: "方案 A", Description: "只拦新上传"}}}}
+	card := q.RequestCard(Card{Tool: "智能体提问", Summary: "怎么定？", Kind: KindQuestion,
+		Options: opts, Questions: groups}, 0)
+
+	list := q.Pending()
+	if len(list) != 1 || list[0].Kind != KindQuestion || len(list[0].Options) != 2 {
+		t.Fatalf("问答卡入队形态不符: %+v", list)
+	}
+	if list[0].Questions[0].Header != "范围" {
+		t.Fatalf("问题正文没带上: %+v", list[0].Questions)
+	}
+
+	if q.DecideOption(card.ID(), "nope") {
+		t.Error("不存在的选项不该被接受")
+	}
+	if !q.DecideOption(card.ID(), "b") {
+		t.Fatal("按 optionId 作答应被接受")
+	}
+	out, err := card.WaitDecision()
+	if err != nil || !out.Allow || out.OptionID != "b" {
+		t.Fatalf("作答结果不符: %+v err=%v", out, err)
+	}
+	if len(q.Pending()) != 0 {
+		t.Errorf("作答后卡片应出队: %+v", q.Pending())
+	}
+}
+
+// TestDecideOptionRejectsApprovalCard 授权卡要的是批准/拒绝，不接受选项作答。
+func TestDecideOptionRejectsApprovalCard(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	card := q.RequestCancelable("exec", "执行 rm", "rm -rf /tmp/x", 0)
+	if q.DecideOption(card.ID(), "allow") {
+		t.Error("授权卡不该被 DecideOption 处理")
+	}
+	if !q.Decide(card.ID(), true) {
+		t.Fatal("授权卡仍应按批准结算")
+	}
+	if ok, err := card.Wait(); !ok || err != nil {
+		t.Fatalf("批准结果不符: %v %v", ok, err)
+	}
+}
+
+// TestWaitDecisionTimeoutKeepsDeniedSemantics 超时/撤卡仍是 ErrDenied，且没有
+// optionId——调用方据此回 cancelled，而不是替用户挑一条。
+func TestWaitDecisionTimeoutKeepsDeniedSemantics(t *testing.T) {
+	q := New("confirm", nil, 0)
+	card := q.RequestCard(Card{Tool: "智能体提问", Summary: "问", Kind: KindQuestion,
+		Options: []Option{{ID: "a", Name: "A"}}}, time.Nanosecond)
+	out, err := card.WaitDecision()
+	if err != ErrDenied {
+		t.Fatalf("超时应为 ErrDenied: %v", err)
+	}
+	if out.OptionID != "" || out.Allow {
+		t.Errorf("超时不该带选项: %+v", out)
+	}
+}

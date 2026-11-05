@@ -260,7 +260,7 @@ loadHistory()
 <template>
   <div id="panel">
     <div id="inputRow">
-      <div id="logo">五</div>
+      <div id="logo"></div>
       <textarea id="q" ref="input" v-model="q" rows="1" placeholder="问小五任何事，或让它安排事项…"
                 autofocus autocomplete="off" spellcheck="false"
                 @keydown="onKeydown" @input="autosize"></textarea>
@@ -316,10 +316,13 @@ loadHistory()
     padding: 14px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, .08);
   }
-  #logo { width: 30px; height: 30px; border-radius: 9px; flex: none;
-    background: #E8E8E8; border: 1px solid rgba(255,255,255,.16);
-    display: flex; align-items: center; justify-content: center;
-    color: #141414; font-size: 14px; font-weight: 600; }
+  /* 品牌标：白底 + 中心黑点（弹窗自带样式，不引 style.css，几何与全站一致：
+     圆角 28%、圆点 44%）。深色桌面上底板用亮灰面，仍是同一块标。 */
+  #logo { position: relative; width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: #E8E8E8; }
+  #logo::after { content: ""; position: absolute; left: 50%; top: 50%;
+    width: 13px; height: 13px; transform: translate(-50%, -50%);
+    border-radius: 50%; background: rgba(20, 20, 20, .92); }
   #q {
     flex: 1; background: transparent; border: 0; outline: 0; resize: none;
     color: #E8E8E8; font-size: 16px; line-height: 1.5; caret-color: #6EA8F2;

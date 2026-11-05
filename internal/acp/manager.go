@@ -103,6 +103,9 @@ type Thread struct {
 	// Handoff 是上一个会话留下的交接摘要：建立下一轮时作为前置文本发给
 	// agent，送达成功后清空（失败保留，重试还能带上）。
 	Handoff string `json:"handoff,omitempty"`
+	// HandoffFrom 是"这条会话由哪条会话交接而来"（总结并新开时写入）。
+	// 记录文件的路径由 cwd + 会话 id 推导，不存字段；交接链要存，否则来源断了。
+	HandoffFrom string `json:"handoffFrom,omitempty"`
 	// PolicyApplied / PolicyNote 记录工作区默认审批档位在本会话的实际落地情况：
 	// Applied 为空表示没有下发过；Note 说明为什么没下发（agent 没报审批模式等）。
 	PolicyApplied string `json:"policyApplied,omitempty"`
@@ -319,6 +322,10 @@ type Manager struct {
 	cfgFn        func() config.AcpConfig
 	approver     *approval.Queue
 	memory       *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	// notifier 是系统提示桥（key 幂等，见 notification.Center.PostOnce）：只在
+	// "人不在这一页上也得知道"的两个时刻用——审批卡入队、一轮结束。未注入时
+	// 静默跳过（测试、或没装配通知中心的运行形态）。
+	notifier func(key, text string)
 	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
 	checks checkRegistry
 	// warmAgents 记下哪些 agent 已经成功起过一次：npx 型命令只有第一次要联网装包，
@@ -459,96 +466,6 @@ func (m *Manager) CreateSession(agentName, workspaceID, cwd, title string) (Thre
 	return *th, nil
 }
 
-// Handoff 从一条会话生成交接摘要，并在同一工作区/agent/主目录下新开一条
-// “续”会话。ACP 没有压缩接口，这里不假装能原地压缩：旧会话原样保留，
-// 新会话下一轮把摘要作为前置文本发给 agent（送达成功才清空）。
-func (m *Manager) Handoff(id string) (Thread, error) {
-	mu := m.threadLock(id)
-	mu.Lock()
-	defer mu.Unlock()
-
-	m.mu.Lock()
-	th, ok := m.threads[id]
-	if !ok {
-		m.mu.Unlock()
-		return Thread{}, fmt.Errorf("未找到会话 %s", id)
-	}
-	if th.State == StateRunning || len(th.Messages) == 0 {
-		m.mu.Unlock()
-		if th.State == StateRunning {
-			return Thread{}, errors.New("这一轮还在跑，等它结束再交接")
-		}
-		return Thread{}, errors.New("这条会话还没有可交接的对话内容")
-	}
-	summary := handoffSummary(th.Messages)
-	title := th.Title
-	if title == "" {
-		title = "上一个会话"
-	}
-	workspaceID, agent, cwd := th.WorkspaceID, th.Agent, th.Cwd
-	choices := make(map[string]string, len(th.CapChoices))
-	for k, v := range th.CapChoices {
-		choices[k] = v
-	}
-	m.mu.Unlock()
-
-	nt, err := m.CreateSession(agent, workspaceID, cwd, title+" · 续")
-	if err != nil {
-		return Thread{}, err
-	}
-	m.mu.Lock()
-	if cur := m.threads[nt.ID]; cur != nil {
-		cur.Handoff = summary
-		if len(choices) > 0 {
-			cur.CapChoices = choices
-		}
-		cur.Messages = append(cur.Messages, Entry{Role: "note", At: time.Now(),
-			Text: "已从上一个会话交接上下文；摘要会随下一轮发给 agent。\n\n" + truncateRunes(summary, 800)})
-		if err := m.saveLocked(); err != nil {
-			log.Printf("[智能体] 交接摘要落盘失败: %v", err)
-		}
-	}
-	m.mu.Unlock()
-	log.Printf("[智能体] 会话 %s 已交接为新会话 %s（摘要 %d 字）", id, nt.ID, len([]rune(summary)))
-	got, ok := m.Get(nt.ID)
-	if !ok {
-		return Thread{}, errors.New("续会话创建后读取失败")
-	}
-	return got, nil
-}
-
-// handoffSummary 从会话投影整理交接摘要。只使用 Friday 看得见的消息（用户原话、
-// agent 最终回答与系统备注），不做模型调用；标注“可能遗漏 agent 未上报的细节”。
-func handoffSummary(msgs []Entry) string {
-	const maxEntries = 12
-	const maxTotal = 4000
-	start := len(msgs) - maxEntries
-	if start < 0 {
-		start = 0
-	}
-	var b strings.Builder
-	b.WriteString("以下是上一个会话的交接摘要（由 Friday 从可见时间线整理，agent 未上报的细节可能遗漏）。请在此基础上继续，不要假设未列出的细节。\n")
-	for _, e := range msgs[start:] {
-		text := strings.TrimSpace(e.Text)
-		if text == "" {
-			continue
-		}
-		switch e.Role {
-		case "user":
-			b.WriteString("\n用户：" + truncateRunes(text, 500))
-		case "assistant":
-			b.WriteString("\nagent：" + truncateRunes(text, 800))
-		case "note":
-			b.WriteString("\n备注：" + truncateRunes(text, 300))
-		}
-	}
-	out := b.String()
-	if len([]rune(out)) > maxTotal {
-		out = truncateRunes(out, maxTotal)
-	}
-	return out
-}
-
 // RenameThread 改会话标题：手动标题优先于首条消息派生。留空 = 回到自动
 // （下一轮对话时若标题仍为空，会按那时的消息重新派生）。
 func (m *Manager) RenameThread(id, title string) (Thread, error) {
@@ -603,6 +520,8 @@ func (m *Manager) Delete(id string) bool {
 	if base := m.snapshotBase(); base != "" {
 		_ = os.RemoveAll(filepath.Join(base, id))
 	}
+	// 会话记录跟着会话走：一条会话一份，删会话就删它的记录。
+	deleteSessionRecord(th.Cwd, id)
 	log.Printf("[智能体] 已删除会话 %s（agent=%s）", id, th.Agent)
 	return true
 }
@@ -678,6 +597,8 @@ func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path st
 			log.Printf("[智能体] 已加载 %d 个会话、%d 个工作区（%s）", n, len(m.wsOrder), path)
 		}
 	}
+	// 投影加载完再收尾会话记录：会话已删而记录还在的（旧版本或删在半路）当孤儿清掉。
+	m.pruneSessionRecords()
 	return m
 }
 
@@ -1228,8 +1149,28 @@ func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 			log.Printf("[智能体] %s 在无进行中对话时请求权限，按拒绝处理", agentName)
 			return respondPermission(r, false), nil
 		}
-		card := m.approver.RequestCancelable("智能体权限", summary, detail,
-			config.AcpPermissionTimeoutSeconds*time.Second)
+		timeout := config.AcpPermissionTimeoutSeconds * time.Second
+		// 分成两种卡：agent 其实在问用户（AskUserQuestion 这类借权限通道发选项的），
+		// 走问答卡——按钮就是它给的选项，点哪条回哪条；真的授权请求保持原样。
+		groups := questionGroups(r)
+		question := isQuestionRequest(r)
+		var card *approval.Pending
+		if question {
+			card = m.approver.RequestCard(approval.Card{
+				Tool: "智能体提问", Summary: summary, Detail: questionDetail(agentName, groups),
+				Kind: approval.KindQuestion, Options: toApprovalOptions(r.Options), Questions: groups,
+			}, timeout)
+			m.notice(fmt.Sprintf("acp:%s:question:%d", threadID, card.ID()),
+				fmt.Sprintf("%s 在等你回答：%s。回到 Friday 的 agent 对话页选一项；"+
+					"%d 分钟内无人处理按未选择结算。", agentName, summary, timeout/time.Minute))
+		} else {
+			card = m.approver.RequestCancelable("智能体权限", summary, detail, timeout)
+			// 等人回来批：卡入队即提示一次。审批等待最长 30 分钟，多数情况下人已经
+			// 切到别的窗口，页面里的卡片看不见就等于没发生。
+			m.notice(fmt.Sprintf("acp:%s:approval:%d", threadID, card.ID()),
+				fmt.Sprintf("%s 在等你批准：%s。回到 Friday 的 agent 对话页处理；"+
+					"%d 分钟内无人处理会自动拒绝。", agentName, summary, timeout/time.Minute))
+		}
 		go func() {
 			select {
 			case <-turnDone:
@@ -1237,6 +1178,21 @@ func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 			case <-card.Done():
 			}
 		}()
+		if question {
+			// 问答只认 agent 给过的那些 optionId：没答/超时/撤卡一律回 cancelled，
+			// 比替用户挑一条诚实——它自己也不知道那算哪个答案。
+			out, err := card.WaitDecision()
+			if err != nil && !errors.Is(err, approval.ErrDenied) {
+				log.Printf("[智能体] %s 提问结算异常（按未选择处理）: %v", agentName, err)
+			}
+			if out.OptionID == "" {
+				log.Printf("[智能体] %s 提问未回答: %s", agentName, sanitizeLog(summary))
+				return cancelledPermission(), nil
+			}
+			log.Printf("[智能体] %s 提问已回答: %s → 选项 %s", agentName,
+				sanitizeLog(summary), sanitizeLog(out.OptionID))
+			return selectedPermission(acp.PermissionOptionId(out.OptionID)), nil
+		}
 		approved, err := card.Wait()
 		if err != nil {
 			if !errors.Is(err, approval.ErrDenied) {
@@ -1318,6 +1274,11 @@ func (m *Manager) workspaceBrief(th *Thread, proc *agentProc) (string, string) {
 		}
 	}
 	b.WriteString("用户问「当前工作区有哪些项目/文件夹」时以上面这份列表为准，不要去上级目录扫描推断；列表之外的不属于本会话。")
+	// 会话记录是 agent 能自己读到的唯一"全量历史"（投影它读不到），首轮交代一次路径。
+	if _, rel := sessionRecordPath(th.Cwd, th.ID); rel != "" {
+		b.WriteString("\n本会话的可见历史会随每轮结束整份重写到工作区文件 " + rel +
+			"（含每轮改动过的文件清单）；需要回看更早的自己就读它，那个目录是 Friday 自己的，不要往里写东西。")
+	}
 	if store != nil {
 		if digest := store.DigestScoped(th.WorkspaceID, 4, 1200); digest != "" {
 			b.WriteString("\n\n[Friday 项目记忆] 本工作区已记下的背景（来自用户或之前的会话）：\n")
@@ -1335,6 +1296,105 @@ func (m *Manager) SetMemory(store *memory.WikiStore) {
 	m.mu.Lock()
 	m.memory = store
 	m.mu.Unlock()
+}
+
+// SetNotifier 注入系统提示桥（启动时调用一次）。key 由调用方保证身份稳定，
+// 重复触发不会二次打扰——见 notification.Center.PostOnce。
+func (m *Manager) SetNotifier(notify func(key, text string)) {
+	m.mu.Lock()
+	m.notifier = notify
+	m.mu.Unlock()
+}
+
+// notice 投一条系统提示。没装配通知中心就什么都不做；桥本身出错由注入方
+// 记日志，这里不拦 agent 的活。
+func (m *Manager) notice(key, text string) {
+	m.mu.Lock()
+	fn := m.notifier
+	m.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(key, text)
+}
+
+// noticeClip 是系统通知里"原因"一段的字数上限：通知条就一行，长 stderr 留在
+// 页面和日志里，不该塞进弹窗。
+const noticeClip = 120
+
+// turnNotice 是一轮结束时该说清的事实（Send 收尾处组装）。
+type turnNotice struct {
+	threadID    string
+	agent       string
+	turnID      string
+	reason      string // end_turn | cancelled | error
+	elapsed     time.Duration
+	changes     *TurnChanges // 可为 nil：本轮没做成快照
+	userStopped bool
+	note        string // 中断原因（面向用户的说法）
+	errText     string // 连接级错误原文
+}
+
+// notifyTurnEnd 把"这一轮收尾了"送进系统提示。用户自己按的停止不弹——那一下
+// 就是他点的，人必然在页面上；其余三种收尾（跑完/中断/连接断了）都值得把
+// 正在别的窗口干活的人叫回来一眼。
+func (m *Manager) notifyTurnEnd(a turnNotice) {
+	if a.userStopped {
+		return
+	}
+	files := "没有文件改动"
+	if a.changes != nil && len(a.changes.Files) > 0 {
+		n := len(a.changes.Files)
+		files = fmt.Sprintf("改了 %d 个文件", n)
+		if sum := a.changes.Additions + a.changes.Deletions; sum > 0 {
+			files += fmt.Sprintf("（+%d/-%d）", a.changes.Additions, a.changes.Deletions)
+		}
+	}
+	spent := zhDuration(a.elapsed)
+	tail := ""
+	if spent != "" {
+		tail = " · 用时 " + spent
+	}
+	text := fmt.Sprintf("%s 这一轮跑完了：%s%s。", a.agent, files, tail)
+	switch a.reason {
+	case "error":
+		text = fmt.Sprintf("%s 这一轮中断了：%s", a.agent,
+			clipLine(firstNonEmpty(a.errText, a.note, "agent 连接已断开"), noticeClip))
+		if files != "没有文件改动" {
+			text += "（" + files + "）"
+		}
+	case "cancelled":
+		// note 为空说明这一轮是被取消结算的，但分不清是用户按的停止还是连接断了
+		// （Stop 落在 turnDone 挂上之前的极窄窗口里）——文案就按"分不清"来说。
+		text = fmt.Sprintf("%s 这一轮没跑完：%s", a.agent,
+			clipLine(firstNonEmpty(a.note, "本轮已取消（停止或连接中断），结果不会回到本对话"), noticeClip))
+		if files != "没有文件改动" {
+			text += "（" + files + "）"
+		}
+	}
+	m.notice(fmt.Sprintf("acp:%s:%s:done", a.threadID, a.turnID), text)
+}
+
+// zhDuration 通知文案里的短时长：45 秒 / 1 分 20 秒 / 2 小时 3 分。
+// 不到 1 秒返回空串——那种速度不值得在通知里占一句。
+func zhDuration(d time.Duration) string {
+	secs := int(d.Round(time.Second).Seconds())
+	if secs < 1 {
+		return ""
+	}
+	h, m, s := secs/3600, (secs%3600)/60, secs%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%d 小时 %d 分", h, m)
+	case h > 0:
+		return fmt.Sprintf("%d 小时", h)
+	case m > 0 && s > 0:
+		return fmt.Sprintf("%d 分 %d 秒", m, s)
+	case m > 0:
+		return fmt.Sprintf("%d 分钟", m)
+	default:
+		return fmt.Sprintf("%d 秒", s)
+	}
 }
 
 // Send 发送一条消息并跑完一轮对话（同一 thread 串行，C3）。
@@ -1577,6 +1637,10 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 			log.Printf("[智能体] 投影落盘失败: %v", serr)
 		}
 		m.mu.Unlock()
+		if keep {
+			// 会话记录是投影的导出物：每轮结束整份重写一次，agent 随时能读全量历史。
+			m.rewriteRecordFor(id)
+		}
 	}
 
 	// 记账：维度 acp:<agent>。金额恒缺失（配额在对面，实测 cost.amount=0），
@@ -1588,6 +1652,9 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	log.Printf("[智能体] 轮次结束 thread=%s agent=%s 用时=%s 原因=%s tokens=%d/%d",
 		id, th.Agent, elapsed.Round(time.Second), result.StopReason, result.In, result.Out)
+	m.notifyTurnEnd(turnNotice{threadID: id, agent: th.Agent, turnID: turnID,
+		reason: result.StopReason, elapsed: elapsed, changes: turnChanges,
+		userStopped: stopped, note: abortNote, errText: errText})
 	m.armIdle(procKey(th.Agent, th.Cwd), true)
 	return result, runErr
 }

@@ -13,6 +13,9 @@
     background: #171717; color: #e8e8e8;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
   }
+  /* 品牌标基准：白底 + 中心黑点（圆角 = 边长 28%、圆点 = 边长 44%）。
+     网页侧 .brand-mark、favicon 与 scripts/gen-icon.py 出的 App 图标都按这套几何，
+     改这里要同时改那三处。 */
   #logo { width: 72px; height: 72px; border-radius: 20px; position: relative;
     background: #e8e8e8; }
   #logo::after { content: ""; position: absolute; inset: 20px; border-radius: 50%;
