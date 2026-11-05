@@ -49,7 +49,7 @@ function sessionRows() {
 
 beforeEach(() => {
   localStorage.clear()
-  Object.assign(store, { loggedIn: true, view: 'chat', mode: 'life', chatBusy: false })
+  Object.assign(store, { loggedIn: true, view: 'chat', mode: 'life' })
   workSessions = [
     { key: 'work-20261105-100000-aa', title: '写周报', kind: 'work', messages: 4, updatedAt: '2026-11-05T02:00:00Z', hasTitle: true },
     { key: 'work-20261105-090000-bb', title: '整理发票', kind: 'work', messages: 2, updatedAt: '2026-11-05T01:00:00Z', hasTitle: true },
@@ -265,5 +265,73 @@ describe('工作模式下还没有会话', () => {
     await flushPromises()
     await send('开工')
     expect(sentBody().session).toBe('work-20261105-110000-cc')
+  })
+})
+
+// slowStream 回一段"已经出了字但还没结束"的 SSE：这一轮卡在流式里，
+// 用来验切走再切回来时进度还在、也没被打断。
+function slowStream(text) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: {"delta":"${text}"}\n\n`))
+    },
+  }), { headers: { 'Content-Type': 'text/event-stream' } })
+}
+
+describe('回复进行中切走再切回', () => {
+  it('切到工作模式再切回来，主会话那一轮的半截回答还在', async () => {
+    await mountChat()
+    fetchMock.mockResolvedValue(slowStream('写到一半'))
+    await send('慢慢说')
+    expect(wrapper.text()).toContain('写到一半')
+    api.mock.calls.length = 0
+    setMode('work')
+    await flushPromises()
+    setMode('life')
+    await flushPromises()
+    // 现场按会话留存：切回来还是那段进度，且没有拿历史覆盖回去
+    // （历史接口此刻只有已落盘的部分，覆盖会把实时输出打回半截之前）
+    expect(wrapper.text()).toContain('写到一半')
+    expect(api.mock.calls.map(([, p]) => p)).not.toContain('/api/chat/history?session=web')
+  })
+
+  it('后台那条还在跑的会话，行上标「回复中」', async () => {
+    await mountChat()
+    setMode('work')
+    await flushPromises()
+    fetchMock.mockResolvedValue(slowStream('周报正文'))
+    await send('写周报')
+    await sessionRows()[1].trigger('click') // 切到另一条会话
+    await flushPromises()
+    expect(sessionRows()[0].text()).toContain('回复中')
+    expect(sessionRows()[1].text()).not.toContain('回复中')
+  })
+
+  it('删除正在后台跑的会话会取消它那一轮', async () => {
+    await mountChat()
+    setMode('work')
+    await flushPromises()
+    fetchMock.mockResolvedValue(slowStream('还没写完'))
+    await send('写周报')
+    const signal = fetchMock.mock.calls.find(([, opts]) => opts?.signal)[1].signal
+    await sessionRows()[1].trigger('click') // 离开这条，让它后台跑
+    await flushPromises()
+    await sessionRows()[0].get('.ag-del').trigger('click') // 删掉正在跑的那条
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    expect(sessionRows()).toHaveLength(1)
+  })
+
+  it('草稿按会话各留各的：切走再回来，写给这条会话的半截话还在', async () => {
+    await mountChat()
+    setMode('work')
+    await flushPromises()
+    await wrapper.get('textarea').setValue('写给「写周报」的半截话')
+    await sessionRows()[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('textarea').element.value).toBe('') // 不是把上一条的话带过来
+    await sessionRows()[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('textarea').element.value).toBe('写给「写周报」的半截话')
   })
 })

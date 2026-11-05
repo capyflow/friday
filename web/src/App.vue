@@ -34,11 +34,10 @@ const NAV = [
 const navItems = computed(() => NAV.filter(n => n.modes.includes(store.mode)))
 
 // switchMode 切生活/工作模式：模式存本地（下次打开还在原来那侧），切完如果当前页
-// 在新模式下不出现就回聊天页。回复进行中不切——切模式会换掉聊天页的会话归属，
-// 半截回答会掉进另一边看不见的地方。
+// 在新模式下不出现就回聊天页。回复进行中也能切——聊天页每条会话各留一份现场，
+// 切走那一轮继续在后台收字，切回来就是当时的进度（会话行上标着「回复中」）。
 function switchMode(next) {
   if (store.mode === next) return
-  if (store.chatBusy) { toast('小五正在回复：等这轮跑完（或先点停止）再切模式', true); return }
   setMode(next)
   if (!NAV.some(n => n.id === store.view && n.modes.includes(next))) store.view = 'chat'
 }
