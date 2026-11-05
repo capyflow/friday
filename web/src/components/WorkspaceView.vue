@@ -17,12 +17,13 @@ import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
-import { fmtTokens } from '../format.js'
+import { ago, fmtTokens } from '../format.js'
 import { getPref, setPref } from '../prefs.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
 import ChatComposer from './ChatComposer.vue'
+import DirPickerDialog from './DirPickerDialog.vue'
 import SelectBox from './SelectBox.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
@@ -170,6 +171,8 @@ const capWrap = ref(null)
 
 const CAP_LABEL = { model: '模型', thought_level: '思考强度', approval_mode: '审批模式' }
 function capLabel(cap) { return CAP_LABEL[cap.kind] || cap.name }
+// capNameById 按能力 id 给中文名（新建会话的提示里要说清沿用了哪几项）。
+function capNameById(id) { return id.startsWith('other:') ? '其他设置' : (CAP_LABEL[id] || id) }
 function capCurrentName(cap) {
   return (cap.values || []).find(v => v.value === cap.currentValue)?.name || cap.currentValue
 }
@@ -317,19 +320,6 @@ const recentThreads = computed(() => threads.value
   .slice(0, 30))
 function wsName(id) { return workspaces.value.find(w => w.id === id)?.name || '（工作区已删除）' }
 function missingDirs(ws) { return ws.missingDirs || [] }
-// 会话行上给"多久之前动过"，取代原来的目录名（列表里不铺路径）
-function ago(iso) {
-  const t = Date.parse(iso || '')
-  if (!t) return ''
-  const min = Math.floor((Date.now() - t) / 60000)
-  if (min < 1) return '刚刚'
-  if (min < 60) return min + ' 分钟'
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return hr + ' 小时'
-  const day = Math.floor(hr / 24)
-  if (day < 30) return day + ' 天'
-  return Math.floor(day / 30) + ' 个月'
-}
 // 目录路径太长，列表行只展示最后一段（完整路径在 title 里）
 function base(p) {
   const s = (p || '').replace(/\/+$/, '')
@@ -729,44 +719,20 @@ async function submitSession() {
     sessionFor.value = ''
     await load()
     select(r.thread.id)
-    toast('已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
+    // 后端已经把这台 agent 上次用过的选择抄到新会话上（capChoices），启动时就照它重放；
+    // 说清沿用了哪几项，用户才知道不用重新点一遍，也知道哪一项没被沿用。
+    const carried = Object.keys(r.thread.capChoices || {})
+    toast(carried.length
+      ? `已创建会话，沿用上次这台智能体的${carried.map(capNameById).join('、')}`
+      : '已创建会话，正在启动 agent（就绪后即可切模型/思考强度）')
   } catch (e) { toast('创建会话失败：' + e.message, true) }
 }
 
-// 目录选择器：后端 /api/acp/dirs 只读逐层列举（浏览器与桌面壳共用，浏览器
-// 原生 API 拿不到绝对路径所以不走 showDirectoryPicker）。弹窗里可逐层点选，
-// 也可在路径栏直接粘贴回车跳转；「使用此目录」把绝对路径交给打开时登记的落点。
-const dirPicker = reactive({ open: false, path: '', parent: '', input: '', dirs: [], loading: false,
-  showHidden: false })
-let dirPickOnPick = null
-// 点开头的隐藏目录默认不展示，弹窗内按钮切换；过滤在前端做，切换不用重新请求
-const visibleDirs = computed(() =>
-  dirPicker.showHidden ? dirPicker.dirs : dirPicker.dirs.filter(d => !d.name.startsWith('.')))
-async function loadDirs(path) {
-  dirPicker.loading = true
-  try {
-    const r = await api('GET', '/api/acp/dirs' + (path ? '?path=' + encodeURIComponent(path) : ''))
-    dirPicker.path = r.path
-    dirPicker.parent = r.parent || ''
-    dirPicker.input = r.path
-    dirPicker.dirs = r.dirs || []
-  } catch (e) { toast('读取目录失败：' + e.message, true) } finally { dirPicker.loading = false }
-}
-function openDirPicker(onPick, startPath) {
-  dirPickOnPick = onPick
-  dirPicker.open = true
-  dirPicker.showHidden = false
-  loadDirs(startPath || '')
-}
-function submitDirPath() {
-  if (dirPicker.input.trim()) loadDirs(dirPicker.input.trim())
-}
-function chooseDir() {
-  const onPick = dirPickOnPick
-  dirPickOnPick = null
-  dirPicker.open = false
-  if (onPick && dirPicker.path) onPick(dirPicker.path)
-}
+// 目录选择器抽成 DirPickerDialog 组件（工作区页与工作模式的聊天页共用一份）：
+// 这里只留 ref 与同名入口，其余调用点（加源文件夹、给会话选主目录）不用改。
+const dirDialog = ref(null)
+function openDirPicker(onPick, startPath) { dirDialog.value?.open(onPick, startPath) }
+
 // 行尾「×」与会话菜单共用这一条删除入口：先弹确认，再真删。
 function askRemoveThread(t) {
   closeThreadMenu()
@@ -1627,59 +1593,5 @@ function previewImages(urls, at = 0) {
       </div>
     </div>
   </Teleport>
-  <!-- 目录选择器弹窗：逐层点选或路径栏直达，绝对路径由后端返回 -->
-  <Teleport to="body">
-    <div v-if="dirPicker.open" class="dlg-mask" @click.self="dirPicker.open = false">
-      <div class="dlg" role="dialog" aria-modal="true" aria-label="选择工作目录" @keydown.esc="dirPicker.open = false">
-        <!-- .dlg 是横向 flex 外壳，纵向堆叠靠 .dlg-form（同 AutoView 的弹窗结构） -->
-        <div class="dlg-form">
-          <header class="dlg-head">
-            <h3 class="dlg-title">选择工作目录</h3>
-            <button type="button" class="set-close" aria-label="关闭目录选择" @click="dirPicker.open = false">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
-                   stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
-            </button>
-          </header>
-          <div class="dlg-body">
-            <div class="ag-dir-bar">
-              <input v-model="dirPicker.input" aria-label="目录路径" placeholder="输入路径后回车跳转"
-                     :disabled="dirPicker.loading" @keydown.enter="submitDirPath">
-              <button type="button" class="ib-btn" title="上一级" aria-label="上一级"
-                      :disabled="!dirPicker.parent || dirPicker.loading" @click="loadDirs(dirPicker.parent)">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-              </button>
-              <button type="button" class="ib-btn ag-dir-show" :class="{ active: dirPicker.showHidden }"
-                      :title="dirPicker.showHidden ? '不显示隐藏目录' : '显示隐藏目录'"
-                      :aria-label="dirPicker.showHidden ? '不显示隐藏目录' : '显示隐藏目录'"
-                      :aria-pressed="dirPicker.showHidden" @click="dirPicker.showHidden = !dirPicker.showHidden">
-                <svg v-if="dirPicker.showHidden" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
-                  <path d="M1 1l22 22"/>
-                </svg>
-                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
-                </svg>
-              </button>
-            </div>
-            <ul class="ag-dirlist" aria-label="子目录列表">
-              <li v-for="d in visibleDirs" :key="d.path">
-                <button type="button" @click="loadDirs(d.path)">{{ d.name }}</button>
-              </li>
-              <li v-if="!visibleDirs.length && !dirPicker.loading" class="meta ag-dir-empty">
-                {{ dirPicker.dirs.length ? '（只有隐藏子目录，可点上方按钮显示）' : '（没有子目录）' }}
-              </li>
-            </ul>
-          </div>
-          <footer class="dlg-foot">
-            <span class="meta ag-dir-cur" :title="dirPicker.path">{{ dirPicker.path }}</span>
-            <button class="btn sm primary" :disabled="dirPicker.loading || !dirPicker.path" @click="chooseDir">使用此目录</button>
-            <button class="btn sm" @click="dirPicker.open = false">取消</button>
-          </footer>
-        </div>
-      </div>
-    </div>
-  </Teleport>
+  <DirPickerDialog ref="dirDialog" />
 </template>

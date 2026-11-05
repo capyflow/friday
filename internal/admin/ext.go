@@ -1,5 +1,6 @@
-// ext.go 是管理后台的扩展接口（M2–M5 新增）：待审批操作、会话管理、
-// MCP 服务器状态、心跳清单编辑。路由挂载见 admin.go 的 Start。
+// ext.go 是管理后台的扩展接口（M2–M5 新增）：待审批操作、上下文与调用轨迹、
+// MCP 服务器状态、心跳清单编辑（网页会话的增删改查在 sessions.go）。
+// 路由挂载见 admin.go 的 Start。
 package admin
 
 import (
@@ -256,14 +257,6 @@ func sessionTurns(key string) []trace.Request {
 		}
 	}
 	return out
-}
-
-// handleListSessions 返回全部会话概要（key、消息数、最后活跃）。
-func (s *Server) handleListSessions(ctx *vhttp.Context) error {
-	if s.chat == nil {
-		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"sessions": []any{}})
-	}
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"sessions": s.chat.Brain().Pool().List()})
 }
 
 // handleClearContext 清除对话上下文：body {"session": "key"} 可选——

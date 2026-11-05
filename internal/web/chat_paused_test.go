@@ -23,9 +23,10 @@ func (noopProvider) Chat(context.Context, *llm.ChatRequest, func(llm.Delta) erro
 
 func newChat(t *testing.T, file string) *Chat {
 	t.Helper()
+	dir := t.TempDir()
 	pool := agent.NewSessionPool(nil)
 	ag := vxagent.New(vxagent.Options{Provider: noopProvider{}, Model: "m"})
-	return New(agent.NewBrain(ag, pool, nil), t.TempDir(), file)
+	return New(agent.NewBrain(ag, pool, nil), dir, file, filepath.Join(dir, "work-sessions.json"))
 }
 
 func readTurns(t *testing.T, file string) map[string]*PausedTurn {

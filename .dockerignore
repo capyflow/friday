@@ -13,6 +13,7 @@ data/
 todos.json
 notifications.json
 session.json
+work-sessions.json
 tasks.json
 memories.json
 admin-account.json

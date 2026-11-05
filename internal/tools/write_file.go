@@ -18,19 +18,20 @@ const writeMaxBytes = 32 * 1024
 // previewLen 审批详情里内容预览的长度（rune）。
 const previewLen = 800
 
-// resolveWrite 把要写入的路径解析为白名单内的绝对路径：目录必须存在且在白名单内，
+// resolveWrite 把要写入的路径解析为允许根内的绝对路径：目录必须存在且在允许根内，
 // 允许目标文件不存在（新建文件）。若目标已存在，解析符号链接后的真实路径
-// 也必须在白名单内（防止用软链把内容写到白名单之外）。
-func (t *FileTools) resolveWrite(path string) (string, error) {
+// 也必须在允许根内（防止用软链把内容写到范围之外）。允许根见 FileTools.roots。
+func (t *FileTools) resolveWrite(ctx context.Context, path string) (string, error) {
+	roots := t.roots(ctx)
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", fmt.Errorf("缺少参数 path")
 	}
 	if !filepath.IsAbs(path) {
-		if len(t.AllowDirs) == 0 {
+		if len(roots) == 0 {
 			return "", fmt.Errorf("未配置可访问目录（file.allowDirs）")
 		}
-		path = filepath.Join(t.AllowDirs[0], path)
+		path = filepath.Join(roots[0], path)
 	}
 	dir, base := filepath.Split(filepath.Clean(path))
 	if base == "" || base == "." || base == ".." {
@@ -43,14 +44,14 @@ func (t *FileTools) resolveWrite(path string) (string, error) {
 	if abs, err := filepath.Abs(realDir); err == nil {
 		realDir = abs
 	}
-	if !t.inAllowDirs(realDir) {
+	if !t.inAllowDirs(ctx, realDir) {
 		return "", fmt.Errorf("路径超出允许范围（file.allowDirs）: %s", path)
 	}
 	final := filepath.Join(realDir, base)
 	if st, err := os.Lstat(final); err == nil && st.Mode()&os.ModeSymlink != 0 {
 		// 目标本身是软链：写入会穿透到链目标，校验链目标也在白名单内。
-		if real, err := filepath.EvalSymlinks(final); err != nil || !t.inAllowDirs(real) {
-			return "", fmt.Errorf("目标为指向白名单之外的软链，拒绝写入: %s", path)
+		if real, err := filepath.EvalSymlinks(final); err != nil || !t.inAllowDirs(ctx, real) {
+			return "", fmt.Errorf("目标为指向允许范围之外的软链，拒绝写入: %s", path)
 		}
 	}
 	return final, nil
@@ -98,8 +99,9 @@ type WriteFileTool struct {
 func (t *WriteFileTool) Name() string { return "write_file" }
 
 func (t *WriteFileTool) Description() string {
-	return "把内容写入文件（覆盖写；原文件自动备份为 .bak）。path 为白名单内的相对或绝对路径，" +
-		"文件可不存在（新建）。confirm 审批模式下需用户在网页批准后才会执行。"
+	return "把内容写入文件（覆盖写；原文件自动备份为 .bak）。path 为允许目录内的相对或绝对路径" +
+		"（相对路径按本次会话的工作目录解析），文件可不存在（新建）。" +
+		"confirm 审批模式下需用户在网页批准后才会执行。"
 }
 
 func (t *WriteFileTool) Schema() map[string]any {
@@ -119,7 +121,7 @@ func (t *WriteFileTool) Call(ctx context.Context, args map[string]any) (string, 
 	if len(content) > writeMaxBytes {
 		return "", fmt.Errorf("内容过大（%d 字节，上限 %d）", len(content), writeMaxBytes)
 	}
-	real, err := t.resolveWrite(path)
+	real, err := t.resolveWrite(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -166,7 +168,7 @@ func (t *EditFileTool) Call(ctx context.Context, args map[string]any) (string, e
 	if oldStr == "" {
 		return "", fmt.Errorf("缺少参数 old")
 	}
-	real, err := t.resolve(path)
+	real, err := t.resolve(ctx, path)
 	if err != nil {
 		return "", err
 	}

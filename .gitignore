@@ -13,6 +13,7 @@ config.yaml
 /admin-account.json
 /token-usage.json
 /paused-turns.json
+/work-sessions.json
 /plans.json
 /pricing.json
 /traces.json

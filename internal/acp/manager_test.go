@@ -2770,3 +2770,129 @@ func TestHandoffTargetAgent(t *testing.T) {
 		t.Fatalf("未知 agent 要给可读原因，实际 %v", err)
 	}
 }
+
+// ---------- 新会话沿用这台 agent 上次的能力选择 ----------
+
+// TestNewSessionInheritsLastChoices 新建会话直接沿用上次用过的选择：模型这类 chips
+// 以前每条新会话都要重新点一遍——那份记录本来就存在老会话身上，只是新建时给的是空表。
+// 现在建会话就抄最近一条的，会话一建立照常按这份记录重放（agent 侧不保存选项）。
+func TestNewSessionInheritsLastChoices(t *testing.T) {
+	f := &fakeAgent{resetOnSession: true, configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	first := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), first.ID, "开工", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetCapability(first.ID, CapKindModel, "builtin/b"); err != nil {
+		t.Fatalf("切模型失败: %v", err)
+	}
+
+	second := mustThreadIn(t, m, ws)
+	if second.CapChoices[CapKindModel] != "builtin/b" {
+		t.Fatalf("新会话应沿用上次选过的模型: %+v", second.CapChoices)
+	}
+	caps, err := m.Capabilities(second.ID)
+	if err != nil {
+		t.Fatalf("取能力清单失败: %v", err)
+	}
+	if cap := findCap(caps, CapKindModel); cap == nil || cap.CurrentValue != "builtin/b" {
+		t.Fatalf("新会话建立时就该把选择重放上去: %+v", cap)
+	}
+
+	// 沿用是持续生效的：第三条拿的是第二条（更新的那条）那份
+	third := mustThreadIn(t, m, ws)
+	if third.CapChoices[CapKindModel] != "builtin/b" {
+		t.Fatalf("沿用应持续有效: %+v", third.CapChoices)
+	}
+}
+
+// TestNewSessionInheritsFromMostRecent 两条老会话选过不同取值时，沿用最近动过的那条。
+func TestNewSessionInheritsFromMostRecent(t *testing.T) {
+	f := &fakeAgent{configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	older := mustThreadIn(t, m, ws)
+	if _, err := m.SetCapability(older.ID, CapKindModel, "builtin/b"); err != nil {
+		t.Fatal(err)
+	}
+	newer := mustThreadIn(t, m, ws)
+	if _, err := m.SetCapability(newer.ID, CapKindModel, "builtin/a"); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock() // 同一秒建出来的两条按秒分不出先后，用例自己拉开
+	m.threads[older.ID].UpdatedAt = m.threads[older.ID].UpdatedAt.Add(-time.Hour)
+	m.mu.Unlock()
+
+	next := mustThreadIn(t, m, ws)
+	if next.CapChoices[CapKindModel] != "builtin/a" {
+		t.Fatalf("应沿用最近一条的选择: %+v", next.CapChoices)
+	}
+}
+
+// TestNewSessionApprovalModeYieldsToWorkspacePolicy 审批档位的归属：工作区定成「只读」
+// 时新会话听工作区的，不继承上次手选的档——把只读工作区的新会话静默升成「全自动」
+// 等于替用户撤了这道设置。「每次都问」（含没动过的默认）谈的是打扰程度不是安全边界，
+// 那里沿用手选的档就是用户要的效果。
+func TestNewSessionApprovalModeYieldsToWorkspacePolicy(t *testing.T) {
+	t.Run("工作区只读就不继承", func(t *testing.T) {
+		f := &fakeAgent{modes: codexSessionModes("agent"), promptScript: defaultScript}
+		m := newTestManager(t, nil, nil, f)
+		ws := mustWorkspace(t, m)
+		if err := m.SetPolicy(ws.ID, WorkspacePolicyReadOnly); err != nil {
+			t.Fatal(err)
+		}
+		first := mustThreadIn(t, m, ws)
+		if _, err := m.SetCapability(first.ID, CapKindApprovalMode, "agent-full-access"); err != nil {
+			t.Fatalf("手动升档失败: %v", err)
+		}
+		second := mustThreadIn(t, m, ws)
+		if _, ok := second.CapChoices[CapKindApprovalMode]; ok {
+			t.Fatalf("工作区定了只读，新会话不该继承上次的全自动: %+v", second.CapChoices)
+		}
+		if _, err := m.Send(context.Background(), second.ID, "开工", nil, TurnHooks{}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := m.Get(second.ID)
+		if got.PolicyApplied != WorkspacePolicyReadOnly || got.PolicyValue != "read-only" {
+			t.Fatalf("新会话应按工作区档位落地，实际 applied=%q value=%q note=%q",
+				got.PolicyApplied, got.PolicyValue, got.PolicyNote)
+		}
+	})
+
+	t.Run("每次都问的档位就继承", func(t *testing.T) {
+		f := &fakeAgent{modes: codexSessionModes("agent"), promptScript: defaultScript}
+		m := newTestManager(t, nil, nil, f)
+		ws := mustWorkspace(t, m) // 默认 ask
+		first := mustThreadIn(t, m, ws)
+		if _, err := m.SetCapability(first.ID, CapKindApprovalMode, "workspace-write"); err != nil {
+			t.Fatal(err)
+		}
+		second := mustThreadIn(t, m, ws)
+		if second.CapChoices[CapKindApprovalMode] != "workspace-write" {
+			t.Fatalf("工作区没定档位时应继承: %+v", second.CapChoices)
+		}
+	})
+}
+
+// TestNewSessionDoesNotInheritOtherAgent 换一台 agent 不沿用别台的取值：各家词汇表
+// 不同，把 codex 的模型 id 播给 codebuddy 只会重放失败。
+func TestNewSessionDoesNotInheritOtherAgent(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Agents = append(cfg.Agents, config.AcpAgentConfig{Name: "other", Command: "other-bin"})
+	f := &fakeAgent{configOptions: sessionOptions("builtin/a"), promptScript: defaultScript}
+	m := newTestManager(t, &cfg, nil, f)
+	ws := mustWorkspace(t, m)
+	first := mustThreadIn(t, m, ws) // agent=fake
+	if _, err := m.SetCapability(first.ID, CapKindModel, "builtin/b"); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := m.CreateSession("other", ws.ID, "", "")
+	if err != nil {
+		t.Fatalf("换 agent 建会话失败: %v", err)
+	}
+	if len(other.CapChoices) != 0 {
+		t.Fatalf("别台 agent 的选择不该搬过来: %+v", other.CapChoices)
+	}
+}

@@ -344,6 +344,11 @@ html[data-theme="dark"] .brand-mark::after { background: rgba(20, 20, 20, .92); 
 .brand .brand-mark { --mark: 32px; }
 .brand b { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
 
+/* 使用模式（生活/工作）：借工作区页那套分段控件的样式，只按侧栏宽度调间距。
+   全屏（focus-mode）侧栏只剩 56px 竖条，这一行放不下，收掉。 */
+#sidebar .mode-seg { margin: 0 2px 10px; }
+#app.focus-mode .mode-seg { display: none; }
+
 /* ---------- 桌面外壳：标题栏并进应用头部（Overlay，不再留一条独立黑边） ----------
    红绿灯由 macOS 画在窗口左上角，内容铺到顶部；侧栏头部让出这段，其余表头直接接管拖拽。
    浏览器直访没有 data-shell 标记，保持原版式。 */
@@ -421,6 +426,18 @@ html[data-theme="dark"] .user-pop {
 
 /* ---------- 聊天 ---------- */
 #view-chat { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* 工作模式在聊天页左侧挂一条会话栏（复用工作区页的 .ag-rail）。不额外包一层
+   容器：整页改成网格，会话栏占满三行的第一列，对话主体的头/滚动区/输入区落在
+   第二列——生活模式没有这条栏，版式与原来完全一致。 */
+#view-chat.chat-split {
+  display: grid;
+  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+#view-chat.chat-split .ag-rail { grid-area: 1 / 1 / 4 / 2; }
+#view-chat.chat-split #chatHead { grid-area: 1 / 2 / 2 / 3; }
+#view-chat.chat-split #chatScroller { grid-area: 2 / 2 / 3 / 3; }
+#view-chat.chat-split #chatFoot { grid-area: 3 / 2 / 4 / 3; }
 #chatHead { display: flex; align-items: center; gap: 10px; padding: 12px 22px;
             border-bottom: 1px solid var(--border); background: var(--card); }
 #chatHead .title { font-size: 14px; font-weight: 600; flex: 1;
@@ -1263,6 +1280,8 @@ html[data-theme="dark"] .selbox-pop {
     width: min(320px, calc(100vw - 24px)); }
   .view { padding: 14px; }
   #chatHead { padding: 12px 16px; }
+  /* 窄屏：聊天页的会话栏收成一条窄列，先保对话区 */
+  #view-chat.chat-split { grid-template-columns: 196px minmax(0, 1fr); }
   .wiki-layout { grid-template-columns: 1fr; }
   #approvalBar { right: 12px; left: 12px; width: auto; }
   /* 设置弹窗全屏；左右两列布局保持不变——导航固定列宽、超高时导航内上下滚动 */

@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 func write(t *testing.T, dir, name, content string) {
@@ -82,21 +85,35 @@ func TestProjectContextFileNames(t *testing.T) {
 	}
 }
 
-// TestBrainProjectDir 项目上下文只在新会话（历史为空）时垫一条系统消息，
-// 与记忆速览同一套做法：避免每轮重复计费。
+// TestBrainProjectDir 项目上下文按"这一次请求在哪个目录"取：会话自带的目录优先，
+// 没带才回落到进程级默认值（启动时设的那个）。做成随 ctx 走而不是一个全局字段，
+// 是因为工作模式可以同时开着几条会话，心跳/计划/目标也在并发跑——谁都不能把
+// 别人的工作目录改掉。
 func TestBrainProjectDir(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "AGENTS.md", "按项目约定来。")
+	sessionDir := t.TempDir()
+	write(t, sessionDir, "AGENTS.md", "这条会话在自己的项目里。")
+
 	b := &Brain{}
-	if b.projectWarmup() != "" {
+	if got := b.projectWarmup(context.Background()); got != "" {
 		t.Error("没设工作目录时不该有项目上下文")
 	}
 	b.SetProjectDir(dir)
-	if got := b.projectWarmup(); !strings.Contains(got, "按项目约定来") {
+	if got := b.projectWarmup(context.Background()); !strings.Contains(got, "按项目约定来") {
 		t.Errorf("设了工作目录就该读到: %q", got)
 	}
+	if got := b.projectWarmup(workdir.With(context.Background(), sessionDir)); !strings.Contains(got, "这条会话在自己的项目里") {
+		t.Errorf("会话自带的目录应压过进程级默认: %q", got)
+	}
+	if got := b.projectWarmup(workdir.With(context.Background(), "   ")); !strings.Contains(got, "按项目约定来") {
+		t.Errorf("会话没指定就该回落默认目录: %q", got)
+	}
 	b.SetProjectDir("")
-	if b.projectWarmup() != "" {
+	if got := b.projectWarmup(context.Background()); got != "" {
 		t.Error("清空工作目录等于关掉注入")
+	}
+	if got := b.projectWarmup(workdir.With(context.Background(), sessionDir)); !strings.Contains(got, "这条会话在自己的项目里") {
+		t.Errorf("进程级关了，会话自带的仍要注入: %q", got)
 	}
 }

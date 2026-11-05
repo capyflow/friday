@@ -59,6 +59,9 @@ type Config struct {
 	// PausedFile 聊天暂停现场落盘路径（默认 paused-turns.json）：刷新页面或重启服务后
 	// 仍可一键继续，并复用当时的技能。
 	PausedFile string `yaml:"pausedFile"`
+	// WorkSessionsFile 工作模式会话登记落盘路径（默认 work-sessions.json）：工作会话
+	// 的显示名与创建时间。历史消息本体仍在 SessionFile 里，这里只是清单。
+	WorkSessionsFile string `yaml:"workSessionsFile"`
 	// PlanFile 计划持久化 JSON 文件路径（默认 plans.json）。
 	PlanFile string `yaml:"planFile"`
 	// Plan 计划模式参数。
@@ -1338,6 +1341,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.PausedFile == "" {
 		c.PausedFile = "paused-turns.json"
+	}
+	if c.WorkSessionsFile == "" {
+		c.WorkSessionsFile = "work-sessions.json"
 	}
 	if c.PlanFile == "" {
 		c.PlanFile = "plans.json"

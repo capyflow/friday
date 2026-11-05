@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 // toInt 读取整数参数，缺失或非法时返回 def。
@@ -26,10 +28,20 @@ func toInt(v any, def int) int {
 	return def
 }
 
-// FileTools 是文件类工具的公共底座：所有路径必须落在 AllowDirs 白名单内
-// （解析符号链接后校验），相对路径基于第一个白名单目录解析。
+// FileTools 是文件类工具的公共底座：所有路径必须落在允许根内（解析符号链接后校验），
+// 相对路径基于第一个允许根解析。允许根 = 这次请求的会话工作目录（工作模式里建会话时
+// 点选的那个，走 ctx 传进来）+ 配置的 file.allowDirs：会话目录是用户自己选的，读写
+// 这个项目就是这条会话的目的，所以它算一个根；没带会话目录时与以往完全一致。
 type FileTools struct {
 	AllowDirs []string
+}
+
+// roots 返回本次调用的允许根，会话工作目录排在最前（它就是相对路径的基准）。
+func (t *FileTools) roots(ctx context.Context) []string {
+	if dir := workdir.From(ctx); dir != "" {
+		return append([]string{dir}, t.AllowDirs...)
+	}
+	return t.AllowDirs
 }
 
 const (
@@ -39,37 +51,38 @@ const (
 	listMaxEntries = 200
 )
 
-// resolve 把用户给的路径解析为白名单内的真实绝对路径。
-func (t *FileTools) resolve(path string) (string, error) {
+// resolve 把用户给的路径解析为允许根内的真实绝对路径。
+func (t *FileTools) resolve(ctx context.Context, path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", fmt.Errorf("缺少参数 path")
 	}
+	roots := t.roots(ctx)
 	if !filepath.IsAbs(path) {
-		if len(t.AllowDirs) == 0 {
-			return "", fmt.Errorf("未配置可访问目录（file.allowDirs）")
+		if len(roots) == 0 {
+			return "", fmt.Errorf("未配置可访问目录（file.allowDirs，或给这条会话选一个工作目录）")
 		}
-		path = filepath.Join(t.AllowDirs[0], path)
+		path = filepath.Join(roots[0], path)
 	}
 	path = filepath.Clean(path)
 
-	// 解析符号链接后的真实路径必须仍在白名单内，防止软链逃逸。
+	// 解析符号链接后的真实路径必须仍在允许根内，防止软链逃逸。
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("路径不存在或无法访问: %s", path)
 	}
-	// 相对输入解析后仍是相对形式，统一转为绝对路径再比对白名单
+	// 相对输入解析后仍是相对形式，统一转为绝对路径再比对允许根
 	if abs, err := filepath.Abs(real); err == nil {
 		real = abs
 	}
-	if !t.inAllowDirs(real) {
-		return "", fmt.Errorf("路径超出允许范围（file.allowDirs）: %s", path)
+	if !t.inAllowDirs(ctx, real) {
+		return "", fmt.Errorf("路径超出允许范围（不在这条会话的工作目录或 file.allowDirs 里）: %s", path)
 	}
 	return real, nil
 }
 
-func (t *FileTools) inAllowDirs(real string) bool {
-	for _, dir := range t.AllowDirs {
+func (t *FileTools) inAllowDirs(ctx context.Context, real string) bool {
+	for _, dir := range t.roots(ctx) {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
 			continue
@@ -100,7 +113,8 @@ type ReadFileTool struct {
 func (t *ReadFileTool) Name() string { return "read_file" }
 
 func (t *ReadFileTool) Description() string {
-	return "读取文本文件内容（带行号）。path 为白名单内的相对或绝对路径；offset 为起始行号（默认 1），" +
+	return "读取文本文件内容（带行号）。path 为允许目录内的相对或绝对路径（相对路径按本次会话的工作目录解析）；" +
+		"offset 为起始行号（默认 1），" +
 		"limit 为行数（默认 400）。PDF 文件按页读取，此时 offset/limit 表示起始页与页数。" +
 		"内容超长会截断，用 offset 续读。"
 }
@@ -117,7 +131,7 @@ func (t *ReadFileTool) Schema() map[string]any {
 	}
 }
 
-func (t *ReadFileTool) Call(_ context.Context, args map[string]any) (string, error) {
+func (t *ReadFileTool) Call(ctx context.Context, args map[string]any) (string, error) {
 	path, _ := args["path"].(string)
 	offset := toInt(args["offset"], 1)
 	limit := toInt(args["limit"], 0)
@@ -125,7 +139,7 @@ func (t *ReadFileTool) Call(_ context.Context, args map[string]any) (string, err
 		offset = 1
 	}
 
-	real, err := t.resolve(path)
+	real, err := t.resolve(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -197,7 +211,7 @@ type ListFilesTool struct {
 func (t *ListFilesTool) Name() string { return "list_files" }
 
 func (t *ListFilesTool) Description() string {
-	return "列出目录下的文件与子目录（含大小）。dir 留空时列出默认白名单目录。用于寻找要读取的文件。"
+	return "列出目录下的文件与子目录（含大小）。dir 留空时列出本次会话的工作目录（这条会话没指定就列默认白名单目录）。用于寻找要读取的文件。"
 }
 
 func (t *ListFilesTool) Schema() map[string]any {
@@ -209,12 +223,12 @@ func (t *ListFilesTool) Schema() map[string]any {
 	}
 }
 
-func (t *ListFilesTool) Call(_ context.Context, args map[string]any) (string, error) {
+func (t *ListFilesTool) Call(ctx context.Context, args map[string]any) (string, error) {
 	dir, _ := args["dir"].(string)
-	if strings.TrimSpace(dir) == "" && len(t.AllowDirs) > 0 {
-		dir = t.AllowDirs[0]
+	if roots := t.roots(ctx); strings.TrimSpace(dir) == "" && len(roots) > 0 {
+		dir = roots[0] // 留空就列这条会话的工作目录（没指定才是配置的白名单首项）
 	}
-	real, err := t.resolve(dir)
+	real, err := t.resolve(ctx, dir)
 	if err != nil {
 		return "", err
 	}
