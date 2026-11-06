@@ -366,3 +366,72 @@ func TestApprovalQuestionDecideHTTP(t *testing.T) {
 		t.Fatalf("应取回选中的选项: %+v %v", out, err)
 	}
 }
+
+// TestApprovalQuestionTextHTTP 问答卡的自由文本走同一条接口的 {"text"}：
+// 空文本拒绝，正常文本原样交给 agent。
+func TestApprovalQuestionTextHTTP(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	s.approver = approval.New("confirm", nil, time.Minute)
+	handler := s.Handler()
+	card := s.approver.RequestCard(approval.Card{
+		Tool: "智能体提问", Summary: "方案怎么定？", Kind: approval.KindQuestion,
+		AllowText: true, TextPlaceholder: "也可以自己写",
+		Options:   []approval.Option{{ID: "opt_a", Name: "方案 A"}},
+		Questions: []approval.QuestionGroup{{Question: "方案怎么定？"}},
+	}, 0)
+
+	path := "/api/approvals/" + strconv.FormatInt(card.ID(), 10)
+	r := setupTestRequest(handler, "POST", path, []byte(`{"text":"   "}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code == http.StatusOK {
+		t.Fatalf("空文本不该被接受: %s", r.Body)
+	}
+
+	r = setupTestRequest(handler, "POST", path, []byte(`{"text":"自定义方案"}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code != http.StatusOK {
+		t.Fatalf("文本作答失败: %d %s", r.Code, r.Body)
+	}
+	out, err := card.WaitDecision()
+	if err != nil || !out.Allow || out.Text != "自定义方案" {
+		t.Fatalf("应取回自由文本: %+v %v", out, err)
+	}
+}
+
+// TestApprovalQuestionMultiChoiceHTTP 多选问答卡用 {"choices":[…]} 一次提交多条：
+// 按提交顺序回到 Outcome.OptionIDs；空勾选与单选卡的 choices 都要 400。
+func TestApprovalQuestionMultiChoiceHTTP(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	s.approver = approval.New("confirm", nil, time.Minute)
+	handler := s.Handler()
+	card := s.approver.RequestCard(approval.Card{
+		Tool: "智能体提问", Summary: "带哪些模块？", Kind: approval.KindQuestion,
+		MultiSelect: true,
+		Options: []approval.Option{
+			{ID: "opt_a", Name: "网关"}, {ID: "opt_b", Name: "存储"}, {ID: "opt_c", Name: "前端"},
+		},
+	}, 0)
+
+	path := "/api/approvals/" + strconv.FormatInt(card.ID(), 10)
+	r := setupTestRequest(handler, "POST", path, []byte(`{"choices":[]}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code == http.StatusOK {
+		t.Fatalf("空勾选不该被接受: %s", r.Body)
+	}
+	r = setupTestRequest(handler, "POST", path, []byte(`{"choices":["opt_c","opt_a"]}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code != http.StatusOK {
+		t.Fatalf("多选作答失败: %d %s", r.Code, r.Body)
+	}
+	out, err := card.WaitDecision()
+	if err != nil || len(out.OptionIDs) != 2 || out.OptionIDs[0] != "opt_c" || out.OptionIDs[1] != "opt_a" {
+		t.Fatalf("应按提交顺序取回两条勾选: %+v %v", out, err)
+	}
+
+	single := s.approver.RequestCard(approval.Card{
+		Tool: "智能体提问", Kind: approval.KindQuestion,
+		Options: []approval.Option{{ID: "opt_x", Name: "X"}},
+	}, 0)
+	path = "/api/approvals/" + strconv.FormatInt(single.ID(), 10)
+	r = setupTestRequest(handler, "POST", path, []byte(`{"choices":["opt_x"]}`), "127.0.0.1:1234", "localhost", "", token)
+	if r.Code == http.StatusOK {
+		t.Fatalf("单选卡不该接受 choices: %s", r.Body)
+	}
+	s.approver.Decide(single.ID(), false)
+}

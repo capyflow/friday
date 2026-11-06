@@ -13,6 +13,7 @@ import (
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
 	"github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/mcp"
@@ -346,16 +347,19 @@ func (s *Server) handleListApprovals(ctx *vhttp.Context) error {
 
 // handleDecideApproval 审批一条待处理操作：body {"approve": true|false,
 // "remember": true|false}，或问答卡专用的 {"choose": "<optionId>"}（必须是这张
-// 卡列出的选项）。remember=true 为"批准并记住"——本进程内相同工具与参数的后续
-// 调用免审批（权限层 Remember 语义），拒绝时忽略该字段。
+// 卡列出的选项；多选卡用 {"choices": ["<id>", …]} 一次提交多条）。remember=true
+// 为"批准并记住"——本进程内相同工具与参数的后续调用免审批（权限层 Remember
+// 语义），拒绝时忽略该字段。
 func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	if s.approver == nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "审批机制未启用"})
 	}
 	var req struct {
-		Approve  bool   `json:"approve"`
-		Remember bool   `json:"remember"`
-		Choose   string `json:"choose"`
+		Approve  bool     `json:"approve"`
+		Remember bool     `json:"remember"`
+		Choose   string   `json:"choose"`
+		Choices  []string `json:"choices"`
+		Text     *string  `json:"text"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
@@ -365,11 +369,34 @@ func (s *Server) handleDecideApproval(ctx *vhttp.Context) error {
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "非法的审批 ID"})
 	}
+	if req.Choices != nil { // 字段出现即按多选处理，[] 落到 DecideOptions 的空勾选拒绝里
+		if !s.approver.DecideOptions(id, req.Choices) {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "这张卡不接受多选（或没勾任何项、含有未列出的选项、已超时或已处理）"})
+		}
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已回答，agent 继续"})
+	}
 	choose := strings.TrimSpace(req.Choose)
 	if choose != "" {
 		if !s.approver.DecideOption(id, choose) {
 			return ctx.JsonResponse(vhttp.Codes.BadRequest,
 				map[string]string{"error": "这张卡没有这个选项，或它不是问答卡（可能已超时或已处理）"})
+		}
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已回答，agent 继续"})
+	}
+	if req.Text != nil {
+		text := strings.TrimSpace(*req.Text)
+		if text == "" {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "文字答案不能为空"})
+		}
+		if len([]rune(text)) > approval.MaxAnswerText {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "答案太长（上限 4000 字）"})
+		}
+		if !s.approver.DecideText(id, text) {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "这张卡不接受文字答案，或它不是问答卡（可能已超时或已处理）"})
 		}
 		return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已回答，agent 继续"})
 	}

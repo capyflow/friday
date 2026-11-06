@@ -15,6 +15,7 @@ const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
 const busy = reactive({})
+const answerTexts = reactive({}) // 问答卡的自由文本（按审批 id 存）
 const confirmPlan = ref('')
 const confirmAcp = ref('')
 const confirmGoal = ref('')
@@ -79,6 +80,36 @@ function decideApproval(a, approve) {
 function answerApproval(a, optionID) {
   act('a' + a.id, () => api('POST', '/api/approvals/' + a.id, { choose: optionID }),
     '已回答，agent 继续')
+}
+
+// 多选问答卡：勾选若干项后一次提交（choices 是 optionId 数组）。
+const multiSels = reactive({})
+const isMulti = a => a.kind === 'question' && !!a.multiSelect
+const isSelected = (a, oid) => (multiSels[a.id] || []).includes(oid)
+
+function toggleMulti(a, oid) {
+  const picked = multiSels[a.id] || []
+  const idx = picked.indexOf(oid)
+  if (idx >= 0) picked.splice(idx, 1)
+  else picked.push(oid)
+  multiSels[a.id] = picked
+}
+
+function answerApprovalMulti(a) {
+  const choices = (multiSels[a.id] || []).slice()
+  if (!choices.length) return
+  act('a' + a.id, () => api('POST', '/api/approvals/' + a.id, { choices }),
+    '已回答，agent 继续')
+  delete multiSels[a.id]
+}
+
+// answerApprovalText 用自由文本回答（CodeBuddy 的自由输入、MiniMax 的 Other）。
+function answerApprovalText(a) {
+  const text = (answerTexts[a.id] || '').trim()
+  if (!text) return
+  act('a' + a.id, () => api('POST', '/api/approvals/' + a.id, { text }),
+    '已回答，agent 继续')
+  delete answerTexts[a.id]
 }
 
 function stopAcp(t) {
@@ -216,11 +247,29 @@ onUnmounted(() => {
               <div class="run-card-title"><span class="badge agent">{{ a.tool }}</span><b>{{ a.summary }}</b></div>
               <pre v-if="a.detail" class="run-detail">{{ a.detail }}</pre>
               <span class="meta">{{ since(a.createdAt) }}前 · 等待你决定</span>
+              <div v-if="a.kind === 'question' && a.allowText" class="aq-text">
+                <textarea v-model="answerTexts[a.id]" rows="1" maxlength="4000" aria-label="自由文本答案"
+                          :placeholder="a.textPlaceholder || '也可以直接输入你的答案…'"
+                          :disabled="busy['a' + a.id]"></textarea>
+                <button class="btn sm" type="button"
+                        :disabled="busy['a' + a.id] || !(answerTexts[a.id] || '').trim()"
+                        @click="answerApprovalText(a)">提交答案</button>
+              </div>
             </div>
             <div class="run-actions">
               <template v-if="a.kind === 'question'">
-                <button v-for="o in a.options || []" :key="o.id" class="btn sm" type="button"
-                        :disabled="busy['a' + a.id]" @click="answerApproval(a, o.id)">{{ o.name }}</button>
+                <template v-if="isMulti(a)">
+                  <button v-for="o in a.options || []" :key="o.id" class="btn sm" type="button"
+                          :class="{ 'is-on': isSelected(a, o.id) }"
+                          :disabled="busy['a' + a.id]" @click="toggleMulti(a, o.id)">{{ o.name }}</button>
+                  <button class="btn sm primary aq-multi-submit" type="button"
+                          :disabled="busy['a' + a.id] || !(multiSels[a.id] || []).length"
+                          @click="answerApprovalMulti(a)">提交所选（{{ (multiSels[a.id] || []).length }}）</button>
+                </template>
+                <template v-else>
+                  <button v-for="o in a.options || []" :key="o.id" class="btn sm" type="button"
+                          :disabled="busy['a' + a.id]" @click="answerApproval(a, o.id)">{{ o.name }}</button>
+                </template>
               </template>
               <template v-else>
                 <button class="btn sm primary" type="button" :disabled="busy['a' + a.id]" @click="decideApproval(a, true)">批准</button>

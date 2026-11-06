@@ -11,6 +11,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 
@@ -25,12 +26,22 @@ const eventBuffer = 4096
 // 返回给 agent 的响应由实现方构造。
 type permissionHook func(ctx context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 
+// elicitationHook 处理 elicitation/create（MiniMax 的 ask_user 走这里）：
+// 表单字段被翻译成问答卡，答复按 requestedSchema 的形状回填。
+type elicitationHook func(ctx context.Context, form acp.UnstableCreateElicitationForm) (acp.UnstableCreateElicitationResponse, error)
+
+// extensionHook 处理 agent 发来的扩展方法（目前是 CodeBuddy 的
+// `_codebuddy.ai/question`）。返回原样序列化给 agent。
+type extensionHook func(ctx context.Context, method string, params json.RawMessage) (any, error)
+
 // bridge 是一条 agent 连接的回调实现。
 type bridge struct {
 	events  chan acp.SessionNotification
 	dropped atomic.Int64 // 因缓冲满被丢弃的 update 条数（日志哨兵）
 
-	onPermission permissionHook // 为 nil 时一律答复 cancelled
+	onPermission  permissionHook  // 为 nil 时一律答复 cancelled
+	onElicitation elicitationHook // 为 nil 时一律答复 cancelled
+	onExtension   extensionHook   // 为 nil 时未知方法一律 method not found
 }
 
 func newBridge(onPermission permissionHook) *bridge {
@@ -55,6 +66,24 @@ func (b *bridge) RequestPermission(ctx context.Context, r acp.RequestPermissionR
 	return b.onPermission(ctx, r)
 }
 
+// UnstableCreateElicitation 转交表单提问钩子（同样可长时间阻塞）。
+// 没有钩子或不是 form 形态时回 cancelled，agent 会把它当成"用户没答"。
+func (b *bridge) UnstableCreateElicitation(ctx context.Context, r acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	if r.Form == nil || b.onElicitation == nil {
+		return cancelledElicitation(), nil
+	}
+	return b.onElicitation(ctx, *r.Form)
+}
+
+// HandleExtensionMethod 实现 SDK 的扩展方法分发。未知方法必须回
+// method not found，别把协议错误吞成空结果。
+func (b *bridge) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if b.onExtension == nil {
+		return nil, acp.NewMethodNotFound(method)
+	}
+	return b.onExtension(ctx, method, params)
+}
+
 // cancelledPermission 构造"取消"答复：agent 视为用户未授权，不重试。
 func cancelledPermission() acp.RequestPermissionResponse {
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
@@ -67,6 +96,13 @@ func selectedPermission(optionID acp.PermissionOptionId) acp.RequestPermissionRe
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
 		Selected: &acp.RequestPermissionOutcomeSelected{OptionId: optionID},
 	}}
+}
+
+// cancelledElicitation 构造"取消"答复：agent 视为用户没有回答。
+func cancelledElicitation() acp.UnstableCreateElicitationResponse {
+	return acp.UnstableCreateElicitationResponse{
+		Cancel: &acp.UnstableCreateElicitationCancel{Action: "cancel"},
+	}
 }
 
 // fs/terminal 五桩：Friday 不声明这些能力（实测两家 agent 一次都没调），被调即回错。

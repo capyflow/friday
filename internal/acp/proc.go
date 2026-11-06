@@ -186,10 +186,9 @@ func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Dur
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo:      &acp.Implementation{Name: "friday", Version: "1.0"},
 		// 不声明 fs/terminal 能力（实测两家 agent 一次都没调；桩实现见 bridge.go）。
-		ClientCapabilities: acp.ClientCapabilities{
-			Fs:       acp.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
-			Terminal: false,
-		},
+		// 提问能力按 agent 白名单声明：CodeBuddy 要 _meta.question，
+		// MiniMax 要 elicitation.form（见 interactions.go）。
+		ClientCapabilities: clientCapabilitiesFor(cfg),
 	})
 	if err != nil {
 		p.kill()

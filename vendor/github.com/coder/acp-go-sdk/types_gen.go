@@ -6861,6 +6861,9 @@ type UnstableCreateElicitationForm struct {
 	Mode    string `json:"mode"`
 	// A JSON Schema describing the form fields to present to the user.
 	RequestedSchema UnstableElicitationSchema `json:"requestedSchema"`
+	// friday vendor patch: elicitation 请求带 sessionId（MiniMax ACP 实测），
+	// 上游稳定类型尚未收录；仅用于把提问路由回所属会话，上游收录后整体移除。
+	SessionId string `json:"sessionId,omitempty"`
 }
 
 // URL-based elicitation where the client directs the user to a URL.
@@ -6878,6 +6881,8 @@ type UnstableCreateElicitationUrl struct {
 	Mode    string `json:"mode"`
 	// The URL to direct the user to.
 	Url string `json:"url"`
+	// friday vendor patch: 同 UnstableCreateElicitationForm.SessionId。
+	SessionId string `json:"sessionId,omitempty"`
 }
 
 type UnstableCreateElicitationRequest struct {

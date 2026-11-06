@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -311,6 +312,91 @@ func TestRequestCardQuestionDecideOption(t *testing.T) {
 	if len(q.Pending()) != 0 {
 		t.Errorf("作答后卡片应出队: %+v", q.Pending())
 	}
+}
+
+// TestDecideTextQuestionCard 自由文本答案：只有允许文本的问答卡接受，
+// 文本会去首尾空白后原样带回 Outcome.Text。
+func TestDecideTextQuestionCard(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	card := q.RequestCard(Card{Tool: "智能体提问", Summary: "怎么定？", Kind: KindQuestion,
+		AllowText: true, TextPlaceholder: "也可以自己写",
+		Options: []Option{{ID: "a", Name: "方案 A", Kind: "allow_once"}}}, 0)
+
+	list := q.Pending()
+	if len(list) != 1 || !list[0].AllowText || list[0].TextPlaceholder != "也可以自己写" {
+		t.Fatalf("自由文本标记没带上: %+v", list)
+	}
+	if q.DecideText(card.ID(), "   ") {
+		t.Error("空文本不该被接受")
+	}
+	if q.DecideText(card.ID(), strings.Repeat("x", MaxAnswerText+1)) {
+		t.Error("超长文本不该被接受")
+	}
+	if !q.DecideText(card.ID(), "  自定义方案  ") {
+		t.Fatal("自由文本作答应被接受")
+	}
+	out, err := card.WaitDecision()
+	if err != nil || !out.Allow || out.Text != "自定义方案" || out.OptionID != "" {
+		t.Fatalf("自由文本结果不符: %+v err=%v", out, err)
+	}
+}
+
+// TestDecideTextRejectsPlainQuestionCard 没有 AllowText 的问答卡不接文本，
+// 更不能把文本塞给真正的授权卡。
+func TestDecideTextRejectsPlainQuestionCard(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	question := q.RequestCard(Card{Tool: "智能体提问", Kind: KindQuestion,
+		Options: []Option{{ID: "a", Name: "A"}}}, 0)
+	if q.DecideText(question.ID(), "自己写") {
+		t.Error("未声明 AllowText 的卡不该接受文本")
+	}
+	approvalCard := q.RequestCancelable("exec", "执行 rm", "", 0)
+	if q.DecideText(approvalCard.ID(), "自己写") {
+		t.Error("授权卡不该接受文本")
+	}
+	q.Decide(question.ID(), false)
+	q.Decide(approvalCard.ID(), false)
+}
+
+// TestDecideOptionsMultiSelectCard 多选问答卡：一次提交多条勾选，顺序保留、
+// 重复与空白去重；没勾、含未知选项都拒绝；非多选卡与授权卡不吃多选作答。
+func TestDecideOptionsMultiSelectCard(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	card := q.RequestCard(Card{Tool: "智能体提问", Summary: "带哪些模块？", Kind: KindQuestion,
+		MultiSelect: true,
+		Options:     []Option{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}, {ID: "c", Name: "C"}}}, 0)
+	list := q.Pending()
+	if len(list) != 1 || !list[0].MultiSelect {
+		t.Fatalf("multiSelect 标记没带上: %+v", list)
+	}
+	if q.DecideOptions(card.ID(), nil) || q.DecideOptions(card.ID(), []string{" ", ""}) {
+		t.Error("没勾任何项不该被接受")
+	}
+	if q.DecideOptions(card.ID(), []string{"a", "nope"}) {
+		t.Error("含未知选项的提交不该被接受")
+	}
+	if !q.DecideOptions(card.ID(), []string{"c", "a", "a", "  "}) {
+		t.Fatal("多选作答应被接受")
+	}
+	out, err := card.WaitDecision()
+	if err != nil || !out.Allow {
+		t.Fatalf("多选结算异常: %+v err=%v", out, err)
+	}
+	if len(out.OptionIDs) != 2 || out.OptionIDs[0] != "c" || out.OptionIDs[1] != "a" || out.OptionID != "" {
+		t.Fatalf("勾选顺序与去重不符: %+v", out)
+	}
+
+	plain := q.RequestCard(Card{Tool: "智能体提问", Kind: KindQuestion,
+		Options: []Option{{ID: "a", Name: "A"}}}, 0)
+	if q.DecideOptions(plain.ID(), []string{"a"}) {
+		t.Error("未声明 MultiSelect 的卡不该接受多选作答")
+	}
+	q.Decide(plain.ID(), false)
+	authz := q.RequestCancelable("exec", "执行 rm", "", 0)
+	if q.DecideOptions(authz.ID(), []string{"allow"}) {
+		t.Error("授权卡不该接受多选作答")
+	}
+	q.Decide(authz.ID(), false)
 }
 
 // TestDecideOptionRejectsApprovalCard 授权卡要的是批准/拒绝，不接受选项作答。

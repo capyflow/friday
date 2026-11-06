@@ -113,6 +113,48 @@ describe('问答卡（agent 在问用户，不是请求授权）', () => {
     expect(wrapper.get('.aq-note').text()).toContain('点一项就是答案')
   })
 
+  it('多选卡：勾选带选中态，重复点取消，提交所选按 choices 数组回传', async () => {
+    await showQuestion({ ...questionItem, multiSelect: true })
+    const toggle = name => wrapper.findAll('.approval-card button').find(b => b.text() === name)
+    await toggle('最小影响面').trigger('click')
+    await toggle('全量封堵').trigger('click')
+    await toggle('全量封堵').trigger('click') // 再点一次 = 取消勾选
+    await toggle('拒绝').trigger('click')
+    const on = wrapper.findAll('.approval-card button.is-on').map(b => b.text())
+    expect(on).toEqual(['最小影响面', '拒绝'])
+    const submit = wrapper.get('.aq-multi-submit')
+    expect(submit.text()).toContain('提交所选（2）')
+    await submit.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/approvals/21', { choices: ['opt_min', 'reject'] })
+    expect(wrapper.text()).not.toContain('本轮修复的范围怎么定？')
+    expect(toast).toHaveBeenCalledWith('已回答，agent 继续')
+  })
+
+  it('多选卡没勾任何项时提交按钮置灰', async () => {
+    await showQuestion({ ...questionItem, multiSelect: true })
+    expect(wrapper.get('.aq-multi-submit').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.aq-note').exists()).toBe(false)
+  })
+
+  it('没声明自由文本时不显示输入框', async () => {
+    await showQuestion()
+    expect(wrapper.find('.aq-text').exists()).toBe(false)
+  })
+
+  it('允许自由文本时显示输入框，提交走 text 而不是 choose', async () => {
+    await showQuestion({ ...questionItem, allowText: true, textPlaceholder: '也可以自己写' })
+    const input = wrapper.get('.aq-text textarea')
+    expect(input.attributes('placeholder')).toBe('也可以自己写')
+    await input.setValue('自定义方案')
+    const btn = wrapper.findAll('.approval-card button').find(b => b.text() === '提交答案')
+    await btn.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/approvals/21', { text: '自定义方案' })
+    expect(wrapper.text()).not.toContain('本轮修复的范围怎么定？')
+    expect(toast).toHaveBeenCalledWith('已回答，agent 继续')
+  })
+
   it('认不出问题正文时退回可读 detail 文本，不空着一张卡', async () => {
     await showQuestion({ ...questionItem, questions: undefined })
     expect(wrapper.find('.aq-list').exists()).toBe(false)

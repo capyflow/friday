@@ -8,6 +8,8 @@ import { api } from '../api.js'
 import { store, toast } from '../store.js'
 
 const items = reactive([])
+const texts = reactive({})      // 问答卡的自由文本答案（按卡片 id 存）
+const selections = reactive({}) // 多选问答卡勾选中的 optionId（按卡片 id 存）
 const decided = new Set()   // 本会话已处理过的审批 id：服务端列表尚未移除前不再显示
 const pending = reactive(new Set())
 let timer = null
@@ -16,9 +18,21 @@ let polling = false
 let disposed = false
 
 const isQuestion = it => it.kind === 'question'
-// 问题正文里标了可多选，但 agent 给的仍是一条条独立选项（协议没有多选通道）：
+// 卡面声明了可多选（interaction 通道的卡，一次能提交多条勾选）。
+const isMulti = it => isQuestion(it) && !!it.multiSelect
+// 问题正文里标了多选但卡是单选（权限通道协议一次只认一个 optionId）：
 // 明说一句，别让人以为点完还能补选。
-const multiHint = it => (it.questions || []).some(g => g.multiSelect)
+const multiHint = it => !isMulti(it) && (it.questions || []).some(g => g.multiSelect)
+const isSelected = (it, oid) => (selections[it.id] || []).includes(oid)
+
+function toggleOption(it, oid) {
+  if (pending.has(it.id) || !store.loggedIn || disposed) return
+  const picked = selections[it.id] || []
+  const idx = picked.indexOf(oid)
+  if (idx >= 0) picked.splice(idx, 1)
+  else picked.push(oid)
+  selections[it.id] = picked
+}
 
 // 登录切换后，旧请求即使晚到也不能更新新会话的卡片或提示。
 watch(() => [store.loggedIn, store.username], () => {
@@ -26,6 +40,8 @@ watch(() => [store.loggedIn, store.username], () => {
   items.splice(0, items.length)
   decided.clear()
   pending.clear()
+  for (const k of Object.keys(texts)) delete texts[k]
+  for (const k of Object.keys(selections)) delete selections[k]
   polling = false
   if (store.loggedIn) poll()
 }, { flush: 'sync' })
@@ -70,6 +86,50 @@ async function answer(it, optionID) {
     const r = await api('POST', '/api/approvals/' + encodeURIComponent(it.id), { choose: optionID })
     if (disposed || current !== generation || !store.loggedIn) return
     decided.add(it.id)
+    delete texts[it.id]
+    const idx = items.findIndex(item => item.id === it.id)
+    if (idx >= 0) items.splice(idx, 1)
+    toast(r.message || '已回答')
+  } catch (e) {
+    if (!disposed && current === generation && store.loggedIn) toast(e.message, true)
+  } finally {
+    if (current === generation) pending.delete(it.id)
+  }
+}
+
+// answerMulti 把多选卡的勾选一次提交给后端（choices 是 optionId 数组）。
+async function answerMulti(it) {
+  const choices = (selections[it.id] || []).slice()
+  if (!choices.length || pending.has(it.id) || !store.loggedIn || disposed) return
+  const current = generation
+  pending.add(it.id)
+  try {
+    const r = await api('POST', '/api/approvals/' + encodeURIComponent(it.id), { choices })
+    if (disposed || current !== generation || !store.loggedIn) return
+    decided.add(it.id)
+    delete texts[it.id]
+    delete selections[it.id]
+    const idx = items.findIndex(item => item.id === it.id)
+    if (idx >= 0) items.splice(idx, 1)
+    toast(r.message || '已回答')
+  } catch (e) {
+    if (!disposed && current === generation && store.loggedIn) toast(e.message, true)
+  } finally {
+    if (current === generation) pending.delete(it.id)
+  }
+}
+
+// answerText 用自由文本回答（CodeBuddy 的自由输入、MiniMax 的 Other 字段）。
+async function answerText(it) {
+  const text = (texts[it.id] || '').trim()
+  if (!text || pending.has(it.id) || !store.loggedIn || disposed) return
+  const current = generation
+  pending.add(it.id)
+  try {
+    const r = await api('POST', '/api/approvals/' + encodeURIComponent(it.id), { text })
+    if (disposed || current !== generation || !store.loggedIn) return
+    decided.add(it.id)
+    delete texts[it.id]
     const idx = items.findIndex(item => item.id === it.id)
     if (idx >= 0) items.splice(idx, 1)
     toast(r.message || '已回答')
@@ -115,11 +175,36 @@ onUnmounted(() => { disposed = true; generation++; clearInterval(timer) })
         <p v-if="multiHint(it)" class="aq-note meta">
           这题标了可多选，但 agent 给的是一条条独立选项——点一项就是答案。
         </p>
-        <div class="acts aq-acts">
-          <!-- 选项一律中性底色：这里没有"默认动作"，染蓝等于替用户推荐一条答案 -->
-          <button v-for="o in it.options || []" :key="o.id" type="button" class="btn sm"
-                  :disabled="pending.has(it.id)" @click="answer(it, o.id)">
-            {{ pending.has(it.id) ? '处理中…' : o.name }}
+        <div v-if="(it.options || []).length" class="acts aq-acts">
+          <!-- 选项一律中性底色：这里没有"默认动作"，染蓝等于替用户推荐一条答案；
+               多选卡的选中态例外——那是用户自己勾出来的，不是我们推荐的 -->
+          <template v-if="isMulti(it)">
+            <button v-for="o in it.options || []" :key="o.id" type="button" class="btn sm"
+                    :class="{ 'is-on': isSelected(it, o.id) }"
+                    :disabled="pending.has(it.id)" @click="toggleOption(it, o.id)">
+              {{ o.name }}
+            </button>
+            <button class="btn sm primary aq-multi-submit" type="button"
+                    :disabled="pending.has(it.id) || !(selections[it.id] || []).length"
+                    @click="answerMulti(it)">
+              {{ pending.has(it.id) ? '处理中…' : `提交所选（${(selections[it.id] || []).length}）` }}
+            </button>
+          </template>
+          <template v-else>
+            <button v-for="o in it.options || []" :key="o.id" type="button" class="btn sm"
+                    :disabled="pending.has(it.id)" @click="answer(it, o.id)">
+              {{ pending.has(it.id) ? '处理中…' : o.name }}
+            </button>
+          </template>
+        </div>
+        <div v-if="it.allowText" class="aq-text">
+          <textarea v-model="texts[it.id]" rows="2" maxlength="4000" aria-label="自由文本答案"
+                    :placeholder="it.textPlaceholder || '也可以直接输入你的答案…'"
+                    :disabled="pending.has(it.id)"></textarea>
+          <button class="btn sm" type="button"
+                  :disabled="pending.has(it.id) || !(texts[it.id] || '').trim()"
+                  @click="answerText(it)">
+            {{ pending.has(it.id) ? '处理中…' : '提交答案' }}
           </button>
         </div>
       </template>

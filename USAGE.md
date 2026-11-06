@@ -193,12 +193,15 @@ GET  /api/sessions
   中断注记会写「可以发『继续』接着做」。
 - agent 的敏感操作经网页审批卡人工放行（与主聊天的审批中心同一处），30 分钟无人处理自动拒绝。
   要让它真的弹卡，需把 agent 自身配置里的审批模式调紧为"每次询问"。
-- agent 用 AskUserQuestion 这类工具问用户时走的是问答卡，不是授权卡：ACP 只有权限通道能承载
-  用户选择，所以 agent 把答案编码成选项发过来。Friday 按 agent 给的选项原样画按钮（点哪条就把
-  那条的 optionId 回给它），正文按「分组 · 题干 · 每项说明」排版，不再糊 rawInput 的 JSON；
-  判定规则见 `internal/acp/question.go`（rawInput 带 questions 正文 / 工具名命中提问类 / 选项全是
-  「<label>:yes:no」这种答题对 / 有选项不像授权答复，任一命中；判不准宁可留在授权卡）。
-  没答（超时或本轮结束撤卡）一律回 `cancelled`，不替用户挑一条。运行看板「待审批」里同样按选项作答。
+- agent 用 AskUserQuestion / ask_user 这类工具问用户时走问答卡，不是授权卡。各家的承载通道不同：
+  zcode 把答案编码进权限请求的选项；CodeBuddy 先发一条工具授权（Friday 自动放行，它不执行命令）
+  再发 interruption 请求；MiniMax 走 elicitation 表单。Friday 统一翻译成「分组 · 题干 · 每项说明」
+  的问答卡，点哪条就把那条的原始值回给 agent；支持自由输入的题（CodeBuddy 的 AskUserQuestion、
+  MiniMax 的 Other 字段）在选项下方多一个输入框，可以直接写自定义答案。没答（超时或本轮结束撤卡）
+  回 cancelled/deny，不替用户挑一条。判定规则见 `internal/acp/question.go` 与
+  `internal/acp/interactions.go`。多选卡目前仍是一次点一条（卡上会有提示）。
+- 权限请求缺 title 时（CodeBuddy 的 ACP 权限请求常见），摘要按 `_meta` 里的工具名与 rawInput 的
+  关键字段（命令/文件/URL/查询）兜底，不再统一显示「未知操作」。
 - 这两个时刻会额外投一条系统通知（人在别的窗口也看得见）：审批卡入队时报「哪个 agent 在等你批准 +
   要做什么」，一轮结束时报「跑完/没跑完 + 改了 N 个文件 + 用时」；用户自己按停止的不弹（他就在页面上）。
   通知按事件身份幂等，同一张卡、同一轮收尾只弹一次，内容同时留在通知中心。

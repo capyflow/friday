@@ -537,12 +537,9 @@ func (m *Manager) startBuiltin(cfg config.AcpAgentConfig, cwd string, handshake 
 	ictx, icancel := context.WithTimeout(context.Background(), handshake)
 	defer icancel()
 	initRes, err := p.conn.Initialize(ictx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientInfo:      &acp.Implementation{Name: "friday", Version: "1.0"},
-		ClientCapabilities: acp.ClientCapabilities{
-			Fs:       acp.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
-			Terminal: false,
-		},
+		ProtocolVersion:    acp.ProtocolVersionNumber,
+		ClientInfo:         &acp.Implementation{Name: "friday", Version: "1.0"},
+		ClientCapabilities: clientCapabilitiesFor(cfg),
 	})
 	if err != nil {
 		p.kill()

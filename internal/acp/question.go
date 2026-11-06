@@ -142,7 +142,7 @@ func toApprovalOptions(opts []acp.PermissionOption) []approval.Option {
 func questionGroups(r acp.RequestPermissionRequest) []approval.QuestionGroup {
 	raw, err := json.Marshal(r.ToolCall.RawInput)
 	if err != nil {
-		return nil
+		return questionnaireFallback(r)
 	}
 	var payload struct {
 		Question    string           `json:"question"`
@@ -153,12 +153,12 @@ func questionGroups(r acp.RequestPermissionRequest) []approval.QuestionGroup {
 		Questions   []map[string]any `json:"questions"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil
+		return questionnaireFallback(r)
 	}
 	items := payload.Questions
 	if len(items) == 0 {
 		if strings.TrimSpace(payload.Question+payload.Text) == "" && len(payload.Options) == 0 {
-			return nil
+			return questionnaireFallback(r)
 		}
 		items = []map[string]any{{
 			"question": payload.Question, "text": payload.Text, "header": payload.Header,
@@ -183,7 +183,41 @@ func questionGroups(r acp.RequestPermissionRequest) []approval.QuestionGroup {
 		}
 		out = append(out, g)
 	}
+	if len(out) == 0 {
+		return questionnaireFallback(r)
+	}
 	return out
+}
+
+// questionnaireFallback 识别 MiniMax 退化成权限请求的问卷：选项 id 带
+// `questionnaire:<请求id>:` 前缀，题干在 toolCall.title 里、rawInput 为空。
+// 不补这一条，卡片会显示"在等你回答（0 个问题）"。
+func questionnaireFallback(r acp.RequestPermissionRequest) []approval.QuestionGroup {
+	if !hasQuestionnaireOptions(r.Options) {
+		return nil
+	}
+	question := strings.TrimSpace(toolCallText(r.ToolCall))
+	if question == "" {
+		question = "请选择"
+	}
+	g := approval.QuestionGroup{Question: question}
+	for _, o := range r.Options {
+		name := strings.TrimSpace(o.Name)
+		if name == "" {
+			name = string(o.OptionId)
+		}
+		g.Options = append(g.Options, approval.QuestionOption{Label: name})
+	}
+	return []approval.QuestionGroup{g}
+}
+
+func hasQuestionnaireOptions(opts []acp.PermissionOption) bool {
+	for _, o := range opts {
+		if strings.HasPrefix(strings.ToLower(string(o.OptionId)), "questionnaire:") {
+			return true
+		}
+	}
+	return false
 }
 
 // questionDetail 给卡片正文一个可读兜底：前端按 Questions 结构化排版，但通知中心、

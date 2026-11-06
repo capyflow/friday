@@ -80,6 +80,10 @@ type QuestionGroup struct {
 	Options     []QuestionOption `json:"options,omitempty"`
 }
 
+// MaxAnswerText 是问答卡自由文本答案的上限（按 rune 计）。它是用户输入，
+// 会原样交给 agent，限长既防误粘贴整篇文档，也避免卡死前端。
+const MaxAnswerText = 4000
+
 // Item 是一条待审批操作（管理后台展示用）。
 type Item struct {
 	ID        int64     `json:"id"`
@@ -94,14 +98,24 @@ type Item struct {
 	// 用的问题正文（可能比选项更细，例如带每项说明）。
 	Options   []Option        `json:"options,omitempty"`
 	Questions []QuestionGroup `json:"questions,omitempty"`
+	// AllowText 表示这张问答卡除选项外还接受自由文本（CodeBuddy 的
+	// AskUserQuestion 与 MiniMax 的 Other 字段都允许用户自己写）。
+	AllowText       bool   `json:"allowText,omitempty"`
+	TextPlaceholder string `json:"textPlaceholder,omitempty"`
+	// MultiSelect 表示这张卡的选项可以勾选多条、一次提交。只有交互通道
+	// （elicitation / 扩展方法）能真正收多条答案；权限通道协议一次只认一个
+	// optionId（zcode 把多选题拆成逐条 yes/no），所以那边永远单选。
+	MultiSelect bool `json:"multiSelect,omitempty"`
 }
 
 // decision 是审批结果：是否批准，以及是否"批准并记住"（本进程内相同工具
 // 与参数的后续调用不再询问，由权限层的 Remember 机制实现）。
 type decision struct {
-	allow    bool
-	remember bool
-	optionID string // 问答卡：用户选中的 optionId（授权卡恒为空）
+	allow     bool
+	remember  bool
+	optionID  string   // 问答卡：用户选中的 optionId（授权卡恒为空）
+	optionIDs []string // 多选问答卡：用户勾选的全部 optionId（与 optionID 二选一）
+	text      string   // 问答卡：用户自己输入的答案（与 optionID 二选一）
 }
 
 // request 是待审批请求的内部形态，携带结果回传通道。
@@ -221,6 +235,11 @@ type Card struct {
 	Kind      string
 	Options   []Option
 	Questions []QuestionGroup
+	// AllowText/TextPlaceholder 用于问答卡的自由文本输入。
+	AllowText       bool
+	TextPlaceholder string
+	// MultiSelect 允许一次勾选多条选项提交（见 Item.MultiSelect）。
+	MultiSelect bool
 }
 
 // RequestCancelable 入队一次审批并立即返回句柄（不阻塞）。timeout<=0 用队列
@@ -243,6 +262,8 @@ func (q *Queue) RequestCard(card Card, timeout time.Duration) *Pending {
 			ID: q.seq, Tool: card.Tool, Summary: card.Summary, Detail: card.Detail,
 			CreatedAt: time.Now(), Kind: card.Kind,
 			Options: card.Options, Questions: card.Questions,
+			AllowText: card.AllowText, TextPlaceholder: card.TextPlaceholder,
+			MultiSelect: card.MultiSelect,
 		},
 		ch: make(chan decision, 1),
 	}
@@ -264,11 +285,14 @@ func (p *Pending) Done() <-chan struct{} { return p.done }
 // 同一张卡只该提示一次，而同一轮里的两张卡是两个编号、各提示一次。
 func (p *Pending) ID() int64 { return p.req.item.ID }
 
-// Outcome 是一次审批的完整结算：批准与否、是否"批准并记住"、问答卡选中的 optionId。
+// Outcome 是一次审批的完整结算：批准与否、是否"批准并记住"、问答卡选中的
+// optionId（多选卡是 OptionIDs），以及用户自己输入的文本答案（与选项二选一）。
 type Outcome struct {
-	Allow    bool
-	Remember bool
-	OptionID string
+	Allow     bool
+	Remember  bool
+	OptionID  string
+	OptionIDs []string
+	Text      string
 }
 
 // Wait 阻塞等待审批结果：批准返回 (true, nil)；拒绝、超时或被 Cancel 返回
@@ -288,9 +312,10 @@ func (p *Pending) WaitDecision() (Outcome, error) {
 	case d := <-p.req.ch:
 		p.q.remove(p.req.item.ID)
 		if !d.allow {
-			return Outcome{OptionID: d.optionID}, ErrDenied
+			return Outcome{OptionID: d.optionID, OptionIDs: d.optionIDs, Text: d.text}, ErrDenied
 		}
-		return Outcome{Allow: true, Remember: d.remember, OptionID: d.optionID}, nil
+		return Outcome{Allow: true, Remember: d.remember,
+			OptionID: d.optionID, OptionIDs: d.optionIDs, Text: d.text}, nil
 	case <-p.cancel:
 		p.q.remove(p.req.item.ID)
 		return Outcome{}, ErrDenied
@@ -401,5 +426,67 @@ func (q *Queue) DecideOption(id int64, optionID string) bool {
 		return false
 	}
 	req.ch <- decision{allow: true, optionID: optionID}
+	return true
+}
+
+// DecideText 用自由文本回答一张问答卡：只有 Kind=question 且 AllowText=true
+// 的卡接受，空文本与超长文本一律拒绝。文本原样交给 agent，不做任何解释。
+func (q *Queue) DecideText(id int64, text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || len([]rune(text)) > MaxAnswerText {
+		return false
+	}
+	q.mu.Lock()
+	req, ok := q.pending[id]
+	valid := ok && req.item.Kind == KindQuestion && req.item.AllowText
+	q.mu.Unlock()
+	if !valid {
+		return false
+	}
+	req.ch <- decision{allow: true, text: text}
+	return true
+}
+
+// DecideOptions 用一组勾选的选项回答多选问答卡：只有 Kind=question 且
+// MultiSelect=true 的卡接受；id 必须都是这张卡给过的，重复项按顺序去重，
+// 全是空白视为没选。返回是否入账。
+func (q *Queue) DecideOptions(id int64, optionIDs []string) bool {
+	seen := make(map[string]bool, len(optionIDs))
+	picked := make([]string, 0, len(optionIDs))
+	for _, raw := range optionIDs {
+		oid := strings.TrimSpace(raw)
+		if oid == "" || seen[oid] {
+			continue
+		}
+		seen[oid] = true
+		picked = append(picked, oid)
+	}
+	if len(picked) == 0 {
+		return false
+	}
+	q.mu.Lock()
+	req, ok := q.pending[id]
+	valid := false
+	if ok && req.item.Kind == KindQuestion && req.item.MultiSelect {
+		valid = true
+		for _, oid := range picked {
+			found := false
+			for _, o := range req.item.Options {
+				if o.ID == oid {
+					found = true
+					break
+				}
+			}
+			if !found {
+				valid = false
+				break
+			}
+		}
+	}
+	q.mu.Unlock()
+	if !valid {
+		return false
+	}
+	req.ch <- decision{allow: true, optionIDs: picked}
 	return true
 }

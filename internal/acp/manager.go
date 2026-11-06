@@ -285,6 +285,19 @@ func (ps *procState) owner(sid acp.SessionId) string {
 	return ps.owners[sid]
 }
 
+// onlyOwner 在连接上恰好只有一个会话时返回它；多于一个就无法可靠路由。
+func (ps *procState) onlyOwner() string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.owners) != 1 {
+		return ""
+	}
+	for _, tid := range ps.owners {
+		return tid
+	}
+	return ""
+}
+
 // dropThread 摘掉某 thread 的会话归属，返回这条连接上还剩几个会话。
 func (ps *procState) dropThread(threadID string) int {
 	ps.mu.Lock()
@@ -763,6 +776,12 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 		releaseSlot(sem)
 		return nil, err
 	}
+	// 提问通道在 initialize 之后、任何 session 建立之前装配：CodeBuddy 的
+	// 扩展方法与 MiniMax 的 elicitation 都按 sessionId 路由回 thread。
+	proc.setInteractionHooks(
+		m.elicitationHookFor(key, agentCfg.Name),
+		m.extensionHookFor(key, agentCfg.Name),
+	)
 	m.markWarm(agentCfg.Name)
 	ps := &procState{key: key, proc: proc, slot: sem, owners: map[acp.SessionId]string{},
 		pause: make(chan struct{}, 1), ack: make(chan struct{}, 1), resume: make(chan struct{}, 1)}
@@ -950,6 +969,15 @@ func (m *Manager) routeEvent(ps *procState, ev acp.SessionNotification) {
 	lv := m.liveOf(thID)
 	if lv == nil {
 		return
+	}
+	// CodeBuddy 的 AskUserQuestion 在工具授权通过后，会再发一条
+	// session_info_update（_meta 里带 interruptionRequest）承载真正的问题；
+	// 这条要异步出卡并回 resolveInterruption，不能交给时间线聚合器丢掉。
+	if info := ev.Update.SessionInfoUpdate; info != nil {
+		if ir := codeBuddyInterruptionFrom(info.Meta); ir != nil {
+			go m.handleCodeBuddyInterruption(ps, ev.SessionId, thID, ir)
+			return
+		}
 	}
 	if ev.Update.ConfigOptionUpdate != nil {
 		lv.setOptions(ev.Update.ConfigOptionUpdate.ConfigOptions)
@@ -1225,25 +1253,19 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 // 并按拒绝结算——卡面向的会话已不存在，留着只会得到一张对着死进程的卡。
 func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 	return func(_ context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-		kind := ""
-		if r.ToolCall.Kind != nil {
-			kind = string(*r.ToolCall.Kind)
-		}
-		summary := ""
-		if r.ToolCall.Title != nil {
-			summary = strings.TrimSpace(*r.ToolCall.Title)
-		}
-		if summary == "" {
-			summary = "未知操作"
-		}
-		detail := fmt.Sprintf("智能体 %s 请求授权（%s）", agentName, kind)
-		if r.ToolCall.RawInput != nil {
-			if b, err := json.Marshal(r.ToolCall.RawInput); err == nil && len(b) > 0 {
-				detail += "\n" + sanitizeLog(string(b))
-			}
-		}
+		// title 缺失时从 _meta 的工具名与 rawInput 兜底（CodeBuddy 的 ACP
+		// 权限请求不填 title/kind，旧逻辑一律显示"未知操作"）。
+		summary := permissionSummary(r)
+		detail := permissionDetail(agentName, r)
 		// C11：文案来自子 agent，卡片摘要照常展示但不作为授权依据。
 		log.Printf("[智能体] %s 权限请求: %s", agentName, sanitizeLog(summary))
+		// CodeBuddy 把 AskUserQuestion 也套了一层工具授权（选项只有
+		// allow/allow_always/reject），真正的问题随后走 interruption。这个
+		// 授权本身不执行任何命令，直接放行，避免用户先批一次再答一次。
+		if metaToolName(r.ToolCall.Meta) == "AskUserQuestion" {
+			log.Printf("[智能体] %s 提问工具授权自动放行（问题由 interruption 呈现）", agentName)
+			return respondPermission(r, true), nil
+		}
 		if m.approver == nil {
 			log.Printf("[智能体] 未装配审批队列，自动允许（仅测试环境应出现）")
 			return respondPermission(r, true), nil

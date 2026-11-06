@@ -111,6 +111,7 @@ type fakeAgent struct {
 	newReq       map[string]any // 最近一次 session/new 的 params（查 cwd/additionalDirectories）
 	loadReq      map[string]any // 最近一次 session/load 的 params
 	permReplies  []string       // client 对权限请求的回包原文（查 selected 的 optionId）
+	resolveCalls []string       // CodeBuddy resolveInterruption 的 params 原文
 
 	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
@@ -131,6 +132,16 @@ func (f *fakeAgent) permReply() string {
 		return ""
 	}
 	return f.permReplies[len(f.permReplies)-1]
+}
+
+// resolveCall 返回最近一次 CodeBuddy resolveInterruption 的 params。
+func (f *fakeAgent) resolveCall() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.resolveCalls) == 0 {
+		return ""
+	}
+	return f.resolveCalls[len(f.resolveCalls)-1]
 }
 
 // resetOptions 在 resetOnSession 时把选项打回初始默认；另外首次调用时记下默认值。
@@ -411,6 +422,11 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 				default:
 				}
 			}
+		case "_codebuddy.ai/resolveInterruption":
+			f.mu.Lock()
+			f.resolveCalls = append(f.resolveCalls, string(msg.Params))
+			f.mu.Unlock()
+			fc.w.respond(msg.ID, map[string]any{"resolved": true, "queued": false})
 		}
 	}
 }
@@ -448,6 +464,15 @@ func (fc *fakeConn) sendPermissionRequest(sid, title string) {
 // 选项是答案本身，rawInput 带 questions 正文。
 func (fc *fakeConn) sendQuestionRequest(sid, title string, options []any, rawInput map[string]any) {
 	fc.w.send(permissionRequest(fc, sid, title, options, rawInput))
+}
+
+// request 发一次任意 JSON-RPC 请求（扩展方法 / elicitation 用）。
+func (fc *fakeConn) request(method string, params any) {
+	fc.w.mu.Lock()
+	fc.w.seq++
+	reqID, _ := json.Marshal(fc.w.seq)
+	fc.w.mu.Unlock()
+	fc.w.send(map[string]any{"jsonrpc": "2.0", "id": reqID, "method": method, "params": params})
 }
 
 func permissionRequest(fc *fakeConn, sid, title string, options []any, rawInput map[string]any) map[string]any {
@@ -2739,6 +2764,452 @@ func TestPlainPermissionStaysApprovalCard(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	<-done
+}
+
+// CodeBuddy 的 AskUserQuestion 不走 request_permission，而是私有扩展方法
+// `_codebuddy.ai/question`；问答卡答完要按 q_0/q_1 回 answers。
+func TestCodeBuddyQuestionExtensionAnswers(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request(codeBuddyQuestionMethod, map[string]any{
+			"sessionId": sid, "toolCallId": "t1", "inputType": "question",
+			"schema": map[string]any{"questions": []any{
+				map[string]any{
+					"id": "q_0", "header": "方案", "question": "选哪个方案？",
+					"options": []any{
+						map[string]any{"label": "方案 A", "description": "改动小"},
+						map[string]any{"label": "方案 B"},
+					},
+				},
+			}},
+		})
+		f.permSent <- struct{}{}
+		time.Sleep(400 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "CodeBuddy 问答卡入队", func() bool { return len(approver.Pending()) == 1 })
+		it := approver.Pending()[0]
+		if it.Kind != approval.KindQuestion {
+			t.Errorf("扩展方法提问应入队成问答卡，实际 kind=%q", it.Kind)
+		}
+		if len(it.Questions) != 1 || it.Questions[0].Question != "选哪个方案？" {
+			t.Errorf("问题正文应结构化，实际 %+v", it.Questions)
+		}
+		if !approver.DecideOption(it.ID, "q:o0") {
+			t.Error("按选项 ID 作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	reply := f.permReply()
+	for _, want := range []string{`"outcome":"submitted"`, `"q_0":"方案 A"`} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("回包缺少 %s，实际 %s", want, reply)
+		}
+	}
+}
+
+// MiniMax 的 ask_user 在客户端声明 elicitation.form 后走 elicitation/create；
+// 表单字段要翻成问答卡，答复按 requestedSchema 的键回填。
+func TestElicitationFormAnswers(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("elicitation/create", map[string]any{
+			"mode": "form", "sessionId": sid, "message": "MiniMax 需要你的选择",
+			"requestedSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"q1": map[string]any{
+						"type": "string", "title": "选哪个方案？",
+						"oneOf": []any{
+							map[string]any{"const": "a", "title": "方案 A"},
+							map[string]any{"const": "b", "title": "方案 B"},
+						},
+					},
+				},
+				"required": []any{"q1"},
+			},
+		})
+		f.permSent <- struct{}{}
+		time.Sleep(400 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "elicitation 问答卡入队", func() bool { return len(approver.Pending()) == 1 })
+		it := approver.Pending()[0]
+		if it.Kind != approval.KindQuestion {
+			t.Errorf("elicitation 应入队成问答卡，实际 kind=%q", it.Kind)
+		}
+		if len(it.Options) != 2 || it.Options[0].Name != "方案 A" {
+			t.Errorf("选项按钮应来自 schema.oneOf，实际 %+v", it.Options)
+		}
+		if !approver.DecideOption(it.ID, "q:o0") {
+			t.Error("按选项 ID 作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	reply := f.permReply()
+	for _, want := range []string{`"action":"accept"`, `"q1":"a"`} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("回包缺少 %s，实际 %s", want, reply)
+		}
+	}
+}
+
+// CodeBuddy 的 AskUserQuestion 实际链路：先发工具授权（这里应自动放行），
+// 再发 session_info_update/interruptionRequest 承载问题，答完调 resolveInterruption。
+func TestCodeBuddyInterruptionCardAnswers(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("session/request_permission", map[string]any{
+			"sessionId": sid,
+			"options": []any{
+				map[string]any{"optionId": "allow_always", "kind": "allow_always", "name": "Always Allow"},
+				map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+				map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+			},
+			"toolCall": map[string]any{
+				"toolCallId": "t1",
+				"rawInput": map[string]any{"questions": []any{
+					map[string]any{"question": "要选方案 A 还是方案 B？", "header": "方案选择",
+						"options": []any{
+							map[string]any{"label": "方案 A", "description": "选择方案 A"},
+							map[string]any{"label": "方案 B", "description": "选择方案 B"},
+						}},
+				}},
+				"_meta": map[string]any{"codebuddy.ai/toolName": "AskUserQuestion"},
+			},
+		})
+		fc.w.notify("session/update", update(sid, "session_info_update", map[string]any{
+			"_meta": map[string]any{"codebuddy.ai/interruptionRequest": map[string]any{
+				"interruptionId": "ir-t1", "toolCallId": "t1", "toolName": "AskUserQuestion",
+				"toolInput": map[string]any{"questions": []any{
+					map[string]any{"id": "q_0", "question": "要选方案 A 还是方案 B？", "header": "方案选择",
+						"options": []any{
+							map[string]any{"label": "方案 A", "description": "选择方案 A"},
+							map[string]any{"label": "方案 B", "description": "选择方案 B"},
+						}},
+				}},
+			}},
+		}))
+		f.permSent <- struct{}{}
+		time.Sleep(600 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "CodeBuddy interruption 问答卡入队", func() bool {
+			return len(approver.Pending()) == 1
+		})
+		it := approver.Pending()[0]
+		if it.Kind != approval.KindQuestion {
+			t.Errorf("interruption 应入队成问答卡，实际 kind=%q", it.Kind)
+		}
+		if it.Summary != "方案选择 · 要选方案 A 还是方案 B？" {
+			t.Errorf("卡片摘要应带 header 与题干，实际 %q", it.Summary)
+		}
+		if len(it.Options) != 2 || it.Options[0].Name != "方案 A" {
+			t.Errorf("按钮应是真正的问题选项，实际 %+v", it.Options)
+		}
+		if !approver.DecideOption(it.ID, "q:o0") {
+			t.Error("按选项 ID 作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	f.mu.Lock()
+	replies := strings.Join(f.permReplies, "\n")
+	f.mu.Unlock()
+	if !strings.Contains(replies, `"optionId":"allow"`) {
+		t.Errorf("提问工具授权应自动放行，实际回包 %s", replies)
+	}
+	resolve := f.resolveCall()
+	for _, want := range []string{`"decision":"allow"`, `"toolCallId":"t1"`, `"q_0":"方案 A"`} {
+		if !strings.Contains(resolve, want) {
+			t.Fatalf("resolveInterruption 缺少 %s，实际 %s", want, resolve)
+		}
+	}
+}
+
+// CodeBuddy 的自由输入：AskUserQuestion 的 answers 可以是任意文本，不走 optionId。
+func TestCodeBuddyInterruptionTextAnswer(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("session/request_permission", map[string]any{
+			"sessionId": sid,
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+				map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+			},
+			"toolCall": map[string]any{
+				"toolCallId": "t2",
+				"rawInput": map[string]any{"questions": []any{
+					map[string]any{"question": "方案怎么定？", "options": []any{
+						map[string]any{"label": "方案 A"}, map[string]any{"label": "方案 B"},
+					}},
+				}},
+				"_meta": map[string]any{"codebuddy.ai/toolName": "AskUserQuestion"},
+			},
+		})
+		fc.w.notify("session/update", update(sid, "session_info_update", map[string]any{
+			"_meta": map[string]any{"codebuddy.ai/interruptionRequest": map[string]any{
+				"interruptionId": "ir-t2", "toolCallId": "t2", "toolName": "AskUserQuestion",
+				"toolInput": map[string]any{"questions": []any{
+					map[string]any{"id": "q_0", "question": "方案怎么定？", "options": []any{
+						map[string]any{"label": "方案 A"}, map[string]any{"label": "方案 B"},
+					}},
+				}},
+			}},
+		}))
+		f.permSent <- struct{}{}
+		time.Sleep(600 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "CodeBuddy 文本问答卡入队", func() bool {
+			return len(approver.Pending()) == 1
+		})
+		it := approver.Pending()[0]
+		if !it.AllowText {
+			t.Error("CodeBuddy 的问答卡应允许自由文本")
+		}
+		if !approver.DecideText(it.ID, "方案 C") {
+			t.Error("自由文本作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	resolve := f.resolveCall()
+	if !strings.Contains(resolve, `"q_0":"方案 C"`) {
+		t.Fatalf("resolveInterruption 应带自由文本答案，实际 %s", resolve)
+	}
+}
+
+// MiniMax 的 Other 字段：文本要回填到 <stepId>__other，而不是主选项字段。
+func TestElicitationOtherTextAnswer(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("elicitation/create", map[string]any{
+			"mode": "form", "sessionId": sid, "message": "选择",
+			"requestedSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"q1": map[string]any{
+						"type": "string", "title": "方案怎么定？",
+						"oneOf": []any{
+							map[string]any{"const": "a", "title": "方案 A"},
+							map[string]any{"const": "b", "title": "方案 B"},
+						},
+					},
+					"q1__other": map[string]any{"type": "string", "title": "方案怎么定？ — Other"},
+				},
+				"required": []any{"q1"},
+			},
+		})
+		f.permSent <- struct{}{}
+		time.Sleep(600 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "MiniMax Other 问答卡入队", func() bool {
+			return len(approver.Pending()) == 1
+		})
+		it := approver.Pending()[0]
+		if !it.AllowText {
+			t.Error("带 Other 字段的问题应允许自由文本")
+		}
+		if !approver.DecideText(it.ID, "方案 C") {
+			t.Error("自由文本作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	reply := f.permReply()
+	for _, want := range []string{`"action":"accept"`, `"q1__other":"方案 C"`} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("回包缺少 %s，实际 %s", want, reply)
+		}
+	}
+}
+
+// TestCodeBuddyInterruptionMultiSelect 多选题：卡面要标 multiSelect，
+// 勾选的两条按值数组回给 resolveInterruption（只勾一条也得是数组）。
+func TestCodeBuddyInterruptionMultiSelect(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("session/request_permission", map[string]any{
+			"sessionId": sid,
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+				map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+			},
+			"toolCall": map[string]any{
+				"toolCallId": "m1",
+				"rawInput": map[string]any{"questions": []any{
+					map[string]any{"question": "带哪些模块？", "multiSelect": true, "options": []any{
+						map[string]any{"label": "网关"}, map[string]any{"label": "存储"}, map[string]any{"label": "前端"},
+					}},
+				}},
+				"_meta": map[string]any{"codebuddy.ai/toolName": "AskUserQuestion"},
+			},
+		})
+		fc.w.notify("session/update", update(sid, "session_info_update", map[string]any{
+			"_meta": map[string]any{"codebuddy.ai/interruptionRequest": map[string]any{
+				"interruptionId": "ir-m1", "toolCallId": "m1", "toolName": "AskUserQuestion",
+				"toolInput": map[string]any{"questions": []any{
+					map[string]any{"id": "q_0", "question": "带哪些模块？", "multiSelect": true, "options": []any{
+						map[string]any{"label": "网关"}, map[string]any{"label": "存储"}, map[string]any{"label": "前端"},
+					}},
+				}},
+			}},
+		}))
+		f.permSent <- struct{}{}
+		time.Sleep(600 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "CodeBuddy 多选卡入队", func() bool {
+			return len(approver.Pending()) == 1
+		})
+		it := approver.Pending()[0]
+		if !it.MultiSelect {
+			t.Error("多选题的卡应标 multiSelect")
+		}
+		if !approver.DecideOptions(it.ID, []string{"q:o2", "q:o0"}) {
+			t.Error("多选作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	resolve := f.resolveCall()
+	if !strings.Contains(resolve, `"q_0":["前端","网关"]`) {
+		t.Fatalf("resolveInterruption 应按勾选顺序回数组，实际 %s", resolve)
+	}
+}
+
+// TestElicitationMultiSelect MiniMax 数组字段（items.anyOf）：勾选多条按数组
+// 回 content，单选卡与多选卡互不混淆。
+func TestElicitationMultiSelect(t *testing.T) {
+	approver := approval.New("confirm", nil, time.Minute)
+	f := &fakeAgent{}
+	f.permSent = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.request("elicitation/create", map[string]any{
+			"mode": "form", "sessionId": sid, "message": "选择",
+			"requestedSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"mods": map[string]any{
+						"type": "array", "title": "带哪些模块？",
+						"items": map[string]any{"anyOf": []any{
+							map[string]any{"const": "gateway", "title": "网关"},
+							map[string]any{"const": "storage", "title": "存储"},
+							map[string]any{"const": "web", "title": "前端"},
+						}},
+					},
+				},
+			},
+		})
+		f.permSent <- struct{}{}
+		time.Sleep(600 * time.Millisecond)
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, approver, f)
+	th := mustThread(t, m)
+
+	seen := make(chan struct{}, 1)
+	go func() {
+		<-f.permSent
+		waitFor(t, 2*time.Second, "MiniMax 多选卡入队", func() bool {
+			return len(approver.Pending()) == 1
+		})
+		it := approver.Pending()[0]
+		if !it.MultiSelect {
+			t.Error("数组字段的卡应标 multiSelect")
+		}
+		if !approver.DecideOptions(it.ID, []string{"q:o0", "q:o2"}) {
+			t.Error("多选作答应被接受")
+		}
+		seen <- struct{}{}
+	}()
+	if _, err := m.Send(context.Background(), th.ID, "你决定", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-seen
+
+	reply := f.permReply()
+	for _, want := range []string{`"action":"accept"`, `"mods":["gateway","web"]`} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("回包缺少 %s，实际 %s", want, reply)
+		}
+	}
 }
 
 // TestHandoffTargetAgent 交接可以换 agent：摘要只是文本，跨 agent 带得动；
