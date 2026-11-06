@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/capyflow/friday/internal/config"
 )
@@ -94,6 +97,92 @@ func TestNpmLatestCacheAndFallback(t *testing.T) {
 	}
 }
 
+// TestNpmLatestStaleCacheRefetched 守护 npm 缓存的 TTL 语义：缓存过期后必须
+// 重新查 npm，而不是把过期值当命中继续用。
+//
+// 原判定 (!force || fresh) 在 force=false 时恒真，TTL 被架空：过期缓存照旧
+// 返回，且 missing 为空直接早退、一个请求都不发。后果是 npm 上已发布的
+// 2.180.0 被 11-03 缓存的 2.179.2 一直盖住（2026-11-06 实测）。
+func TestNpmLatestStaleCacheRefetched(t *testing.T) {
+	var fail atomic.Bool
+	srv, hits := newNpmTestSrv(t, map[string]string{"@tencent-ai/codebuddy-code": "2.180.0"}, &fail)
+	withNpmSrv(t, srv)
+	m := newTestManager(t, nil, nil, nil)
+	base := t.TempDir()
+	m.registryBase = base
+	ctx := context.Background()
+
+	// 预置一份「过期且版本陈旧」的缓存（模拟 11-03 抓到的 2.179.2）。
+	old := map[string]string{"@tencent-ai/codebuddy-code": "2.179.2"}
+	writeNpmCache(filepath.Join(base, "npm-cache.json"), old)
+	// 把时间戳改旧，强制越过 TTL。
+	f, err := os.OpenFile(filepath.Join(base, "npm-cache.json"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("打开缓存失败: %v", err)
+	}
+	raw, _ := json.Marshal(npmCacheFile{
+		FetchedAt: time.Now().Add(-48 * time.Hour),
+		Versions:  old,
+	})
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt(raw, 0)
+	_ = f.Close()
+
+	// 过期缓存 + force=false：必须重查并拿到新版本。
+	got := m.npmLatest(ctx, []string{"@tencent-ai/codebuddy-code"}, false)
+	if got["@tencent-ai/codebuddy-code"] != "2.180.0" {
+		t.Fatalf("过期缓存应重查，got %v（want 2.180.0）", got)
+	}
+	if atomic.LoadInt64(hits) == 0 {
+		t.Fatal("过期缓存后应发出请求")
+	}
+}
+
+// TestNpmLatestAllFailKeepsStaleTimestamp 守护「全败不刷新缓存时间戳」：
+// 拉取全失败时若照旧写缓存，FetchedAt 被推到当前，旧版本号就又「新鲜」了
+// 一整个 TTL，下次仍被当成命中——11-03 那次 HTTP 400 全败正是这样把 2.179.2
+// 冻住的。
+func TestNpmLatestAllFailKeepsStaleTimestamp(t *testing.T) {
+	var fail atomic.Bool
+	srv, _ := newNpmTestSrv(t, map[string]string{"@tencent-ai/codebuddy-code": "2.180.0"}, &fail)
+	withNpmSrv(t, srv)
+	m := newTestManager(t, nil, nil, nil)
+	base := t.TempDir()
+	m.registryBase = base
+	ctx := context.Background()
+
+	// 先成功查一次，把缓存写出来。
+	if got := m.npmLatest(ctx, []string{"@tencent-ai/codebuddy-code"}, false); got["@tencent-ai/codebuddy-code"] != "2.180.0" {
+		t.Fatalf("首查结果 = %v", got)
+	}
+	first := readNpmCache(filepath.Join(base, "npm-cache.json"))
+	if first == nil {
+		t.Fatal("首查后应有缓存")
+	}
+
+	// 让缓存过期，再让 npm 全败。
+	f, err := os.OpenFile(filepath.Join(base, "npm-cache.json"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("打开缓存失败: %v", err)
+	}
+	raw, _ := json.Marshal(npmCacheFile{
+		FetchedAt: time.Now().Add(-48 * time.Hour),
+		Versions:  first.Versions,
+	})
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt(raw, 0)
+	_ = f.Close()
+	fail.Store(true)
+
+	m.npmLatest(ctx, []string{"@tencent-ai/codebuddy-code"}, false)
+	after := readNpmCache(filepath.Join(base, "npm-cache.json"))
+	if after == nil {
+		t.Fatal("全败后缓存不应消失")
+	}
+	if time.Since(after.FetchedAt) < 24*time.Hour {
+		t.Fatalf("全败时缓存时间戳被刷新了（FetchedAt=%v），旧版本号会被保鲜一整个 TTL", after.FetchedAt)
+	}
+}
 func TestUpgradeNpxTokenSwap(t *testing.T) {
 	var fail atomic.Bool
 	srv, _ := newNpmTestSrv(t, map[string]string{"@minimax-ai/code": "0.6.12"}, &fail)

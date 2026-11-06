@@ -77,9 +77,13 @@ type npmCacheFile struct {
 	Versions  map[string]string `json:"versions"` // pkg → latest 版本
 }
 
-// npmLatest 批量取 npm latest（带缓存，TTL 与官方目录一致）。force=true 忽略
-// TTL 强制拉取（只补缺失的键，已有的不重查）；失败回退过期缓存，连缓存都没有
-// 的包返回空串。cachePath 为空（无基目录）直接不查。
+// npmLatest 批量取 npm latest（带缓存，TTL 与官方目录一致）。force=true 强制
+// 重查全部包（忽略 TTL 与已有缓存）；force=false 时只有缓存新鲜才复用，过期即
+// 重查——原判定 `(!force || fresh)` 在 force=false 时恒真，TTL 被架空：过期
+// 缓存照旧返回，且 missing 为空直接早退、一个请求都不发，于是 npm 上已发布的
+// 2.180.0 被 11-03 的 2.179.2 一直盖住（2026-11-06 实测）。
+// 单包失败静默缺席（下次再查）；全败时不刷新缓存时间戳，否则旧版本号会被
+// 「保鲜」一整个 TTL。cachePath 为空（无基目录）直接不查。
 func (m *Manager) npmLatest(ctx context.Context, pkgs []string, force bool) map[string]string {
 	out := map[string]string{}
 	if m.registryBase == "" || len(pkgs) == 0 {
@@ -94,8 +98,8 @@ func (m *Manager) npmLatest(ctx context.Context, pkgs []string, force bool) map[
 	var missing []string
 	for _, p := range pkgs {
 		if cached != nil {
-			if v, ok := cached.Versions[p]; ok && (!force || fresh) {
-				out[p] = v // 缓存命中（force 且缓存已过期时才重查）
+			if v, ok := cached.Versions[p]; ok && !force && fresh {
+				out[p] = v // 缓存新鲜且未要求强制刷新：直接用，不再发请求
 				continue
 			}
 		}
@@ -118,6 +122,7 @@ func (m *Manager) npmLatest(ctx context.Context, pkgs []string, force bool) map[
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 6)
 	failed := 0
+	okCount := 0
 	var firstErr error
 	for _, p := range missing {
 		wg.Add(1)
@@ -139,13 +144,17 @@ func (m *Manager) npmLatest(ctx context.Context, pkgs []string, force bool) map[
 			}
 			updated[pkg] = v
 			out[pkg] = v
+			okCount++
 		}(p)
 	}
 	wg.Wait()
 	if failed > 0 {
 		log.Printf("[智能体] npm latest 查询 %d/%d 个包失败（示例: %v；缺席的包下次再查）", failed, len(missing), firstErr)
 	}
-	if len(updated) > 0 {
+	// 只有真查成了才刷新缓存时间戳：全败时若照旧写入，FetchedAt 被推到当前，
+	// 旧版本号就又「新鲜」了一整个 TTL（11-03 那次 HTTP 400 全败正是这样把
+	// 2.179.2 冻住的）。
+	if okCount > 0 && len(updated) > 0 {
 		writeNpmCache(cachePath, updated)
 	}
 	return out

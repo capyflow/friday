@@ -2,8 +2,12 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/capyflow/friday/internal/config"
@@ -28,6 +32,70 @@ func TestCatalogEntriesValid(t *testing.T) {
 	}
 }
 
+// TestCatalogLatestVersionMatchesUpdateAvailable 守护「升级徽标的两个版本号同源」。
+//
+// 场景：官方注册表说 2.180.0（已装 2.179.3），npm 缓存里还是旧的 2.179.2。
+// 后端算出「可升级到 2.180.0」，但若 LatestVersion 仍报 npm 的旧值 2.179.2，
+// 前端就会显示「可升级（v2.179.3 → v2.179.2）」——高版本向低版本升级
+// （2026-11-06 实测）。所以 LatestVersion 必须取与 UpdateAvailable 同一个 avail。
+func TestCatalogLatestVersionMatchesUpdateAvailable(t *testing.T) {
+	// 官方注册表：codebuddy-code 最新 2.180.0
+	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"version": "1",
+			"agents": []map[string]any{{
+				"id":      "codebuddy-code",
+				"name":    "Codebuddy Code",
+				"version": "2.180.0",
+				"distribution": map[string]any{
+					"npx": map[string]any{
+						"package": "@tencent-ai/codebuddy-code@2.180.0",
+						"args":    []string{"--acp"},
+					},
+				},
+			}},
+		})
+	}))
+	defer regSrv.Close()
+	oldURL, oldHTTP := registryURLFn, registryHTTP
+	registryURLFn = func() string { return regSrv.URL }
+	registryHTTP = regSrv.Client()
+	defer func() { registryURLFn, registryHTTP = oldURL, oldHTTP }()
+
+	// npm 真值：故意给旧的 2.179.2（模拟 npm 缓存滞后于注册表）
+	var fail atomic.Bool
+	npmSrv, _ := newNpmTestSrv(t, map[string]string{"@tencent-ai/codebuddy-code": "2.179.2"}, &fail)
+	withNpmSrv(t, npmSrv)
+
+	cfg := testConfig(t)
+	cfg.Agents = []config.AcpAgentConfig{{
+		Name:    "codebuddy-code",
+		Command: "npx",
+		Args:    []string{"-y", "@tencent-ai/codebuddy-code@2.179.3", "--acp"},
+		Version: "2.179.3",
+	}}
+	m := newTestManager(t, &cfg, nil, nil)
+	m.registryBase = t.TempDir()
+
+	var found *CatalogView
+	for i := range m.Catalog(context.Background(), true) {
+		v := m.Catalog(context.Background(), true)[i]
+		if v.ID == "codebuddy-code" {
+			found = &v
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("目录里应有 codebuddy-code 条目")
+	}
+	if !found.UpdateAvailable {
+		t.Fatalf("2.180.0 相对已装 2.179.3 应判为可升级，got LatestVersion=%q", found.LatestVersion)
+	}
+	// 关键断言：LatestVersion 必须是最终 avail（2.180.0），不能是 npm 的旧值。
+	if found.LatestVersion != "2.180.0" {
+		t.Fatalf("LatestVersion = %q，want 2.180.0（npm 旧值不得成为升级目标）", found.LatestVersion)
+	}
+}
 func TestCatalogViewAndInstallUnknown(t *testing.T) {
 	m := NewManager(func() config.AcpConfig { return config.AcpConfig{} }, nil, t.TempDir()+"/t.json")
 	defer m.Close()

@@ -163,6 +163,10 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 			if compareVersions(curLatest, avail) > 0 {
 				avail = curLatest // npm 真值比 registry 条目新（常态）
 			}
+			// LatestVersion 必须与 UpdateAvailable 用同一个 avail：两者分家时前端会
+			// 拿 npm 的旧值当「升级目标」，把 v2.180.0 → v2.179.2 这种降级当升级展示
+			// （2026-11-06 实测）。
+			v.LatestVersion = avail
 			v.UpdateAvailable = avail != "" &&
 				(a.Version == "" || compareVersions(avail, a.Version) > 0)
 			if e.Check == "" { // registry 条目：注册即已安装
@@ -210,8 +214,8 @@ func (m *Manager) Catalog(ctx context.Context, refresh bool) []CatalogView {
 			ce.Name = re.Name
 		}
 		curLatest = npmVer[entryPkg[re.ID]] // binary 分发条目不在表里，自然为空
+		// add() 内部把 LatestVersion 定成最终 avail（npm 与 registry 取大）
 		add(ce, "registry")
-		out[len(out)-1].LatestVersion = curLatest
 		if !supported {
 			out[len(out)-1].Supported = false
 		}

@@ -81,13 +81,40 @@ async function refreshCatalog() {
   } finally { refreshing.value = false }
 }
 
-// upgradeHint 升级徽章的「v旧 → v新」注记：旧取清单里登记的版本戳（没有就退
-// 回目录条目版本），新取 npm latest 真值（没有就退回目录版本）。
+// compareVer 分段比较版本号（与后端 internal/acp 的 compareVersions 同口径）：
+// 按 "." 切分逐段比数字，段数不齐右侧补 0；非数字段退化为字符串比较。
+// 返回 -1/0/1。
+function compareVer(a, b) {
+  const as = String(a || '').split('.')
+  const bs = String(b || '').split('.')
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    const av = as[i] ?? '0'
+    const bv = bs[i] ?? '0'
+    const an = /^\d+$/.test(av) ? Number(av) : null
+    const bn = /^\d+$/.test(bv) ? Number(bv) : null
+    if (an !== null && bn !== null) {
+      if (an !== bn) return an < bn ? -1 : 1
+      continue
+    }
+    if (av !== bv) return av < bv ? -1 : 1
+  }
+  return 0
+}
+
+// upgradeHint 升级徽标的「v旧 → v新」注记：旧取清单里登记的版本戳（没有就退
+// 回目录条目版本），新取后端给的最终可用版本 latestVersion（没有就退回目录
+// 版本）。
+//
+// 只有「新版本严格高于旧版本」才画箭头：后端的 latestVersion 与
+// updateAvailable 已同源，但数据来自缓存/npm，理论上仍可能拿到比登记版本更
+// 旧的号——那时显示成「v2.180.0 → v2.179.2」就是明晃晃的降级提示，比不显示
+// 更糟（2026-11-06 实测）。
 function upgradeHint(c) {
   const to = c.latestVersion || c.version
   const reg = cfg.agents.find(a => a.name === (c.template?.name || c.id))
   const from = reg?.version || c.version
-  if (!to || !from || from === to) return ''
+  if (!to || !from) return ''
+  if (compareVer(to, from) <= 0) return ''
   return `（v${from} → v${to}）`
 }
 

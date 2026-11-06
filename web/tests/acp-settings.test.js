@@ -159,3 +159,54 @@ describe('内置 friday 条目', () => {
     expect(saved.acp.agents.map(a => a.name)).toEqual(['codex'])
   })
 })
+
+describe('升级徽标的版本号', () => {
+  // 场景（2026-11-06 实测）：官方注册表已到 2.180.0，但 npm 缓存还停在 2.179.2，
+  // 徽标一度显示「可升级（v2.179.3 → v2.179.2）」——高版本向低版本升级。
+  // 后端已让 latestVersion 与 updateAvailable 同源，前端再兜一层：目标版本
+  // 不严格高于当前版本就不画箭头。
+  const catWith = (c) => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: true, agents: [
+        { name: 'codebuddy-code', command: 'npx', args: ['-y', '@tencent-ai/codebuddy-code@2.179.3'], version: '2.179.3' },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [c] }
+      return { message: '已保存' }
+    })
+  }
+
+  it('目标版本低于当前版本时不显示降级箭头', async () => {
+    catWith({
+      id: 'codebuddy-code', name: 'Codebuddy Code', version: '2.180.0',
+      latestVersion: '2.179.2', registered: true, updateAvailable: true,
+      template: { name: 'codebuddy-code', command: 'npx' },
+    })
+    await show()
+    const badge = wrapper.get('.acp-cat-badge')
+    expect(badge.text()).toContain('可升级')
+    expect(badge.text()).not.toContain('→')
+  })
+
+  it('目标版本等于当前版本时不显示箭头', async () => {
+    catWith({
+      id: 'codebuddy-code', name: 'Codebuddy Code', version: '2.179.3',
+      latestVersion: '2.179.3', registered: true, updateAvailable: true,
+      template: { name: 'codebuddy-code', command: 'npx' },
+    })
+    await show()
+    expect(wrapper.get('.acp-cat-badge').text()).toContain('可升级')
+    expect(wrapper.get('.acp-cat-badge').text()).not.toContain('→')
+  })
+
+  it('目标版本确实更高时正常显示 v旧 → v新', async () => {
+    catWith({
+      id: 'codebuddy-code', name: 'Codebuddy Code', version: '2.180.0',
+      latestVersion: '2.180.0', registered: true, updateAvailable: true,
+      template: { name: 'codebuddy-code', command: 'npx' },
+    })
+    await show()
+    const badge = wrapper.get('.acp-cat-badge')
+    expect(badge.text()).toContain('可升级')
+    expect(badge.text()).toContain('v2.179.3 → v2.180.0')
+  })
+})
