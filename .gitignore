@@ -48,6 +48,9 @@ logs/
 # 本地工具目录
 /.zcode/
 
+# Friday 自己的工作区会话记录（目录自带 .gitignore，内容不入库）
+/.friday/
+
 # 桌面端（docs/DESKTOP.md）：Tauri 外壳构建产物
 /desktop/src-tauri/target/
 /desktop/src-tauri/binaries/
