@@ -1534,13 +1534,23 @@ html[data-theme="dark"] .ag-blank-logo { background: rgba(255,255,255,.06); }
 
 /* ===== 工作区内嵌终端面板（WorkspaceTerminal）：对话左列 + 终端右列 ===== */
 /* 面板开着时 .ag-main 里就一个 .ag-split：左列原样对话，右列终端。面板组件用 v-show
-   常驻，收起只是 display:none——连接、缓冲与内容都保留，展开即原样回来。 */
+   常驻，收起只是 display:none——连接、缓冲与内容都保留，展开即原样回来。
+   面板宽度由分隔线拖出来（内联样式，钳 30%–70%），min-width 是窄窗口的兜底。 */
 .ag-split { flex: 1; min-height: 0; display: flex; }
 .ag-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* 分隔线：平时只在两栏交界处留 1px（负 margin 把 9px 命中区挤进去），
+   悬停/拖动时亮出可抓的中线；拖动全程锁 col-resize 并禁文本选中。 */
+.wt-divider { flex: none; width: 9px; margin: 0 -4px; cursor: col-resize;
+              position: relative; z-index: 3; touch-action: none; }
+.wt-divider::before { content: ""; position: absolute; top: 0; bottom: 0; left: 4px;
+                      width: 1px; background: var(--accent); opacity: 0; transition: opacity .12s ease; }
+.wt-divider:hover::before, .wt-divider:focus-visible::before,
+body.wt-resizing .wt-divider::before { opacity: .55; }
+body.wt-resizing { cursor: col-resize; user-select: none; }
 /* 面板开着时头部终端按钮给出按下的样子（同族 .ctx-btn.active 的画法） */
 .ag-term.active { background: var(--bg-muted); color: var(--fg); }
 html[data-theme="dark"] .ag-term.active { background: rgba(255,255,255,.09); color: #fff; }
-.wt-panel { flex: none; width: min(46%, 620px); min-width: 300px; display: flex;
+.wt-panel { flex: none; min-width: 300px; display: flex;
             flex-direction: column; border-left: 1px solid var(--border); background: var(--card); }
 .wt-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
            border-bottom: 1px solid var(--border); }

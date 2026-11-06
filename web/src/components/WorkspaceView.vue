@@ -37,9 +37,48 @@ const loaded = ref(false)      // 配置/列表是否已拉到：加载中 ≠ �
 const loadError = ref('')      // 首次加载失败原因（可重试）
 const currentId = ref('')      // 正在"显示"哪个会话（thread）
 const currentWsId = ref('')    // 正在展开哪个工作区（'' = 全收起）
-// 右侧终端面板开关：面板组件用 v-show 常驻（开合不卸载），关了再开终端与内容都还在；
-// 新终端的起始目录跟随当前会话的主目录（= 工作区主文件夹）。
-const wtOpen = ref(false)
+// 右侧终端面板跟着会话走：每条会话自己的开合状态（termOpen）与实例挂载标记
+// （termMounted，第一次打开才挂载组件）。收起/切走都只是 v-show——连接、缓冲与
+// 内容都保留；没开过终端的会话切过去面板不自动开。实例的 cwd 用会话自己的主目录。
+// 分栏比例（终端面板占 .ag-split 的宽度份额）是全局的：拖分隔线可调，钳在 30%–70%，
+// 换会话不重置。拖动过程里 xterm 的 ResizeObserver 会跟着 refit，不用额外补事件。
+const TERM_MIN = 0.3
+const TERM_MAX = 0.7
+const termW = ref(0.46) // 缺省 ≈ 旧版 min(46%, 620px) 的比例档
+const termStyle = computed(() => (termW.value * 100).toFixed(2) + '%')
+const wtOpen = computed(() => !!(cur.value && cur.value.termOpen))
+function toggleTerm() {
+  const st = cur.value
+  if (!st) return
+  st.termOpen = !st.termOpen
+  if (st.termOpen) st.termMounted = true
+}
+function closeTerm(id) {
+  const st = states[id]
+  if (st) st.termOpen = false
+}
+// 分隔线拖拽：pointer 事件跟着松手走；拖动中禁选中（body.wt-resizing）。
+function startSplit(e) {
+  const split = e.target.closest('.ag-split')
+  if (!split) return
+  e.preventDefault()
+  document.body.classList.add('wt-resizing')
+  const move = ev => {
+    const rect = split.getBoundingClientRect()
+    if (rect.width <= 0) return
+    const ratio = (rect.right - ev.clientX) / rect.width
+    termW.value = Math.min(TERM_MAX, Math.max(TERM_MIN, ratio))
+  }
+  const up = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    window.removeEventListener('pointercancel', up)
+    document.body.classList.remove('wt-resizing')
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+  window.addEventListener('pointercancel', up)
+}
 // 左栏两种视图（照主流 agent 工具的项目栏习惯）：按工作区分组 / 跨工作区按最近活动
 const VIEW_KEY = 'friday-acp-view'
 const SEEN_KEY = 'friday-acp-seen'
@@ -112,6 +151,8 @@ function stateOf(id) {
       draft: '', pending: [], // 输入草稿与待发的图片也按会话分开
       queue: [],        // 回答进行中排队的消息：{ text, shots:[{id,url}] }，本轮跑完依次发出
       queuePaused: false, // 暂停后本轮结束也不会继续放队列上路
+      termOpen: false,    // 这条会话的终端面板开合（跟着会话走，切会话不串）
+      termMounted: false, // 面板实例是否已挂载（第一次打开才挂，之后 v-show 常驻）
     }
   }
   return states[id]
@@ -1321,11 +1362,12 @@ function previewImages(urls, at = 0) {
             </span>
           </div>
           <!-- 工作区内嵌终端：点开把对话分成两栏，右侧终端直接落在本会话的主目录
-               （= 工作区主文件夹）；收起再打开内容都在，只有登出/重启才收掉 -->
+               （= 工作区主文件夹）。开合状态跟着会话走：换到没开过终端的会话，
+               面板不自动出现；收起再打开（或切回来）内容都在 -->
           <button class="ib-btn ag-term" :class="{ active: wtOpen }" aria-label="工作区终端"
                   :aria-pressed="wtOpen"
                   :title="wtOpen ? '收起终端面板（内容保留）' : '工作区终端（在本会话主目录打开）'"
-                  @click="wtOpen = !wtOpen">
+                  @click="toggleTerm">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-terminal"/></svg>
           </button>
@@ -1548,7 +1590,21 @@ function previewImages(urls, at = 0) {
           </div>
         </div>
         </div><!-- /.ag-chat -->
-        <WorkspaceTerminal v-show="wtOpen" :open="wtOpen" :cwd="current.cwd" @close="wtOpen = false" />
+        <!-- 分隔线：左右拖调整对话/终端两栏比例（30%–70%），只在面板开着时出现 -->
+        <div v-if="wtOpen" class="wt-divider" role="separator" aria-orientation="vertical"
+             :aria-valuenow="Math.round(termW * 100)" aria-valuemin="30" aria-valuemax="70"
+             aria-label="调整对话与终端的比例" title="拖动调整两栏比例（30%–70%）"
+             @pointerdown="startSplit"></div>
+        <!-- 终端跟着会话走：每条会话自己的面板实例（cwd 也是各自的主目录），
+             第一次打开才挂载；收起与切走都是 v-show，连接与内容保留 -->
+        <template v-for="t in threads" :key="t.id">
+          <WorkspaceTerminal v-if="stateOf(t.id).termMounted"
+                             v-show="t.id === currentId && stateOf(t.id).termOpen"
+                             :open="t.id === currentId && stateOf(t.id).termOpen"
+                             :cwd="t.cwd"
+                             :style="{ width: termStyle }"
+                             @close="closeTerm(t.id)" />
+        </template>
       </div><!-- /.ag-split -->
       </template>
     </section>

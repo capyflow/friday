@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import WorkspaceView from '../src/components/WorkspaceView.vue'
 import SelectBox from '../src/components/SelectBox.vue'
@@ -9,6 +10,33 @@ vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 // WorkspaceView 静态引入 anim.js，模块加载即调 window.matchMedia（jsdom 未实现）。
 vi.mock('../src/anim.js', () => ({ popIn: vi.fn() }))
 vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()), toast: vi.fn() }))
+
+// 内嵌终端的替身（与 workspace-terminal.test.js 同一套）：默认用例不打开终端面板
+// （组件是开过才挂载的），要验「面板跟会话走 / 分隔线拖拽」时才需要它们。
+// xterm 在 jsdom 里量不出尺寸，WebSocket 也没有真内核可连。
+const termMocks = vi.hoisted(() => {
+  const termInstances = []
+  class FakeTerminal {
+    constructor(options) { Object.assign(this, { options, disposed: false }); termInstances.push(this) }
+    loadAddon() {} open() {} write() {} writeln() {} focus() {} dispose() { this.disposed = true }
+    onData() {} onResize() {}
+  }
+  const sockets = []
+  class FakeSocket {
+    static OPEN = 1
+    constructor(url) {
+      this.url = url; this.readyState = 0; this.frames = []
+      sockets.push(this)
+      Promise.resolve().then(() => { this.readyState = FakeSocket.OPEN; this.onopen?.() })
+    }
+    send(text) { this.frames.push(JSON.parse(text)) }
+    close() { this.readyState = 3; this.onclose?.() }
+  }
+  return { FakeTerminal, termInstances, FakeSocket, sockets }
+})
+const { FakeTerminal, termInstances, FakeSocket, sockets } = termMocks
+vi.mock('@xterm/xterm', () => ({ Terminal: termMocks.FakeTerminal }))
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }))
 
 // 每次装数据都用副本：改名的用例会把 thread.title 改掉，共用同一个对象会串到后面的用例
 const copy = v => JSON.parse(JSON.stringify(v))
@@ -74,9 +102,13 @@ beforeEach(() => {
   uploadSeq = 0
   api.mockReset().mockImplementation(server)
   toast.mockClear()
+  termInstances.length = 0
+  sockets.length = 0
   fetchMock = vi.fn()
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() })
+  vi.stubGlobal('WebSocket', FakeSocket)
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null; vi.unstubAllGlobals() })
 
@@ -86,6 +118,9 @@ afterEach(() => { wrapper?.unmount(); wrapper = null; vi.unstubAllGlobals() })
 const json = v => JSON.parse(JSON.stringify(v === undefined ? null : v))
 async function server(method, url, body) {
   if (method === 'GET' && url === '/api/acp/threads') return json({ ...data })
+  if (method === 'GET' && url === '/api/terminal') {
+    return json({ enabled: true, local: true, active: 0, maxSessions: 2 })
+  }
   const threadMatch = url.match(/^\/api\/acp\/threads\/([^/]+)$/)
   if (method === 'GET' && threadMatch) {
     const t = data.threads.find(x => x.id === threadMatch[1])
@@ -1579,5 +1614,76 @@ describe('工作区清单里的内置 Friday', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces', { name: '', dirs: ['/home/u/proj'] })
     expect(selectedText('选择智能体')).toBe('codex')
+  })
+})
+
+describe('内嵌终端面板：跟着会话走 + 分栏拖拽', () => {
+  async function openTerm() {
+    await wrapper.get('[aria-label="工作区终端"]').trigger('click')
+    await flushPromises()
+  }
+
+  it('没开过终端的会话不自动开面板；开过的切回来面板与内容原样在', async () => {
+    data.threads.push(copy(second))
+    await show()
+    await pickSession('第一件事')
+    expect(wrapper.find('.wt-panel').exists()).toBe(false) // 还没开过：实例都没挂载
+    await openTerm()
+    expect(wrapper.find('.wt-panel').exists()).toBe(true)
+    // 根节点 .view 在测试里是 v-show 关着的（store.view 不是 'agent'），不能用
+    // isVisible()；面板自己的 v-show 只体现在 style 上：开着 = 没有 display:none
+    expect(wrapper.find('.wt-panel').attributes('style')).not.toContain('display: none')
+    expect(wrapper.find('.wt-divider').exists()).toBe(true)
+    expect(sockets).toHaveLength(1)
+
+    await pickSession('第二件事')
+    // 没开过终端的会话切过来：面板不自动出现（分隔线也没有），A 的实例留着但藏起
+    expect(wrapper.find('.wt-divider').exists()).toBe(false)
+    expect(wrapper.find('.wt-panel').attributes('style')).toContain('display: none')
+    expect(sockets).toHaveLength(1) // 收起不打断终端
+    expect(termInstances[0].disposed).toBe(false)
+
+    await pickSession('第一件事')
+    expect(wrapper.find('.wt-panel').attributes('style')).not.toContain('display: none')
+    expect(sockets).toHaveLength(1) // 切回来不重开连接、不重挂实例
+    expect(termInstances).toHaveLength(1)
+  })
+
+  it('每条会话的终端落在各自的主目录（实例按会话分开）', async () => {
+    data.threads.push({ ...copy(second), cwd: '/home/u/shared' })
+    await show()
+    await pickSession('第一件事')
+    await openTerm()
+    await pickSession('第二件事')
+    await openTerm()
+    expect(wrapper.findAll('.wt-panel')).toHaveLength(2)
+    expect(wrapper.findAll('.wt-divider')).toHaveLength(1) // 分隔线只跟当前会话走
+    expect(sockets[0].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/proj' })
+    expect(sockets[1].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/shared' })
+  })
+
+  it('分隔线拖动把面板宽度钳在 30%–70%，松手后不再跟随', async () => {
+    await show()
+    await pickSession('第一件事')
+    await openTerm()
+    wrapper.get('.ag-split').element.getBoundingClientRect =
+      () => ({ left: 0, right: 1000, top: 0, bottom: 100, width: 1000, height: 100 })
+    await wrapper.get('.wt-divider').trigger('pointerdown', { clientX: 300 })
+    expect(document.body.classList.contains('wt-resizing')).toBe(true)
+    // Vue 的样式 patch 是批处理的：每动一下等一次 nextTick 再断言
+    const move = async clientX => {
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX }))
+      await nextTick()
+    }
+    await move(250) // 0.75 → 顶到 70%
+    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 70%')
+    await move(850) // 0.15 → 压到 30%
+    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 30%')
+    await move(500)
+    expect(wrapper.get('.wt-divider').attributes('aria-valuenow')).toBe('50')
+    window.dispatchEvent(new Event('pointerup'))
+    expect(document.body.classList.contains('wt-resizing')).toBe(false)
+    await move(100) // 松手后指针移动不再影响比例
+    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 50%')
   })
 })
