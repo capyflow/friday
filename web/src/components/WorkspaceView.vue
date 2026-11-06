@@ -28,6 +28,7 @@ import SelectBox from './SelectBox.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
 import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
 import ImageLightbox from './ImageLightbox.vue'
+import WorkspaceTerminal from './WorkspaceTerminal.vue'
 
 const threads = ref([])
 const workspaces = ref([])     // 工作区（一组目录 + 挂在它下面的会话）
@@ -36,6 +37,9 @@ const loaded = ref(false)      // 配置/列表是否已拉到：加载中 ≠ �
 const loadError = ref('')      // 首次加载失败原因（可重试）
 const currentId = ref('')      // 正在"显示"哪个会话（thread）
 const currentWsId = ref('')    // 正在展开哪个工作区（'' = 全收起）
+// 右侧终端面板开关：面板组件用 v-show 常驻（开合不卸载），关了再开终端与内容都还在；
+// 新终端的起始目录跟随当前会话的主目录（= 工作区主文件夹）。
+const wtOpen = ref(false)
 // 左栏两种视图（照主流 agent 工具的项目栏习惯）：按工作区分组 / 跨工作区按最近活动
 const VIEW_KEY = 'friday-acp-view'
 const SEEN_KEY = 'friday-acp-seen'
@@ -1300,6 +1304,10 @@ function previewImages(urls, at = 0) {
         </div>
       </template>
       <template v-else>
+      <!-- 终端面板开着时对话区收成左列：head/hint/scroller/foot 整体进 .ag-chat，
+           右列是工作区终端（组件 v-show 常驻，开合不打断里面的连接与内容） -->
+      <div class="ag-split">
+        <div class="ag-chat">
         <header class="ag-head">
           <div class="ag-head-txt">
             <b>{{ current.title || '新会话' }}</b>
@@ -1312,6 +1320,15 @@ function previewImages(urls, at = 0) {
               <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
+          <!-- 工作区内嵌终端：点开把对话分成两栏，右侧终端直接落在本会话的主目录
+               （= 工作区主文件夹）；收起再打开内容都在，只有登出/重启才收掉 -->
+          <button class="ib-btn ag-term" :class="{ active: wtOpen }" aria-label="工作区终端"
+                  :aria-pressed="wtOpen"
+                  :title="wtOpen ? '收起终端面板（内容保留）' : '工作区终端（在本会话主目录打开）'"
+                  @click="wtOpen = !wtOpen">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-terminal"/></svg>
+          </button>
           <!-- 工作区抽屉：文件树、本轮 diff 与还原、项目记忆、验证（预览 + 检查命令） -->
           <button class="ib-btn ag-files" aria-label="工作区文件与验证"
                   title="工作区文件（diff、还原、项目记忆、验证）" @click="openWorkspaceFiles">
@@ -1529,7 +1546,11 @@ function previewImages(urls, at = 0) {
               </p>
             </div>
           </div>
-        </div>      </template>
+        </div>
+        </div><!-- /.ag-chat -->
+        <WorkspaceTerminal v-show="wtOpen" :open="wtOpen" :cwd="current.cwd" @close="wtOpen = false" />
+      </div><!-- /.ag-split -->
+      </template>
     </section>
   </div>
   <FilePreviewDrawer ref="fileDrawer" />

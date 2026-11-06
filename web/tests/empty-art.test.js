@@ -28,8 +28,8 @@ describe('空状态插画', () => {
     const frames = readFileSync(`${SRC}/components/art/EmptyState.vue`, 'utf8')
     const used = vueFiles(SRC).flatMap((f) =>
       [...readFileSync(f, 'utf8').matchAll(/<EmptyState\b[^>]*kind="(\w+)"/g)].map((m) => m[1]))
-    // 13 处：内置终端页多了一处"不可用"空态（kind=error）
-    expect(used).toHaveLength(13)
+    // 14 处：内置终端页多了一处"不可用"空态（kind=error）
+    expect(used).toHaveLength(14)
     expect(used.filter((k) => !KINDS.includes(k))).toEqual([])
     used.forEach((k) => expect(frames).toContain(`  ${k}: `))
   })

@@ -1532,6 +1532,28 @@ html[data-theme="dark"] .qbar-head .ib-btn.sm[aria-pressed="true"] { color: #FBB
 html[data-theme="dark"] .ag-blank-logo { background: rgba(255,255,255,.06); }
 @media (max-width: 760px) { .ag-rail { width: 236px; } }
 
+/* ===== 工作区内嵌终端面板（WorkspaceTerminal）：对话左列 + 终端右列 ===== */
+/* 面板开着时 .ag-main 里就一个 .ag-split：左列原样对话，右列终端。面板组件用 v-show
+   常驻，收起只是 display:none——连接、缓冲与内容都保留，展开即原样回来。 */
+.ag-split { flex: 1; min-height: 0; display: flex; }
+.ag-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* 面板开着时头部终端按钮给出按下的样子（同族 .ctx-btn.active 的画法） */
+.ag-term.active { background: var(--bg-muted); color: var(--fg); }
+html[data-theme="dark"] .ag-term.active { background: rgba(255,255,255,.09); color: #fff; }
+.wt-panel { flex: none; width: min(46%, 620px); min-width: 300px; display: flex;
+            flex-direction: column; border-left: 1px solid var(--border); background: var(--card); }
+.wt-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+           border-bottom: 1px solid var(--border); }
+.wt-head .title { font-size: 12.5px; font-weight: 600; flex: none; color: var(--muted-fg); }
+/* 标签条复用「终端」页的 .term-tab 族；这里只补面板内的收窄余量 */
+.wt-head .term-tabs { flex: 1; min-width: 0; }
+.wt-hint { padding: 6px 14px 0; font-size: 11.5px; white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; }
+.wt-panes { flex: 1; min-height: 0; padding: 8px 10px 10px; }
+.wt-off { flex: 1; display: flex; flex-direction: column; align-items: center;
+          justify-content: center; gap: 10px; padding: 32px 20px; text-align: center; }
+.wt-off-hint { max-width: 40ch; line-height: 1.7; }
+
 /* ===== 文件路径 chip 与侧边预览抽屉 ===== */
 /* 时间线正文行内代码里的本机文件路径：渲染成可点 chip（md.js fileChips 开关） */
 .chat-md .file-chip, .fp-md .file-chip {
