@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,9 +114,10 @@ type fakeAgent struct {
 	permReplies  []string       // client 对权限请求的回包原文（查 selected 的 optionId）
 	resolveCalls []string       // CodeBuddy resolveInterruption 的 params 原文
 
-	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason
+	promptScript func(fc *fakeConn, sessionID string) string // 返回 stopReason；"ERR:<msg>" 演 prompt 被拒
 	permSent     chan struct{}                               // 权限请求已发出（非 nil 时）
 	cancelSeen   chan struct{}                               // 收到 session/cancel（非 nil 时）
+	cancelCount  int                                         // 收到的 session/cancel 次数（busy 自愈用例核对）
 }
 
 func (f *fakeAgent) recorded() []string {
@@ -194,6 +196,12 @@ func (f *fakeAgent) spawnCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.spawns
+}
+
+func (f *fakeAgent) cancelCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancelCount
 }
 
 func (f *fakeAgent) promptBlocks() [][]string {
@@ -410,12 +418,21 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 				if f.promptScript != nil {
 					stop = f.promptScript(fc, sid)
 				}
+				// "ERR:<message>" = 这次 prompt 以 JSON-RPC 错误收场（busy 自愈等
+				// 用例靠它演 agent 侧拒绝）；其余仍是正常 stopReason。
+				if strings.HasPrefix(stop, "ERR:") {
+					fc.w.respondErr(promptID, strings.TrimPrefix(stop, "ERR:"))
+					return
+				}
 				fc.w.respond(promptID, map[string]any{
 					"stopReason": stop,
 					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
 				})
 			}()
 		case "session/cancel":
+			f.mu.Lock()
+			f.cancelCount++
+			f.mu.Unlock()
 			if f.cancelSeen != nil {
 				select {
 				case f.cancelSeen <- struct{}{}:
@@ -684,6 +701,63 @@ func TestSendBasicTurn(t *testing.T) {
 	}
 	if got.Title == "" {
 		t.Fatal("标题未从首条消息生成")
+	}
+}
+
+// ---------- busy 自愈：agent 侧残留活跃轮时，取消后重发一次 ----------
+
+func TestSendRecoversFromAgentBusyTurn(t *testing.T) {
+	oldDelay := busyRetryDelay
+	busyRetryDelay = 20 * time.Millisecond
+	t.Cleanup(func() { busyRetryDelay = oldDelay })
+
+	busy := "Internal error: MiniMax Code Runtime failed: Session already has an active Turn. Use queue send to deliver the message after it."
+	var f *fakeAgent
+	f = &fakeAgent{promptScript: func(fc *fakeConn, sid string) string {
+		if len(f.promptBlocks()) == 1 {
+			return "ERR:" + busy // 第一次：runtime 里还有活跃轮，拒绝
+		}
+		return defaultScript(fc, sid) // 取消后重发：正常跑完
+	}}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	res, err := m.Send(context.Background(), th.ID, "继续", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("busy 自愈后 Send 仍失败: %v", err)
+	}
+	if res.Answer != "你好，这是回答。" || res.StopReason != "end_turn" {
+		t.Fatalf("重发轮结果不符: %+v", res)
+	}
+	if f.cancelCalls() == 0 {
+		t.Fatal("应先对 agent 发 session/cancel 再重发")
+	}
+	got := f.promptBlocks()
+	if len(got) != 2 || fmt.Sprint(got[0]) != fmt.Sprint(got[1]) {
+		t.Fatalf("应把同一条消息原样重发一次: %v", got)
+	}
+	if len(got[1]) == 0 || !strings.HasSuffix(got[1][len(got[1])-1], "继续") {
+		t.Fatalf("重发的应是这条用户消息: %v", got[1])
+	}
+}
+
+func TestSendBusyRetryStillRejected(t *testing.T) {
+	oldDelay := busyRetryDelay
+	busyRetryDelay = 20 * time.Millisecond
+	t.Cleanup(func() { busyRetryDelay = oldDelay })
+
+	f := &fakeAgent{promptScript: func(fc *fakeConn, sid string) string {
+		return "ERR:MiniMax Code Runtime failed: Session already has an active Turn."
+	}}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	_, err := m.Send(context.Background(), th.ID, "继续", nil, TurnHooks{})
+	if err == nil || !strings.Contains(err.Error(), "仍被拒绝") || !strings.Contains(err.Error(), "active Turn") {
+		t.Fatalf("应带着自救说明交回错误: %v", err)
+	}
+	if f.cancelCalls() != 1 {
+		t.Fatalf("应恰好取消一次（重发失败不再连环取消）: %d", f.cancelCalls())
 	}
 }
 

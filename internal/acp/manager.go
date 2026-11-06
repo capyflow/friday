@@ -53,6 +53,23 @@ var stopKillGrace = 8 * time.Second
 // 干等几分钟不出一句话，用户只会以为界面坏了。测试会改小。
 var turnSilenceNotice = 30 * time.Second
 
+// busyRetryDelay 是 busy 自愈里 session/cancel 之后等 agent 收尾的宽限：取消只是
+// 通知、没有回执，给运行时一点 abort 的余地再重发。测试会改小。
+var busyRetryDelay = 800 * time.Millisecond
+
+// activeTurnBusy 识别"agent 侧还有活跃轮，新消息被拒"的 busy 错误：MiniMax 的
+// runtime 在问卷回复后可能与 ACP 桥状态分裂（桥已 end_turn，runtime 的轮还在
+// 跑），用户再发消息就撞上它。见 Send 的 busy 自愈与 manager_test 的用例。
+func activeTurnBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "already has an active Turn") ||
+		strings.Contains(msg, "local_session_busy") ||
+		strings.Contains(msg, "SESSION_BUSY")
+}
+
 // Entry 是投影对话记录里的一条消息。
 type Entry struct {
 	Role    string    `json:"role"` // user | assistant | note
@@ -1652,6 +1669,30 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		SessionId: lv.sessionID, Prompt: blocks,
 	})
 	silenceTimer.Stop()
+	// busy 自愈：有的 agent 会在自己的会话里留下"活跃轮"，与 Friday 侧的轮次状态
+	// 分裂（实测 MiniMax 0.7.4：ask_user 问卷回复后桥已 end_turn，runtime 却接着
+	// 开新轮干活），用户再发消息就被 "Session already has an active Turn" 拒掉，
+	// 从此再也说不上话。识别到这类 busy：先 session/cancel 掐掉 agent 侧的孤儿轮
+	// （它的产出已经收不回来了，但落盘的文件还在），稍候把这条消息原样重发一次；
+	// 仍被拒就把错误如实交回，并说明已自救过。
+	if promptErr != nil && activeTurnBusy(promptErr) && ctx.Err() == nil && !lv.stopping.Load() {
+		log.Printf("[智能体] %s 报会话忙（agent 侧仍有活跃轮）：先取消它再重发一次", th.Agent)
+		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
+		select {
+		case <-ctx.Done():
+		case <-time.After(busyRetryDelay):
+		}
+		if ctx.Err() == nil && lv.proc.alive() {
+			res, promptErr = lv.proc.conn.Prompt(ctx, acp.PromptRequest{
+				SessionId: lv.sessionID, Prompt: blocks,
+			})
+			if promptErr != nil && activeTurnBusy(promptErr) {
+				promptErr = fmt.Errorf("已取消 agent 侧活跃轮并重发一次，仍被拒绝: %w", promptErr)
+			} else if promptErr == nil {
+				log.Printf("[智能体] %s 取消活跃轮后重发成功", th.Agent)
+			}
+		}
+	}
 	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
 	close(turnDone)
 	sink.finish()
