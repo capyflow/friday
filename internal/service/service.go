@@ -94,6 +94,8 @@ func Uninstall() error {
 }
 
 // Start 加载并启动服务（幂等：已加载先 bootout 再 bootstrap + kickstart）。
+// bootout 是异步生效的，紧跟着 bootstrap 可能撞上 "Input/output error"（5），
+// 带退避重试几次直到 launchd 状态收敛。
 func Start() error {
 	plist, err := PlistPath()
 	if err != nil {
@@ -102,15 +104,23 @@ func Start() error {
 	if _, err := os.Stat(plist); err != nil {
 		return fmt.Errorf("plist 不存在（先 install）: %w", err)
 	}
-	// bootstrap 对已加载的服务会报错，先 bootout 清掉残留（未加载时报错属正常）。
-	_, _ = launchctlOutput("bootout", guiDomain()+"/"+Label)
-	if out, err := launchctlOutput("bootstrap", guiDomain(), plist); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %w: %s", err, strings.TrimSpace(out))
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		_, _ = launchctlOutput("bootout", guiDomain()+"/"+Label)
+		if out, err := launchctlOutput("bootstrap", guiDomain(), plist); err != nil {
+			lastErr = fmt.Errorf("launchctl bootstrap: %w: %s", err, strings.TrimSpace(out))
+			continue
+		}
+		if out, err := launchctlOutput("kickstart", "-k", guiDomain()+"/"+Label); err != nil {
+			lastErr = fmt.Errorf("launchctl kickstart: %w: %s", err, strings.TrimSpace(out))
+			continue
+		}
+		return nil
 	}
-	if out, err := launchctlOutput("kickstart", "-k", guiDomain()+"/"+Label); err != nil {
-		return fmt.Errorf("launchctl kickstart: %w: %s", err, strings.TrimSpace(out))
-	}
-	return nil
+	return lastErr
 }
 
 // Stop 卸载服务实例（launchd 不再拉起；plist 保留）。
