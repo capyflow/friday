@@ -264,6 +264,13 @@ npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生
 后手机访问 `http://localhost:45678/mobile`（无需证书，secure context 由
 localhost 满足）。
 
+**打包 APP（Android）**：`android/build.sh` 产出 `android/friday-mobile.apk`
+（debug 签名，自用分发）。壳 = 极薄 WebView 加载 `/mobile`（前端零改动），
+比浏览器多两件事：**登录页记住服务端地址**（输一次 `电脑IP:45679` 即可）与
+**证书指纹信任**（TOFU：首次连接展示 SHA-256 指纹确认一次，免装系统 CA）。
+扫码配对同样支持——扫电脑端二维码时证书指纹随码校验，全自动。指纹随证书
+重签变化（换网/换 IP），APP 会再确认一次，属预期。
+
 macOS 上内核可装成 launchd 常驻服务（`friday service install`，桌面端首启
 会自动安装）：开机自启、崩溃自拉，桌面 app 与手机都是它的客户端——架构细节
 见 [docs/DESKTOP.md](docs/DESKTOP.md)「服务模式」。

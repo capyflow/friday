@@ -1,0 +1,7 @@
+# Gradle 与构建产物（APK 走 release 脚本拷出，本目录产物不入库）
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+.idea/

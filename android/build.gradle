@@ -1,0 +1,5 @@
+// Friday Mobile（Android WebView 壳）根构建脚本。
+// 壳保持无业务：大脑/界面全部在 Go 内核与 web/src/mobile，两侧经本地 HTTPS 通信。
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

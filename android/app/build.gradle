@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.capyflow.friday.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.capyflow.friday.mobile'
+        minSdk 26      // Android 8.0+：目标用户的三星机与主流设备覆盖
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            // 自用分发：先用 debug 签名产出可安装包；上架再换正式签名
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+    buildFeatures {
+        buildConfig true // debug 包判断开关 WebView CDP
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // 扫码：zxing-embedded 自带横竖屏适配的 CaptureActivity，核心依赖 zxing core
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0@aar'
+    implementation 'com.google.zxing:core:3.5.3'
+    // zxing-embedded 传递依赖把 kotlin-stdlib-jdk8:1.6.21 拉进 classpath，
+    // 与 kotlin-stdlib 1.8.22（1.8 起已并入 jdk8 内容）撞类——三者统一对齐。
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+}
