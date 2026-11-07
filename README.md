@@ -247,6 +247,27 @@ npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生
 
 内置命令：`/help` `/tasks` `/cancel <id>` `/self-test`（无需 LLM 的自检演示）`/quit`
 
+## 手机端（PWA）
+
+手机浏览器与电脑连**同一个内核**（同一账号、同一份会话/待办/通知），入口 `/mobile`
+（加到主屏幕后当 PWA 全屏运行）。
+
+**局域网直连**（推荐，手机与电脑同 Wi-Fi）：
+
+1. `config.yaml` 开启局域网门（详见 `config.yaml.example` 的 `admin.tls` 注释）并重启内核
+2. 手机浏览器先打开 `https://<电脑IP>:45679/friday-ca.crt` 下载并**安装信任**本机自签 CA
+   （一次性；iOS：设置→通用→VPN与设备管理；Android：设置→安全→安装证书）
+3. 电脑端「设置 → 手机连接」生成配对二维码 → 手机扫码自动登录
+
+配对码一次性、5 分钟过期；HTTPS 证书由本机自签 CA 签发（私钥不出数据目录），
+换 Wi-Fi/换 IP 自动重签。调试期也可走 USB：`adb reverse tcp:45678 tcp:45678`
+后手机访问 `http://localhost:45678/mobile`（无需证书，secure context 由
+localhost 满足）。
+
+macOS 上内核可装成 launchd 常驻服务（`friday service install`，桌面端首启
+会自动安装）：开机自启、崩溃自拉，桌面 app 与手机都是它的客户端——架构细节
+见 [docs/DESKTOP.md](docs/DESKTOP.md)「服务模式」。
+
 ## 自定义功能
 
 **自定义指令**（config.yaml，重启生效）：

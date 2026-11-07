@@ -25,7 +25,9 @@
 2. 指针文件 `系统配置目录/Friday.launcher.json`（`{"dataDir": "…"}`）；指针指向的目录已不存在 → 回退默认路径并重跑向导
 3. 都没有 → **首装向导模式**：内核先按默认路径拉起，主窗口进入应用内向导页 `/wizard.html`（`needs_dir_setup=true` 时占位页自动导航）——第一步创建管理员账号（已有账号则跳过），第二步确认数据目录。目录规则：空目录/不存在 → 原样使用；已有 Friday 数据（config.yaml 等）→ 原样接管；其它非空目录 → 收进其下 `Friday/` 子目录。网盘同步目录（iCloud/OneDrive/Dropbox/Google Drive）需二次确认。确认后：写指针 → 迁移本次向导产生的文件（账号/配置；目标已有数据则跳过=接管）→ 内核以新目录重启 → 跳登录页。删除指针文件即可重跑向导
 
-**内核一体包**（2026-10-28 起，替代早先的「外置内核」方案）：内核即随包分发的 sidecar，落在外壳可执行文件旁边，**卸载应用即随之删除，数据目录只存数据**——目录里没有二进制，换数据目录/换设备迁移的都是纯数据，Windows 卸载器也能顺手带走内核。内核更新随应用更新走（后续 updater 插件整包替换）；启动时尽力清理旧版外置布局遗留的 `<数据目录>/bin/friday`。壳-内核契约（`--desktop/--data-dir/--port <port>`、stdout 的 `FRIDAY_ADDR`、stdin 的 `/quit`）不变。曾选「外置内核」（数据目录/bin/friday，包内做首装种子）是为内核自更新通道留地基——通道一直未建，外置反而让每次迭代要多同步一份二进制，遂回归一体包。
+**内核一体包**（2026-10-28 起，替代早先的「外置内核」方案）：内核即随包分发的 sidecar，落在外壳可执行文件旁边，**卸载应用即随之删除，数据目录只存数据**——目录里没有二进制，换数据目录/换设备迁移的都是纯数据，Windows 卸载器也能顺手带走内核。内核更新随应用更新走（后续 updater 插件整包替换）。壳-内核契约（`--desktop/--data-dir/--port <port>`、stdout 的 `FRIDAY_ADDR`、stdin 的 `/quit`）不变。曾选「外置内核」（数据目录/bin/friday，包内做首装种子）是为内核自更新通道留地基——通道一直未建，外置反而让每次迭代要多同步一份二进制，遂回归一体包。
+
+**服务模式的例外**（2026-11-07 起，见「二·五」）：macOS 上安装常驻服务后，内核二进制改为服务所有，落 `<数据目录>/bin/friday`；随包 sidecar 退居「安装器/升级搬运工」——壳负责把新版本内核搬运进该路径（版本比对后停服务→替换→重启），一体包的安装/升级体验不变，只是内核进程的所有权从外壳转给了 launchd。
 
 已知取舍：Windows 上数据目录在 `%APPDATA%`（Roaming），漫游同步只带数据不带二进制；企业部署需求出现时再拆 `%LocalAppData%`。
 
@@ -48,6 +50,22 @@ sidecar 机制本身不提供父子进程生命周期绑定（Tauri 不自动杀
 反向一致：内核先死（如配置错误）→ 外壳收到 sidecar `Terminated` 事件 → 窗口显示错误页（后续可加自动重启策略）。
 
 已知边界：外壳最终兜底是 kill，Go 侧落盘均为原子写（tmp+rename），最多丢最后一次会话快照。
+
+## 二·五、服务模式（launchd 常驻内核，2026-11-07）
+
+**所有权模型**：macOS 上内核进程归 launchd（`LaunchAgent com.capyflow.friday.kernel`，`RunAtLoad` 开机自启 + `KeepAlive` 崩溃秒级自拉）。桌面壳与手机 PWA 都只是它的客户端——**同一套数据目录只允许一个内核进程**的约束由「服务单实例」天然满足。手机直连（局域网 HTTPS + 扫码配对）见 README「手机端」。
+
+**外壳启动链（`start_kernel`）**：
+
+1. **确保服务**：plist 缺失 → 用随包 sidecar 执行 `friday service install`（拷贝自身二进制到 `<数据目录>/bin/friday` + 写 plist + 启动）；plist 在但内核没响应 → 版本比对（随包 `--version` vs 安装版），一致仅 kickstart，不一致重装升级（这就是「内核更新随应用走」的服务化实现）
+2. **发现复用（attach）**：读数据目录 `kernel.addr`（内核就绪后原子落盘的服务地址，`cmd/robot` 的 `writeAddrFile`）→ 探测 `GET /api/session`（裸 TCP HTTP，零依赖）→ 存活即 attach：设置地址、导航主窗口，**不拉起任何进程**
+3. **兜底**：服务管理不可用（非 macOS / launchctl 失败）→ 回退老的 sidecar 拉起路径（`--desktop --port 47831`，端口占用退 0）
+
+**退出语义**：attach 模式下壳退出**绝不触碰内核**（`quit_kernel` 的 child-None 守卫）；仅 sidecar 兜底路径保留 `/quit` + kill 链。attach 模式由壳做 10 秒间隔存活轮询，连续两次失败走错误页（launchd KeepAlive 会把内核拉回来，单次探测失败不打扰用户）。
+
+**`friday service` 子命令**（仅 macOS，`internal/service`）：`install|uninstall|status|start|stop|restart`。安装细节：plist 钉 `WorkingDirectory=<数据目录>`（allspark logx 在包 init 阶段就 `mkdir ./logs`，launchd 默认 cwd=/ 只读会 panic——与桌面壳 `current_dir` 同一约定）；日志统一落 `<数据目录>/friday-kernel.log`；`--service` 模式与 `--desktop` 共享 chdir + `ensureUserPath` 前置，但**没有** `/quit` stdin 契约与 ppid==1 看门狗（两者都在 desktop-only 分支；launchd 场景 ppid 恒为 1，看门狗必须绕开）。服务端口默认 **45678**（重装从旧 plist 保号）——刻意不用 config 默认 8080（本机常被 Docker 占用），与开发实例 45678、桌面壳 47831 互不相撞。
+
+**bootout→bootstrap 竞态**：launchd 的 bootout 异步生效，紧跟的 bootstrap 可能报 `5: Input/output error`；`Start()` 带退避重试（4 次直至状态收敛）。目标端口已被手动内核占用时，install 只落盘不启动（防 KeepAlive 崩溃循环），由用户排障后 `service start`。
 
 ## 三、Go 侧改造（改动很小）
 
