@@ -8,7 +8,7 @@
     <application
         android:label="小五"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
         android:usesCleartextTraffic="false"
         android:allowBackup="true">
 
