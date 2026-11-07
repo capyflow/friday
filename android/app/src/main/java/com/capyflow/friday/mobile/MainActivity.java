@@ -1,7 +1,6 @@
 package com.capyflow.friday.mobile;
 
 import android.annotation.SuppressLint;
-import android.net.http.SslCertificate;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -25,10 +24,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanOptions;
 
-import java.io.ByteArrayInputStream;
 import java.security.MessageDigest;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
 
 /**
  * Friday Mobile 壳：极薄 WebView，加载内核的移动端 PWA（/mobile）。
@@ -53,6 +49,8 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private boolean webReady = false;
     private String currentOrigin = null;
+    /** TLS 探测指纹缓存（host → sha256）：一次连接内避免反复握手。 */
+    private final java.util.Map<String, String> fpCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     private final androidx.activity.result.ActivityResultLauncher<ScanOptions> scanLauncher =
             registerForActivityResult(new ScanContract(), result -> {
@@ -231,7 +229,7 @@ public class MainActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         Button reset = new Button(this);
         reset.setText("更换服务端地址");
-        reset.setAlpha(0f); // 平时隐形；加载失败时置为可见
+        reset.setVisibility(View.GONE); // 平时隐藏；GONE 才不拦截触摸（alpha=0 仍可点击，实测踩过）
         reset.setOnClickListener(v -> {
             addrInput.setText(currentOrigin == null ? "" : currentOrigin.replaceFirst("^https://", ""));
             showConnect();
@@ -249,7 +247,24 @@ public class MainActivity extends AppCompatActivity {
         return new WebViewClient() {
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                tofuCheck(handler, error.getCertificate());
+                // SslCertificate.saveState() 的 Bundle 黑科技在部分机型（实测三星）
+                // 取不出证书字节 → 无法算指纹。改为后台对目标主机做一次真实 TLS
+                // 探测拿叶子证书（trust-all 只为取字节，不作为信任依据），拿到
+                // 指纹后再决定 pin/proceed 或弹 TOFU。探测期间 handler 挂起加载。
+                android.net.Uri uri = android.net.Uri.parse(currentOrigin == null ? "" : currentOrigin);
+                final String host = uri.getHost();
+                final int port = uri.getPort() > 0 ? uri.getPort() : 443;
+                if (host == null) {
+                    handler.cancel();
+                    return;
+                }
+                new Thread(() -> {
+                    String fp = fpCache.containsKey(host) ? fpCache.get(host) : probeFingerprint(host, port);
+                    if (fp != null) fpCache.put(host, fp);
+                    String pinned = prefs.getString(KEY_FP_PREFIX + host, null);
+                    boolean ok = fp != null && fp.equals(pinned);
+                    runOnUiThread(() -> decideSsl(handler, host, fp, ok));
+                }).start();
             }
 
             @Override
@@ -258,10 +273,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!webReady && failingUrl != null && failingUrl.startsWith(currentOrigin + "/mobile")) {
                     toast("连接失败：检查地址与 Wi-Fi 网络");
                     Button reset = webView.getTag() instanceof Button ? (Button) webView.getTag() : null;
-                    if (reset != null) {
-                        reset.setAlpha(1f);
-                        reset.bringToFront();
-                    }
+                    if (reset != null) reset.setVisibility(View.VISIBLE);
                 }
             }
 
@@ -269,22 +281,19 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 webReady = true;
                 View reset = webView.getTag() instanceof View ? (View) webView.getTag() : null;
-                if (reset != null) reset.setAlpha(0f);
+                if (reset != null) reset.setVisibility(View.GONE);
             }
         };
     }
 
-    /* ---------- 证书 TOFU ---------- */
-
-    private void tofuCheck(SslErrorHandler handler, SslCertificate cert) {
-        String fp = certificateFingerprint(cert);
-        String host = currentOrigin == null ? "" : currentOrigin.replaceFirst("^https://", "");
-        String pinned = prefs.getString(KEY_FP_PREFIX + host, null);
-        if (fp != null && fp.equals(pinned)) {
+    /** SSL 决策（UI 线程）：已 pin 指纹直接放行；否则弹 TOFU；拿不到证书拒绝。 */
+    private void decideSsl(SslErrorHandler handler, String host, String fp, boolean pinnedOk) {
+        if (pinnedOk) {
             handler.proceed();
             return;
         }
-        if (fp == null) { // 证书取不出来（极罕见），宁可拒绝也不放行
+        if (fp == null) { // 探测失败（网络抖动等），宁可拒绝也不放行
+            toast("无法读取服务器证书，请检查网络后重试");
             handler.cancel();
             return;
         }
@@ -303,26 +312,44 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    private void pinFingerprint(String origin, String fp) {
-        String host = origin.replaceFirst("^https://", "");
-        prefs.edit().putString(KEY_FP_PREFIX + host, fp).apply();
-    }
-
-    private String certificateFingerprint(SslCertificate cert) {
+    /**
+     * 对 host:port 做一次真实 TLS 握手取叶子证书指纹。信任管理器放行一切——
+     * 我们只要证书字节本身（指纹算完由人眼/扫码带外比对），不在这里做信任决策。
+     * 3 秒超时，失败返回 null。
+     */
+    private String probeFingerprint(String host, int port) {
+        javax.net.ssl.TrustManager[] trustAll = new javax.net.ssl.TrustManager[]{
+                new javax.net.ssl.X509TrustManager() {
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] c, String a) {}
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] c, String a) {}
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[0]; }
+                }
+        };
         try {
-            android.os.Bundle state = SslCertificate.saveState(cert);
-            byte[] der = state == null ? null : state.getByteArray("x509");
-            if (der == null) return null;
-            X509Certificate x = (X509Certificate) CertificateFactory.getInstance("X.509")
-                    .generateCertificate(new ByteArrayInputStream(der));
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(x.getEncoded());
-            StringBuilder sb = new StringBuilder();
-            for (byte by : digest) sb.append(String.format("%02x", by));
-            return sb.toString();
+            javax.net.ssl.SSLContext ctx = javax.net.ssl.SSLContext.getInstance("TLS");
+            ctx.init(null, trustAll, new java.security.SecureRandom());
+            javax.net.ssl.SSLSocketFactory f = ctx.getSocketFactory();
+            try (javax.net.ssl.SSLSocket socket = (javax.net.ssl.SSLSocket) f.createSocket()) {
+                socket.connect(new java.net.InetSocketAddress(host, port), 3000);
+                socket.setSoTimeout(3000);
+                socket.startHandshake();
+                java.security.cert.Certificate[] chain = socket.getSession().getPeerCertificates();
+                if (chain == null || chain.length == 0) return null;
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] digest = md.digest(chain[0].getEncoded());
+                StringBuilder sb = new StringBuilder();
+                for (byte b : digest) sb.append(String.format("%02x", b));
+                return sb.toString();
+            }
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private void pinFingerprint(String origin, String fp) {
+        // key 必须与 onReceivedSslError 里的查询一致：getHost() 不含端口
+        String host = android.net.Uri.parse(origin).getHost();
+        prefs.edit().putString(KEY_FP_PREFIX + host, fp).apply();
     }
 
     private String groupFingerprint(String fp) {
