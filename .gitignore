@@ -72,6 +72,7 @@ evidence/
 /internal/admin/webdist/wizard.html
 /internal/admin/webdist/mobile.html
 /internal/admin/webdist/mobile.webmanifest
+/internal/admin/webdist/mobile-sw.js
 /internal/admin/webdist/icon-192.png
 /internal/admin/webdist/icon-512.png
 

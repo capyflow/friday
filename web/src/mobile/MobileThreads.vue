@@ -43,7 +43,6 @@ async function load() {
 }
 onMounted(load)
 
-const wsName = id => (workspaces.value.find(w => w.id === id) || {}).name || '未知工作区'
 const isRunning = t => t.state === 'running' || !!t.turnStartedAt
 
 // 项目行信息：会话数 + 最近活跃

@@ -265,11 +265,18 @@ npm run build    # 产物写回 internal/admin/webdist/，重新 go build 即生
 localhost 满足）。
 
 **打包 APP（Android）**：`android/build.sh` 产出 `android/friday-mobile.apk`
-（debug 签名，自用分发）。壳 = 极薄 WebView 加载 `/mobile`（前端零改动），
+（debug 签名，自用分发）。壳 = 极薄 WebView 加载 `/mobile`，
 比浏览器多两件事：**登录页记住服务端地址**（输一次 `电脑IP:45679` 即可）与
 **证书指纹信任**（TOFU：首次连接展示 SHA-256 指纹确认一次，免装系统 CA）。
 扫码配对同样支持——扫电脑端二维码时证书指纹随码校验，全自动。指纹随证书
 重签变化（换网/换 IP），APP 会再确认一次，属预期。
+
+**服务器不在线时**：不再甩浏览器那张 `net::ERR_CONNECTION_REFUSED` 报错页。
+APP 壳拦下主框架加载失败，换成原生「服务器不在线」页（重试 / 换地址）；
+浏览器直访靠 Service Worker 兜住上次缓存的页面壳，页面上是同一张
+「服务器不在线」卡片，带**服务器地址输入框 + 扫码图标 + 重试连接**。
+登录页也带同一行地址：默认当前服务器，可手输或扫电脑端「手机连接」的二维码
+换电脑（扫到带一次性配对码的码直接就登录了）。
 
 macOS 上内核可装成 launchd 常驻服务（`friday service install`，桌面端首启
 会自动安装）：开机自启、崩溃自拉，桌面 app 与手机都是它的客户端——架构细节

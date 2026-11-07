@@ -363,6 +363,9 @@ func (s *Server) Handler() http.Handler {
 	// PWA 清单与图标：与 mobile.html 一起从 webdist 产物下发（未构建时图标 404，
 	// 清单给内置缺省，页面本身能进）。
 	root.AddStaticRouter("/mobile.webmanifest", s.handleWebdistAsset("mobile.webmanifest", "application/manifest+json"))
+	// 移动端离线壳：SW 注册在 /mobile 作用域下，断网时由它兜住页面壳，让前端
+	// 渲染「服务器不在线」而不是浏览器那张 ERR_CONNECTION_REFUSED 报错页。
+	root.AddStaticRouter("/mobile-sw.js", s.handleMobileSW)
 	// 自签 CA 证书下载（公开静态）：手机首次连接局域网门时安装信任，见 cert.go。
 	root.AddStaticRouter("/friday-ca.crt", s.handleCACert)
 	root.AddStaticRouter("/icon-192.png", s.handleWebdistAsset("icon-192.png", "image/png"))
@@ -706,6 +709,25 @@ func (s *Server) handleMobile(ctx *vhttp.Context) error {
 	} else {
 		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderMobile)
 	}
+	return nil
+}
+
+// handleMobileSW 下发移动端离线壳的 Service Worker。
+//
+// SW 脚本放在 /mobile-sw.js，但它要管的是 /mobile 这个页面——脚本路径与作用域
+// 不一致时，浏览器默认不允许（作用域得在脚本目录下）。Service-Worker-Allowed
+// 头就是干这个的：显式授权该脚本可以管到哪条路径。
+//
+// 有了它，服务器不在线时浏览器不再直接甩 ERR_CONNECTION_REFUSED 报错页，
+// 而是由 SW 兜出上次缓存的页面壳，前端渲染「服务器不在线 + 重试 + 换地址」。
+func (s *Server) handleMobileSW(ctx *vhttp.Context) error {
+	noCache(ctx)
+	ctx.GinContext().Header("Service-Worker-Allowed", "/mobile")
+	if b, ok := webdistFile("mobile-sw.js"); ok {
+		ctx.GinContext().Data(http.StatusOK, "application/javascript", b)
+		return nil
+	}
+	ctx.GinContext().String(http.StatusNotFound, "not built")
 	return nil
 }
 

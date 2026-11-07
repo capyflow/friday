@@ -114,6 +114,68 @@ textarea.m-input { resize: none; line-height: 1.5; }
 .m-auth-setup { text-align: left; color: var(--fg-2); font-size: 14px; line-height: 1.7; }
 .m-auth-foot { color: var(--faint-fg); font-size: 12px; margin-top: 6px; }
 
+/* ---------- 服务器地址行（登录页 / 离线页共用） ---------- */
+.m-srv { display: flex; flex-direction: column; gap: 6px; }
+.m-srv-row { display: flex; align-items: center; gap: 8px; }
+.m-srv-input {
+  flex: 1; min-width: 0; text-align: left;
+  font-size: 14px; color: var(--muted-fg);
+}
+.m-srv-input.editing { color: var(--fg); }
+.m-srv-scan {
+  flex: none; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+  border-radius: 10px; border: 1px solid var(--border-strong);
+  background: var(--card); color: var(--muted-fg);
+}
+.m-srv-scan:active { background: var(--bg-muted); color: var(--fg); }
+.m-srv-go {
+  align-self: flex-start; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: var(--card); color: var(--accent);
+  font-size: 13px;
+}
+
+/* ---------- 扫码页 ---------- */
+.m-scan {
+  position: fixed; inset: 0; z-index: 95;
+  background: var(--bg); color: var(--fg);
+  display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top);
+}
+.m-scan-head {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.m-scan-head b { font-size: 16px; }
+.m-scan-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px; padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}
+.m-scan-view {
+  position: relative; width: 100%; aspect-ratio: 1;
+  border-radius: 14px; overflow: hidden;
+  background: #000; border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+}
+.m-scan-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.m-scan-canvas { display: none; }
+.m-scan-native {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 20px; text-align: center; color: var(--muted-fg); font-size: 13px;
+}
+.m-scan-status { color: var(--muted-fg); font-size: 13px; text-align: center; }
+
+/* ---------- 离线页（服务器不在线） ---------- */
+.m-offline {
+  width: 100%; max-width: 340px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 12px; text-align: center;
+}
+.m-offline h2 { font-size: 20px; }
+.m-offline-detail { color: var(--danger-fg); font-size: 13px; word-break: break-all; }
+.m-offline-hint { color: var(--muted-fg); font-size: 13px; line-height: 1.6; }
+.m-offline-acts { display: flex; gap: 10px; justify-content: center; }
+
 /* ---------- 面板（列表页通用） ---------- */
 .m-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .m-pane-head {

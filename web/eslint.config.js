@@ -9,6 +9,7 @@ export default [
     languageOptions: {
       globals: Object.fromEntries([
         'window', 'document', 'location', 'navigator', 'localStorage', 'matchMedia', 'fetch',
+        'Event', 'MouseEvent', 'history', 'URLSearchParams',
         'URL', 'File', 'FormData', 'Blob', 'HTMLCanvasElement', 'createImageBitmap',
         'CustomEvent', 'TextDecoder', 'TextEncoder', 'AbortController', 'Response',
         'ReadableStream', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',

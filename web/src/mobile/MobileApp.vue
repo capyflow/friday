@@ -12,6 +12,10 @@ import MobileChat from './MobileChat.vue'
 import MobileThreads from './MobileThreads.vue'
 import MobileFiles from './MobileFiles.vue'
 import MobileNotifications from './MobileNotifications.vue'
+import MobileScan from './MobileScan.vue'
+import MobileServerRow from './MobileServerRow.vue'
+import { parseScan } from './server.js'
+import { connectTo, currentOrigin } from './native.js'
 
 // phase: boot（探测中）| main（登录门卫之后的一切——由 store.loggedIn 分流）
 const phase = ref('boot')
@@ -19,6 +23,30 @@ const bootErr = ref('')
 const tab = ref('chat') // chat | threads | notices
 const openThread = ref(null) // 当前打开的智能体会话对象
 const filesOpen = ref(false) // 会话内「对话 ↔ 文件」切换
+const scanning = ref(false) // 扫码页开关（服务器不在线时换电脑用）
+
+// 换服务器：整页跳到新服务器的 /mobile（接口是同源相对路径，跨源调不动）。
+function switchServer(origin) {
+  if (!origin) return
+  if (origin === currentOrigin()) return
+  connectTo(origin + '/mobile')
+}
+
+// 扫码结果：带一次性配对码的直接开那个链接（网页自己 redeem 换 JWT 登录），
+// 纯地址的换成服务器地址。
+function onScanned(text) {
+  scanning.value = false
+  const p = parseScan(text, location.protocol === 'http:' ? 'http:' : 'https:')
+  if (!p.ok) {
+    toast('这个二维码里没认出来是服务器地址', true)
+    return
+  }
+  if (p.kind === 'pair') {
+    connectTo(p.url)
+    return
+  }
+  switchServer(p.origin)
+}
 
 async function boot() {
   bootErr.value = ''
@@ -86,8 +114,16 @@ function openThreadFrom(t) {
       <span class="brand-mark m-boot-logo"></span>
       <p v-if="!bootErr">连接中…</p>
       <template v-else>
-        <p class="m-boot-err">无法连接服务器：{{ bootErr }}</p>
-        <button class="m-btn primary" type="button" @click="boot">重试</button>
+        <div class="m-offline">
+          <h2>服务器不在线</h2>
+          <p class="m-offline-detail">{{ bootErr }}</p>
+          <p class="m-offline-hint">请确认电脑上的 Friday 正在运行、手机与电脑连的是同一个 Wi-Fi，
+            地址不对可以换一个或扫码重连。</p>
+          <MobileServerRow @scan="scanning = true" @switch="switchServer" />
+          <div class="m-offline-acts">
+            <button class="m-btn primary" type="button" @click="boot">重试连接</button>
+          </div>
+        </div>
       </template>
     </div>
 
@@ -153,6 +189,9 @@ function openThreadFrom(t) {
         </button>
       </nav>
     </template>
+
+    <!-- 扫码页（服务器不在线时换电脑用） -->
+    <MobileScan v-if="scanning" @scanned="onScanned" @close="scanning = false" />
 
     <!-- 轻提示与弹窗（与桌面同一套 store） -->
     <div id="m-toast" :class="{ show: toastState.show, err: toastState.err }" role="status" aria-live="polite">{{ toastState.text }}</div>
