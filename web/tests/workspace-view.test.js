@@ -34,7 +34,7 @@ const termMocks = vi.hoisted(() => {
   }
   return { FakeTerminal, termInstances, FakeSocket, sockets }
 })
-const { FakeTerminal, termInstances, FakeSocket, sockets } = termMocks
+const { termInstances, FakeSocket, sockets } = termMocks
 vi.mock('@xterm/xterm', () => ({ Terminal: termMocks.FakeTerminal }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }))
 
