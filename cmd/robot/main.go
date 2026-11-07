@@ -634,12 +634,15 @@ func main() {
 			log.Printf("[管理后台] %s/admin（使用已有管理员账号）", addr)
 		}
 		// 桌面模式：服务就绪后向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行解析 stdout
-		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）。
+		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）；同时把地址
+		// 落盘 kernel.addr，外壳冷启动可凭它「发现已有内核」直接复用（attach）。
 		if *desktop {
 			if !waitReady(cfg.Admin.Port, 30*time.Second) {
 				log.Fatalf("桌面模式等待服务就绪超时（端口 %d）", cfg.Admin.Port)
 			}
-			fmt.Printf("FRIDAY_ADDR=http://127.0.0.1:%d\n", cfg.Admin.Port)
+			addrLocal := fmt.Sprintf("http://127.0.0.1:%d", cfg.Admin.Port)
+			writeAddrFile("kernel.addr", addrLocal)
+			fmt.Printf("FRIDAY_ADDR=%s\n", addrLocal)
 		}
 	}
 	noticeCtx, stopNotices := context.WithCancel(ctx)
@@ -995,4 +998,19 @@ func waitReady(port int, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false
+}
+
+// writeAddrFile 把内核实际服务地址原子落盘（数据目录下 kernel.addr），供桌面
+// 外壳冷启动「发现已有内核」复用（attach 模式）。写失败只记日志——它只是发现
+// 通道之一，外壳探测失败会退回拉起 sidecar 的老路。
+func writeAddrFile(path, addr string) {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(addr), 0o644); err != nil {
+		log.Printf("[地址] 落盘 %s 失败: %v", path, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("[地址] 落盘 %s 失败: %v", path, err)
+		_ = os.Remove(tmp)
+	}
 }

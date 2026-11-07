@@ -5,8 +5,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -36,6 +37,8 @@ const DATA_DIR_NAME: &str = "Friday";
 const LAUNCHER_POINTER: &str = "Friday.launcher.json";
 
 /// 内核进程状态：服务地址、子进程句柄、退出标记、数据目录、最后一条 stderr 行。
+/// child 为 None 有两种含义：内核尚未拉起，或处于 attach 模式（内核非本壳拉起，
+/// 如服务实例/手动运行）——此时退出绝不向内核发 /quit（见 quit_kernel）。
 struct Kernel {
     addr: Mutex<Option<String>>,
     child: Mutex<Option<CommandChild>>,
@@ -909,7 +912,7 @@ fn main() {
                 });
             }
             app.global_shortcut().register(palette_shortcut)?;
-            spawn_kernel(app.handle().clone());
+            start_kernel(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1105,6 +1108,86 @@ fn kernel_ready(app: &tauri::AppHandle, addr: String) {
     eprintln!("[外壳] 内核就绪：{addr}");
     let _ = app.emit("server-ready", addr);
 }
+
+/// 读数据目录的 kernel.addr（内核就绪后原子落盘的服务地址，见 cmd/robot writeAddrFile）。
+/// 只认本机回环 http 地址——内核监听地址的可信来源是它自己，外壳不接受任意值。
+fn read_kernel_addr(data_dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(data_dir.join("kernel.addr")).ok()?;
+    let s = s.trim();
+    (s.starts_with("http://127.0.0.1:") || s.starts_with("http://localhost:")).then(|| s.to_string())
+}
+
+/// 探测内核存活：裸 HTTP/1.0 GET /api/session（公开路由，永远 200）。零依赖，
+/// 与 Go 侧 waitReady 的「GET / 200」同一健康语义。
+fn probe_kernel(addr: &str) -> bool {
+    let Some(rest) = addr.strip_prefix("http://") else {
+        return false;
+    };
+    let Some(sock) = rest
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+    else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&sock, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let host = sock.ip().to_string();
+    let req = format!("GET /api/session HTTP/1.0\r\nHost: {host}\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    match stream.read(&mut buf) {
+        Ok(n) => String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1."),
+        Err(_) => false,
+    }
+}
+
+/// 内核启动入口：优先「发现已有内核」attach（数据目录 kernel.addr 指向的实例
+/// 探测存活即复用），失败才拉起随包 sidecar。attach 模式不持有 child 句柄，
+/// 外壳退出不会触碰内核（服务化后内核生命周期归服务管）。
+fn start_kernel(app: tauri::AppHandle) {
+    let data_dir = app.state::<Kernel>().data_dir();
+    if let Some(addr) = read_kernel_addr(&data_dir) {
+        if probe_kernel(&addr) {
+            eprintln!("[外壳] 发现已有内核，attach：{addr}");
+            kernel_ready(&app, addr.clone());
+            spawn_liveness_poll(app, addr);
+            return;
+        }
+        eprintln!("[外壳] kernel.addr 无响应（{addr}），回退拉起 sidecar");
+    }
+    spawn_kernel(app);
+}
+
+/// attach 模式的轻量存活轮询：内核不是本壳的子进程，收不到 Terminated 事件，
+/// 只能定期探测。连续两次失败按内核死亡处理；服务化后 launchd KeepAlive 会在
+/// 秒级拉回内核，偶发一次探测失败不打扰用户。
+fn spawn_liveness_poll(app: tauri::AppHandle, addr: String) {
+    std::thread::spawn(move || {
+        let mut misses = 0u8;
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            if app.state::<Kernel>().quitting.load(Ordering::SeqCst) {
+                return;
+            }
+            if probe_kernel(&addr) {
+                misses = 0;
+                continue;
+            }
+            misses += 1;
+            if misses >= 2 {
+                kernel_dead(&app, format!("内核失去响应（{addr}）"));
+                return;
+            }
+        }
+    });
+}
+
 
 /// 内核先死（如配置错误）：主窗口显示错误页并带上死因（自动重启策略后续再加）。
 fn mark_kernel_dead(kernel: &Kernel, reason: &str) -> bool {
