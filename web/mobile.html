@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<!-- 移动端禁缩放：iOS 输入框聚焦会自动放大，配合输入 16px 字号；viewport-fit
+     让内容吃到刘海屏安全区。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<!-- 主题预设：在样式表加载前定好 data-theme，避免首帧闪烁（与 src/theme.js 同逻辑） -->
+<script>
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('friday-theme'); } catch (e) {}
+  if (!t) t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  document.documentElement.dataset.theme = t;
+})();
+</script>
+<meta name="theme-color" content="#141414">
+<title>小五</title>
+<!-- PWA：加到主屏幕后全屏运行；清单与图标由内核从 webdist 产物下发 -->
+<link rel="manifest" href="/mobile.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="小五">
+<!-- 品牌标：白底 + 中心黑点（与 index.html 的 favicon 同一形状） -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='1' y='1' width='98' height='98' rx='28' fill='%23FFFFFF' stroke='%23D6D6DC'/><circle cx='50' cy='50' r='22' fill='%2318181B'/></svg>">
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/mobile-main.js"></script>
+</body>
+</html>

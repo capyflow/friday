@@ -1,5 +1,6 @@
-// files.go 是文件预览接口：聊天/智能体时间线里输出的本机文件路径，前端渲染成
-// 可点 chip，点开后由这里只读读取内容，侧边抽屉按类型渲染。
+// files.go 是文件预览与下载接口：聊天/智能体时间线里输出的本机文件路径，前端
+// 渲染成可点 chip，点开后由这里只读读取内容，侧边抽屉按类型渲染；下载端点
+// 支撑手机端文件面板把文件拉到本机。
 // 信任档说明：服务仅监听本机、接口需登录，可读范围与 agent 自身读工具一致
 // （本机任意可读普通文件），不做目录白名单；拒绝目录与非普通文件。
 package admin
@@ -10,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,33 +26,47 @@ const (
 	filePreviewImageMax = 8 << 20
 )
 
-// handleFilePreview 只读返回一个本机文件的内容供侧边预览。
-// GET /api/files/preview?path=/abs/a.md（支持 ~/ 前缀）。kind：text（content 为
-// 文本，.md 由前端再走 markdown 渲染）| image（dataUrl 内联）| binary（无法
-// 预览，message 说明原因）；text 超限时 content 只含前 filePreviewTextMax 字节。
-func (s *Server) handleFilePreview(ctx *vhttp.Context) error {
-	raw := strings.TrimSpace(ctx.GinContext().Query("path"))
+// resolveFilePath 解析并校验 ?path= 参数：支持 ~/ 前缀，展开为绝对路径，要求
+// 存在且为普通文件。返回错误消息（空串=通过），预览与下载共用同一套口径。
+func resolveFilePath(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 path 参数"})
+		return "", "缺少 path 参数"
 	}
 	target := raw
 	if target == "~" || strings.HasPrefix(target, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "解析 HOME 失败"})
+			return "", "解析 HOME 失败"
 		}
 		target = filepath.Join(home, strings.TrimPrefix(target, "~"))
 	}
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "解析路径失败"})
+		return "", "解析路径失败"
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", "文件不存在或不可读"
+	}
+	if !info.Mode().IsRegular() {
+		return "", "不是普通文件"
+	}
+	return abs, ""
+}
+
+// handleFilePreview 只读返回一个本机文件的内容供侧边预览。
+// GET /api/files/preview?path=/abs/a.md（支持 ~/ 前缀）。kind：text（content 为
+// 文本，.md 由前端再走 markdown 渲染）| image（dataUrl 内联）| binary（无法
+// 预览，message 说明原因）；text 超限时 content 只含前 filePreviewTextMax 字节。
+func (s *Server) handleFilePreview(ctx *vhttp.Context) error {
+	abs, errMsg := resolveFilePath(ctx.GinContext().Query("path"))
+	if errMsg != "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": errMsg + "，无法预览"})
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "文件不存在或不可读"})
-	}
-	if !info.Mode().IsRegular() {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "不是普通文件，无法预览"})
 	}
 	f, err := os.Open(abs)
 	if err != nil {
@@ -123,4 +139,39 @@ func mimeLabel(ext, sniff string) string {
 		}
 	}
 	return sniff
+}
+
+// handleFileDownload 流式下载一个本机文件（手机端文件面板把文件拉到手机用）：
+// GET /api/files/download?path=/abs/a.md（支持 ~/ 前缀）。鉴权走 wrapMedia——
+// 浏览器 <a download> 带不了自定义头，token 只能放查询参数（同附件回读的取舍）。
+// ServeContent 自带 Range/If-Modified-Since 支持，类型按扩展名推断。
+func (s *Server) handleFileDownload(ctx *vhttp.Context) error {
+	abs, errMsg := resolveFilePath(ctx.GinContext().Query("path"))
+	if errMsg != "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": errMsg + "，无法下载"})
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "文件不可读"})
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "读取文件失败"})
+	}
+	name := filepath.Base(abs)
+	// 中文等非 ASCII 文件名按 RFC 5987 走 filename* 传原值；filename 兜底
+	// ASCII（只留可打印安全字符），老旧客户端与下载器不至于拿到空文件名。
+	var ascii strings.Builder
+	for _, r := range name {
+		if r > 32 && r < 127 && r != '"' && r != '\\' && r != '\'' {
+			ascii.WriteRune(r)
+		} else {
+			ascii.WriteByte('_')
+		}
+	}
+	ctx.GinContext().Header("Content-Disposition",
+		`attachment; filename="`+ascii.String()+`"; filename*=UTF-8''`+url.PathEscape(name))
+	http.ServeContent(ctx.GinContext().Writer, ctx.GinContext().Request, name, info.ModTime(), f)
+	return nil
 }

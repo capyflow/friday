@@ -1,0 +1,16 @@
+{
+  "name": "小五 · Friday",
+  "short_name": "小五",
+  "description": "Friday 移动端：同一内核，手机上对话、看工作区文件、收通知。",
+  "lang": "zh-CN",
+  "start_url": "/mobile",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#141414",
+  "theme_color": "#141414",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

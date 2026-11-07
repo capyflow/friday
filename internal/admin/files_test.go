@@ -143,3 +143,57 @@ func TestFilePreviewExpandsHomePrefix(t *testing.T) {
 		t.Fatalf("~/ 应展开为 HOME: %v", body)
 	}
 }
+
+// downloadBody 发一次 GET /api/files/download（token 走查询参数——<a download>
+// 带不了请求头，这是手机端的真实连法），返回状态码与响应体字节。
+func downloadBody(t *testing.T, handler http.Handler, token, rawPath string) (int, []byte, http.Header) {
+	t.Helper()
+	q := "path=" + url.QueryEscape(rawPath)
+	if token != "" {
+		q += "&token=" + url.QueryEscape(token)
+	}
+	rec := setupTestRequest(handler, http.MethodGet, "/api/files/download?"+q, nil, "10.9.8.7:1234", "phone.example", "", "")
+	return rec.Code, rec.Body.Bytes(), rec.Header()
+}
+
+func TestFileDownloadStreamsAttachment(t *testing.T) {
+	_, handler, token, _, _ := manageTestServer(t)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "周报 中文.md")
+	if err := os.WriteFile(file, []byte("# 下载我"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, body, header := downloadBody(t, handler, token, file)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 %d", code)
+	}
+	if string(body) != "# 下载我" {
+		t.Fatalf("内容不符: %q", body)
+	}
+	disp := header.Get("Content-Disposition")
+	if !strings.Contains(disp, "attachment") || !strings.Contains(disp, "filename*=UTF-8''") {
+		t.Fatalf("Content-Disposition 不符: %q", disp)
+	}
+	if !strings.Contains(url.QueryEscape("周报 中文.md"), "") && !strings.Contains(disp, url.PathEscape("周报 中文.md")) {
+		t.Fatalf("filename* 应带原始中文文件名: %q", disp)
+	}
+}
+
+func TestFileDownloadRejectsBadPathsAndAuth(t *testing.T) {
+	_, handler, token, _, _ := manageTestServer(t)
+
+	dir := t.TempDir()
+	// 目录与不存在的文件都拒绝。
+	for _, raw := range []string{dir, filepath.Join(dir, "没有.md")} {
+		code, _, _ := downloadBody(t, handler, token, raw)
+		if code != http.StatusBadRequest {
+			t.Fatalf("%s 应 400，实际 %d", raw, code)
+		}
+	}
+	// 无 token 的远端请求拒绝（wrapMedia 头/查询参数都不认）。
+	code, _, _ := downloadBody(t, handler, "", filepath.Join(dir, "a.md"))
+	if code != http.StatusForbidden {
+		t.Fatalf("未登录应 403，实际 %d", code)
+	}
+}

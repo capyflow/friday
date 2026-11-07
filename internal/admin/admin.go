@@ -16,6 +16,9 @@
 //	GET    /                  应用外壳（登录 + 聊天/待办/运行状态/自动化/记忆/设置）
 //	GET    /palette           全局快捷键弹窗页（桌面外壳加载，公开静态；对话仍走 /api/chat）
 //	GET    /wizard            首装向导页（桌面外壳首装流程加载，公开静态；含建号表单）
+//	GET    /mobile            移动端入口页（手机浏览器 / PWA，公开静态）
+//	GET    /mobile.webmanifest PWA 清单（公开静态；webdist 产物，未构建时回内置缺省）
+//	GET    /icon-192.png|/icon-512.png PWA 图标（公开静态）
 //	POST   /api/chat          对话接口（需登录，SSE 流式，web.Chat 处理）
 //	POST   /api/chat/stop     暂停当前回复（需登录，已生成部分可继续）
 //	POST   /api/chat/resume   继续被暂停的对话（需登录，SSE 流式）
@@ -74,6 +77,7 @@
 //	GET    /api/terminal      内置终端可用状态（enabled/上限/活跃数，需登录）
 //	GET    /api/terminal/ws   内置终端（WebSocket，一条连接一个 PTY；只接受本机回环，需登录）
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
+//	GET    /api/files/download 流式下载本机文件（?path=，token 走查询参数，手机端用）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -113,6 +117,9 @@
 //	POST   /api/plans/:id/confirm 确认或否决计划（可带编辑后的步骤，需登录）
 //	POST   /api/plans/:id/pause|resume|cancel 暂停/继续/取消计划（需登录）
 //	POST   /api/plans/:id/steps/:n/retry|skip 重试或跳过某一步（需登录）
+//	GET    /api/notifications 通知列表与未读数（?taskId= 过滤，需登录）
+//	GET    /api/notifications/ws 通知长链接（WebSocket，?token= 鉴权，远程可用）
+//	POST   /api/notifications/:id/read|retry|snooze 已读 / 重试 / 延后（需登录）
 package admin
 
 import (
@@ -179,6 +186,12 @@ var placeholderWizard = []byte(`<!doctype html><html lang="zh"><meta charset="ut
 <p>前端尚未构建，首装向导不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
 </body></html>`)
 
+var placeholderMobile = []byte(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Friday 移动端</title><body style="font-family:system-ui;margin:8vh auto;max-width:480px;padding:0 24px">
+<p>前端尚未构建，移动端不可用。构建方法见主页面占位说明（<code>cd web && npm run build</code>）。</p>
+</body></html>`)
+
 // webdistFile 读取内嵌产物，缺失（未构建）返回 false。
 func webdistFile(name string) ([]byte, bool) {
 	b, err := webdistFS.ReadFile("webdist/" + name)
@@ -221,6 +234,7 @@ type Server struct {
 	acpUpdateMu   sync.Mutex
 	skillUpdateMu sync.Mutex
 	notifications *notification.Center
+	noticeHub     *noticeHub // 通知长链接（手机端实时推送；通知中心挂钩子写入）
 	heartbeatFile string // HEARTBEAT.md 路径
 	pricer        *cost.Pricer
 	guard         *cost.Guard
@@ -274,7 +288,7 @@ func New(o Options) *Server {
 	if strings.TrimSpace(o.Host) == "" {
 		o.Host = "127.0.0.1"
 	}
-	return &Server{
+	s := &Server{
 		host:          o.Host,
 		port:          o.Port,
 		accounts:      o.Accounts,
@@ -303,6 +317,13 @@ func New(o Options) *Server {
 		planRunner:    o.PlanRunner,
 		goalRunner:    o.GoalRunner,
 	}
+	// 通知中心在：顺手把长链接枢纽挂上——新通知落库/状态变化实时推给手机端
+	// （钩子在 Center 锁内回调，push 只做非阻塞入队，契约见 notifyws.go）。
+	if o.Notifications != nil {
+		s.noticeHub = newNoticeHub(o.Notifications.Unread)
+		o.Notifications.SetNoticeHook(s.noticeHub.push)
+	}
+	return s
 }
 
 // Handler 保留 vortexv3 路由/响应约定，由本服务管理监听地址和关闭生命周期。
@@ -314,6 +335,13 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/palette", s.handlePalette)
 	// 首装向导页（桌面外壳首装流程加载）：公开下发——向导本身就是建号入口。
 	root.AddStaticRouter("/wizard", s.handleWizard)
+	// 移动端入口（手机浏览器 / 加到主屏幕的 PWA）：公开下发，数据接口各自鉴权。
+	root.AddStaticRouter("/mobile", s.handleMobile)
+	// PWA 清单与图标：与 mobile.html 一起从 webdist 产物下发（未构建时图标 404，
+	// 清单给内置缺省，页面本身能进）。
+	root.AddStaticRouter("/mobile.webmanifest", s.handleWebdistAsset("mobile.webmanifest", "application/manifest+json"))
+	root.AddStaticRouter("/icon-192.png", s.handleWebdistAsset("icon-192.png", "image/png"))
+	root.AddStaticRouter("/icon-512.png", s.handleWebdistAsset("icon-512.png", "image/png"))
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
@@ -369,6 +397,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
 	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
+	root.AddRouter([]string{http.MethodGet}, "/api/files/download", s.wrapMedia(s.handleFileDownload))
 	// 智能体（ACP）工作区与对话：工作区 CRUD、会话 CRUD、SSE 对话流、停止、
 	// 配置与握手诊断。
 	if s.acp != nil {
@@ -454,6 +483,7 @@ func (s *Server) Handler() http.Handler {
 	root.AddRouter([]string{http.MethodDelete}, "/api/wiki/pages/:id", s.wrap(s.handleDeleteWikiPage))
 	if s.notifications != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/notifications", s.wrap(s.handleNotifications))
+		root.AddRouter([]string{http.MethodGet}, "/api/notifications/ws", s.wrapMedia(s.handleNotificationsWS))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/retry", s.wrap(s.handleRetryNotification))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/read", s.wrap(s.handleReadNotification))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/snooze", s.wrap(s.handleSnoozeNotification))
@@ -602,6 +632,36 @@ func (s *Server) handleWizard(ctx *vhttp.Context) error {
 		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderWizard)
 	}
 	return nil
+}
+
+// handleMobile 返回移动端入口页（手机浏览器访问 /mobile，或加到主屏幕当 PWA 用；
+// 与桌面页同源同 token，登录态天然共享）。
+func (s *Server) handleMobile(ctx *vhttp.Context) error {
+	noCache(ctx)
+	if b, ok := webdistFile("mobile.html"); ok {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", b)
+	} else {
+		ctx.GinContext().Data(http.StatusOK, "text/html; charset=utf-8", placeholderMobile)
+	}
+	return nil
+}
+
+// handleWebdistAsset 下发 webdist 里的静态资源（PWA 清单与图标）。名字由路由
+// 写死传入，不存在时对清单回退内置缺省、图标 404——页面主体不依赖它们。
+func (s *Server) handleWebdistAsset(name, contentType string) func(*vhttp.Context) error {
+	return func(ctx *vhttp.Context) error {
+		noCache(ctx)
+		if b, ok := webdistFile(name); ok {
+			ctx.GinContext().Data(http.StatusOK, contentType, b)
+			return nil
+		}
+		if name == "mobile.webmanifest" {
+			ctx.GinContext().Data(http.StatusOK, contentType, []byte(`{"name":"Friday","short_name":"Friday","start_url":"/mobile","display":"standalone","background_color":"#141414","theme_color":"#141414"}`))
+			return nil
+		}
+		ctx.GinContext().String(http.StatusNotFound, "not built")
+		return nil
+	}
 }
 
 // handleUpdateProvider 热更新 LLM 供应商配置（baseURL/model）：

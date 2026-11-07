@@ -70,6 +70,10 @@ evidence/
 /internal/admin/webdist/index.html
 /internal/admin/webdist/palette.html
 /internal/admin/webdist/wizard.html
+/internal/admin/webdist/mobile.html
+/internal/admin/webdist/mobile.webmanifest
+/internal/admin/webdist/icon-192.png
+/internal/admin/webdist/icon-512.png
 
 # 本地构建二进制与配置备份（含密钥，永不入库）
 /friday

@@ -63,6 +63,7 @@ type Center struct {
 	webEnabled      bool
 	desktopDispatch func(Notice) error
 	deliveryGuard   func(task.Task) (bool, error)
+	noticeHook      func(Notice) // 新通知落库/状态变化时回调（移动端长链接推送用）
 }
 
 func New(path string, resolve Resolver, targets []Target) (*Center, error) {
@@ -344,6 +345,15 @@ func (c *Center) SetDeliveryGuard(guard func(task.Task) (bool, error)) {
 	c.mu.Unlock()
 }
 
+// SetNoticeHook 挂载通知变化回调（移动端长链接推送用）：新通知落库或投递
+// 状态变化时以最新快照回调一次。回调在 Center 内部锁内被同步调用——必须
+// 非阻塞，且不得再调用 Center 的任何方法，否则死锁。
+func (c *Center) SetNoticeHook(hook func(Notice)) {
+	c.mu.Lock()
+	c.noticeHook = hook
+	c.mu.Unlock()
+}
+
 func (c *Center) Retry(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -545,6 +555,11 @@ func (c *Center) putLocked(n Notice) error {
 			delete(c.notices, n.ID)
 		}
 		return err
+	}
+	// 只在"新通知"或"状态变化"时叫钩子：已读/延后这类局部字段更新不推，
+	// 免得长链接被自触发的回显刷屏（自己点已读又收到一遍同一条）。
+	if hook := c.noticeHook; hook != nil && (!exists || before.Status != n.Status) {
+		hook(n)
 	}
 	return nil
 }
