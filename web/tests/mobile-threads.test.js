@@ -1,4 +1,5 @@
-// 工作区会话列表按项目分组：组头 = 工作区名，组间按各组最新会话活跃时间排序。
+// 工作区两级视图：①项目列表（名称 + 会话数 + 最近活跃）；②点进项目看该
+// 项目会话。新建项目用 /api/acp/dirs 浏览电脑目录后 POST /api/acp/workspaces。
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,53 +10,73 @@ vi.mock('../src/components/SelectBox.vue', () => ({ default: { template: '<selec
 
 import MobileThreads from '../src/mobile/MobileThreads.vue'
 
+const WORKSPACES = [
+  { id: 'ws-plugins', name: 'Plugins' },
+  { id: 'ws-photos', name: '照片服务' },
+]
 const THREADS = [
   { id: 't1', title: 'Plugins 最新', workspaceId: 'ws-plugins', agent: 'zcode', updatedAt: '2026-11-07T10:00:00Z' },
   { id: 't2', title: 'Photos 更新', workspaceId: 'ws-photos', agent: 'codex', updatedAt: '2026-11-07T09:00:00Z' },
   { id: 't3', title: 'Plugins 旧', workspaceId: 'ws-plugins', agent: 'claude', updatedAt: '2026-11-06T08:00:00Z' },
-  { id: 't4', title: 'Codis', workspaceId: 'ws-codis', agent: 'zcode', updatedAt: '2026-11-05T08:00:00Z' },
 ]
-const WORKSPACES = [
-  { id: 'ws-plugins', name: 'Plugins' },
-  { id: 'ws-photos', name: '照片服务' },
-  { id: 'ws-codis', name: 'codis' },
-]
-
-const mountList = async () => {
+const mountView = async () => {
   apiMock.mockImplementation(async (_m, path) => {
-    if (path === '/api/acp/threads') return { workspaces: WORKSPACES, threads: THREADS, acp: { agents: [] } }
-    return {} // 容忍测试环境的杂散调用（Vue dev 模式初始化触达）
+    if (path === '/api/acp/threads') return { workspaces: WORKSPACES, threads: THREADS, acp: { agents: [{ name: 'zcode' }] } }
+    if (String(path).startsWith('/api/acp/dirs')) {
+      // 解析 query 返回对应层级的列表（组件按返回的 path/parent 继续浏览）
+      const q = decodeURIComponent(String(path).split('path=')[1] || '')
+      if (q.endsWith('/projects')) return { path: q, parent: '/home/aaron', dirs: [] }
+      return { path: '/home/aaron', parent: '', dirs: [{ name: 'projects', path: '/home/aaron/projects' }] }
+    }
+    if (path === '/api/acp/workspaces') return { workspace: { id: 'ws-new', name: 'projects' } }
+    return {} // 容忍测试环境的杂散调用
   })
   const w = mount(MobileThreads)
   await flushPromises()
   return w
 }
 
-describe('mobile threads grouping', () => {
+describe('mobile workspace two-level view', () => {
   beforeEach(() => apiMock.mockReset())
 
-  it('按工作区分组出组头，组间按最近活跃排序', async () => {
-    const w = await mountList()
-    const groups = w.findAll('.m-row-group')
-    // Plugins 最新(11-07 10:00) > 照片服务(11-07 09:00) > codis(11-05)
-    expect(groups.map(g => g.text())).toEqual(['Plugins', '照片服务', 'codis'])
-    // 组内顺序保持接口时间序，且组内连续：Plugins 两行相邻，然后照片服务、codis
-    const rows = w.findAll('.m-row .m-row-title')
-    expect(rows.map(r => r.text())).toEqual(['Plugins 最新', 'Plugins 旧', 'Photos 更新', 'Codis'])
-    // 分组后行副标题不再重复工作区名（组头已表达）
-    expect(w.find('.m-row-sub').text()).not.toContain('Plugins')
+  it('项目列表：每个项目一行，带会话数与最近活跃', async () => {
+    const w = await mountView()
+    const rows = w.findAll('.m-row')
+    expect(rows.length).toBe(2)
+    expect(rows[0].text()).toContain('Plugins')
+    expect(rows[0].text()).toContain('2 个会话')
+    expect(rows[1].text()).toContain('照片服务')
+    expect(rows[1].text()).toContain('1 个会话')
     w.unmount()
   })
 
-  it('未知工作区的会话归入「未知工作区」组', async () => {
-    apiMock.mockImplementation(async () => ({
-      workspaces: [],
-      threads: [{ id: 'x', title: '孤儿', workspaceId: 'gone', agent: 'a', updatedAt: '2026-11-07T00:00:00Z' }],
-      acp: { agents: [] },
-    }))
-    const w = mount(MobileThreads)
+  it('点项目进入会话列表：只显示该项目的会话，返回键回项目列表', async () => {
+    const w = await mountView()
+    await w.findAll('.m-row')[0].trigger('click')
+    const rows = w.findAll('.m-row')
+    expect(rows.length).toBe(2) // Plugins 的两个会话
+    expect(rows[0].text()).toContain('Plugins 最新')
+    expect(rows[1].text()).toContain('Plugins 旧')
+    await w.find('.m-ico-btn').trigger('click')
+    expect(w.findAll('.m-row').length).toBe(2) // 回到项目列表
+    w.unmount()
+  })
+
+  it('新建项目：浏览目录 → 在此创建 → POST workspaces 并进入新项目', async () => {
+    const w = await mountView()
+    await w.find('.m-pane-head .m-btn').trigger('click') // ＋ 新项目
+    expect(w.find('.m-dir-path').text()).toContain('/home/aaron')
+    await w.findAll('.m-dir-row')[0].trigger('click') // 进入 projects 子目录
     await flushPromises()
-    expect(w.find('.m-row-group').text()).toBe('未知工作区')
+    // 名称默认取首层目录名（aaron），用户改成 projects 后创建
+    await w.find('.m-sheet input.m-input').setValue('projects')
+    await w.find('.m-sheet .m-btn.primary').trigger('click') // 在此创建项目
+    await flushPromises()
+    const post = apiMock.mock.calls.find(c => c[0] === 'POST' && c[1] === '/api/acp/workspaces')
+    expect(post).toBeTruthy()
+    expect(JSON.parse(JSON.stringify(post[2]))).toEqual({ name: 'projects', dirs: ['/home/aaron/projects'] })
+    // 创建成功后直接进入新项目的会话视图
+    expect(w.find('.m-pane-title').text()).toContain('projects')
     w.unmount()
   })
 })
