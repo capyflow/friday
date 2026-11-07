@@ -7,10 +7,15 @@ package admin
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	vhttp "github.com/capyflow/vortexv3/server/http"
@@ -62,7 +67,9 @@ func (s *Server) redeemPairCode(code string) bool {
 	return true
 }
 
-// handlePairInfo 生成配对码与二维码（需登录）。
+// handlePairInfo 生成配对码与二维码（需登录）。url 带 &fp=<叶子证书指纹>：
+// 手机 APP 扫码即把指纹一并拿到（二维码来自电脑屏幕，属带外可信通道），
+// 无需 TOFU 确认；fp 对浏览器侧无影响（PWA 只读 pair 参数）。
 func (s *Server) handlePairInfo(ctx *vhttp.Context) error {
 	if !s.tlsReady() {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{
@@ -76,7 +83,7 @@ func (s *Server) handlePairInfo(ctx *vhttp.Context) error {
 		})
 	}
 	code, expires := s.newPairCode()
-	url := fmt.Sprintf("https://%s:%d/mobile?pair=%s", ip, s.tlsPort, code)
+	url := fmt.Sprintf("https://%s:%d/mobile?pair=%s&fp=%s", ip, s.tlsPort, code, s.leafFP)
 	png, err := qrcode.Encode(url, qrcode.Medium, 512)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "生成二维码失败"})
@@ -84,9 +91,28 @@ func (s *Server) handlePairInfo(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"url":       url,
 		"qr":        base64.StdEncoding.EncodeToString(png),
+		"fp":        s.leafFP,
 		"expiresAt": expires.UTC().Format(time.RFC3339),
 		"caURL":     "/friday-ca.crt",
 	})
+}
+
+// FingerprintPEM 证书 PEM 文件的 SHA-256 指纹（hex 小写 64 位）；文件缺失或
+// 解析失败返回空串（调用方据此降级：壳走 TOFU 确认而不是扫码免确认）。
+func FingerprintPEM(path string) string {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return ""
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:])
 }
 
 // handlePairRedeem 用配对码换登录 JWT（公开路由；码一次性、5 分钟过期）。

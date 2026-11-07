@@ -249,6 +249,7 @@ type Server struct {
 	// CA 下载都依赖它们（pair.go / cert.go）。
 	tlsPort     int
 	caPEM       []byte
+	leafFP      string // 叶子证书 SHA-256 指纹（hex），随配对 URL 下发供壳 pin
 	tls         *TLSOptions
 	tlsListener net.Listener
 	pairMu      sync.Mutex
@@ -568,6 +569,7 @@ func (s *Server) Start(ctx context.Context) error {
 				} else {
 					s.caPEM = caPEM
 					s.tlsPort = o.Port
+					s.leafFP = FingerprintPEM(certPath)
 					s.tlsListener = tls.NewListener(tlsL, tlsCfg)
 					go func() {
 						if err := server.Serve(s.tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
