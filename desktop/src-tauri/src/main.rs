@@ -836,21 +836,6 @@ fn desktop_port() -> u16 {
 
 /// 清理旧版外置内核布局的遗留（<数据目录>/bin/friday）：内核改为随包分发后，
 /// 这份旧种子不再被运行，留着会让人误以为它还在生效。尽力清理，失败保留。
-fn remove_seeded_kernel(data_dir: &std::path::Path) {
-    let legacy = data_dir.join("bin").join(if cfg!(windows) { "friday.exe" } else { "friday" });
-    if !legacy.exists() {
-        return;
-    }
-    match std::fs::remove_file(&legacy) {
-        Ok(_) => eprintln!("[外壳] 已清理旧版外置内核：{}", legacy.display()),
-        Err(err) => eprintln!(
-            "[外壳] 清理旧版外置内核失败（保留原文件）：{}：{err}",
-            legacy.display()
-        ),
-    }
-    let _ = std::fs::remove_dir(data_dir.join("bin")); // 只在空目录时删得掉，失败无妨
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1007,7 +992,6 @@ fn spawn_kernel(app: tauri::AppHandle) {
     let data_dir = app.state::<Kernel>().data_dir();
     eprintln!("[外壳] 数据目录：{}", data_dir.display());
     seed_config(&app, &data_dir);
-    remove_seeded_kernel(&data_dir);
     let envs = read_env_file(&data_dir.join("friday.env"));
 
     let data_arg = data_dir.to_string_lossy().to_string();
@@ -1147,21 +1131,110 @@ fn probe_kernel(addr: &str) -> bool {
     }
 }
 
-/// 内核启动入口：优先「发现已有内核」attach（数据目录 kernel.addr 指向的实例
-/// 探测存活即复用），失败才拉起随包 sidecar。attach 模式不持有 child 句柄，
-/// 外壳退出不会触碰内核（服务化后内核生命周期归服务管）。
+/// 内核启动入口（服务化后的完整链路）：
+/// 1. 确保常驻服务就绪（未安装→随包内核安装；已装未响应→按需升级并重启）；
+/// 2. 读 kernel.addr 探测已有内核，存活即 attach（不拉起任何进程）；
+/// 3. 服务管理不可用（非 macOS / launchctl 失败）才回退拉起随包 sidecar。
+/// attach 模式不持有 child 句柄，外壳退出不会触碰内核（生命周期归 launchd）。
 fn start_kernel(app: tauri::AppHandle) {
     let data_dir = app.state::<Kernel>().data_dir();
-    if let Some(addr) = read_kernel_addr(&data_dir) {
-        if probe_kernel(&addr) {
-            eprintln!("[外壳] 发现已有内核，attach：{addr}");
-            kernel_ready(&app, addr.clone());
-            spawn_liveness_poll(app, addr);
-            return;
-        }
-        eprintln!("[外壳] kernel.addr 无响应（{addr}），回退拉起 sidecar");
+    let service_ready = ensure_service(&data_dir);
+    if attach_existing_kernel(&app, &data_dir, service_ready) {
+        return;
     }
+    eprintln!("[外壳] 服务不可用且无已有内核，回退拉起 sidecar");
     spawn_kernel(app);
+}
+
+/// 确保内核服务就绪，返回服务管理是否可用（macOS + 操作成功）。
+/// - plist 缺失：用随包内核执行 `service install`（拷贝二进制 + 写 plist + 启动）；
+/// - plist 在、内核活着：什么都不做（随后 attach 接上，绝不重启打扰会话）；
+/// - plist 在、内核没响应：版本比对——一致仅 kickstart，不一致重装（升级二进制）。
+fn ensure_service(data_dir: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let bin = kernel_path();
+    let dir_arg = data_dir.to_string_lossy().to_string();
+    if !service_plist_path().exists() {
+        eprintln!("[外壳] 内核服务未安装，随包安装中…");
+        return run_kernel_tool(
+            &bin,
+            &["service", "install", "--data-dir", &dir_arg],
+            "安装内核服务",
+        );
+    }
+    if read_kernel_addr(data_dir)
+        .map(|a| probe_kernel(&a))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    eprintln!("[外壳] 内核服务已装但未响应，检查版本并重启…");
+    let bundled_v = run_capture(&bin, &["--version"]);
+    let installed_v = run_capture(&data_dir.join("bin").join("friday"), &["--version"]);
+    if bundled_v.is_some() && bundled_v == installed_v {
+        return run_kernel_tool(&bin, &["service", "start"], "启动内核服务");
+    }
+    run_kernel_tool(
+        &bin,
+        &["service", "install", "--data-dir", &dir_arg],
+        "升级并重启内核服务",
+    )
+}
+
+/// attach 尝试：读 kernel.addr → 探测 /api/session。wait=true 时轮询约 20 秒
+///（服务 kickstart 拉起内核需要几秒），成功返回 true 并发出 server-ready。
+fn attach_existing_kernel(app: &tauri::AppHandle, data_dir: &Path, wait: bool) -> bool {
+    let attempts = if wait { 40 } else { 1 };
+    for i in 0..attempts {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if let Some(addr) = read_kernel_addr(data_dir) {
+            if probe_kernel(&addr) {
+                eprintln!("[外壳] 发现已有内核，attach：{addr}");
+                kernel_ready(app, addr.clone());
+                spawn_liveness_poll(app.clone(), addr);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn service_plist_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.capyflow.friday.kernel.plist")
+}
+
+/// 跑一次内核二进制的子命令（服务管理），成功与否只记日志。
+fn run_kernel_tool(bin: &Path, args: &[&str], what: &str) -> bool {
+    match std::process::Command::new(bin).args(args).output() {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "[外壳] {what}失败: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(err) => {
+            eprintln!("[外壳] {what}失败: {err}");
+            false
+        }
+    }
+}
+
+fn run_capture(bin: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(bin).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// attach 模式的轻量存活轮询：内核不是本壳的子进程，收不到 Terminated 事件，

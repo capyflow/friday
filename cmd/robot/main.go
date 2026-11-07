@@ -83,35 +83,45 @@ var version = "dev"
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "配置文件路径")
 	desktop := flag.Bool("desktop", false, "桌面模式：数据落独立目录、无终端 REPL、stdin 关闭即退出（供 Tauri 桌面外壳拉起）")
-	dataDir := flag.String("data-dir", "", "数据目录（桌面模式：进程切换到该目录运行，默认取系统配置目录下的 Friday）")
+	serviceMode := flag.Bool("service", false, "服务模式（launchd LaunchAgent）：数据目录语义与桌面模式相同，但无 /quit stdin 契约与 ppid 看门狗——内核生命周期归服务管理器")
+	dataDir := flag.String("data-dir", "", "数据目录（桌面/服务模式：进程切换到该目录运行，默认取系统配置目录下的 Friday）")
 	portFlag := flag.Int("port", -1, "覆盖 admin.port；0 表示自动挑选空闲端口（桌面外壳依赖此参数定位服务地址）")
 	hostFlag := flag.String("host", "", "覆盖 admin.host（默认 127.0.0.1；远程部署显式用 0.0.0.0）")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	// service 子命令（launchd 服务管理）自带 FlagSet，放 flag 解析前分流。
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		runServiceCommand(os.Args[2:])
+		return
+	}
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
 		return
 	}
 
-	// 桌面模式：先补用户 PATH（Finder/launchd 只有系统目录，npm/npx/uv 会 127），
+	// 桌面/服务模式：先补用户 PATH（Finder/launchd 只有系统目录，npm/npx/uv 会 127），
 	// 再落位数据目录（相对路径的 config.yaml 与数据文件全部基于它）。
-	if *desktop {
+	if *desktop || *serviceMode {
+		mode := "桌面"
+		if *serviceMode {
+			mode = "服务"
+		}
 		ensureUserPath()
 		dir := strings.TrimSpace(*dataDir)
 		if dir == "" {
 			base, err := os.UserConfigDir()
 			if err != nil {
-				log.Fatalf("桌面模式无法定位系统配置目录: %v", err)
+				log.Fatalf("%s模式无法定位系统配置目录: %v", mode, err)
 			}
 			dir = filepath.Join(base, "Friday")
 		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			log.Fatalf("桌面模式创建数据目录失败: %v", err)
+			log.Fatalf("%s模式创建数据目录失败: %v", mode, err)
 		}
 		if err := os.Chdir(dir); err != nil {
-			log.Fatalf("桌面模式切换数据目录失败: %v", err)
+			log.Fatalf("%s模式切换数据目录失败: %v", mode, err)
 		}
-		log.Printf("[桌面] 数据目录：%s（config.yaml / 会话 / 待办 / 记忆均在此目录）", dir)
+		log.Printf("[%s] 数据目录：%s（config.yaml / 会话 / 待办 / 记忆均在此目录）", mode, dir)
 	}
 
 	if err := config.EnsureInitial(*cfgPath); err != nil {
@@ -135,11 +145,13 @@ func main() {
 	if *hostFlag != "" {
 		cfg.Admin.Host = *hostFlag
 	}
-	if *desktop {
+	if *desktop || *serviceMode {
+		// 本机 HTTP 门恒为回环（外壳/本机浏览器走这里）；局域网访问走 TLS
+		// 监听（见 admin TLS 配置），两个门是两套独立 listener。
 		cfg.Admin.Host = "127.0.0.1"
 	}
-	if *desktop && !cfg.Admin.IsEnabled() {
-		log.Fatalf("桌面模式要求管理后台保持开启（admin.enabled 不能配成 false），外壳窗口依赖它提供界面")
+	if (*desktop || *serviceMode) && !cfg.Admin.IsEnabled() {
+		log.Fatalf("桌面/服务模式要求管理后台保持开启（admin.enabled 不能配成 false），外壳窗口与手机端依赖它提供界面")
 	}
 	log.Printf("[启动] Friday %s（provider=%s）", version, cfg.Provider.Model)
 	// 密钥未配置不阻断启动：网页/桌面端均可在「设置」页补配（写回 config.yaml）。
@@ -633,16 +645,18 @@ func main() {
 		} else {
 			log.Printf("[管理后台] %s/admin（使用已有管理员账号）", addr)
 		}
-		// 桌面模式：服务就绪后向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行解析 stdout
-		// 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）；同时把地址
-		// 落盘 kernel.addr，外壳冷启动可凭它「发现已有内核」直接复用（attach）。
-		if *desktop {
+		// 桌面/服务模式：服务就绪后落盘 kernel.addr（外壳冷启动「发现已有内核」
+		// 复用，attach 模式）；桌面模式再向 stdout 打印 FRIDAY_ADDR 标记，外壳逐行
+		// 解析 stdout 拿到地址后导航主窗口（docs/DESKTOP.md 启动链路第 3/4 步）。
+		if *desktop || *serviceMode {
 			if !waitReady(cfg.Admin.Port, 30*time.Second) {
-				log.Fatalf("桌面模式等待服务就绪超时（端口 %d）", cfg.Admin.Port)
+				log.Fatalf("等待服务就绪超时（端口 %d）", cfg.Admin.Port)
 			}
 			addrLocal := fmt.Sprintf("http://127.0.0.1:%d", cfg.Admin.Port)
 			writeAddrFile("kernel.addr", addrLocal)
-			fmt.Printf("FRIDAY_ADDR=%s\n", addrLocal)
+			if *desktop {
+				fmt.Printf("FRIDAY_ADDR=%s\n", addrLocal)
+			}
 		}
 	}
 	noticeCtx, stopNotices := context.WithCancel(ctx)
