@@ -1212,29 +1212,60 @@ fn service_plist_path() -> PathBuf {
 }
 
 /// 跑一次内核二进制的子命令（服务管理），成功与否只记日志。
+/// 带超时强杀：exec 偶发被 macOS 安全评估卡死时不能拖死外壳启动。
 fn run_kernel_tool(bin: &Path, args: &[&str], what: &str) -> bool {
-    match std::process::Command::new(bin).args(args).output() {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
+    match run_with_timeout(bin, args, 15_000) {
+        Some(out) if out.status.success() => true,
+        Some(out) => {
             eprintln!(
                 "[外壳] {what}失败: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             false
         }
-        Err(err) => {
-            eprintln!("[外壳] {what}失败: {err}");
+        None => {
+            eprintln!("[外壳] {what}超时或失败");
             false
         }
     }
 }
 
 fn run_capture(bin: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(bin).args(args).output().ok()?;
+    let out = run_with_timeout(bin, args, 10_000)?;
     if !out.status.success() {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 带超时的子进程执行：超时强杀并返回 None（std 无内置 timeout，轮询实现）。
+fn run_with_timeout(bin: &Path, args: &[&str], timeout_ms: u64) -> Option<std::process::Output> {
+    let mut child = std::process::Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // 正常退出：收管道（进程已退，读不会阻塞）
+                let out = child.wait_with_output().ok()?;
+                return Some(std::process::Output { status, stdout: out.stdout, stderr: out.stderr });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// attach 模式的轻量存活轮询：内核不是本壳的子进程，收不到 Terminated 事件，
