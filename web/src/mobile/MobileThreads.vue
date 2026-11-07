@@ -43,6 +43,21 @@ onMounted(load)
 
 const wsName = id => (workspaces.value.find(w => w.id === id) || {}).name || '未知工作区'
 
+// 按项目（工作区）分组：组内保持接口返回的时间序（新→旧），组间按各组
+// 最新会话的活跃时间排——最近在用的项目排最前。接口全局按时间返回时，
+// 各组首元素即该组最新会话，直接可比。
+const groups = computed(() => {
+  const byWs = new Map()
+  for (const t of threads.value) {
+    if (!byWs.has(t.workspaceId)) byWs.set(t.workspaceId, [])
+    byWs.get(t.workspaceId).push(t)
+  }
+  return [...byWs.entries()]
+    .map(([id, list]) => ({ id, name: wsName(id), threads: list }))
+    .sort((a, b) => String((b.threads[0] || {}).updatedAt || '')
+      .localeCompare(String((a.threads[0] || {}).updatedAt || '')))
+})
+
 // SelectBox 选项集（仓库约定：下拉一律用 SelectBox 自绘弹出层）
 const wsOptions = computed(() => workspaces.value.map(w => ({ value: w.id, label: w.name })))
 const agentOptions = computed(() => agents.value.map(a => ({ value: a.name, label: a.name })))
@@ -90,13 +105,16 @@ async function create() {
       <div v-if="!threads.length && !loading" class="m-empty">
         还没有智能体会话。点右上角「＋ 新会话」选一个工作区和 agent 开始。
       </div>
-      <button v-for="t in threads" :key="t.id" type="button" class="m-row" @click="open(t)">
-        <span class="m-row-main">
-          <span class="m-row-title">{{ t.title || '未命名会话' }}</span>
-          <span class="m-row-sub">{{ wsName(t.workspaceId) }} · {{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
-        </span>
-        <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
-      </button>
+      <template v-for="g in groups" :key="g.id">
+        <div class="m-row-group">{{ g.name }}</div>
+        <button v-for="t in g.threads" :key="t.id" type="button" class="m-row" @click="open(t)">
+          <span class="m-row-main">
+            <span class="m-row-title">{{ t.title || '未命名会话' }}</span>
+            <span class="m-row-sub">{{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
+          </span>
+          <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
+        </button>
+      </template>
       <div v-if="loading" class="m-empty">加载中…</div>
     </div>
 
