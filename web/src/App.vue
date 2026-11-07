@@ -165,6 +165,7 @@ async function logout() {
     <symbol id="i-acp" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9 17h6"/></symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
     <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
   </svg>
 
   <!-- 极光背景（深色可见光斑，浅色极淡点阵） -->

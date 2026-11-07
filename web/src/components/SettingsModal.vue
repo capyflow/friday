@@ -17,6 +17,7 @@ import StatusSection from './settings/StatusSection.vue'
 import TraceSection from './settings/TraceSection.vue'
 import SessionSection from './settings/SessionSection.vue'
 import WikiSection from './settings/WikiSection.vue'
+import PairingSection from './settings/PairingSection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import AboutSection from './settings/AboutSection.vue'
 
@@ -49,6 +50,7 @@ const GROUPS = [
     { id: 'appearance', icon: 'i-sun', label: '外观', comp: markRaw(AppearanceSection) },
     { id: 'wiki', icon: 'i-mem', label: '记忆', comp: markRaw(WikiSection), wide: true },
     { id: 'sessions', icon: 'i-chat', label: '会话管理', comp: markRaw(SessionSection) },
+    { id: 'pairing', icon: 'i-phone', label: '手机连接', comp: markRaw(PairingSection) },
     { id: 'about', icon: 'i-info', label: '关于与配置',
       comp: markRaw(AboutSection), on: { logout: () => emit('logout') } },
   ]},

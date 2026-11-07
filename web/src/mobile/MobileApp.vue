@@ -23,6 +23,20 @@ const filesOpen = ref(false) // 会话内「对话 ↔ 文件」切换
 async function boot() {
   bootErr.value = ''
   try {
+    // 扫码配对（?pair=一次性码）：换 JWT 后直达主界面；无论成败都清掉 URL
+    // 参数——码已作废，留着只会在刷新时再报一次「无效或已过期」。
+    const pairCode = new URLSearchParams(location.search).get('pair')
+    if (pairCode) {
+      try {
+        const r = await api('POST', '/api/pair/redeem', { code: pairCode })
+        setToken(r.token)
+        store.username = r.username
+        store.loggedIn = true
+      } catch (e) {
+        toast(e.message || '配对失败，请重新扫码', true)
+      }
+      history.replaceState(null, '', location.pathname)
+    }
     await hydrateToken() // 浏览器直访是 no-op（无桌面壳），与桌面端保持一致
     store.setupStatus = await api('GET', '/api/setup/status')
     const s = await api('GET', '/api/session')

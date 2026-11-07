@@ -3,9 +3,13 @@ module github.com/capyflow/friday
 go 1.25.5
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.3
 	github.com/capyflow/vortexagent v0.0.0-20261027081641-32e0de9c24fc
 	github.com/capyflow/vortexv3 v0.0.0-20260710095541-4b0bd57e123f
+	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.23
+	github.com/gin-gonic/gin v1.11.0
+	github.com/golang-jwt/jwt/v5 v5.2.3
 	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	github.com/gorilla/websocket v1.5.3
 	github.com/k2-fsa/sherpa-onnx-go v1.13.7
@@ -13,28 +17,25 @@ require (
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.3 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.14.2 // indirect
 	github.com/bytedance/sonic/loader v0.4.0 // indirect
 	github.com/capyflow/allspark-go v0.0.0-20260407135012-b62683dddee1 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
-	github.com/coder/acp-go-sdk v0.13.5 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.11 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
-	github.com/gin-gonic/gin v1.11.0 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.28.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.2.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-linux v1.13.7 // indirect

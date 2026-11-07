@@ -130,6 +130,23 @@ type AdminConfig struct {
 	// 环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD 优先于这两个字段。
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	// TLS 局域网门（手机端直连用）：开启后内核额外监听 0.0.0.0:<Port> 的
+	// HTTPS 通道，用数据目录内自签 CA 签发的证书；本机 HTTP 门不受影响。
+	// 手机首次连接需安装并信任该 CA（/friday-ca.crt 下载）。
+	TLS *TLSConfig `yaml:"tls"`
+}
+
+// TLSConfig 局域网 HTTPS 门配置。
+type TLSConfig struct {
+	// Enabled 默认关闭；开启即监听 0.0.0.0:<Port>。
+	Enabled *bool `yaml:"enabled"`
+	// Port HTTPS 监听端口（默认 45679）。
+	Port int `yaml:"port"`
+}
+
+// IsEnabled 返回 TLS 局域网门是否开启（未配置时默认关闭）。
+func (t *TLSConfig) IsEnabled() bool {
+	return t != nil && t.Enabled != nil && *t.Enabled
 }
 
 // 管理员凭据的环境变量名（优先于配置文件中的 username/password）。
@@ -1337,6 +1354,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Admin.AccountFile == "" {
 		c.Admin.AccountFile = "admin-account.json"
+	}
+	if c.Admin.TLS != nil && c.Admin.TLS.Port == 0 {
+		c.Admin.TLS.Port = 45679
 	}
 	if c.Memory.File == "" {
 		c.Memory.File = "memories.json"

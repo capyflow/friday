@@ -124,6 +124,7 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"fmt"
@@ -244,6 +245,14 @@ type Server struct {
 	goalRunner    *agent.GoalRunner
 	info          Info
 	startedAt     time.Time
+	// TLS 局域网门（手机直连）：Start 时挂载成功才置 tlsPort/caPEM，配对与
+	// CA 下载都依赖它们（pair.go / cert.go）。
+	tlsPort     int
+	caPEM       []byte
+	tls         *TLSOptions
+	tlsListener net.Listener
+	pairMu      sync.Mutex
+	pair        *pairState // 当前一次性配对码（内存单条，pair.go）
 }
 
 // Options 汇总管理后台的构建参数。
@@ -279,7 +288,19 @@ type Options struct {
 	Plans      *plan.Store
 	PlanRunner *plan.Runner
 	GoalRunner *agent.GoalRunner
+	// TLS 局域网门选项（nil = 不启用）：Port 为 0.0.0.0 HTTPS 监听端口，
+	// Dir 为证书目录（数据目录 tls/，CA 与叶子证书见 cert.go）。
+	TLS *TLSOptions
 }
+
+// TLSOptions 局域网 HTTPS 门的启动参数。
+type TLSOptions struct {
+	Port int
+	Dir  string
+}
+
+// SetTLS 设置局域网 HTTPS 门参数（Start 之前调用；不调 = 不启用）。
+func (s *Server) SetTLS(o TLSOptions) { s.tls = &o }
 
 // New 创建管理后台。accounts 为账号仓库（默认 admin/admin，可通过启动配置预置）；
 // chat 为网页聊天服务（可为 nil）；cfg/registry/configPath 支撑模型热更新
@@ -297,6 +318,7 @@ func New(o Options) *Server {
 		engine:        o.Engine,
 		todos:         o.Todos,
 		memory:        o.Memory,
+		tls:           o.TLS,
 		schedule:      &tools.ScheduleTaskTool{Engine: o.Engine},
 		chat:          o.Chat,
 		cfg:           o.Cfg,
@@ -340,6 +362,8 @@ func (s *Server) Handler() http.Handler {
 	// PWA 清单与图标：与 mobile.html 一起从 webdist 产物下发（未构建时图标 404，
 	// 清单给内置缺省，页面本身能进）。
 	root.AddStaticRouter("/mobile.webmanifest", s.handleWebdistAsset("mobile.webmanifest", "application/manifest+json"))
+	// 自签 CA 证书下载（公开静态）：手机首次连接局域网门时安装信任，见 cert.go。
+	root.AddStaticRouter("/friday-ca.crt", s.handleCACert)
 	root.AddStaticRouter("/icon-192.png", s.handleWebdistAsset("icon-192.png", "image/png"))
 	root.AddStaticRouter("/icon-512.png", s.handleWebdistAsset("icon-512.png", "image/png"))
 	if s.chat != nil {
@@ -488,6 +512,9 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/read", s.wrap(s.handleReadNotification))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/snooze", s.wrap(s.handleSnoozeNotification))
 	}
+	// 手机配对：桌面端（已登录）取码出二维码，手机扫码 redeem 换 JWT（pair.go）。
+	root.AddRouter([]string{http.MethodGet}, "/api/pair/info", s.wrap(s.handlePairInfo))
+	root.AddRouter([]string{http.MethodPost}, "/api/pair/redeem", s.wrapPublic(s.handlePairRedeem))
 
 	var handler *gin.Engine
 	_ = vortex.NewVortexEngine(context.Background(),
@@ -502,6 +529,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Start 在绑定失败时同步返回错误，默认仅监听本机；取消 ctx 时关闭 HTTP 服务。
+// 配置了 TLS 局域网门时额外监听 0.0.0.0:<tlsPort>（手机直连，同一 handler）。
 func (s *Server) Start(ctx context.Context) error {
 	l, err := net.Listen("tcp", net.JoinHostPort(s.host, strconv.Itoa(s.port)))
 	if err != nil {
@@ -519,7 +547,40 @@ func (s *Server) Start(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
+		// Shutdown 只停 handler 排空，两个 listener 要显式关，Serve 才会返回。
+		_ = l.Close()
+		if s.tlsListener != nil {
+			_ = s.tlsListener.Close()
+		}
 	}()
+	if o := s.tls; o != nil {
+		certPath, keyPath, caPEM, err := EnsureCerts(o.Dir)
+		if err != nil {
+			log.Printf("[TLS] 局域网门证书初始化失败，手机直连不可用: %v", err)
+		} else {
+			tlsCfg, err := TLSConfig(certPath, keyPath)
+			if err != nil {
+				log.Printf("[TLS] 局域网门启动失败: %v", err)
+			} else {
+				tlsL, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", o.Port))
+				if err != nil {
+					log.Printf("[TLS] 局域网门监听 0.0.0.0:%d 失败: %v", o.Port, err)
+				} else {
+					s.caPEM = caPEM
+					s.tlsPort = o.Port
+					s.tlsListener = tls.NewListener(tlsL, tlsCfg)
+					go func() {
+						if err := server.Serve(s.tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+							log.Printf("[管理后台] HTTPS 服务退出: %v", err)
+						}
+					}()
+					if ip := LANIPv4(); ip != "" {
+						log.Printf("[网页入口-局域网] https://%s:%d/mobile（手机首次连接先装 CA：/friday-ca.crt）", ip, o.Port)
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 

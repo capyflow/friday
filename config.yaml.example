@@ -144,6 +144,12 @@ admin:
   host: 127.0.0.1             # 默认仅本机；Docker 通过 ADMIN_HOST=0.0.0.0 显式开放
   port: 8080
   accountFile: admin-account.json   # 管理员账号文件（bcrypt 哈希落盘）；删除后需重新初始化
+  # 局域网门（手机直连，可选）：开启后额外监听 0.0.0.0:<port> 的 HTTPS 通道，
+  # 证书由本机自签 CA 签发（数据目录 tls/，网卡 IP 变化自动重签）。手机首次
+  # 连接：下载 /friday-ca.crt 安装并信任，之后扫码配对自动登录（设置 → 手机连接）。
+  # tls:
+  #   enabled: true
+  #   port: 45679
   # 启动预置账号（可选，须同时提供）：设置后每次启动以它覆盖账号文件里的账号。
   # 环境变量 FRIDAY_ADMIN_USERNAME / FRIDAY_ADMIN_PASSWORD 优先于下面两个字段。
   # username: aaron

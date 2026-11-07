@@ -633,6 +633,10 @@ func main() {
 			PlanRunner:    planRunner,
 			GoalRunner:    goalRunner,
 		})
+		// TLS 局域网门（手机直连）：启用时证书落数据目录 tls/，监听 0.0.0.0:<tlsPort>。
+		if cfg.Admin.TLS.IsEnabled() {
+			adminServer.SetTLS(admin.TLSOptions{Port: cfg.Admin.TLS.Port, Dir: filepath.Join("tls")})
+		}
 		if err := adminServer.Start(ctx); err != nil {
 			log.Fatalf("启动管理后台失败: %v", err)
 		}
