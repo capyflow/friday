@@ -1,9 +1,9 @@
 <script setup>
 // 移动端工作区：两级视图——①项目（工作区）列表；②点进项目看该项目全部
-// 会话并可新建会话（工作区已定，只选 agent）。新建项目在手机上直接浏览
-// 电脑目录（GET /api/acp/dirs 逐层懒列举）后 POST /api/acp/workspaces 创建，
-// 与桌面端同一组接口。终端入口刻意不做——终端通道只收本机回环，见
-// internal/admin/terminal.go 的硬闸说明。
+// 会话并可新建/删除会话。项目的编辑（改名/加移除目录/删除项目）走「⋯ 管理」
+// 弹层；新建项目在手机上浏览电脑目录（GET /api/acp/dirs 逐层懒列举）后
+// POST /api/acp/workspaces 创建——与桌面端同一组接口。终端入口刻意不做——
+// 终端通道只收本机回环，见 internal/admin/terminal.go 的硬闸说明。
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
 import { toast } from '../store.js'
@@ -31,6 +31,10 @@ async function load() {
     workspaces.value = r.workspaces || []
     threads.value = r.threads || []
     agents.value = (r.acp && r.acp.agents) || []
+    // 管理态下 currentWs 持有的是旧对象引用，load 后按 id 对齐新数据
+    if (currentWs.value) {
+      currentWs.value = workspaces.value.find(w => w.id === currentWs.value.id) || currentWs.value
+    }
   } catch (e) {
     toast('加载会话失败：' + e.message, true)
   } finally {
@@ -65,6 +69,36 @@ function open(t) {
   emit('open', t)
 }
 
+/* ---------- 危险操作确认（组件内小型确认框） ---------- */
+
+const confirmState = ref(null) // { text, run }
+function askConfirm(text, run) {
+  confirmState.value = { text, run }
+}
+function doConfirm() {
+  const c = confirmState.value
+  confirmState.value = null
+  if (c && c.run) c.run()
+}
+
+/* ---------- 会话删除 ---------- */
+
+const delThread = ref(null)
+function askDeleteThread(t) {
+  delThread.value = t
+}
+async function doDeleteThread() {
+  const t = delThread.value
+  delThread.value = null
+  if (!t) return
+  try {
+    await api('DELETE', '/api/acp/threads/' + t.id)
+    await load()
+  } catch (e) {
+    toast('删除会话失败：' + e.message, true)
+  }
+}
+
 /* ---------- 新建会话（工作区已定） ---------- */
 
 const wsSheet = ref(false)
@@ -96,7 +130,41 @@ async function createThread() {
   }
 }
 
-/* ---------- 新建项目（浏览电脑目录后创建） ---------- */
+/* ---------- 项目管理（改名 / 加移除目录 / 删除项目） ---------- */
+
+const manageSheet = ref(false)
+const manageName = ref('')
+const addDirOpen = ref(false)
+
+function openManage() {
+  manageName.value = (currentWs.value && currentWs.value.name) || ''
+  addDirOpen.value = false
+  manageSheet.value = true
+}
+
+async function saveName() {
+  const name = manageName.value.trim()
+  if (!currentWs.value || !name || name === currentWs.value.name) return
+  try {
+    await api('POST', '/api/acp/workspaces/' + currentWs.value.id, { name })
+    await load()
+    toast('项目已改名')
+  } catch (e) {
+    toast('改名失败：' + e.message, true)
+  }
+}
+
+async function removeDir(path) {
+  if (!currentWs.value) return
+  try {
+    await api('DELETE', '/api/acp/workspaces/' + currentWs.value.id + '/dirs?path=' + encodeURIComponent(path))
+    await load()
+  } catch (e) {
+    toast('移除目录失败：' + e.message, true)
+  }
+}
+
+/* ---------- 目录浏览（新建项目 / 添加目录共用） ---------- */
 
 const projSheet = ref(false)
 const projName = ref('')
@@ -147,6 +215,37 @@ async function createProject() {
   }
 }
 
+async function openAddDir() {
+  addDirOpen.value = true
+  await browseTo('~/')
+}
+
+async function addDir() {
+  if (!currentWs.value || !browsePath.value) return
+  try {
+    await api('POST', '/api/acp/workspaces/' + currentWs.value.id + '/dirs', { path: browsePath.value })
+    await load()
+    addDirOpen.value = false
+    toast('目录已添加')
+  } catch (e) {
+    toast('添加目录失败：' + e.message, true)
+  }
+}
+
+async function deleteProject() {
+  if (!currentWs.value) return
+  const id = currentWs.value.id
+  try {
+    await api('DELETE', '/api/acp/workspaces/' + id)
+    manageSheet.value = false
+    backToList()
+    await load()
+    toast('项目已删除')
+  } catch (e) {
+    toast('删除项目失败：' + e.message, true)
+  }
+}
+
 const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
 </script>
 
@@ -181,6 +280,9 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
         </button>
         <span class="m-pane-title">{{ currentWs && currentWs.name }}</span>
+        <button class="m-ico-btn" type="button" aria-label="项目设置" @click="openManage">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+        </button>
         <button class="m-btn primary small" type="button" @click="openWsSheet">＋ 新会话</button>
       </div>
       <div class="m-list">
@@ -194,6 +296,7 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
               <span class="m-row-sub">{{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
             </span>
             <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
+            <span class="m-row-x" role="button" aria-label="删除会话" @click.stop="askDeleteThread(t)">×</span>
           </button>
         </template>
         <div v-if="loading" class="m-empty">加载中…</div>
@@ -221,6 +324,48 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
       </div>
     </div>
 
+    <!-- 项目管理：改名 / 目录增删 / 删除项目 -->
+    <div v-if="manageSheet" class="m-sheet-mask" @click.self="manageSheet = false">
+      <div class="m-sheet" role="dialog" aria-label="项目设置">
+        <div class="m-sheet-title">项目设置</div>
+        <label class="m-field">
+          <span class="m-field-label">项目名</span>
+          <div class="m-inline-row">
+            <input v-model="manageName" class="m-input grow" autocapitalize="none">
+            <button class="m-btn small" type="button" @click="saveName">保存</button>
+          </div>
+        </label>
+        <div class="m-field">
+          <span class="m-field-label">目录（{{ (currentWs && currentWs.dirs || []).length }}）</span>
+          <div v-for="d in (currentWs && currentWs.dirs || [])" :key="d" class="m-dir-row">
+            <span class="m-dir-name">{{ shortPath(d) }}</span>
+            <button class="m-dir-x" type="button" aria-label="移除目录" @click="askConfirm('从项目移除目录 ' + shortPath(d) + '？（磁盘文件不动，仅解除分组）', () => removeDir(d))">×</button>
+          </div>
+          <div v-if="!(currentWs && currentWs.dirs || []).length" class="m-empty">还没有目录</div>
+        </div>
+        <div v-if="!addDirOpen" class="m-field">
+          <button class="m-btn block" type="button" @click="openAddDir">＋ 添加电脑目录</button>
+        </div>
+        <div v-else class="m-field">
+          <span class="m-field-label">选择要添加的目录</span>
+          <div class="m-dir-path">{{ shortPath(browsePath) || '…' }}</div>
+          <div class="m-dir-list">
+            <button v-if="browseParent" class="m-dir-row" type="button" @click="browseTo(browseParent)">← 上一级</button>
+            <button v-for="d in browseDirs" :key="d.path" class="m-dir-row" type="button" @click="browseTo(d.path)">{{ d.name }}</button>
+            <div v-if="browsing" class="m-empty">读取中…</div>
+          </div>
+          <div class="m-inline-row">
+            <button class="m-btn block" type="button" @click="addDirOpen = false">收起</button>
+            <button class="m-btn primary block" type="button" :disabled="browsing" @click="addDir">添加当前目录</button>
+          </div>
+        </div>
+        <div class="m-sheet-acts">
+          <button class="m-btn" type="button" @click="manageSheet = false">关闭</button>
+          <button class="m-btn danger" type="button" @click="askConfirm('删除项目「' + (currentWs && currentWs.name) + '」？会话记录一并删除，电脑上的文件不动。', deleteProject)">删除项目</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 新建项目：名称 + 电脑目录浏览 -->
     <div v-if="projSheet" class="m-sheet-mask" @click.self="projSheet = false">
       <div class="m-sheet" role="dialog" aria-label="新建项目">
@@ -233,12 +378,8 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
           <span class="m-field-label">在电脑上选择目录</span>
           <div class="m-dir-path">{{ shortPath(browsePath) || '…' }}</div>
           <div class="m-dir-list">
-            <button v-if="browseParent" class="m-dir-row" type="button" @click="browseTo(browseParent)">
-              ← 上一级
-            </button>
-            <button v-for="d in browseDirs" :key="d.path" class="m-dir-row" type="button" @click="browseTo(d.path)">
-              {{ d.name }}
-            </button>
+            <button v-if="browseParent" class="m-dir-row" type="button" @click="browseTo(browseParent)">← 上一级</button>
+            <button v-for="d in browseDirs" :key="d.path" class="m-dir-row" type="button" @click="browseTo(d.path)">{{ d.name }}</button>
             <div v-if="browsing" class="m-empty">读取中…</div>
             <div v-else-if="!browseDirs.length" class="m-empty">没有子目录</div>
           </div>
@@ -250,6 +391,30 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
           </button>
         </div>
         <div class="m-sheet-note">目录只读浏览，创建项目不会改动电脑上的文件。</div>
+      </div>
+    </div>
+
+    <!-- 删除会话确认 -->
+    <div v-if="delThread" class="m-sheet-mask" @click.self="delThread = null">
+      <div class="m-sheet" role="alertdialog" aria-modal="true">
+        <div class="m-sheet-title">删除会话？</div>
+        <p class="m-sheet-note">{{ (delThread && delThread.title) || '未命名会话' }} 的记录将一并删除，电脑上的文件不动。</p>
+        <div class="m-sheet-acts">
+          <button class="m-btn" type="button" @click="delThread = null">取消</button>
+          <button class="m-btn danger" type="button" @click="doDeleteThread">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通用危险操作确认（移除目录 / 删除项目） -->
+    <div v-if="confirmState" class="m-sheet-mask" @click.self="confirmState = null">
+      <div class="m-sheet" role="alertdialog" aria-modal="true">
+        <div class="m-sheet-title">确认操作</div>
+        <p class="m-sheet-note">{{ confirmState && confirmState.text }}</p>
+        <div class="m-sheet-acts">
+          <button class="m-btn" type="button" @click="confirmState = null">取消</button>
+          <button class="m-btn danger" type="button" @click="doConfirm">确认</button>
+        </div>
       </div>
     </div>
   </div>

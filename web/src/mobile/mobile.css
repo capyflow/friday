@@ -153,6 +153,25 @@ textarea.m-input { resize: none; line-height: 1.5; }
 }
 .m-dir-row:last-child { border-bottom: none; }
 .m-dir-row:active { background: var(--bg-muted); }
+
+/* 会话行删除 × 与目录管理行 */
+.m-row-x {
+  flex: none; width: 30px; height: 30px; display: flex; align-items: center;
+  justify-content: center; border: none; background: none; border-radius: 8px;
+  color: var(--faint-fg); font-size: 20px; line-height: 1;
+}
+.m-row-x:active { background: var(--bg-muted); color: var(--danger); }
+.m-dir-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-dir-row .m-dir-x {
+  flex: none; width: 26px; height: 26px; border: none; background: none;
+  color: var(--faint-fg); font-size: 16px; border-radius: 6px;
+}
+.m-dir-row .m-dir-x:active { background: var(--bg-muted); color: var(--danger); }
+.m-dir-row { display: flex; align-items: center; gap: 8px; }
+.m-btn.danger { background: var(--danger); border-color: transparent; color: #fff; }
+.m-inline-row { display: flex; gap: 8px; align-items: center; }
+.m-inline-row .grow { flex: 1; min-width: 0; }
+
 .m-empty { padding: 28px 16px; text-align: center; color: var(--faint-fg); font-size: 13px; }
 
 /* ---------- 面包屑（文件面板） ---------- */
