@@ -316,54 +316,17 @@ def run(binary: str, output_dir: str | None) -> dict:
         expect(fake.tool_calls == 1 and fake.tool_results == 1, "chat did not execute get_time tool")
         result["checks"].append("chat-sse")
 
-        # Life mode keeps the single main session; work mode can add independent
-        # sessions that share nothing but the same assistant behind them.
+        # 主会话是唯一的对话入口：清单里有它，且聊天只放行 web 这个 key。
         sessions = api.json("GET", "/api/sessions").get("sessions", [])
         expect(any(item.get("key") == "web" and item.get("kind") == "life" for item in sessions),
                "main session missing from the session list")
-        work_key = api.json("POST", "/api/sessions", {"title": "smoke work session"}).get("session", {}).get("key", "")
-        expect(work_key.startswith("work-"), "created session key lacks the work- prefix")
-        expect(sse_chat(api, "note this for the smoke run", session=work_key), "work session chat returned no text")
-        expect(api.json("GET", f"/api/chat/history?session={work_key}").get("messages"),
-               "work session history is not readable")
-        sessions = api.json("GET", "/api/sessions").get("sessions", [])
-        entry = next((item for item in sessions if item.get("key") == work_key), {})
-        expect(entry.get("kind") == "work" and entry.get("messages", 0) >= 2,
-               "work session is not listed with its messages")
-        main_texts = [item.get("text", "") for item in api.json("GET", "/api/chat/history?session=web").get("messages", [])]
-        expect(not any("note this for the smoke run" in text for text in main_texts),
-               "work session leaked into the main session")
         status, body = api.request("POST", "/api/chat", {"message": "x", "session": "work-unregistered"}, expected=(400,))
         expect(status == 400 and (body.get("body", body).get("error") or ""),
                "an unregistered session key was accepted by chat")
-        api.json("POST", f"/api/sessions/{work_key}", {"title": "renamed smoke session"})
-        keep_key = api.json("POST", "/api/sessions", {}).get("session", {}).get("key", "")
-        drop_key = api.json("POST", "/api/sessions", {}).get("session", {}).get("key", "")
-        api.json("DELETE", f"/api/sessions/{drop_key}")
-        sessions = api.json("GET", "/api/sessions").get("sessions", [])
-        expect(any(item.get("key") == keep_key and item.get("title") == "新会话" for item in sessions),
-               "an unnamed session should fall back to the placeholder title")
-        expect(not any(item.get("key") == drop_key for item in sessions), "deleted session is still listed")
-        status, body = api.request("DELETE", "/api/sessions/web", expected=(400,))
-        expect(status == 400, "the main session was deletable")
-
-        # A session can be anchored to a project directory: inside that session a
-        # bare relative filename resolves there, and the same request in the main
-        # session still cannot see it.
-        proj = root / "proj"
-        proj.mkdir()
-        (proj / "P0_SESSION_MARKER.txt").write_text("session-dir-ok\n", encoding="utf-8")
-        status, body = api.request("POST", "/api/sessions", {"dir": str(proj / "没有这个项目目录")}, expected=(400,))
-        expect(status == 400 and "重选" in json.dumps(body, ensure_ascii=False),
-               "a missing project dir should be refused with the next step")
-        dir_key = api.json("POST", "/api/sessions", {"dir": str(proj)}).get("session", {}).get("key", "")
-        expect(dir_key, "session with a project dir was not created")
-        echoed = sse_chat(api, "读项目标记文件", session=dir_key)
-        expect("session-dir-ok" in echoed, f"project dir did not become the relative base: {echoed}")
-        elsewhere = sse_chat(api, "读项目标记文件")
-        expect("session-dir-ok" not in elsewhere, f"the marker leaked into the main session: {elsewhere}")
         result["checks"].append("chat-sessions")
 
+        proj = root / "proj"
+        proj.mkdir(exist_ok=True)
         # 工作区的新建会话清单里还有一台内置 Friday：不装任何外部 agent 也能把活
         # 交给它，跑在工作区目录里（轮前快照、改动还原、投影与 SSE 都走 ACP 那套）。
         acp_cfg = api.json("POST", "/api/acp/config", {"acp": {"enabled": True, "agents": []}})
@@ -443,12 +406,6 @@ def run(binary: str, output_dir: str | None) -> dict:
         restored_tasks = api2.json("GET", "/api/tasks").get("tasks", [])
         expect(any(item.get("id") == paused_task_id and item.get("status") == "paused" for item in restored_tasks), "paused task was not restored")
         restored_sessions = api2.json("GET", "/api/sessions").get("sessions", [])
-        renamed = next((item for item in restored_sessions if item.get("key") == work_key), {})
-        expect(renamed.get("title") == "renamed smoke session", "renamed work session was not restored")
-        expect(any(item.get("key") == keep_key for item in restored_sessions), "idle work session was not restored")
-        anchored = next((item for item in restored_sessions if item.get("key") == dir_key), {})
-        expect(anchored.get("dir") == str(proj), "the session's project dir was not restored")
-        expect(not any(item.get("key") == drop_key for item in restored_sessions), "deleted session came back after restart")
         restored_notice = api2.json("GET", "/api/notifications").get("notifications", [])
         persisted = next((item for item in restored_notice if item.get("id") == notice["id"]), None)
         expect(persisted is not None and persisted.get("readAt"), "notification read state was not restored")
