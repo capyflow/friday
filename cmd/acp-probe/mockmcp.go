@@ -20,8 +20,12 @@ var mockStart = time.Now()
 type mockMCP struct {
 	nonce string
 	block time.Duration // friday_approval_gate 阻塞多久，模拟 Friday 侧人工审批
+	// requireAuth > "" 时校验 Authorization: Bearer <token>，模拟 Friday 门面的
+	// 会话 token（验证 agent 是否转发 session/new 里声明的 header）。
+	requireAuth string
 
 	mu        sync.Mutex
+	authFails int
 	listHits  int
 	calls     []string
 	other     []string
@@ -69,6 +73,17 @@ type mockReq struct {
 }
 
 func (m *mockMCP) handle(w http.ResponseWriter, r *http.Request) {
+	if m.requireAuth != "" && r.Header.Get("Authorization") != "Bearer "+m.requireAuth {
+		m.mu.Lock()
+		m.authFails++
+		got := r.Header.Get("Authorization")
+		m.mu.Unlock()
+		m.note("鉴权拒绝（Authorization=" + firstN(got, 60) + "）")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}`))
+		return
+	}
 	if r.Method == http.MethodGet {
 		// 不提供 SSE 反向通道：规范要求此时返回 405。
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -229,7 +244,8 @@ func (m *mockMCP) note(s string) {
 func (m *mockMCP) summary() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := fmt.Sprintf("tools/list %d 次，tools/call %d 次，审批门状态=%q", m.listHits, len(m.calls), m.gateState)
+	out := fmt.Sprintf("tools/list %d 次，tools/call %d 次，鉴权拒绝 %d 次，审批门状态=%q",
+		m.listHits, len(m.calls), m.authFails, m.gateState)
 	for _, c := range m.calls {
 		out += "\n   call params: " + firstN(c, 400)
 	}

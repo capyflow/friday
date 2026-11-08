@@ -377,6 +377,7 @@ func main() {
 		timeoutFlg   = flag.Duration("timeout", 5*time.Minute, "整个 turn 的上限")
 		cancelFlag   = flag.Duration("cancel-after", 0, ">0 时在该时刻发 session/cancel，观察取消语义")
 		mockMCPFlag  = flag.Bool("mock-mcp", false, "在本进程起一个 mock MCP HTTP 门面并挂给 agent")
+		mockAuthFlag = flag.Bool("mock-auth", false, "mock 门面要求 Authorization: Bearer（验证 agent 转发 header）")
 		mcpURLFlag   = flag.String("mcp-url", "", "额外挂给 agent 的 MCP streamable-HTTP 地址")
 	)
 	flag.Parse()
@@ -466,11 +467,18 @@ func main() {
 		}
 		mm.block = *approveBlk
 		mm.mode = *approveMode
+		headers := []acp.HttpHeader{}
+		if *mockAuthFlag {
+			mm.requireAuth = "probe-" + randHex(6)
+			headers = append(headers, acp.HttpHeader{
+				Name: "Authorization", Value: "Bearer " + mm.requireAuth,
+			})
+		}
 		defer mm.stop()
 		servers = append(servers, acp.McpServer{Http: &acp.McpServerHttpInline{
-			Name: "friday-probe", Url: mm.url, Headers: []acp.HttpHeader{},
+			Name: "friday-probe", Url: mm.url, Headers: headers,
 		}})
-		fmt.Fprintf(os.Stderr, "挂给 agent 的 MCP 门面: %s\n\n", mm.url)
+		fmt.Fprintf(os.Stderr, "挂给 agent 的 MCP 门面: %s（鉴权=%v）\n\n", mm.url, *mockAuthFlag)
 	}
 	if *mcpURLFlag != "" {
 		servers = append(servers, acp.McpServer{Http: &acp.McpServerHttpInline{
