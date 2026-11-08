@@ -60,6 +60,23 @@ export function parseScan(text, schemeHint) {
   return { ok: true, kind: 'addr', origin: n.origin, host: n.host, port: n.port }
 }
 
+// 用户手输的地址 → origin。**不补端口**：用户自己配了域名就按域名的默认端口
+// 走（反代一般已经把 45679 转进去了），没配就自己把端口写上——端口由用户决定，
+// 我们不替他添。缺 scheme 时按当前页面的协议补一个。
+export function addrToOrigin(raw, schemeHint) {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  const hint = schemeHint === 'http:' ? 'http:' : 'https:'
+  try {
+    const u = new URL(s.includes('://') ? s : hint + '//' + s)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+    if (!u.hostname) return null
+    return u.origin // origin 原样保留用户写的端口；没写端口就是没有
+  } catch {
+    return null
+  }
+}
+
 // origin → 给用户看的 host:port（输入框里显示的形态）。
 export function addrLabel(origin) {
   const m = /^[a-z]+:\/\/([^/]+)/i.exec(String(origin || ''))

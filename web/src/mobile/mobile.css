@@ -111,28 +111,22 @@ textarea.m-input { resize: none; line-height: 1.5; }
 .m-auth-box h1 { font-size: 22px; }
 .m-auth-sub { color: var(--muted-fg); font-size: 13px; margin-bottom: 10px; }
 .m-auth-box form { display: flex; flex-direction: column; gap: 10px; }
+.m-auth-form { text-align: left; }
+.m-auth-note { color: var(--muted-fg); font-size: 12px; line-height: 1.6; margin: 0; }
 .m-auth-setup { text-align: left; color: var(--fg-2); font-size: 14px; line-height: 1.7; }
 .m-auth-foot { color: var(--faint-fg); font-size: 12px; margin-top: 6px; }
 
 /* ---------- 服务器地址行（登录页 / 离线页共用） ---------- */
-.m-srv { display: flex; flex-direction: column; gap: 6px; }
-.m-srv-row { display: flex; align-items: center; gap: 8px; }
-.m-srv-input {
-  flex: 1; min-width: 0; text-align: left;
-  font-size: 14px; color: var(--muted-fg);
-}
-.m-srv-input.editing { color: var(--fg); }
-.m-srv-scan {
-  flex: none; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+/* 输入框 + 末尾动作按钮（扫码 / 显示密码）排成一行 */
+.m-input-row { display: flex; align-items: center; gap: 8px; }
+.m-input-row .m-input { flex: 1; min-width: 0; }
+.m-input-act {
+  flex: none; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
   border-radius: 10px; border: 1px solid var(--border-strong);
   background: var(--card); color: var(--muted-fg);
 }
-.m-srv-scan:active { background: var(--bg-muted); color: var(--fg); }
-.m-srv-go {
-  align-self: flex-start; padding: 6px 12px; border-radius: 8px;
-  border: 1px solid var(--border-strong); background: var(--card); color: var(--accent);
-  font-size: 13px;
-}
+.m-input-act:active { background: var(--bg-muted); color: var(--fg); }
+.m-input-act:disabled { opacity: .45; pointer-events: none; }
 
 /* ---------- 扫码页 ---------- */
 .m-scan {

@@ -8,7 +8,7 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { normalizeAddr, parseScan, addrLabel } from '../src/mobile/server.js'
+import { normalizeAddr, parseScan, addrLabel, addrToOrigin } from '../src/mobile/server.js'
 import MobileLogin from '../src/mobile/MobileLogin.vue'
 
 const apiMock = vi.hoisted(() => vi.fn())
@@ -63,6 +63,21 @@ describe('移动端服务器地址', () => {
     expect(parseScan('not a url at all').ok).toBe(false)
   })
 
+  it('addrToOrigin：用户填什么端口就是什么端口，不替他补 45679', () => {
+    // 配了域名的机器走反代，端口由用户自己决定，我们不添
+    expect(addrToOrigin('friday.home.arpa', 'https:')).toBe('https://friday.home.arpa')
+    expect(addrToOrigin('friday.home.arpa:8443', 'https:')).toBe('https://friday.home.arpa:8443')
+    expect(addrToOrigin('192.168.10.242', 'https:')).toBe('https://192.168.10.242')
+    // 缺 scheme 时按当前页面的协议补一个
+    expect(addrToOrigin('127.0.0.1:45678', 'http:')).toBe('http://127.0.0.1:45678')
+    expect(addrToOrigin('127.0.0.1:45678', 'https:')).toBe('https://127.0.0.1:45678')
+    // 写了 scheme 就以写的为准；非法输入返回 null
+    expect(addrToOrigin('http://127.0.0.1:45678', 'https:')).toBe('http://127.0.0.1:45678')
+    expect(addrToOrigin('')).toBe(null)
+    expect(addrToOrigin('ftp://x/y')).toBe(null)
+    expect(addrToOrigin('::::')).toBe(null)
+  })
+
   it('addrLabel：origin 显示成 host:port', () => {
     expect(addrLabel('https://192.168.10.242:45679')).toBe('192.168.10.242:45679')
   })
@@ -78,20 +93,38 @@ describe('移动端登录页的服务器地址行', () => {
     })
   })
 
-  it('登录表单里带服务器地址输入行与扫码图标', async () => {
+  it('登录表单是三个带标签的字段：服务器地址 / 用户名 / 密码', async () => {
     const w = mount(MobileLogin, { props: { setupStatus: { accountRequired: false } } })
     await flushPromises()
-    expect(w.find('.m-srv').exists()).toBe(true)
-    expect(w.find('.m-srv-input').exists()).toBe(true)
-    expect(w.find('.m-srv-scan').exists()).toBe(true)
+    // 三个字段各有可见标签（不是只靠 placeholder）
+    const labels = w.findAll('.m-field-label').map(l => l.text())
+    expect(labels).toEqual(['服务器地址', '用户名', '密码'])
+    // 地址输入框末尾跟着扫码图标
+    expect(w.find('.m-input-row .m-input').exists()).toBe(true)
+    expect(w.find('.m-input-act').exists()).toBe(true)
+    // 账号密码输入框
+    expect(w.find('#m-auth-user').exists()).toBe(true)
+    expect(w.find('#m-auth-pass').exists()).toBe(true)
     w.unmount()
   })
 
-  it('首装未建号时给指引卡，不摆地址行（还没到连哪台电脑那一步）', async () => {
+  it('地址输入框默认显示当前服务器，扫码图标可点', async () => {
+    const w = mount(MobileLogin, { props: { setupStatus: { accountRequired: false } } })
+    await flushPromises()
+    const addr = w.find('#m-srv-addr')
+    expect(addr.exists()).toBe(true)
+    expect(addr.element.value).toBe(location.host)
+    // 扫码按钮触发扫码页
+    await w.find('.m-input-act').trigger('click')
+    expect(w.find('.m-scan').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('首装未建号时给指引卡，不摆表单（还没到连哪台电脑那一步）', async () => {
     const w = mount(MobileLogin, { props: { setupStatus: { accountRequired: true } } })
     await flushPromises()
     expect(w.find('.m-auth-setup').exists()).toBe(true)
-    expect(w.find('.m-srv').exists()).toBe(false)
+    expect(w.find('#m-auth-user').exists()).toBe(false)
     w.unmount()
   })
 })

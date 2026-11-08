@@ -13,8 +13,8 @@ import MobileThreads from './MobileThreads.vue'
 import MobileFiles from './MobileFiles.vue'
 import MobileNotifications from './MobileNotifications.vue'
 import MobileScan from './MobileScan.vue'
-import MobileServerRow from './MobileServerRow.vue'
-import { parseScan } from './server.js'
+import MobileServerField from './MobileServerField.vue'
+import { addrToOrigin, parseScan } from './server.js'
 import { connectTo, currentOrigin } from './native.js'
 
 // phase: boot（探测中）| main（登录门卫之后的一切——由 store.loggedIn 分流）
@@ -24,16 +24,20 @@ const tab = ref('chat') // chat | threads | notices
 const openThread = ref(null) // 当前打开的智能体会话对象
 const filesOpen = ref(false) // 会话内「对话 ↔ 文件」切换
 const scanning = ref(false) // 扫码页开关（服务器不在线时换电脑用）
+const srvAddr = ref('') // 服务器地址输入框（host:port 形态）
+const offline = ref(false) // 上次探测是否失败（失败时离线卡片才允许换服务器）
 
-// 换服务器：整页跳到新服务器的 /mobile（接口是同源相对路径，跨源调不动）。
-function switchServer(origin) {
-  if (!origin) return
-  if (origin === currentOrigin()) return
-  connectTo(origin + '/mobile')
+// 当前服务器的 host:port —— 地址输入框的初值。
+function currentAddr() {
+  try {
+    return new URL(currentOrigin()).host
+  } catch {
+    return ''
+  }
 }
 
 // 扫码结果：带一次性配对码的直接开那个链接（网页自己 redeem 换 JWT 登录），
-// 纯地址的换成服务器地址。
+// 纯地址的填进地址框。
 function onScanned(text) {
   scanning.value = false
   const p = parseScan(text, location.protocol === 'http:' ? 'http:' : 'https:')
@@ -45,11 +49,26 @@ function onScanned(text) {
     connectTo(p.url)
     return
   }
-  switchServer(p.origin)
+  srvAddr.value = p.host + ':' + p.port
+  toast('已填入服务器地址')
+}
+
+// 地址输入框里的值 → origin。端口由用户自己定，不替他补。
+function srvOrigin() {
+  return addrToOrigin(srvAddr.value, location.protocol === 'http:' ? 'http:' : 'https:')
 }
 
 async function boot() {
   bootErr.value = ''
+  // 离线时填了另一台电脑的地址：先整页跳过去（接口是同源相对路径，跨源调不动），
+  // 跳过去后页面重新加载，自然重新探测。
+  if (offline.value) {
+    const target = srvOrigin()
+    if (target && target !== currentOrigin()) {
+      connectTo(target + '/mobile')
+      return
+    }
+  }
   try {
     // 扫码配对（?pair=一次性码）：换 JWT 后直达主界面；无论成败都清掉 URL
     // 参数——码已作废，留着只会在刷新时再报一次「无效或已过期」。
@@ -76,8 +95,11 @@ async function boot() {
       store.loggedIn = false
     }
     phase.value = 'main' // 探测结束（登录与否交给 store.loggedIn 分流），离开启动屏
+    offline.value = false
   } catch (e) {
+    offline.value = true
     bootErr.value = e.message || String(e)
+    srvAddr.value = currentAddr() // 离线页的地址输入框初值：当前服务器
   }
 }
 onMounted(boot)
@@ -119,7 +141,7 @@ function openThreadFrom(t) {
           <p class="m-offline-detail">{{ bootErr }}</p>
           <p class="m-offline-hint">请确认电脑上的 Friday 正在运行、手机与电脑连的是同一个 Wi-Fi，
             地址不对可以换一个或扫码重连。</p>
-          <MobileServerRow @scan="scanning = true" @switch="switchServer" />
+          <MobileServerField v-model="srvAddr" @scan="scanning = true" />
           <div class="m-offline-acts">
             <button class="m-btn primary" type="button" @click="boot">重试连接</button>
           </div>
