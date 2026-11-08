@@ -3,10 +3,11 @@
 //
 // ① 首装建号（/api/setup）只收本机请求，手机上必然被拒——账号未建时给一张
 //    "去电脑端完成首次设置"的说明卡，不摆一个注定 403 的表单。
-// ② 服务器地址：默认当前连着的服务器（APP 里由壳提供，浏览器里取 location.host）。
-//    末尾的扫码图标扫电脑端「手机连接」的二维码即可换电脑——扫到带一次性配对码
-//    的码扫码即登录，纯地址的则换服务器。地址改了要整页跳到新服务器：网页的接口
-//    调用是同源相对路径，跨源调不动，只能换 origin。
+// ② 服务器地址：**只在浏览器访问时展示**。APP 里服务器地址由壳记住（壳侧还管
+//    证书信任），摆出来只会让人以为要改；浏览器访问没有壳，地址要手输才能换
+//    电脑。末尾的扫码图标扫电脑端「手机连接」的二维码即可换电脑——扫到带一次性
+//    配对码的码扫码即登录，纯地址的则换服务器。地址改了要整页跳到新服务器：网页
+//    的接口调用是同源相对路径，跨源调不动，只能换 origin。
 // ③ 用户名/密码：标准账号密码登录。
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
@@ -14,7 +15,7 @@ import { store, toast } from '../store.js'
 import MobileScan from './MobileScan.vue'
 import MobileServerField from './MobileServerField.vue'
 import { addrToOrigin, parseScan } from './server.js'
-import { connectTo, currentOrigin } from './native.js'
+import { connectTo, currentOrigin, hasNative } from './native.js'
 
 const props = defineProps({
   // store.setupStatus?.accountRequired 为 true 时展示首装指引而不是表单
@@ -28,10 +29,15 @@ const scanning = ref(false)
 // 密码明文开关（对齐常见客户端：输错时能看见自己敲的字符）
 const showPass = ref(false)
 
+// APP 内（壳桥在）不展示服务器地址字段：地址由壳记住，用户不用改。
+const inApp = hasNative()
+
 // 地址输入框里的值：host:port 形态（用户看到的），默认当前服务器。
 const addr = ref('')
 
 onMounted(() => {
+  // APP 内不展示地址字段，也就没有初值——省得 parsed 算出个跟当前服务器对不上的值
+  if (inApp) return
   const cur = currentOrigin()
   // currentOrigin 是 origin（https://host:port），输入框只显示 host:port
   try {
@@ -104,7 +110,8 @@ function onScanned(text) {
       </div>
 
       <form v-else class="m-auth-form" @submit.prevent="submit">
-        <MobileServerField v-model="addr" :disabled="busy" @scan="scanning = true" />
+        <!-- APP 内地址由壳记住，登录页不展示；浏览器访问才需要手输或扫码换服务器 -->
+        <MobileServerField v-if="!inApp" v-model="addr" :disabled="busy" @scan="scanning = true" />
 
         <div class="m-field">
           <label class="m-field-label" for="m-auth-user">用户名</label>

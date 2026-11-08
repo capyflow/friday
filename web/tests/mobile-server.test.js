@@ -120,6 +120,22 @@ describe('移动端登录页的服务器地址行', () => {
     w.unmount()
   })
 
+  it('APP 内登录页不展示服务器地址字段（地址由壳记住）', async () => {
+    // 壳桥在 = 在 Android 壳里跑
+    window.FridayNative = { isApp: () => true }
+    try {
+      const w = mount(MobileLogin, { props: { setupStatus: { accountRequired: false } } })
+      await flushPromises()
+      expect(w.find('#m-srv-addr').exists()).toBe(false)
+      // 用户名密码照旧
+      expect(w.find('#m-auth-user').exists()).toBe(true)
+      expect(w.find('#m-auth-pass').exists()).toBe(true)
+      w.unmount()
+    } finally {
+      delete window.FridayNative
+    }
+  })
+
   it('首装未建号时给指引卡，不摆表单（还没到连哪台电脑那一步）', async () => {
     const w = mount(MobileLogin, { props: { setupStatus: { accountRequired: true } } })
     await flushPromises()
