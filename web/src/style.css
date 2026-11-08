@@ -945,7 +945,11 @@ html[data-theme="dark"] .approval-card {
   word-break: break-all; max-height: 180px; overflow: auto;
   background: var(--bg-subtle); border-radius: 8px; padding: 8px 10px;
   font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--fg-2); }
-.approval-card .acts { display: flex; gap: 8px; justify-content: flex-end; }
+.approval-card .acts { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* 选项按钮的文案是 agent 原样转来的一整句话（如 codex 的 "Yes, and don't ask
+   again for commands that start with …"），.btn 基础样式 nowrap 会把单个按钮
+   撑破 372px 卡面；这里放开按钮内换行，超宽时占满整行、文本折行。 */
+.approval-card .acts .btn { white-space: normal; min-width: 0; }
 /* 问答卡（agent 借权限通道问用户，如 AskUserQuestion）：正文按问题排版，
    按钮就是 agent 自己给的选项；左边条改点缀色，与"要你批准"的橙条区分。 */
 .approval-card.is-question { border-left-color: var(--accent); }
