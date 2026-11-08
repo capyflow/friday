@@ -210,3 +210,96 @@ describe('升级徽标的版本号', () => {
     expect(badge.text()).toContain('v2.179.3 → v2.180.0')
   })
 })
+// ---------- 工具门面卡片 ----------
+
+const FACADE = {
+  status: {
+    enabled: true, authDisabled: false, url: 'http://127.0.0.1:58080/mcp',
+    lists: 2, calls: 3, rejects: 1,
+    grants: [{ agent: 'minimax', tools: ['get_time'], expires: '2026-11-07T21:00:00+08:00' }],
+    records: [
+      { at: '2026-11-06T21:45:27.5+08:00', agent: 'minimax', tool: 'list_files', outcome: 'ok', detail: '12ms' },
+      { at: '2026-11-06T21:44:00.0+08:00', agent: 'minimax', tool: 'write_file', outcome: 'denied', detail: '不在该会话白名单' },
+    ],
+  },
+  tools: [
+    { name: 'read_file', description: '读文件', denied: false, inDefault: true },
+    { name: 'list_files', description: '列目录', denied: false, inDefault: true },
+    { name: 'write_file', description: '写文件', denied: true, inDefault: false },
+  ],
+}
+
+describe('设置 → 智能体 → 工具门面', () => {
+  beforeEach(() => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') {
+        // 后端回的是归一化后的值：facade.tools 为空会补默认只读清单，这里照实给。
+        return { acp: { enabled: false,
+          facade: { enabled: true, disableAuth: false, tools: ['read_file', 'list_files'] },
+          agents: [{ name: 'minimax', command: 'minimax-acp' }] } }
+      }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url === '/api/acp/facade') return FACADE
+      return { message: '已保存' }
+    })
+  })
+
+  function facadeBox(name) {
+    const card = wrapper.get('.acp-facade')
+    return card.findAll('label').find(l => l.text().startsWith(name))
+  }
+
+  it('渲染状态行、调用记录（最新在前、结果中文化）与可勾选工具目录', async () => {
+    await show()
+    const status = wrapper.get('.acp-facade-status')
+    expect(status.text()).toContain('http://127.0.0.1:58080/mcp')
+    expect(status.text()).toContain('调用 3 次')
+    expect(status.text()).toContain('活授权：minimax')
+    const rows = wrapper.findAll('.acp-facade-records tbody tr')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('成功')
+    expect(rows[1].text()).toContain('拒绝')
+    expect(rows[1].text()).toContain('minimax')
+  })
+
+  it('审批类工具的勾选框禁用并带标记，勾不上', async () => {
+    await show()
+    const box = facadeBox('write_file')
+    expect(box.find('input').attributes('disabled')).toBeDefined()
+    expect(box.text()).toContain('审批类')
+    await box.find('input').setValue(true) // disabled，事件不应改状态
+    const saved = await saveAndCapture()
+    expect(saved.acp.facade.tools).not.toContain('write_file')
+  })
+
+  it('勾选全局清单随 facade.tools 保存；agent 卡片勾选落到 allowedFacadeTools，未勾的 agent 为空数组', async () => {
+    await show()
+    await facadeBox('read_file').find('input').setValue(true)
+    await facadeBox('list_files').find('input').setValue(true)
+    // 展开 agent 卡片，勾一个逐 agent 白名单。
+    await wrapper.get('.acp-agent-toggle').trigger('click')
+    const agentCard = wrapper.get('.acp-agent')
+    const agentBox = agentCard.findAll('label').find(l => l.text() === 'read_file')
+    await agentBox.find('input').setValue(true)
+
+    const saved = await saveAndCapture()
+    expect(saved.acp.facade.tools).toEqual(['read_file', 'list_files'])
+    expect(saved.acp.agents[0].allowedFacadeTools).toEqual(['read_file'])
+    expect(saved.acp.facade.disableAuth).toBe(false)
+  })
+
+  it('全局清单全部取消 = 保存空数组（后端回默认只读清单）', async () => {
+    await show() // config 无 facade 段 → 默认清单回显；目录里 read_file/list_files 应勾上
+    expect(facadeBox('read_file').find('input').element.checked).toBe(true)
+    await facadeBox('read_file').find('input').setValue(false)
+    await facadeBox('list_files').find('input').setValue(false)
+    const saved = await saveAndCapture()
+    expect(saved.acp.facade.tools).toEqual([])
+  })
+
+  async function saveAndCapture() {
+    await wrapper.findAll('button').find(b => b.text().includes('保存')).trigger('click')
+    await flushPromises()
+    return api.mock.calls.find(([method, url]) => method === 'POST' && url === '/api/acp/config')[2]
+  }
+})

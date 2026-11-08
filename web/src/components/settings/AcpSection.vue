@@ -9,6 +9,10 @@ import { api } from '../../api.js'
 const cfg = reactive({
   enabled: false, maxConcurrent: 2, idleKillSeconds: 600,
   handshakeTimeoutSeconds: 10, sessionTimeoutSeconds: 60, showThought: true,
+  // 工具门面（facade）：外部 agent 建会话时挂上的 MCP server，能调哪些 Friday
+  // 工具由这里的全局清单 + 逐 agent 的 allowedFacadeTools 决定。可编辑态随
+  // /api/acp/config 保存；运行态（地址/计数/调用记录）只读，来自 /api/acp/facade。
+  facade: { enabled: true, disableAuth: false, tools: [] },
   agents: [],
 })
 const busy = ref(false)
@@ -25,12 +29,44 @@ function show(t, ok) {
   clearTimeout(timer); timer = setTimeout(() => { msg.text = '' }, 5000)
 }
 
+// ---------- 工具门面 ----------
+
+// facadeStatus 是运行态快照（url/计数/活授权/最近调用）；facadeTools 是注册表
+// 全目录（带 denied 审批类护栏标记与 inDefault 默认清单标记），全局清单和逐
+// agent 白名单的勾选框都靠它渲染。
+const facadeStatus = ref(null)
+const facadeTools = ref([])
+const facadeLoading = ref(false)
+
+async function loadFacade() {
+  facadeLoading.value = true
+  try {
+    const r = await api('GET', '/api/acp/facade')
+    facadeStatus.value = r.status || null
+    facadeTools.value = r.tools || []
+  } catch { /* 门面接口失败不阻塞主配置 */ } finally { facadeLoading.value = false }
+}
+
+// toggleIn 勾选/取消一个工具名（数组来自 reactive 树，原地改即可触发更新）。
+function toggleIn(list, name) {
+  const i = list.indexOf(name)
+  if (i >= 0) list.splice(i, 1)
+  else list.push(name)
+}
+
+const OUTCOMES = { ok: '成功', error: '失败', timeout: '超时', denied: '拒绝' }
+function outcomeText(o) { return OUTCOMES[o] || o }
+function shortTime(iso) {
+  // RFC3339（本地时区偏移）截 HH:MM:SS；列表只求一眼可辨先后。
+  return String(iso || '').slice(11, 19)
+}
+
 // 卡片默认收起：折叠态只留名称 + 启动命令摘要 + 测试/删除，展开才给全字段。
 // open 是纯前端状态（toAgent 不带它，不会写回 config.yaml）。
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
            enabled: true, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
-           degradeResume: false, version: '', testing: false }
+           degradeResume: false, version: '', testing: false, facadeTools: [] }
 }
 // launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
 // 一眼看出是哪个 agent、怎么起的。
@@ -52,6 +88,8 @@ function toAgent(a) {
     sessionTimeoutSeconds: Math.max(0, Math.floor(Number(a.sessionTimeoutSeconds) || 0)),
     degradeResume: a.degradeResume,
     version: a.version || '',   // 安装时登记的版本戳（M-4），保存时原样带回
+    // Friday 工具白名单逐 agent 覆盖：空数组 = 用全局清单（后端不落盘）。
+    allowedFacadeTools: (a.facadeTools || []).filter(Boolean),
   }
 }
 function parseEnv(text) {
@@ -162,6 +200,7 @@ function appendTemplate(entry) {
 
 async function load() {
   loadCatalog()
+  loadFacade()
   try {
     const r = await api('GET', '/api/acp/config')
     const a = r.acp || {}
@@ -172,6 +211,13 @@ async function load() {
       handshakeTimeoutSeconds: a.handshakeTimeoutSeconds ?? 10,
       sessionTimeoutSeconds: a.sessionTimeoutSeconds ?? 60,
       showThought: a.showThought !== false,
+      // 后端回的是归一化后的值：tools 为空会补默认只读清单，勾选框直接以它为准；
+      // 全部取消再保存即回到默认（落盘时与默认相同就不写 facade 段）。
+      facade: {
+        enabled: a.facade?.enabled !== false,
+        disableAuth: !!a.facade?.disableAuth,
+        tools: [...(a.facade?.tools || [])],
+      },
     })
     const list = a.agents || []
     hasBuiltin.value = list.some(x => x.builtin)
@@ -183,6 +229,7 @@ async function load() {
       handshakeTimeoutSeconds: x.handshakeTimeoutSeconds || 0,
       sessionTimeoutSeconds: x.sessionTimeoutSeconds || 0,
       version: x.version || '',
+      facadeTools: [...(x.allowedFacadeTools || [])],
     }))
   } catch (e) { show(e.message, false) }
 }
@@ -196,6 +243,11 @@ async function save() {
       handshakeTimeoutSeconds: num(cfg.handshakeTimeoutSeconds, 10),
       sessionTimeoutSeconds: num(cfg.sessionTimeoutSeconds, 60),
       showThought: cfg.showThought,
+      facade: {
+        enabled: cfg.facade.enabled,
+        disableAuth: cfg.facade.disableAuth,
+        tools: [...cfg.facade.tools],
+      },
       agents: cfg.agents.map(toAgent),
     }
     const r = await api('POST', '/api/acp/config', { acp: payload })
@@ -240,6 +292,47 @@ onMounted(load)
         <input v-model="cfg.showThought" type="checkbox">
         <span>显示 agent 思考流</span>
       </label>
+    </div>
+
+    <div class="acp-facade">
+      <div class="acp-catalog-head">Friday 工具门面
+        <button class="btn sm" type="button" style="margin-left:8px"
+                :disabled="facadeLoading" @click="loadFacade">
+          {{ facadeLoading ? '刷新中…' : '刷新状态' }}</button>
+      </div>
+      <p class="meta">外部 agent（minimax / codex…）建会话时挂上一台 MCP server，即可直接调用勾选的 Friday 工具。
+        默认只给只读清单；写文件、执行命令属审批类工具，不能经门面暴露——那类需求 agent 用自己的工具走审批卡。</p>
+      <div class="acp-checks">
+        <label class="acp-check"><input v-model="cfg.facade.enabled" type="checkbox"><span>启用门面</span></label>
+        <label class="acp-check"><input v-model="cfg.facade.disableAuth" type="checkbox">
+          <span>关闭鉴权（仅当某家 agent 不转发 Authorization 时用）</span></label>
+      </div>
+      <div v-if="facadeStatus" class="acp-facade-status meta">
+        <span v-if="facadeStatus.url" class="mono">{{ facadeStatus.url }}</span>
+        <span>tools/list {{ facadeStatus.lists }} 次 · 调用 {{ facadeStatus.calls }} 次 · 拒绝 {{ facadeStatus.rejects }} 次</span>
+        <span v-if="facadeStatus.grants?.length">活授权：{{ facadeStatus.grants.map(g => g.agent || '（关鉴权）').join('、') }}</span>
+      </div>
+      <div class="acp-facade-tools">
+        <label v-for="t in facadeTools" :key="t.name" class="acp-check" :class="{ off: t.denied }">
+          <input type="checkbox" :checked="cfg.facade.tools.includes(t.name)" :disabled="t.denied"
+                 @change="toggleIn(cfg.facade.tools, t.name)">
+          <span>{{ t.name }}<i v-if="t.denied" class="acp-tool-tag">审批类</i></span>
+        </label>
+        <p v-if="!facadeTools.length" class="meta">工具目录未就绪（Friday 大脑还没起工具），稍后点「刷新状态」。</p>
+      </div>
+      <p class="meta acp-coldnote">全部取消勾选 = 恢复默认只读清单；逐 agent 可在其卡片里单独覆盖（留空 = 用这里的全局清单）。</p>
+      <table v-if="facadeStatus?.records?.length" class="acp-facade-records" aria-label="最近调用">
+        <thead><tr><th>时间</th><th>agent</th><th>工具</th><th>结果</th><th>详情</th></tr></thead>
+        <tbody>
+          <tr v-for="(r, i) in facadeStatus.records" :key="i">
+            <td class="mono">{{ shortTime(r.at) }}</td>
+            <td>{{ r.agent || '（关鉴权）' }}</td>
+            <td class="mono">{{ r.tool }}</td>
+            <td><span class="acp-outcome" :class="r.outcome">{{ outcomeText(r.outcome) }}</span></td>
+            <td class="meta">{{ r.detail }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="acp-catalog">
@@ -287,6 +380,8 @@ onMounted(load)
             <b>{{ a.name || '未命名 agent' }}</b>
             <span v-if="!a.enabled" class="acp-agent-tag">已停用</span>
             <span v-if="a.version" class="acp-agent-tag">v{{ a.version }}</span>
+            <span v-if="a.facadeTools?.length" class="acp-agent-tag"
+                  :title="`可调用 Friday 工具：${a.facadeTools.join('、')}`">Friday 工具 ×{{ a.facadeTools.length }}</span>
             <span v-if="!a.open" class="meta mono acp-agent-sum" :title="launchText(a)">{{ launchText(a) }}</span>
           </button>
           <span class="pm-acts">
@@ -310,6 +405,16 @@ onMounted(load)
             <label class="acp-check"><input v-model="a.enabled" type="checkbox"><span>启用</span></label>
             <label class="acp-check"><input v-model="a.degradeResume" type="checkbox">
               <span>会话恢复不可靠（重开对话不再尝试重接，直接新开并标注）</span></label>
+          </div>
+          <div class="acp-facade-agent">
+            <span class="acp-facade-agent-label">Friday 工具白名单（留空 = 用全局清单；审批类工具不可选）</span>
+            <div class="acp-facade-tools">
+              <label v-for="t in facadeTools" :key="t.name" class="acp-check" :class="{ off: t.denied }">
+                <input type="checkbox" :checked="a.facadeTools.includes(t.name)" :disabled="t.denied"
+                       @change="toggleIn(a.facadeTools, t.name)">
+                <span>{{ t.name }}</span>
+              </label>
+            </div>
           </div>
         </div>
       </div>
@@ -366,6 +471,27 @@ onMounted(load)
 .acp-agent-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-agent-body { display: flex; flex-direction: column; gap: 10px; }
 .acp-checks { display: flex; gap: 18px; flex-wrap: wrap; }
+/* 工具门面卡片：状态行、勾选网格、调用记录表。 */
+.acp-facade { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px;
+              border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.acp-facade-status { display: flex; gap: 14px; flex-wrap: wrap; margin: 0; font-size: 11.5px; }
+.acp-facade-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                    gap: 6px 14px; }
+.acp-facade-tools .acp-check.off { opacity: .55; cursor: not-allowed; }
+.acp-tool-tag { font-style: normal; margin-left: 6px; font-size: 10.5px; padding: 1px 6px;
+                border-radius: 999px; background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+.acp-facade-records { width: 100%; border-collapse: collapse; font-size: 12px; }
+.acp-facade-records th { text-align: left; font-weight: 600; font-size: 11px;
+                         color: var(--muted-fg); padding: 4px 8px 4px 0; }
+.acp-facade-records td { padding: 4px 8px 4px 0; border-top: 1px solid var(--border);
+                         vertical-align: top; }
+.acp-outcome { font-size: 11px; padding: 1px 8px; border-radius: 999px; }
+.acp-outcome.ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
+.acp-outcome.error, .acp-outcome.timeout { background: rgba(217, 119, 6, .14); color: #D97706; }
+.acp-outcome.denied { background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+/* agent 卡片里的逐 agent 白名单。 */
+.acp-facade-agent { display: flex; flex-direction: column; gap: 6px; }
+.acp-facade-agent-label { font-size: 12px; color: var(--muted-fg); }
 .acp-install-output { margin: 8px 0 0; padding: 10px 12px; max-height: 240px; overflow: auto;
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle);
   font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;

@@ -119,7 +119,18 @@ function onDocPointerdown(e) {
   if (pop.value && pop.value.contains(e.target)) return
   close()
 }
-function onScrollOrResize() { if (open.value) close() }
+// 滚动时收起弹层（页面一动，fixed 定位的弹层就该跟着走）——但弹层自己例外：
+// 选项多时列表是可滚的（agent 清单常九、十台），滑一下想看后面的选项就被收走，
+// 下拉框等于只能看前八条。scroll 事件不冒泡，可 window 上这行是捕获阶段监听，
+// 任何元素的滚动都会先经过它——所以必须按事件来源区分：弹层内部的滚动放过，
+// 弹层之外（页面/父容器）滚动的照旧收起。
+function onScrollOrResize(e) {
+  if (!open.value) return
+  const t = e && e.target
+  // t 可能是 window（页面滚动）——它不是 Node，不能喂给 contains()
+  if (t && t.nodeType && pop.value && pop.value.contains(t)) return
+  close()
+}
 
 onMounted(() => {
   document.addEventListener('pointerdown', onDocPointerdown)

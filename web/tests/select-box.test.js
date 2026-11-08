@@ -105,4 +105,32 @@ describe('下拉框组件', () => {
     await flushPromises()
     expect(off.find('.selbox-pop').exists()).toBe(false)
   })
+
+  // 回归：弹层里滑一下就被收走，下拉框只看得到前几条（agent 清单排到第九台就没了）。
+  // scroll 事件不冒泡，但 window 上是捕获阶段监听，弹层内的滚动也会被它看见——
+  // 必须按来源区分：弹层内滚动放过，弹层外滚动照旧收起。
+  it('弹层内部滚动不收起下拉（选项多时还能往下翻）', async () => {
+    const w = mountBox({
+      options: [
+        { value: 'a', label: '第一台' },
+        { value: 'b', label: '第二台' },
+        { value: 'c', label: '第三台' },
+      ],
+    })
+    await open(w)
+    const pop = w.find('.selbox-pop').element
+    pop.dispatchEvent(new window.Event('scroll'))
+    await flushPromises()
+    expect(w.find('.selbox-pop').exists()).toBe(true)
+    expect(w.get('.selbox-trigger').attributes('aria-expanded')).toBe('true')
+  })
+
+  it('弹层之外的滚动照旧收起下拉（页面一动，fixed 弹层该跟着走）', async () => {
+    const w = mountBox()
+    await open(w)
+    window.dispatchEvent(new window.Event('scroll'))
+    await flushPromises()
+    expect(w.find('.selbox-pop').exists()).toBe(false)
+    expect(w.get('.selbox-trigger').attributes('aria-expanded')).toBe('false')
+  })
 })
