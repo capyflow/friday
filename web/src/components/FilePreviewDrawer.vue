@@ -5,7 +5,7 @@
 // Esc 或点遮罩关闭；open(path) 由父组件经 ref 调用。
 import { onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
-import { renderMD } from '../md.js'
+import { renderMD, localFileHref, joinFilePath } from '../md.js'
 
 const openState = ref(false)
 const loading = ref(false)
@@ -46,10 +46,20 @@ function close() {
   document.removeEventListener('keydown', onKey)
 }
 
-// 抽屉里预览 markdown 时命中的文件路径 chip 同样可点开。
+// 抽屉里预览 markdown 时命中的文件路径 chip 同样可点开；预览正文里的文件链接
+// （[文案](./b.md)）按当前文件所在目录解析相对路径，抽屉内继续点开。
 function onBodyClick(e) {
   const chip = e.target.closest?.('.file-chip')
-  if (chip?.dataset.path) open(chip.dataset.path)
+  if (chip?.dataset.path) { open(chip.dataset.path); return }
+  const a = e.target.closest?.('a[href]')
+  if (!a) return
+  const href = localFileHref(a.getAttribute('href'))
+  if (href === null) return
+  const dir = file.path ? file.path.slice(0, file.path.lastIndexOf('/')) : ''
+  const abs = href.startsWith('/') ? href : joinFilePath(dir, href)
+  if (!abs) return
+  e.preventDefault()
+  open(abs)
 }
 
 onUnmounted(() => document.removeEventListener('keydown', onKey))

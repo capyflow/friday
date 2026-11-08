@@ -68,6 +68,41 @@ export function looksLikeFilePath(text) {
   return /\.[A-Za-z0-9]{1,8}$/.test(s)
 }
 
+// localFileHref 判定一个 <a href> 是不是指向本机文件：是则返回去掉 ?# 后缀的
+// 路径候选（相对路径原样返回，由调用方按基准目录拼绝对路径），否则 null。
+// agent 的回答常带 [文案](docs/a.md) 这类相对链接——safeURL 的固定基址把它们
+// 当 https 透传成 <a>，原生行为是跳到站点 404（桌面壳里干脆没反应）。识别从严：
+// 带协议（http:/mailto:/…）与协议相对（//host/…）不算，纯锚点不算；绝对路径
+// 与 file-chip 同口径（looksLikeFilePath），相对路径要求 1–8 位扩展名结尾——
+// 点错顶多提示文件不存在，不误伤站内路由（/api/…）。
+export function localFileHref(href) {
+  const h = String(href ?? '').trim()
+  if (!h || h.startsWith('#') || h.startsWith('//')) return null
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(h)) return null
+  const clean = h.replace(/[?#].*$/, '')
+  if (!clean || /[`<>|]/.test(clean)) return null
+  for (let i = 0; i < clean.length; i++) {
+    if (clean.charCodeAt(i) < 0x20) return null
+  }
+  if (clean.startsWith('/')) return looksLikeFilePath(clean) ? clean : null
+  if (!/\.[A-Za-z0-9]{1,8}$/.test(clean)) return null
+  try { return decodeURIComponent(clean) } catch { return clean }
+}
+
+// joinFilePath 把相对路径按基准目录拼成绝对路径（消化 ./ 与 ../）。base 非绝对
+// 路径时返回空串——调用方据此回退默认行为，不猜位置。
+export function joinFilePath(base, rel) {
+  const b = String(base ?? '').trim()
+  if (!b.startsWith('/')) return ''
+  const out = []
+  for (const part of (b.replace(/\/+$/, '') + '/' + rel).split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return '/' + out.join('/')
+}
+
 // 后处理已消毒 HTML：命中路径的行内 code（pre 里的不动）换成 button.file-chip，
 // 全部经 DOM API 构造（textContent/dataset），不拼字符串，无注入面。
 function linkifyFileChips(html) {

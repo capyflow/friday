@@ -5,7 +5,7 @@
 // 每条仍是可再展开的 ToolStep。块对象是父组件的 reactive 数组元素，这里的开合切换
 // 直接改写它们。
 import { computed } from 'vue'
-import { renderMD } from '../md.js'
+import { renderMD, localFileHref, joinFilePath } from '../md.js'
 import ToolStep from './ToolStep.vue'
 import { blockIndex, thinkPreview } from '../blocks.js'
 
@@ -19,12 +19,25 @@ const props = defineProps({
   // 这些工具调用是不是 Friday 自己 agent 发的（ChatView）。ACP 会话页不传，
   // 外部 agent 的工具名照直显示、图标退回扳手。
   ownTools: { type: Boolean, default: false },
+  // 会话主目录：正文里的相对文件链接（[文案](docs/a.md)）按它拼绝对路径再预览。
+  // 内置聊天没有 cwd，不传时相对链接不拦（绝对路径链接不受影响）。
+  baseDir: { type: String, default: '' },
 })
 
-// 正文里的文件路径 chip 由后端只读预览（v-html 内的点击走委托）。
+// 正文里的文件路径 chip 与文件链接都转后端只读预览（v-html 内的点击走委托）。
+// http(s)/mailto 外链不在这拦：桌面壳由 App.vue 的全局委托转系统浏览器，浏览器
+// 直连保持原生行为（中键/右键不受影响）。
 function onTextClick(e) {
   const chip = e.target.closest?.('.file-chip')
-  if (chip?.dataset.path) emit('preview', chip.dataset.path)
+  if (chip?.dataset.path) { emit('preview', chip.dataset.path); return }
+  const a = e.target.closest?.('a[href]')
+  if (!a) return
+  const href = localFileHref(a.getAttribute('href'))
+  if (href === null) return
+  const abs = href.startsWith('/') ? href : joinFilePath(props.baseDir, href)
+  if (!abs) return // 没有基准目录拼不出绝对路径：不拦，回退默认行为
+  e.preventDefault()
+  emit('preview', abs)
 }
 
 // 相邻的工具调用并成一叠；只有一次的退回普通行（多套一层折叠只会让人多点一下）。

@@ -36,3 +36,32 @@ describe('时间线工具行的来源口径', () => {
     expect(mountRows(many).get('.tool-stack > .tool-head').text()).toBe('执行工具 2 次')
   })
 })
+
+describe('正文里的文件链接转预览', () => {
+  it('相对链接按 baseDir 拼绝对路径交给预览，外链保持原生行为不拦', async () => {
+    const w = mountRows([{
+      kind: 'text',
+      text: '已整理好：[客户端发现服务器接入说明](docs/client.md)。另见 [/tmp/a.md](/tmp/a.md) 与 [官网](https://example.com)。',
+    }], { baseDir: '/home/u/proj' })
+    await w.get('a[href="docs/client.md"]').trigger('click')
+    await w.get('a[href="/tmp/a.md"]').trigger('click')
+    const ext = w.get('a[href^="https"]')
+    let extPrevented = null
+    ext.element.addEventListener('click', e => { extPrevented = e.defaultPrevented })
+    await ext.trigger('click')
+    expect(w.emitted('preview')).toEqual([['/home/u/proj/docs/client.md'], ['/tmp/a.md']])
+    // 外链没被拦（默认行为留给 App.vue 的桌面壳委托 / 浏览器原生导航）
+    expect(extPrevented).toBe(false)
+  })
+
+  it('没有 baseDir 时相对链接不拦（回退默认行为），chip 照常可点', async () => {
+    const w = mountRows([{
+      kind: 'text',
+      text: '相对 [a](docs/a.md)，chip `</tmp/b.md>` '.replace('</tmp/b.md>', '/tmp/b.md') + '都在。',
+    }])
+    await w.get('a[href="docs/a.md"]').trigger('click')
+    expect(w.emitted('preview')).toBeUndefined()
+    await w.get('.file-chip').trigger('click')
+    expect(w.emitted('preview')).toEqual([['/tmp/b.md']])
+  })
+})

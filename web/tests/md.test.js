@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { looksLikeFilePath, renderMD } from '../src/md.js'
+import { joinFilePath, localFileHref, looksLikeFilePath, renderMD } from '../src/md.js'
 
 function render(source) {
   const container = document.createElement('div')
@@ -112,4 +112,40 @@ describe('文件路径 chip', () => {
     container.innerHTML = renderMD(source, { fileChips })
     return container
   }
+})
+
+describe('正文里的本机文件链接', () => {
+  it.each([
+    ['docs/spec.md', 'docs/spec.md'],
+    ['./a/b.md#小结', './a/b.md'],
+    ['../out/报告.pdf?download=1', '../out/报告.pdf'],
+    ['/Users/aaron/x/说明.txt', '/Users/aaron/x/说明.txt'],
+    ['a%20b.md', 'a b.md'],
+  ])('识别文件链接：%s → %s', (href, want) => {
+    expect(localFileHref(href)).toBe(want)
+  })
+
+  it.each([
+    'https://example.com/a.md', 'mailto:a@b.c', 'file:///etc/hosts',
+    '//cdn.example.com/a.css', '#section', '/api/sessions', '',
+    '目录/', 'readme', 'a<b.md',
+  ])('不误伤非文件链接：%s', href => {
+    expect(localFileHref(href)).toBeNull()
+  })
+})
+
+describe('相对链接按基准目录拼绝对路径', () => {
+  it.each([
+    ['/home/u/proj', 'docs/a.md', '/home/u/proj/docs/a.md'],
+    ['/home/u/proj/', './a.md', '/home/u/proj/a.md'],
+    ['/home/u/proj', 'docs/../b.md', '/home/u/proj/b.md'],
+    ['/home/u/proj', '../shared/c.md', '/home/u/shared/c.md'],
+  ])('%s + %s → %s', (base, rel, want) => {
+    expect(joinFilePath(base, rel)).toBe(want)
+  })
+
+  it('基准不是绝对路径时返回空串（调用方回退默认行为）', () => {
+    expect(joinFilePath('', 'a.md')).toBe('')
+    expect(joinFilePath('relative/dir', 'a.md')).toBe('')
+  })
 })

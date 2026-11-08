@@ -1403,7 +1403,7 @@ function previewImages(urls, at = 0) {
                 </div>
                 <div v-else-if="m.role === 'bot'" class="turn">
                   <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
-                                  @preview="path => fileDrawer.open(path)" />
+                                  :base-dir="current?.cwd || ''" @preview="path => fileDrawer.open(path)" />
                   <button v-if="m.changes && m.changes.files.length && !m.streaming"
                           type="button" class="turn-changes" :class="{ reverted: m.changes.revertedAt }"
                           :aria-label="'查看本轮改动的 ' + m.changes.files.length + ' 个文件'"
