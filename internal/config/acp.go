@@ -48,6 +48,16 @@ func BuiltinAgent() AcpAgentConfig {
 	return AcpAgentConfig{Name: BuiltinAgentName, Builtin: true}
 }
 
+// FacadeDefaultTools 是工具门面的默认白名单：只读类工具。外部 agent 通过
+// MCP 门面只能调用这里列出的名字；写类（write_file/edit_file/mcp_edit）、
+// 命令执行（exec_command）、记忆与待办的增删改一律不进默认清单
+// （docs/AGENT-TOOL-INJECTION.md §3.2）。
+var FacadeDefaultTools = []string{
+	"read_file", "list_files",
+	"recall", "list_todos", "list_notes", "list_tasks",
+	"get_time", "web_search", "web_fetch",
+}
+
 // AcpConfig 是智能体层配置（config.yaml acp 段）。
 type AcpConfig struct {
 	// Enabled 总开关（默认关闭）。关闭时不拉起任何 agent，thread 接口拒绝新消息。
@@ -64,8 +74,26 @@ type AcpConfig struct {
 	SessionTimeoutSeconds int `yaml:"sessionTimeoutSeconds,omitempty" json:"sessionTimeoutSeconds,omitempty"`
 	// ShowThought 是否默认显示 agent 思考流（agent_thought_chunk，默认显示）。
 	ShowThought *bool `yaml:"showThought,omitempty" json:"showThought,omitempty"`
+	// Facade 工具门面配置（config.yaml acp.facade 段；nil = 默认开启 + 只读白名单）。
+	Facade *AcpFacadeConfig `yaml:"facade,omitempty" json:"facade,omitempty"`
 	// Agents 已声明的 agent 清单。
 	Agents []AcpAgentConfig `yaml:"agents,omitempty" json:"agents,omitempty"`
+}
+
+// AcpFacadeConfig 是「Friday 工具门面」的配置：把 Friday 注册表里白名单内的
+// 工具以 MCP server 形态注入外部 agent 的会话（session/new 的 mcpServers），
+// 见 internal/acp/facade.go。
+type AcpFacadeConfig struct {
+	// Enabled 门面开关（缺省开启）。关闭时 session/new 的 mcpServers 回到空数组。
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Tools 暴露给外部 agent 的工具白名单（空 = 用 FacadeDefaultTools）。
+	// 各 agent 可用 allowedFacadeTools 覆盖（逐 agent 收紧或放宽）。
+	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	// DisableAuth 关掉门面的 Bearer token 鉴权（缺省开启鉴权）。逃生口：若某家
+	// agent 不转发 session/new 里声明的自定义 header（docs/AGENT-TOOL-INJECTION.md
+	// §3.5 的未实测风险），关掉鉴权让它的门面工具可用——门面只听回环，风险同级
+	// 于 Admin 服务本机暴露。
+	DisableAuth *bool `yaml:"disableAuth,omitempty" json:"disableAuth,omitempty"`
 }
 
 // AcpAgentConfig 是一个外部 agent 的启动配置。
@@ -90,6 +118,9 @@ type AcpAgentConfig struct {
 	// DegradeResume 标记该 agent 的 session/load 恢复保真度实测不可靠：
 	// 重开 thread 不再尝试重接，直接新开会话并标注「上下文已重置」。
 	DegradeResume bool `yaml:"degradeResume,omitempty" json:"degradeResume,omitempty"`
+	// AllowedFacadeTools 该 agent 可调用的 Friday 门面工具白名单（空 = 用全局
+	// acp.facade.tools）。只该比全局更紧或按需放宽；门面按 token 逐会话执行。
+	AllowedFacadeTools []string `yaml:"allowedFacadeTools,omitempty" json:"allowedFacadeTools,omitempty"`
 	// Version 安装时登记的版本戳（M-4）：registry 条目安装/升级时写入，目录页
 	// 据此提示「有新版本」。仅元数据，不影响启动。
 	Version string `yaml:"version,omitempty" json:"version,omitempty"`
@@ -116,8 +147,32 @@ func (c AcpConfig) Normalized() AcpConfig {
 	if c.SessionTimeoutSeconds <= 0 {
 		c.SessionTimeoutSeconds = AcpDefaultSessionSeconds
 	}
+	if c.Facade == nil {
+		c.Facade = &AcpFacadeConfig{}
+	}
+	if len(c.Facade.Tools) == 0 {
+		c.Facade.Tools = append([]string(nil), FacadeDefaultTools...)
+	}
 	c.Agents = withBuiltinAgent(c.Agents)
 	return c
+}
+
+// FacadeEnabled 返回工具门面是否开启（缺省开启）。
+func (c AcpConfig) FacadeEnabled() bool {
+	return c.Facade == nil || c.Facade.Enabled == nil || *c.Facade.Enabled
+}
+
+// FacadeAuthDisabled 返回门面是否关闭鉴权（缺省开启鉴权）。
+func (c AcpConfig) FacadeAuthDisabled() bool {
+	return c.Facade != nil && c.Facade.DisableAuth != nil && *c.Facade.DisableAuth
+}
+
+// FacadeTools 返回门面白名单（Normalized 后必有值；未归一化的裸配置回退默认清单）。
+func (c AcpConfig) FacadeTools() []string {
+	if c.Facade != nil && len(c.Facade.Tools) > 0 {
+		return c.Facade.Tools
+	}
+	return FacadeDefaultTools
 }
 
 // withBuiltinAgent 把内置 Friday 排在 agent 清单最前：工作区新建会话时它就在那里，
@@ -206,6 +261,20 @@ func (c AcpConfig) Validate() error {
 		c.HandshakeTimeoutSeconds < 0 || c.SessionTimeoutSeconds < 0 {
 		return fmt.Errorf("config: acp 各项数值不能为负")
 	}
+	if c.Facade != nil {
+		for _, t := range c.Facade.Tools {
+			if t == "" {
+				return fmt.Errorf("config: acp.facade.tools 存在空工具名")
+			}
+		}
+	}
+	for _, a := range c.Agents {
+		for _, t := range a.AllowedFacadeTools {
+			if t == "" {
+				return fmt.Errorf("config: acp.agents[%s].allowedFacadeTools 存在空工具名", a.Name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -263,6 +332,26 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 	if cfg.ShowThought != nil && !*cfg.ShowThought {
 		boolPair(section, "showThought", false)
 	}
+	// 工具门面：只在偏离代码默认时落盘（显式关闭、白名单与 FacadeDefaultTools
+	// 不同、或显式关鉴权），默认形态不写进 config.yaml，与「0 值沿用全局」的段落
+	// 风格一致。
+	if cfg.Facade != nil {
+		fac := &yaml.Node{Kind: yaml.MappingNode}
+		if cfg.Facade.Enabled != nil && !*cfg.Facade.Enabled {
+			boolPair(fac, "enabled", false)
+		}
+		if cfg.Facade.DisableAuth != nil && *cfg.Facade.DisableAuth {
+			boolPair(fac, "disableAuth", true)
+		}
+		if len(cfg.Facade.Tools) > 0 && !sameStrings(cfg.Facade.Tools, FacadeDefaultTools) {
+			fac.Content = append(fac.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "tools"}, strSeqNode(cfg.Facade.Tools))
+		}
+		if len(fac.Content) > 0 {
+			section.Content = append(section.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "facade"}, fac)
+		}
+	}
 	if len(cfg.Agents) > 0 {
 		seq := &yaml.Node{Kind: yaml.SequenceNode}
 		for _, a := range cfg.Agents {
@@ -277,6 +366,11 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 				}
 				item.Content = append(item.Content,
 					&yaml.Node{Kind: yaml.ScalarNode, Value: "args"}, argsSeq)
+			}
+			if len(a.AllowedFacadeTools) > 0 {
+				item.Content = append(item.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "allowedFacadeTools"},
+					strSeqNode(a.AllowedFacadeTools))
 			}
 			if len(a.Env) > 0 {
 				envMap := &yaml.Node{Kind: yaml.MappingNode}
@@ -351,4 +445,33 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// strSeqNode 构造字符串序列的 yaml 节点（args / facade.tools /
+// allowedFacadeTools 共用）。
+func strSeqNode(values []string) *yaml.Node {
+	seq := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, v := range values {
+		seq.Content = append(seq.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
+	}
+	return seq
+}
+
+// sameStrings 判断两个切片作为集合是否相同（排序后逐项比较；白名单场景下
+// 重复项没有语义，顺序也不重要）。
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := append([]string(nil), a...)
+	sb := append([]string(nil), b...)
+	sort.Strings(sa)
+	sort.Strings(sb)
+	for i := range sa {
+		if sa[i] != sb[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -484,6 +484,11 @@ func main() {
 	// ACP 适配器交给这个 Brain，所以外部 agent 那套会话编排、轮前快照、改动还原、
 	// 停止与重接对内置会话同样成立。差别写在 builtin.go 顶部（模型/权限是全局的）。
 	acpMgr.SetBuiltin(brain)
+	// 工具门面：把 Friday 注册表里白名单内的只读工具以 MCP server 形态注入外部
+	// agent 的会话（session/new 的 mcpServers，见 internal/acp/facade.go）。
+	// regFn 与设置页共用同一份——MCP 工具清单变化触发 rebuild 后，门面下次
+	// tools/list 自动拿到新清单。
+	acpMgr.SetRegistry(regFn)
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
 		// 内置条目不算进配置里的 agent 数（它是代码给的，用户没配过）

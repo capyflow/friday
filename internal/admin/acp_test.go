@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	vxagent "github.com/capyflow/vortexagent/agent"
 
 	"github.com/capyflow/friday/internal/acp"
 	"github.com/capyflow/friday/internal/approval"
@@ -564,4 +567,70 @@ func waitCheckRun(t *testing.T, handler http.Handler, token, path, want string) 
 	}
 	t.Fatalf("等待验证状态 %s 超时，最后记录 %+v", want, last)
 	return nil
+}
+
+// facadeProbeTool 是端点测试用的最小 vxagent.Tool 实现（够 Handler 渲染目录即可）。
+type facadeProbeTool struct{ name, desc string }
+
+func (t *facadeProbeTool) Name() string           { return t.name }
+func (t *facadeProbeTool) Description() string    { return t.desc }
+func (t *facadeProbeTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (t *facadeProbeTool) Call(_ context.Context, _ map[string]any) (string, error) {
+	return "ok", nil
+}
+
+// TestAcpFacadeStatusEndpoint S5：设置页「工具门面」卡片的数据面——运行状态
+// + 可勾选工具目录（denied/inDefault 标记驱动勾选框渲染）。
+func TestAcpFacadeStatusEndpoint(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	m := acp.NewManager(func() config.AcpConfig { return config.AcpConfig{} }, nil,
+		filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	t.Cleanup(m.Close)
+
+	reg := vxagent.NewRegistry()
+	_ = reg.Add(&facadeProbeTool{name: "get_time", desc: "报当前时间"})
+	_ = reg.Add(&facadeProbeTool{name: "write_file", desc: "写文件（审批类）"})
+	regFn := func() *vxagent.Registry { return reg }
+	s.regFn = regFn
+	m.SetRegistry(regFn)
+	handler := s.Handler()
+
+	code, body := acpCall(t, handler, token, http.MethodGet, "/api/acp/facade", nil)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 %d: %v", code, body)
+	}
+	st, ok := body["status"].(map[string]any)
+	if !ok || st["enabled"] != true {
+		t.Fatalf("status.enabled 应为 true: %v", body["status"])
+	}
+	if _, hasURL := st["url"]; hasURL {
+		t.Fatalf("未被会话用过时不应有 url: %v", st["url"])
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("应列 2 个工具: %v", body["tools"])
+	}
+	seen := map[string]map[string]any{}
+	for _, raw := range tools {
+		item := raw.(map[string]any)
+		seen[item["name"].(string)] = item
+	}
+	getTime := seen["get_time"]
+	if getTime == nil || getTime["denied"] != false || getTime["inDefault"] != true {
+		t.Fatalf("get_time 应可勾选且属默认清单: %v", getTime)
+	}
+	if desc := getTime["description"]; desc != "报当前时间" {
+		t.Fatalf("description 未带上: %v", desc)
+	}
+	writeFile := seen["write_file"]
+	if writeFile == nil || writeFile["denied"] != true {
+		t.Fatalf("write_file 应标 denied（不可勾选）: %v", writeFile)
+	}
+
+	// 未登录应被拦（wrap 鉴权）。
+	rec := setupTestRequest(handler, http.MethodGet, "/api/acp/facade", nil, "127.0.0.1:1234", "localhost", "", "")
+	if rec.Code == http.StatusOK {
+		t.Fatalf("无 token 不应放行: %d", rec.Code)
+	}
 }

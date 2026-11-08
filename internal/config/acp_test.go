@@ -245,3 +245,130 @@ func TestUpdateAcpVersionStamp(t *testing.T) {
 		t.Fatalf("空版本不应写 version 键: %s", data)
 	}
 }
+
+// ---------- 工具门面（acp.facade）----------
+
+func TestAcpFacadeDefaults(t *testing.T) {
+	n := AcpConfig{}.Normalized()
+	if !n.FacadeEnabled() {
+		t.Fatal("门面缺省应开启")
+	}
+	if len(n.FacadeTools()) != len(FacadeDefaultTools) || n.FacadeTools()[0] != "read_file" {
+		t.Fatalf("缺省白名单应为只读清单: %v", n.FacadeTools())
+	}
+	off := false
+	d := AcpConfig{Facade: &AcpFacadeConfig{Enabled: &off}}.Normalized()
+	if d.FacadeEnabled() {
+		t.Fatal("显式关闭应生效")
+	}
+	if len(d.Facade.Tools) != len(FacadeDefaultTools) {
+		t.Fatalf("显式关闭但未配清单时仍应补默认清单: %v", d.Facade.Tools)
+	}
+	// 未归一化的裸配置同样回退默认清单（门面读数不依赖调用方先 Normalized）。
+	if got := (AcpConfig{}).FacadeTools(); len(got) != len(FacadeDefaultTools) {
+		t.Fatalf("裸配置应回退默认清单: %v", got)
+	}
+}
+
+func TestAcpFacadeValidate(t *testing.T) {
+	bad := AcpConfig{Enabled: true, Facade: &AcpFacadeConfig{Tools: []string{"get_time", ""}}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("白名单里的空工具名应报错")
+	}
+	ok := AcpConfig{Enabled: true, Facade: &AcpFacadeConfig{Tools: []string{"get_time"}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("合法白名单不应报错: %v", err)
+	}
+}
+
+func TestUpdateAcpFacadeRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "provider:\n  baseURL: https://api.deepseek.com/v1\n  model: deepseek-chat\nacp:\n  enabled: false\n"
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 关闭 + 自定义清单（异于默认）：两处都该落盘并回读。
+	off := false
+	custom := AcpConfig{Enabled: true, Facade: &AcpFacadeConfig{Enabled: &off, Tools: []string{"get_time"}}}
+	if err := UpdateAcp(path, custom); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if cfg.Acp.Facade == nil || cfg.Acp.Facade.Enabled == nil || *cfg.Acp.Facade.Enabled {
+		t.Fatalf("facade.enabled=false 未写回: %+v", cfg.Acp.Facade)
+	}
+	if len(cfg.Acp.Facade.Tools) != 1 || cfg.Acp.Facade.Tools[0] != "get_time" {
+		t.Fatalf("facade.tools 未写回: %+v", cfg.Acp.Facade.Tools)
+	}
+
+	// 回到默认形态：facade 段应整体消失（默认不写进 config.yaml）。
+	if err := UpdateAcp(path, AcpConfig{Enabled: true}); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if bytes.Contains(data, []byte("facade")) {
+		t.Fatalf("默认形态不应落 facade 段:\n%s", data)
+	}
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if !cfg2.Acp.FacadeEnabled() || len(cfg2.Acp.FacadeTools()) != len(FacadeDefaultTools) {
+		t.Fatalf("默认形态回读应回到缺省开启 + 只读清单: %+v", cfg2.Acp.Facade)
+	}
+}
+
+func TestUpdateAcpFacadeAuthAndAgentWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "provider:\n  baseURL: https://api.deepseek.com/v1\n  model: deepseek-chat\nacp:\n  enabled: false\n"
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	authOff := true
+	cfg := AcpConfig{
+		Enabled: true,
+		Facade:  &AcpFacadeConfig{DisableAuth: &authOff},
+		Agents: []AcpAgentConfig{
+			{Name: "codex", Command: "codex-acp", AllowedFacadeTools: []string{"get_time", "recall"}},
+			{Name: "opencode", Command: "opencode"},
+		},
+	}
+	if err := UpdateAcp(path, cfg); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if !got.Acp.FacadeAuthDisabled() {
+		t.Fatal("disableAuth 未写回")
+	}
+	codex := got.Acp.Agents[1] // Load 已归一化，内置 friday 排最前
+	if codex.Name != "codex" {
+		t.Fatalf("条目错位: %+v", got.Acp.Agents)
+	}
+	if len(codex.AllowedFacadeTools) != 2 || codex.AllowedFacadeTools[0] != "get_time" {
+		t.Fatalf("allowedFacadeTools 未写回: %+v", codex.AllowedFacadeTools)
+	}
+	for _, a := range got.Acp.Agents {
+		if a.Name == "opencode" && len(a.AllowedFacadeTools) != 0 {
+			t.Fatalf("未配置的 agent 不应有白名单: %+v", a)
+		}
+	}
+
+	// 回到默认：disableAuth / allowedFacadeTools 键都应消失。
+	if err := UpdateAcp(path, AcpConfig{Enabled: true}); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if bytes.Contains(data, []byte("disableAuth")) || bytes.Contains(data, []byte("allowedFacadeTools")) {
+		t.Fatalf("默认形态不应落这些键:\n%s", data)
+	}
+}

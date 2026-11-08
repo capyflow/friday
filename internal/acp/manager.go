@@ -27,6 +27,7 @@ import (
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
+	vxagent "github.com/capyflow/vortexagent/agent"
 
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
@@ -361,6 +362,17 @@ type Manager struct {
 	// warmAgents 记下哪些 agent 已经成功起过一次：npx 型命令只有第一次要联网装包，
 	// 冷启动预算给一次就够，之后回落到常规握手值（见 handshakeBudget）。
 	warmAgents map[string]bool
+
+	// regFn 是工具注册表取用函数（SetRegistry 注入）：工具门面据此枚举与调用
+	// Friday 的只读工具。nil 时门面不注入（mcpServers 保持空数组）。
+	regFn func() *vxagent.Registry
+	// facade 是工具门面（facade.go）：惰性起监听，兜底白名单/鉴权开关变化时
+	// 重建（逐会话的 token 白名单走 grant 表，不触发重建）。
+	// facadeMu 只护这三个字段——不与 m.mu 混用，避免建会话路径上的锁倒挂。
+	facadeMu       sync.Mutex
+	facade         *Facade
+	facadeFallback []string
+	facadeAuthOff  bool
 
 	// registryBase 官方目录数据的基目录（<数据目录>/acp）：registry-cache.json
 	// 缓存与 agents/<id>/<version>/ binary 安装都在其下。空值或 registryOff=true
@@ -1206,7 +1218,7 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 		hooks.status("正在重接上次会话…")
 		lctx, lcancel := context.WithTimeout(context.Background(), budget)
 		lres, err := proc.conn.LoadSession(lctx, acp.LoadSessionRequest{
-			SessionId: acp.SessionId(th.SessionID), Cwd: proc.cwd, McpServers: []acp.McpServer{},
+			SessionId: acp.SessionId(th.SessionID), Cwd: proc.cwd, McpServers: m.mcpServersFor(c, agentCfg),
 			AdditionalDirectories: extra,
 		})
 		lcancel()
@@ -1230,7 +1242,7 @@ func (m *Manager) ensureSession(ps *procState, th *Thread, lv *live, agentCfg co
 	}
 	nctx, ncancel := context.WithTimeout(context.Background(), budget)
 	res, err := proc.conn.NewSession(nctx, acp.NewSessionRequest{
-		Cwd: proc.cwd, McpServers: []acp.McpServer{},
+		Cwd: proc.cwd, McpServers: m.mcpServersFor(c, agentCfg),
 		AdditionalDirectories: extra,
 	})
 	// SDK 把超时包成不带 Unwrap 链的 *RequestError，errors.Is 认不出来，
@@ -1459,6 +1471,100 @@ func (m *Manager) SetNotifier(notify func(key, text string)) {
 	m.mu.Lock()
 	m.notifier = notify
 	m.mu.Unlock()
+}
+
+// SetRegistry 注入工具注册表（启动时调用一次）：工具门面据此把 Friday 的
+// 只读工具以 MCP server 形态挂给外部 agent（见 facade.go）。
+func (m *Manager) SetRegistry(fn func() *vxagent.Registry) {
+	m.regFn = fn
+}
+
+// facadeWhitelistFor 返回某 agent 生效的门面白名单：agent 自带
+// allowedFacadeTools 优先，否则用全局 acp.facade.tools。
+func facadeWhitelistFor(cfg config.AcpConfig, agentCfg config.AcpAgentConfig) []string {
+	if len(agentCfg.AllowedFacadeTools) > 0 {
+		return agentCfg.AllowedFacadeTools
+	}
+	return cfg.FacadeTools()
+}
+
+// mcpServersFor 返回挂给外部 agent 会话的 MCP server 清单：工具门面开启且
+// 注册表已注入时为 friday 门面一条（携带按 agent 白名单签发的 Bearer token），
+// 否则空数组。恒为非 nil——探针实测 mcpServers:null 会被 opencode 的 zod 校验
+// 拒掉（cmd/acp-probe/main.go 同款注释）。内置 Friday 会话不走这里（builtin.go
+// 有自己的 NewSession），它本来就有全套工具。
+func (m *Manager) mcpServersFor(cfg config.AcpConfig, agentCfg config.AcpAgentConfig) []acp.McpServer {
+	if !cfg.FacadeEnabled() || m.regFn == nil {
+		return []acp.McpServer{}
+	}
+	f := m.ensureFacade(cfg)
+	srv, ok := f.ServerFor(facadeWhitelistFor(cfg, agentCfg), agentCfg.Name)
+	if !ok {
+		return []acp.McpServer{}
+	}
+	return []acp.McpServer{srv}
+}
+
+// FacadeStatus 返回工具门面状态快照（admin GET /api/acp/facade 用）：配置层
+// 开关 + 运行态（若门面已因某个外部会话起过监听）。为看状态而被动起监听没有
+// 意义，这里不触发 ensureFacade。
+func (m *Manager) FacadeStatus() FacadeStatus {
+	cfg := m.cfgFn().Normalized()
+	st := FacadeStatus{
+		Enabled:      cfg.FacadeEnabled() && m.regFn != nil,
+		AuthDisabled: cfg.FacadeAuthDisabled(),
+	}
+	if st.Enabled {
+		st.FallbackTools = cfg.FacadeTools()
+	}
+	m.facadeMu.Lock()
+	f := m.facade
+	m.facadeMu.Unlock()
+	if f != nil {
+		run := f.Status()
+		st.URL = run.URL
+		st.Lists, st.Calls, st.Rejects = run.Lists, run.Calls, run.Rejects
+		st.Grants, st.Records = run.Grants, run.Records
+	}
+	return st
+}
+
+// ensureFacade 返回（必要时按最新兜底白名单/鉴权开关重建的）工具门面。设置页
+// 改全局配置后无需重启：下一次建会话自动换新门面（旧监听随即关闭，已建会话
+// 不受影响——工具调用每次都重新走 HTTP，重建会话即恢复）。
+func (m *Manager) ensureFacade(cfg config.AcpConfig) *Facade {
+	m.facadeMu.Lock()
+	defer m.facadeMu.Unlock()
+	fallback := cfg.FacadeTools()
+	authOff := cfg.FacadeAuthDisabled()
+	if m.facade != nil && m.facadeAuthOff == authOff && sameStringSlice(m.facadeFallback, fallback) {
+		return m.facade
+	}
+	if m.facade != nil {
+		m.facade.Close()
+	}
+	m.facade = newFacade(m.regFn, fallback, authOff)
+	m.facadeFallback = append([]string(nil), fallback...)
+	m.facadeAuthOff = authOff
+	return m.facade
+}
+
+// sameStringSlice 集合级比较（顺序无关；白名单语义下顺序与重复都无意义）。
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		if seen[s] == 0 {
+			return false
+		}
+		seen[s]--
+	}
+	return true
 }
 
 // notice 投一条系统提示。没装配通知中心就什么都不做；桥本身出错由注入方
@@ -2476,6 +2582,12 @@ func (m *Manager) Close() {
 	for _, ps := range all {
 		m.releaseProc(ps, "服务关闭")
 	}
+	// 工具门面随服务一起关（幂等）。
+	m.facadeMu.Lock()
+	fac := m.facade
+	m.facade = nil
+	m.facadeMu.Unlock()
+	fac.Close()
 }
 
 // ---------- 持久化 ----------

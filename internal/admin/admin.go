@@ -74,6 +74,7 @@
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
 //	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
+//	GET    /api/acp/facade    工具门面状态、调用记录与可勾选工具目录（需登录）
 //	GET    /api/terminal      内置终端可用状态（enabled/上限/活跃数，需登录）
 //	GET    /api/terminal/ws   内置终端（WebSocket，一条连接一个 PTY；只接受本机回环，需登录）
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
@@ -461,6 +462,8 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))
+		// 工具门面状态与调用记录（设置页「工具门面」卡片）。
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/facade", s.wrap(s.handleAcpFacadeStatus))
 	}
 	if s.terminal != nil {
 		// 终端要长连接：token 走 ?token=（浏览器 WebSocket 加不了请求头），
