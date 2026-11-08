@@ -112,6 +112,8 @@ textarea.m-input { resize: none; line-height: 1.5; }
 .m-auth-sub { color: var(--muted-fg); font-size: 13px; margin-bottom: 10px; }
 .m-auth-box form { display: flex; flex-direction: column; gap: 10px; }
 .m-auth-form { text-align: left; }
+/* 登录按钮与上面的密码框拉开一点距离，别贴着 */
+.m-auth-form > .m-btn { margin-top: 8px; }
 .m-auth-note { color: var(--muted-fg); font-size: 12px; line-height: 1.6; margin: 0; }
 .m-auth-setup { text-align: left; color: var(--fg-2); font-size: 14px; line-height: 1.7; }
 .m-auth-foot { color: var(--faint-fg); font-size: 12px; margin-top: 6px; }
