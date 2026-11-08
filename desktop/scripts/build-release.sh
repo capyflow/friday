@@ -54,7 +54,10 @@ command -v npx >/dev/null || die "未安装 Node/npx（Tauri CLI 经 npx 运行�
 if command -v python3 >/dev/null 2>&1 && python3 -c "" 2>/dev/null; then PYTHON=python3
 elif command -v python >/dev/null 2>&1 && python -c "" 2>/dev/null; then PYTHON=python
 else die "未安装 Python3（生成占位图标用）"; fi
-TAURI_CLI=(npx -y @tauri-apps/cli@^2)
+# npm 11 起 npx <pkg> <args> 这种写法坏了：它把包名当命令交给 shell 去跑，
+# 报 "sh: @tauri-apps/cli@^2: No such file or directory"（与包名带不带版本无关）。
+# 还能用的形式是 --package=<spec> + 显式给出 bin 名（tauri）。
+TAURI_CLI=(npx -y --package=@tauri-apps/cli@^2 tauri)
 echo "go $(go version | awk '{print $3}') / rust $(rustc --version | awk '{print $2}') / tauri-cli ${TAURI_CLI[*]}"
 
 # ---- 1. 版本号 ----
