@@ -108,7 +108,7 @@ function onScanned(text) {
 
         <div class="m-field">
           <label class="m-field-label" for="m-auth-user">用户名</label>
-          <input id="m-auth-user" v-model="user" class="m-input m-input-icon" aria-label="用户名" placeholder="输入用户名"
+          <input id="m-auth-user" v-model="user" class="m-input" aria-label="用户名" placeholder="输入用户名"
                  autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" :disabled="busy" required>
         </div>
 

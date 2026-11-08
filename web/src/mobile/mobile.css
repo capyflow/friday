@@ -117,13 +117,14 @@ textarea.m-input { resize: none; line-height: 1.5; }
 .m-auth-foot { color: var(--faint-fg); font-size: 12px; margin-top: 6px; }
 
 /* ---------- 服务器地址行（登录页 / 离线页共用） ---------- */
-/* 输入框 + 末尾动作按钮（扫码 / 显示密码）排成一行 */
-.m-input-row { display: flex; align-items: center; gap: 8px; }
-.m-input-row .m-input { flex: 1; min-width: 0; }
+/* 输入框 + 框内右侧的小图标按钮（扫码 / 显示密码）：按钮浮在输入框内右端，
+   不在框外另起一个控件。 */
+.m-input-row { position: relative; display: block; }
+.m-input-icon { padding-right: 46px; } /* 给框内图标让位 */
 .m-input-act {
-  flex: none; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
-  border-radius: 10px; border: 1px solid var(--border-strong);
-  background: var(--card); color: var(--muted-fg);
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
+  border: none; background: none; color: var(--muted-fg);
 }
 .m-input-act:active { background: var(--bg-muted); color: var(--fg); }
 .m-input-act:disabled { opacity: .45; pointer-events: none; }
