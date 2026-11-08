@@ -131,6 +131,8 @@ type Thread struct {
 	// PolicyValue / PolicyValueName 是真正下发给 agent 的审批模式取值与它的显示名；
 	// PolicyFallback 标出这次是「退让命中」（agent 没有语义等价档）。只说「已下发」不够——
 	// codex 上「每次都问」只能落到 workspace-write，用户得看到实际跑的是哪一档。
+	// 用户手动改审批模式（chips 或重放上次选择）后这组字段整体刷新、Applied/Note/
+	// Fallback 清空（markManualApproval）：横幅只描述工作区默认档，覆盖后以 chips 为准。
 	PolicyValue     string `json:"policyValue,omitempty"`
 	PolicyValueName string `json:"policyValueName,omitempty"`
 	PolicyFallback  bool   `json:"policyFallback,omitempty"`
@@ -2103,6 +2105,10 @@ func (m *Manager) SetCapability(id, capID, value string) ([]Capability, error) {
 	if err := m.applyCapability(lv, th, capID, value); err != nil {
 		return nil, err
 	}
+	// 手动切审批模式 = 显式覆盖工作区默认档，档位落点记录跟着刷新（见 markManualApproval）
+	if capID == CapKindApprovalMode {
+		m.markManualApproval(lv, th, value)
+	}
 	// 记住这次选择：agent 不保证把选项存进会话，重开时靠这份记录重放
 	m.recordChoice(th, capID, value)
 	return normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()), nil
@@ -2279,6 +2285,10 @@ func (m *Manager) reapplyChoices(lv *live, th *Thread) {
 			log.Printf("[智能体] %s 重放能力选择 %s=%s 失败: %v", th.Agent, cap.ID, want, err)
 			continue
 		}
+		// 重放的若是审批模式，同样视为用户手动选择：覆盖工作区默认档的下发记录
+		if cap.ID == CapKindApprovalMode {
+			m.markManualApproval(lv, th, want)
+		}
 		log.Printf("[智能体] %s 已按上次的选择重放 %s=%s", th.Agent, cap.ID, want)
 	}
 }
@@ -2291,6 +2301,8 @@ func (m *Manager) reapplyChoices(lv *live, th *Thread) {
 // 记进 PolicyValue/PolicyNote：codex 只有 read-only / workspace-write / agent /
 // agent-full-access，「每次都问」只能落到 workspace-write——不写清落点的话，用户会
 // 以为逐条审批在跑，而它其实只是“越界才问”（V-1/V-4）。
+// 手动在 chips 里改过的选择由 reapplyChoices 随后覆盖并刷新落点记录
+// （见 markManualApproval），工作区档位只是默认值。
 func (m *Manager) applyWorkspacePolicy(lv *live, th *Thread) {
 	m.mu.Lock()
 	policy := WorkspacePolicyAsk
@@ -2363,6 +2375,26 @@ func (m *Manager) setPolicyState(th *Thread, st policyState) {
 	th.PolicyApplied, th.PolicyNote = st.applied, st.note
 	th.PolicyValue, th.PolicyValueName, th.PolicyFallback = st.value, st.name, st.fallback
 	m.mu.Unlock()
+}
+
+// markManualApproval 记「用户显式选的审批模式」生效：清掉 Applied/Note/Fallback，
+// 只留实际取值与显示名。「审批档位实际是 X」横幅描述的是工作区默认档的下发落点
+// （含退让原因），手动在 chips 里改过、或重放上次选择覆盖它之后，那条横幅就成了
+// 过时信息——不清会跟 chips 里的当前值自相矛盾。当前档位以 chips 为准，横幅整体消失。
+func (m *Manager) markManualApproval(lv *live, th *Thread, value string) {
+	name := ""
+	for _, cap := range normalizeCapabilities(lv.getOptions(), lv.getModelState(), lv.getModeState()) {
+		if cap.Kind != CapKindApprovalMode {
+			continue
+		}
+		for _, v := range cap.Values {
+			if v.Value == value {
+				name = v.Name
+				break
+			}
+		}
+	}
+	m.setPolicyState(th, policyState{value: value, name: name})
 }
 
 func policyLabel(policy string) string {

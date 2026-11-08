@@ -2198,6 +2198,44 @@ func TestWorkspacePolicyDeclinesAmbiguousAgent(t *testing.T) {
 	}
 }
 
+// 用户手动切审批模式（chips 里改、或重连后重放上次的选择）会覆盖工作区默认档：
+// 退让说明这时必须跟着清掉，否则顶部「审批档位实际是 Workspace access」横幅
+// 还挂着工作区默认档那次下发，跟 chips 里的当前值自相矛盾。
+func TestManualApprovalClearsPolicyFallback(t *testing.T) {
+	f := &fakeAgent{modes: codexSessionModes("agent"), promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	ws := mustWorkspace(t, m)
+	if err := m.SetPolicy(ws.ID, WorkspacePolicyAsk); err != nil {
+		t.Fatalf("设档位失败: %v", err)
+	}
+	th := mustThreadIn(t, m, ws)
+	if _, err := m.Send(context.Background(), th.ID, "改一下", nil, TurnHooks{}); err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	if got, _ := m.Get(th.ID); !got.PolicyFallback || got.PolicyValue != "workspace-write" {
+		t.Fatalf("前置：ask 应退让到 workspace-write，实际 %+v", got)
+	}
+	if _, err := m.SetCapability(th.ID, CapKindApprovalMode, "agent-full-access"); err != nil {
+		t.Fatalf("手动切审批模式失败: %v", err)
+	}
+	got, _ := m.Get(th.ID)
+	if got.PolicyFallback || got.PolicyNote != "" || got.PolicyApplied != "" {
+		t.Fatalf("手动覆盖后横幅记录应清空: %+v", got)
+	}
+	if got.PolicyValue != "agent-full-access" || got.PolicyValueName != "Full access" {
+		t.Fatalf("落点应记为手动选的值: %+v", got)
+	}
+	found := false
+	for _, call := range f.setRecorded() {
+		if call == "mode:agent-full-access" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应把手动选择下发给 agent，实际调用 %v", f.setRecorded())
+	}
+}
+
 // waitThreadState 轮询直到会话进入目标状态（排队/运行这类瞬时状态只能靠轮询抓到）。
 func waitThreadState(t *testing.T, m *Manager, id, want string) Thread {
 	t.Helper()
