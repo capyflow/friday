@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -537,6 +538,74 @@ func (s *Server) handleAcpThreadHandoff(ctx *vhttp.Context) error {
 	})
 }
 
+// ---------- Git 面板（工作区「Git 管理」标签页） ----------
+
+// handleAcpThreadGitStatus 读仓库状态：GET /api/acp/threads/:id/git/status。
+func (s *Server) handleAcpThreadGitStatus(ctx *vhttp.Context) error {
+	st, err := s.acp.GitStatus(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"status": st})
+}
+
+// handleAcpThreadGitLog 读提交历史：GET /api/acp/threads/:id/git/log?limit=30。
+func (s *Server) handleAcpThreadGitLog(ctx *vhttp.Context) error {
+	limit := 0
+	if v := ctx.GinContext().Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	commits, err := s.acp.GitLog(ctx.GinContext().Param("id"), limit)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"commits": commits})
+}
+
+// handleAcpThreadGitBranches 列出分支：GET /api/acp/threads/:id/git/branches。
+func (s *Server) handleAcpThreadGitBranches(ctx *vhttp.Context) error {
+	branches, err := s.acp.GitBranches(ctx.GinContext().Param("id"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"branches": branches})
+}
+
+// handleAcpThreadGitOps 读 Git 写操作记录：GET /api/acp/threads/:id/git/ops。
+func (s *Server) handleAcpThreadGitOps(ctx *vhttp.Context) error {
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"ops": s.acp.GitOps(ctx.GinContext().Param("id")),
+	})
+}
+
+// handleAcpThreadGitOpStart 提交一次 Git 写操作：POST /api/acp/threads/:id/git/ops。
+// body {"op":"checkout","arg":"main"}。命令先进审批队列，批准后才执行。
+func (s *Server) handleAcpThreadGitOpStart(ctx *vhttp.Context) error {
+	var req struct {
+		Op  string `json:"op"`
+		Arg string `json:"arg"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": `请求体须为 {"op":"...","arg":"..."}`})
+	}
+	run, err := s.acp.StartGitOp(ctx.GinContext().Param("id"), acp.GitOpRequest{Op: req.Op, Arg: req.Arg})
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"op": run, "message": "已提交，等你在审批卡上批准后执行",
+	})
+}
+
+// handleAcpThreadGitOpStop 取消一次写操作：POST /api/acp/threads/:id/git/ops/:op/stop。
+func (s *Server) handleAcpThreadGitOpStop(ctx *vhttp.Context) error {
+	if err := s.acp.StopGitOp(ctx.GinContext().Param("id"), ctx.GinContext().Param("op")); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已停止这次操作"})
+}
 // handleAcpThreadChecks 返回会话的验证命令记录与建议命令：
 // GET /api/acp/threads/:id/checks。记录是内存态（重启即清，不留假「在跑」），
 // 建议按主目录的标志文件推断（package.json scripts / go.mod / Makefile 等）。

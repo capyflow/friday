@@ -15,6 +15,11 @@ const props = defineProps({
   thread: { type: Object, default: null },
   messages: { type: Array, default: () => [] },
   workspaceId: { type: String, default: '' },
+  // embedded：嵌在统一工具面板里（不再自己浮成抽屉）。此时没有遮罩、没有自己的
+  // 头部与标签行——标签由外层面板统一管，这里只出内容。
+  embedded: { type: Boolean, default: false },
+  // activeTab：embedded 模式下由外层面板指定当前显示哪个标签（文件/改动/记忆/验证）。
+  activeTab: { type: String, default: '' },
 })
 const emit = defineEmits(['reverted'])
 
@@ -292,7 +297,9 @@ const rows = computed(() => {
 
 function open(which = 'files', turnId = '') {
   if (!props.thread) return
-  lastFocus = document.activeElement
+  // embedded 模式下标签由外层面板决定：这里只按请求切到对应标签并拉数据，
+  // 不抢焦点（面板里切标签不该把焦点从对话输入框抢走）。
+  if (!props.embedded) lastFocus = document.activeElement
   openState.value = true
   tab.value = which === 'changes' ? 'changes' : which === 'memory' ? 'memory'
     : which === 'verify' ? 'verify' : 'files'
@@ -303,7 +310,7 @@ function open(which = 'files', turnId = '') {
   if (tab.value === 'changes') loadChanges(turnId)
   if (tab.value === 'memory') loadMemory()
   if (tab.value === 'verify') loadChecks()
-  nextTick(() => closeBtn.value?.focus())
+  if (!props.embedded) nextTick(() => closeBtn.value?.focus())
 }
 
 function openMemory(draft = {}) {
@@ -650,6 +657,13 @@ onUnmounted(() => {
   stopCheckPolling()
 })
 
+// embedded 模式下外层面板换标签：跟着切，并按需拉数据（数据逻辑与手点标签一致）。
+watch(() => props.activeTab, v => {
+  if (!props.embedded || !v) return
+  if (v === tab.value) return
+  switchTab(v)
+})
+
 watch(() => [props.thread?.id, props.workspaceId], () => {
   // 缓存属于上一条会话/上一个项目，先无条件作废：抽屉关着时也要清，否则重开
   // 「本轮改动」还会看到上个项目那一轮的文件。
@@ -668,10 +682,17 @@ defineExpose({ open, close, openMemory })
 </script>
 
 <template>
-  <div v-if="openState">
-    <div class="wfd-mask" @click="close"></div>
-    <aside class="wfd-panel" role="dialog" aria-modal="true" aria-label="工作区面板">
-      <header class="wfd-head">
+  <!-- wfd-wrap 只是为了让 embedded 与浮层两种形态共用同一份内容：
+       浮层时它是 display:contents（不占布局），遮罩与面板照旧浮在视口上；
+       embedded 时它是普通弹性子项，面板变成面板区里的一个整块。
+       类名不叫 wfd-root：那个名字已经被文件树里的「根目录那一行」占用了，
+       撞车会让整块内容被当成树根行来排（居中、带下边框）。 -->
+  <div v-if="embedded || openState" class="wfd-wrap" :class="{ 'is-embed': embedded }">
+    <div v-if="!embedded" class="wfd-mask" @click="close"></div>
+    <aside class="wfd-panel" :class="{ 'is-embed': embedded }"
+           :role="embedded ? undefined : 'dialog'" :aria-modal="embedded ? undefined : 'true'"
+           aria-label="工作区面板">
+      <header v-if="!embedded" class="wfd-head">
         <div class="wfd-title">
           <span class="wfd-name">工作区</span>
           <span class="wfd-meta" :title="thread?.cwd || ''">

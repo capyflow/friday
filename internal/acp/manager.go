@@ -394,6 +394,8 @@ type Manager struct {
 	notifier func(key, text, threadID string)
 	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
 	checks checkRegistry
+	// gitOps 是 Git 面板写操作的记录与取消句柄（同 checks：内存态）。
+	gitOps gitOpRegistry
 	// warmAgents 记下哪些 agent 已经成功起过一次：npx 型命令只有第一次要联网装包，
 	// 冷启动预算给一次就够，之后回落到常规握手值（见 handshakeBudget）。
 	warmAgents map[string]bool

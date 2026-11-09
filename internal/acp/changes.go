@@ -11,6 +11,7 @@ package acp
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1095,7 +1096,13 @@ func gitDiffOutput(dir string, args ...string) (string, error) {
 }
 
 func gitRun(dir string, args ...string) (string, string, error) {
-	cmd := exec.Command("git", args...)
+	return gitRunCtx(context.Background(), dir, args...)
+}
+
+// gitRunCtx 是 gitRun 的可取消版本：Git 面板的写操作要能被超时/用户点停止杀掉。
+// 环境处理与 gitRun 完全一致（清掉 GIT_DIR 等指向别的仓库的变量）。
+func gitRunCtx(ctx context.Context, dir string, args ...string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	// 不让调用方环境里的 GIT_DIR/GIT_WORK_TREE 把命令指到别的仓库；
 	// 其他 git 配置（身份、ignore、credential）照常继承。

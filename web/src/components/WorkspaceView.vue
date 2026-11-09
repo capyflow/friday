@@ -26,9 +26,8 @@ import ChatComposer from './ChatComposer.vue'
 import DirPickerDialog from './DirPickerDialog.vue'
 import SelectBox from './SelectBox.vue'
 import FilePreviewDrawer from './FilePreviewDrawer.vue'
-import WorkspaceFilesDrawer from './WorkspaceFilesDrawer.vue'
 import ImageLightbox from './ImageLightbox.vue'
-import WorkspaceTerminal from './WorkspaceTerminal.vue'
+import WorkspaceTools from './WorkspaceTools.vue'
 
 const threads = ref([])
 const workspaces = ref([])     // 工作区（一组目录 + 挂在它下面的会话）
@@ -37,47 +36,25 @@ const loaded = ref(false)      // 配置/列表是否已拉到：加载中 ≠ �
 const loadError = ref('')      // 首次加载失败原因（可重试）
 const currentId = ref('')      // 正在"显示"哪个会话（thread）
 const currentWsId = ref('')    // 正在展开哪个工作区（'' = 全收起）
-// 右侧终端面板跟着会话走：每条会话自己的开合状态（termOpen）与实例挂载标记
-// （termMounted，第一次打开才挂载组件）。收起/切走都只是 v-show——连接、缓冲与
-// 内容都保留；没开过终端的会话切过去面板不自动开。实例的 cwd 用会话自己的主目录。
-// 分栏比例（终端面板占 .ag-split 的宽度份额）是全局的：拖分隔线可调，钳在 30%–70%，
-// 换会话不重置。拖动过程里 xterm 的 ResizeObserver 会跟着 refit，不用额外补事件。
-const TERM_MIN = 0.3
-const TERM_MAX = 0.7
-const termW = ref(0.46) // 缺省 ≈ 旧版 min(46%, 620px) 的比例档
-const termStyle = computed(() => (termW.value * 100).toFixed(2) + '%')
-const wtOpen = computed(() => !!(cur.value && cur.value.termOpen))
-function toggleTerm() {
-  const st = cur.value
-  if (!st) return
-  st.termOpen = !st.termOpen
-  if (st.termOpen) st.termMounted = true
+// 右侧工具面板：终端、文件、改动、Git 管理、项目记忆、验证收在同一列里
+// （参考 ZCode 的右侧面板：一列面板 + 若干标签，而不是每个工具各开一个抽屉）。
+// 面板自己管三种形态——窄图标条（默认）/ 并排两栏 / 展开视图（左边会话、右边
+// 工具视图）；这里只留一个入口按钮与「面板开着没有」的显示态。
+// 面板组件常驻（不卸载），收起只是 v-show：终端的 WebSocket、xterm 实例与内容
+// 都留着，切标签也不打断连接。
+const tools = ref(null)
+// 面板开着没有（收成图标条时是 false）：入口按钮的按下态靠它。
+const toolsOpen = ref(false)
+function toggleTools() {
+  tools.value?.toggle()
 }
-function closeTerm(id) {
-  const st = states[id]
-  if (st) st.termOpen = false
-}
-// 分隔线拖拽：pointer 事件跟着松手走；拖动中禁选中（body.wt-resizing）。
-function startSplit(e) {
-  const split = e.target.closest('.ag-split')
-  if (!split) return
-  e.preventDefault()
-  document.body.classList.add('wt-resizing')
-  const move = ev => {
-    const rect = split.getBoundingClientRect()
-    if (rect.width <= 0) return
-    const ratio = (rect.right - ev.clientX) / rect.width
-    termW.value = Math.min(TERM_MAX, Math.max(TERM_MIN, ratio))
-  }
-  const up = () => {
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', up)
-    window.removeEventListener('pointercancel', up)
-    document.body.classList.remove('wt-resizing')
-  }
-  window.addEventListener('pointermove', move)
-  window.addEventListener('pointerup', up)
-  window.addEventListener('pointercancel', up)
+// focus 态要收窄左列：布局量由面板报上来，这里套到会话列上。
+const toolsFocus = ref(false)
+const toolsChatW = ref(0)
+function onToolsLayout(layout) {
+  toolsFocus.value = !!(layout && layout.focus)
+  toolsChatW.value = (layout && layout.chatW) || 0
+  toolsOpen.value = !!(layout && layout.open)
 }
 // 左栏两种视图（照主流 agent 工具的项目栏习惯）：按工作区分组 / 跨工作区按最近活动
 const VIEW_KEY = 'friday-acp-view'
@@ -126,7 +103,7 @@ const sessionForm = reactive({ agent: '' })
 const pendingDelete = ref(null)
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
-const filesDrawer = ref(null)      // 工作区文件/本轮改动抽屉（文件树 + diff + 还原）
+
 const imgLightbox = ref(null)      // 附件全图预览层（气泡上方的缩略图点开）
 
 /* 每个 thread 一份前端态：消息缓冲、进行中的一轮、能力清单、上下文水位、输入草稿、
@@ -155,8 +132,7 @@ function stateOf(id) {
       draft: '', pending: [], // 输入草稿与待发的图片也按会话分开
       queue: [],        // 回答进行中排队的消息：{ text, shots:[{id,url}] }，本轮跑完依次发出
       queuePaused: false, // 暂停后本轮结束也不会继续放队列上路
-      termOpen: false,    // 这条会话的终端面板开合（跟着会话走，切会话不串）
-      termMounted: false, // 面板实例是否已挂载（第一次打开才挂，之后 v-show 常驻）
+
     }
   }
   return states[id]
@@ -172,19 +148,16 @@ function dropState(id) {
 
 const cur = computed(() => stateOf(currentId.value))
 const messages = computed(() => (cur.value ? cur.value.messages : []))
-// 工作区文件/改动抽屉：文件树常驻入口；时间线里的“本轮改动”直接落到对应轮次。
-function openWorkspaceFiles() {
-  if (!current.value) return
-  filesDrawer.value?.open('files')
-}
+// 工具面板入口：时间线里的“本轮改动”直接落到对应轮次，
+// “记到项目记忆”把面板切到记忆页并起草一条。都走右侧那一列，不再另开抽屉。
 function openTurnChanges(turnId) {
   if (!current.value) return
-  filesDrawer.value?.open('changes', turnId)
+  tools.value?.open('changes', turnId)
 }
 function rememberMessage(m) {
   const body = m.text || answerText(m.blocks || [])
   if (!body) return
-  filesDrawer.value?.openMemory({ title: current.value?.title || '项目约定', body })
+  tools.value?.openMemory({ title: current.value?.title || '项目约定', body })
 }
 
 function onChangesReverted(turnId) {
@@ -847,7 +820,7 @@ watch(() => store.view, (v, prev) => {
   if (prev === 'agent' && v !== 'agent') {
     backToBottom = nearBottom() || busy.value
     // v-show 只藏主视图，抽屉是 fixed 兄弟节点；切走时主动收起，别盖到别的页上
-    filesDrawer.value?.close()
+    // 工具面板的标签态由面板自己管，这里无需额外收尾。
     fileDrawer.value?.close()
   } else if (v === 'agent') nextTick(() => { if (backToBottom) stick(true) })
 })
@@ -1350,8 +1323,8 @@ function previewImages(urls, at = 0) {
       <template v-else>
       <!-- 终端面板开着时对话区收成左列：head/hint/scroller/foot 整体进 .ag-chat，
            右列是工作区终端（组件 v-show 常驻，开合不打断里面的连接与内容） -->
-      <div class="ag-split">
-        <div class="ag-chat">
+      <div class="ag-split" :class="{ 'ag-split-focus': toolsFocus }">
+        <div class="ag-chat" :style="toolsFocus ? { width: (toolsChatW * 100).toFixed(2) + '%' } : null">
         <header class="ag-head">
           <div class="ag-head-txt">
             <b>{{ current.title || '新会话' }}</b>
@@ -1364,24 +1337,15 @@ function previewImages(urls, at = 0) {
               <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
             </span>
           </div>
-          <!-- 工作区内嵌终端：点开把对话分成两栏，右侧终端直接落在本会话的主目录
-               （= 工作区主文件夹）。开合状态跟着会话走：换到没开过终端的会话，
-               面板不自动出现；收起再打开（或切回来）内容都在 -->
-          <button class="ib-btn ag-term" :class="{ active: wtOpen }" aria-label="工作区终端"
-                  :aria-pressed="wtOpen"
-                  :title="wtOpen ? '收起终端面板（内容保留）' : '工作区终端（在本会话主目录打开）'"
-                  @click="toggleTerm">
+          <!-- 工具面板入口：终端、文件、改动、Git 管理、项目记忆、验证都收在右侧那一列。
+               点开把对话分成两栏（面板在右）；面板右上角还有展开按钮，能在工作区内
+               一分为二：左边会话、右边工具视图。 -->
+          <button class="ib-btn ag-term" :class="{ active: toolsOpen }" aria-label="工具面板"
+                  :aria-pressed="toolsOpen"
+                  :title="toolsOpen ? '收起工具面板（内容保留）' : '工具面板（终端、文件、改动、Git、记忆、验证）'"
+                  @click="toggleTools">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-terminal"/></svg>
-          </button>
-          <!-- 工作区抽屉：文件树、本轮 diff 与还原、项目记忆、验证（预览 + 检查命令） -->
-          <button class="ib-btn ag-files" aria-label="工作区文件与验证"
-                  title="工作区文件（diff、还原、项目记忆、验证）" @click="openWorkspaceFiles">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-              <path d="M8 13h8M8 17h5"/>
-            </svg>
           </button>
           <!-- 应用内全屏：收起左侧全局导航、对话吃满窗口；Esc 归页面处理（先停本轮，空闲时退出） -->
           <button class="ib-btn ag-full" :class="{ active: store.fullscreen }"
@@ -1593,28 +1557,16 @@ function previewImages(urls, at = 0) {
           </div>
         </div>
         </div><!-- /.ag-chat -->
-        <!-- 分隔线：左右拖调整对话/终端两栏比例（30%–70%），只在面板开着时出现 -->
-        <div v-if="wtOpen" class="wt-divider" role="separator" aria-orientation="vertical"
-             :aria-valuenow="Math.round(termW * 100)" aria-valuemin="30" aria-valuemax="70"
-             aria-label="调整对话与终端的比例" title="拖动调整两栏比例（30%–70%）"
-             @pointerdown="startSplit"></div>
-        <!-- 终端跟着会话走：每条会话自己的面板实例（cwd 也是各自的主目录），
-             第一次打开才挂载；收起与切走都是 v-show，连接与内容保留 -->
-        <template v-for="t in threads" :key="t.id">
-          <WorkspaceTerminal v-if="stateOf(t.id).termMounted"
-                             v-show="t.id === currentId && stateOf(t.id).termOpen"
-                             :open="t.id === currentId && stateOf(t.id).termOpen"
-                             :cwd="t.cwd"
-                             :style="{ width: termStyle }"
-                             @close="closeTerm(t.id)" />
-        </template>
+        <!-- 统一工具面板：终端、文件、改动、Git 管理、项目记忆、验证。
+             面板自己管三种形态（窄图标条 / 并排两栏 / 展开视图），组件常驻不卸载。 -->
+        <WorkspaceTools ref="tools" :thread="current" :threads="threads" :messages="messages"
+                       :workspace-id="current?.workspaceId || ''"
+                       @reverted="onChangesReverted" @layout="onToolsLayout" />
       </div><!-- /.ag-split -->
       </template>
     </section>
   </div>
   <FilePreviewDrawer ref="fileDrawer" />
-  <WorkspaceFilesDrawer ref="filesDrawer" :thread="current" :messages="messages"
-                        :workspace-id="current?.workspaceId || ''" @reverted="onChangesReverted" />
   <!-- 附件全图预览：气泡上方的缩略图与输入区待发缩略图共用一层 -->
   <ImageLightbox ref="imgLightbox" />
   <!-- 删除确认：会话与工作区共用一张，标题和影响范围随目标变化。遮罩、Esc 与「取消」

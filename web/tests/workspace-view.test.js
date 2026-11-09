@@ -1283,9 +1283,9 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
   it('工作区抽屉可读写项目记忆，消息也能一键记到项目', async () => {
     workspaceMemory.ws1 = [{ id: 'm1', title: '项目约定', body: '这个仓库用 pnpm', updatedAt: '2026-10-30T10:00:00Z' }]
     await show()
-    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await wrapper.get('[aria-label="工具面板"]').trigger('click')
     await flushPromises()
-    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('项目记忆')).trigger('click')
+    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('项目记忆')).trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('项目约定')
     await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('项目约定')).trigger('click')
@@ -1298,7 +1298,6 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
       { id: 'm1', title: '项目约定', body: '这个仓库用 pnpm；验收跑 npm run check' })
     expect(wrapper.text()).toContain('已保存')
 
-    await wrapper.get('[aria-label="关闭工作区文件"]').trigger('click')
     await wrapper.get('[aria-label="记到项目记忆"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[aria-label="项目记忆标题"]').element.value).toBe('第一件事')
@@ -1331,7 +1330,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     }
     await show()
 
-    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await wrapper.get('[aria-label="工具面板"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('.wfd-panel').exists()).toBe(true)
     expect(wrapper.findAll('.wfd-row')).toHaveLength(2)
@@ -1343,7 +1342,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     await flushPromises()
     expect(wrapper.get('.wfd-code').text()).toContain('new')
 
-    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('本轮改动')).trigger('click')
+    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('改动')).trigger('click')
     await flushPromises()
     expect(wrapper.get('.wfd-diff').text()).toContain('old')
     expect(wrapper.find('.wfd-diff-row.add').text()).toContain('new')
@@ -1360,9 +1359,9 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
   it('验证标签：本地预览、检查命令提交与运行输出', async () => {
     data.threads[0].messages[2].text = '服务起来了，看 http://localhost:5173 就行'
     await show()
-    await wrapper.get('[aria-label="工作区文件与验证"]').trigger('click')
+    await wrapper.get('[aria-label="工具面板"]').trigger('click')
     await flushPromises()
-    const verifyTab = () => wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('验证'))
+    const verifyTab = () => wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('验证'))
     await verifyTab().trigger('click')
     await flushPromises()
 
@@ -1397,7 +1396,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     checkRuns[0].note = '退出码 1'
     checkRuns[0].durationMs = 8200
     checkRuns[0].output = 'PASS a.test.js\nFAIL b.test.js\n  期望 1 得到 2'
-    await wrapper.findAll('.wfd-tabs button').find(b => b.text().includes('文件')).trigger('click')
+    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('文件')).trigger('click')
     await flushPromises()
     await verifyTab().trigger('click')
     await flushPromises()
@@ -1617,55 +1616,85 @@ describe('工作区清单里的内置 Friday', () => {
   })
 })
 
-describe('内嵌终端面板：跟着会话走 + 分栏拖拽', () => {
-  async function openTerm() {
-    await wrapper.get('[aria-label="工作区终端"]').trigger('click')
+describe('统一工具面板：窄图标条 / 展开 / 分栏拖拽', () => {
+  // 面板三种形态：rail（默认，只剩图标条）/ panel（对话在左、面板在右）/ focus
+  // （工作区一分为二，左会话右工具视图）。入口按钮在会话头部。
+  async function openPanel() {
+    await wrapper.get('[aria-label="工具面板"]').trigger('click')
+    await flushPromises()
+  }
+  async function pickTool(label) {
+    await wrapper.get('.ag-tools-rail-btn[aria-label="' + label + '"]').trigger('click')
     await flushPromises()
   }
 
-  it('没开过终端的会话不自动开面板；开过的切回来面板与内容原样在', async () => {
-    data.threads.push(copy(second))
+  it('默认只有一条窄图标条，展开后工具面板在对话右边', async () => {
     await show()
     await pickSession('第一件事')
-    expect(wrapper.find('.wt-panel').exists()).toBe(false) // 还没开过：实例都没挂载
-    await openTerm()
-    expect(wrapper.find('.wt-panel').exists()).toBe(true)
-    // 根节点 .view 在测试里是 v-show 关着的（store.view 不是 'agent'），不能用
-    // isVisible()；面板自己的 v-show 只体现在 style 上：开着 = 没有 display:none
-    expect(wrapper.find('.wt-panel').attributes('style')).not.toContain('display: none')
+    // 默认形态：图标条在，面板收起（v-show：元素还在，只是不显示——
+    // 里面的终端实例不能被卸载，收起时那条 shell 还得继续跑）
+    expect(wrapper.find('.ag-tools-rail').exists()).toBe(true)
+    expect(wrapper.find('.ag-tools').attributes('style')).toContain('display: none')
+    expect(wrapper.find('.wt-divider').attributes('style')).toContain('display: none')
+
+    await openPanel()
+    expect(wrapper.find('.ag-tools').attributes('style')).not.toContain('display: none')
+    expect(wrapper.find('.wt-divider').attributes('style')).not.toContain('display: none')
     expect(wrapper.find('.wt-divider').exists()).toBe(true)
-    expect(sockets).toHaveLength(1)
-
-    await pickSession('第二件事')
-    // 没开过终端的会话切过来：面板不自动出现（分隔线也没有），A 的实例留着但藏起
-    expect(wrapper.find('.wt-divider').exists()).toBe(false)
-    expect(wrapper.find('.wt-panel').attributes('style')).toContain('display: none')
-    expect(sockets).toHaveLength(1) // 收起不打断终端
-    expect(termInstances[0].disposed).toBe(false)
-
-    await pickSession('第一件事')
-    expect(wrapper.find('.wt-panel').attributes('style')).not.toContain('display: none')
-    expect(sockets).toHaveLength(1) // 切回来不重开连接、不重挂实例
-    expect(termInstances).toHaveLength(1)
+    // 面板上排着六个工具标签
+    const labels = wrapper.findAll('.ag-tools-tab').map(b => b.text())
+    expect(labels).toEqual(['终端', '文件', '改动', 'Git 管理', '项目记忆', '验证'])
   })
 
-  it('每条会话的终端落在各自的主目录（实例按会话分开）', async () => {
+  it('右上角展开按钮把工作区一分为二：左边会话、右边工具视图', async () => {
+    await show()
+    await pickSession('第一件事')
+    await openPanel()
+    expect(wrapper.find('.ag-tools').classes()).not.toContain('focus')
+
+    await wrapper.get('[aria-label="展开工具视图"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ag-tools').classes()).toContain('focus')
+    // 会话列被收窄（左列宽度由面板报上来）
+    expect(wrapper.find('.ag-chat').attributes('style')).toContain('width:')
+
+    await wrapper.get('[aria-label="退出展开视图"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ag-tools').classes()).not.toContain('focus')
+  })
+
+  it('终端标签下每条会话各自一份实例，切会话不打断连接', async () => {
     data.threads.push({ ...copy(second), cwd: '/home/u/shared' })
     await show()
     await pickSession('第一件事')
-    await openTerm()
+    await openPanel()
+    await pickTool('终端')
+    expect(wrapper.findAll('.wt-panel')).toHaveLength(1)
+    expect(sockets).toHaveLength(1)
+
     await pickSession('第二件事')
-    await openTerm()
+    // 还没看过这条会话的终端：实例没挂
+    expect(wrapper.findAll('.wt-panel')).toHaveLength(1)
+    expect(sockets).toHaveLength(1)
+
+    await pickTool('终端')
     expect(wrapper.findAll('.wt-panel')).toHaveLength(2)
-    expect(wrapper.findAll('.wt-divider')).toHaveLength(1) // 分隔线只跟当前会话走
+    expect(sockets).toHaveLength(2)
+    // 每条会话的终端落在各自的主目录
     expect(sockets[0].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/proj' })
     expect(sockets[1].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/shared' })
+
+    // 切回第一条：连接还在，不重开
+    await pickSession('第一件事')
+    await pickTool('终端')
+    expect(sockets).toHaveLength(2)
+    expect(termInstances[0].disposed).toBe(false)
   })
 
-  it('分隔线拖动把面板宽度钳在 30%–70%，松手后不再跟随', async () => {
+  it('分隔线拖动把面板宽度钳在 28%–78%，松手后不再跟随', async () => {
     await show()
     await pickSession('第一件事')
-    await openTerm()
+    await openPanel()
     wrapper.get('.ag-split').element.getBoundingClientRect =
       () => ({ left: 0, right: 1000, top: 0, bottom: 100, width: 1000, height: 100 })
     await wrapper.get('.wt-divider').trigger('pointerdown', { clientX: 300 })
@@ -1675,15 +1704,15 @@ describe('内嵌终端面板：跟着会话走 + 分栏拖拽', () => {
       window.dispatchEvent(new MouseEvent('pointermove', { clientX }))
       await nextTick()
     }
-    await move(250) // 0.75 → 顶到 70%
-    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 70%')
-    await move(850) // 0.15 → 压到 30%
-    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 30%')
+    await move(200) // 0.8 -> 顶到 78%
+    expect(wrapper.get('.ag-tools').attributes('style')).toContain('width: 78%')
+    await move(850) // 0.15 -> 压到 28%
+    expect(wrapper.get('.ag-tools').attributes('style')).toContain('width: 28%')
     await move(500)
     expect(wrapper.get('.wt-divider').attributes('aria-valuenow')).toBe('50')
     window.dispatchEvent(new Event('pointerup'))
     expect(document.body.classList.contains('wt-resizing')).toBe(false)
     await move(100) // 松手后指针移动不再影响比例
-    expect(wrapper.get('.wt-panel').attributes('style')).toContain('width: 50%')
+    expect(wrapper.get('.ag-tools').attributes('style')).toContain('width: 50%')
   })
 })

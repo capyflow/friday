@@ -1923,3 +1923,66 @@ html[data-theme="dark"] .wfd-check-detail { background: rgba(0,0,0,.10); }
   .wfd-check { grid-template-columns: 1fr; grid-template-rows: minmax(0, 42%) minmax(0, 58%); }
   .wfd-check-list { border-right: none; border-bottom: 1px solid var(--border); }
 }
+
+/* ===== 统一工具面板（WorkspaceTools）：终端/文件/改动/Git/记忆/验证 收在一列 ===== */
+/* 三种形态：rail（默认，只剩窄图标条）/ panel（对话在左、面板在右，可拖宽）
+   / focus（工作区一分为二：左边收窄的会话、右边占满的工具视图）。
+   全部只发生在工作区内部，左侧会话列表不动。 */
+.ag-tools-rail { flex: none; width: 46px; display: flex; flex-direction: column; align-items: center;
+                 gap: 2px; padding: 10px 0; border-left: 1px solid var(--border); background: var(--card); }
+.ag-tools-rail-btn { position: relative; width: 34px; height: 34px; display: flex; align-items: center;
+                     justify-content: center; border: none; border-radius: 9px; background: transparent;
+                     color: var(--muted-fg); cursor: pointer; }
+.ag-tools-rail-btn:hover { background: var(--bg-muted); color: var(--fg); }
+.ag-tools-rail-btn.on { background: var(--accent-subtle); color: var(--accent-fg); }
+.ag-tools-rail-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ag-tools-badge { position: absolute; top: 1px; right: 1px; min-width: 15px; height: 15px; padding: 0 3px;
+                  border-radius: 999px; background: var(--accent); color: var(--accent-fg);
+                  font-size: 9.5px; line-height: 15px; text-align: center;
+                  font-variant-numeric: tabular-nums; }
+
+.ag-tools { flex: none; min-width: 300px; display: flex; flex-direction: column;
+            border-left: 1px solid var(--border); background: var(--card); }
+/* focus 态：工具视图占满工作区，左边会话列收窄（宽度由内联样式给）。 */
+.ag-tools.focus { flex: 1; min-width: 0; }
+.ag-tools-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+                 border-bottom: 1px solid var(--border); }
+.ag-tools-title { flex: none; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ag-tools-title b { font-size: 12.5px; font-weight: 650; color: var(--fg); white-space: nowrap; }
+.ag-tools-title .meta { font-size: 11px; color: var(--faint-fg); white-space: nowrap;
+                        overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.ag-tools-tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto;
+                 scrollbar-width: none; }
+.ag-tools-tabs::-webkit-scrollbar { display: none; }
+.ag-tools-tab { flex: none; border: none; border-radius: 7px; background: transparent; color: var(--muted-fg);
+                font: inherit; font-size: 11.5px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
+.ag-tools-tab:hover { color: var(--fg); background: var(--bg-muted); }
+.ag-tools-tab.on { color: var(--fg); background: var(--bg-muted); font-weight: 600; }
+html[data-theme="dark"] .ag-tools-tab.on { background: rgba(255,255,255,.09); }
+.ag-tools-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.ag-tools-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.ag-tools-hint { padding: 16px; line-height: 1.7; }
+
+/* 抽屉在面板里（embedded）：不再是浮层，没有遮罩与自己的头部，
+   内容直接铺满面板区；外层标签行已经说明了当前在看哪一项。 */
+.wfd-wrap.is-embed { flex: 1; min-height: 0; display: flex; }
+.wfd-panel.is-embed { position: static; width: auto; height: auto; flex: 1; min-height: 0;
+                      border-left: none; box-shadow: none; animation: none; }
+.wfd-panel.is-embed .wfd-body { min-height: 0; }
+html[data-theme="dark"] .wfd-panel.is-embed { background: transparent; backdrop-filter: none; }
+
+/* 面板列的外壳：收起时整列 v-show 隐藏（里面的终端实例不卸载，连接与内容留着） */
+.ag-tools-col { display: contents; }
+
+/* focus 态：左列（会话）按面板报上来的宽度收窄，工具视图占满剩下的。
+   .ag-chat 默认是 flex:1（flex-basis:0），这里要改成按宽度走，
+   否则内联的 width 会被 flex-basis 顶掉。 */
+.ag-split.ag-split-focus .ag-chat { flex: none; min-width: 0; }
+
+/* 抽屉嵌在工具面板里时：内容区要撑满面板高度（文件树在左、预览在右，
+   各自独立滚动），不能被内容高度顶着走。 */
+.wfd-panel.is-embed .wfd-body { flex: 1; min-height: 0; align-content: stretch; }
+.wfd-panel.is-embed .wfd-tree,
+.wfd-panel.is-embed .wfd-change-list,
+.wfd-panel.is-embed .wfd-memory-list,
+.wfd-panel.is-embed .wfd-check-list { height: 100%; }

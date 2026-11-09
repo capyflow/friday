@@ -458,6 +458,13 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks", s.wrap(s.handleAcpThreadCheckStart))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/checks/:run", s.wrap(s.handleAcpThreadCheckRun))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/checks/:run/stop", s.wrap(s.handleAcpThreadCheckStop))
+		// Git 面板：状态/历史/分支是只读；写操作先进审批队列再执行。
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/git/status", s.wrap(s.handleAcpThreadGitStatus))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/git/log", s.wrap(s.handleAcpThreadGitLog))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/git/branches", s.wrap(s.handleAcpThreadGitBranches))
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads/:id/git/ops", s.wrap(s.handleAcpThreadGitOps))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/git/ops", s.wrap(s.handleAcpThreadGitOpStart))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/git/ops/:op/stop", s.wrap(s.handleAcpThreadGitOpStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))

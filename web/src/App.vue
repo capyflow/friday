@@ -189,6 +189,11 @@ async function logout() {
     <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
     <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.9 5.3.6-3.9 3.6 1 5.3L12 14.8 7.4 17.4l1-5.3L4.5 8.5l5.3-.6z"/></symbol>
     <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
+    <!-- 统一工具面板的图标（终端/文件/改动/Git 管理/项目记忆/验证） -->
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M8 13h8M8 17h5"/></symbol>
+    <symbol id="i-diff" viewBox="0 0 24 24"><path d="M4 6h7M4 12h5M4 18h7"/><path d="M14 6h6M14 12h6M14 18h6"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7"/><path d="M8.5 6h4a5.5 5.5 0 0 1 5.5 5.5v.5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
   </svg>
 
   <!-- 极光背景（深色可见光斑，浅色极淡点阵） -->
