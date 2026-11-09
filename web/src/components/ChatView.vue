@@ -10,6 +10,7 @@ import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { fmtTokens } from '../format.js'
 import { pushThinking, finishRound, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
+import { feedRate } from '../speed.js'
 import { store, toast } from '../store.js'
 import TimelineBlocks from './TimelineBlocks.vue'
 import CopyMessageButton from './CopyMessageButton.vue'
@@ -553,7 +554,9 @@ async function streamTurn({ url, body, userMsg, draft, prepare }) {
         nextTick(() => stick())
       }
       if (data.delta) {
-        pushText(ensureBot(), data.delta)
+        const b = ensureBot()
+        pushText(b, data.delta)
+        b.rate = feedRate(b, data.delta)
         nextTick(() => stick())
       }
       if (data.paused) {
@@ -876,7 +879,7 @@ async function clearContext() {
           <!-- bot：zcode 风时间线——思考 / 工具调用 / 正文按到达顺序分开成块 -->
           <div v-else-if="m.role === 'bot'" class="turn">
             <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
-                            own-tools @preview="path => fileDrawer.open(path)" />
+                            :rate="m.rate || 0" own-tools @preview="path => fileDrawer.open(path)" />
             <span v-if="m.paused" class="paused-chip">已暂停 · 点发送键继续，或直接输入新问题</span>
             <div v-if="m.plan" class="plan-card" :data-plan="m.plan.id">
                 <div class="pc-head">

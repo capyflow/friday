@@ -6,6 +6,7 @@
 // 直接改写它们。
 import { computed } from 'vue'
 import { renderMD, localFileHref, joinFilePath } from '../md.js'
+import { fmtRate } from '../speed.js'
 import ToolStep from './ToolStep.vue'
 import { blockIndex, thinkPreview } from '../blocks.js'
 
@@ -22,6 +23,8 @@ const props = defineProps({
   // 会话主目录：正文里的相对文件链接（[文案](docs/a.md)）按它拼绝对路径再预览。
   // 内置聊天没有 cwd，不传时相对链接不拦（绝对路径链接不受影响）。
   baseDir: { type: String, default: '' },
+  // 当前输出速度（tok/s，前端按字符估算），跟着正在写的正文光标一起显示。
+  rate: { type: Number, default: 0 },
 })
 
 // 正文里的文件路径 chip 与文件链接都转后端只读预览（v-html 内的点击走委托）。
@@ -120,6 +123,6 @@ function cursorOn(bi) {
     <ToolStep v-else-if="r.b.kind === 'tool'" :b="r.b" :own="ownTools" @toggle="r.b.open = !r.b.open" />
 
     <!-- 正文块（fileChips：行内代码里的本机文件路径渲染成可点预览 chip） -->
-    <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(r.b.text, { fileChips: true })"></span><span v-if="cursorOn(r.bi)" class="cursor"></span></div>
+    <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(r.b.text, { fileChips: true })"></span><span v-if="cursorOn(r.bi)" class="cursor"></span><span v-if="cursorOn(r.bi) && rate > 0" class="tok-rate">↑{{ fmtRate(rate) }} tok/s</span></div>
   </template>
 </template>

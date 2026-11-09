@@ -496,6 +496,9 @@ html[data-theme="dark"] .chat-md pre {
   background: #0D0D0D; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 .cursor { display: inline-block; width: 2px; height: 1em; vertical-align: -.15em;
   background: var(--accent); margin-left: 2px; animation: blink .9s steps(1) infinite; }
+/* 流式输出速度：跟在光标后的体感指标（按字符估算），结束后随光标一起消失 */
+.tok-rate { margin-left: 8px; font-size: 11.5px; color: var(--faint-fg);
+            font-variant-numeric: tabular-nums; white-space: nowrap; }
 @keyframes blink { 50% { opacity: 0; } }
 .typing { display: inline-flex; gap: 4px; padding: 4px 2px; }
 .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint-fg);
@@ -1103,6 +1106,9 @@ html[data-theme="dark"] .dlg {
 .dlg-btns { display: flex; gap: 10px; margin-left: auto; }
 /* 删除确认：同一套弹窗骨架，收窄到一句话能读完的宽度 */
 .dlg.dlg-confirm { width: min(420px, 100%); }
+/* 重命名弹窗：输入独占一行，下面一行灰色提示 */
+.dlg-body .dlg-input { width: 100%; }
+.dlg-body .dlg-hint { margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; }
 
 /* ---------- 设置页 · 能力卡片（工具 / MCP 服务器共用外壳） ----------
    一行一项：图标 + 名称与状态徽章 + 一行说明，右侧「配置」展开编辑区、再点「收起」。
@@ -1449,9 +1455,6 @@ html[data-theme="dark"] .ws-missing { color: #FBBF24; }
 .ws-dlg-state { flex: 1; min-width: 0; }
 /* 新建会话表单里的主目录提示与行内改标题 */
 .ws-session-hint { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; word-break: break-all; }
-.ag-title-edit { width: 100%; font: inherit; font-size: 13px; font-weight: 550; padding: 1px 5px;
-                 border: 1px solid var(--border-strong); border-radius: 6px;
-                 background: var(--bg); color: var(--fg); }
 /* 会话行右侧的「…」：平时淡出，悬停/选中/菜单开着才显形，别让每行都挂一个图标 */
 .ag-menu-wrap { position: relative; flex: none; }
 .ag-menu-wrap .ws-icon { width: 22px; height: 22px; opacity: 0; transition: opacity .12s ease; }

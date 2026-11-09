@@ -17,6 +17,7 @@ import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
+import { feedRate } from '../speed.js'
 import { ago, fmtTokens } from '../format.js'
 import { getPref, setPref } from '../prefs.js'
 import { store, toast } from '../store.js'
@@ -91,7 +92,7 @@ function isUnread(t) {
   const at = seen[t.id]
   return !!at && !!t.updatedAt && t.updatedAt > at
 }
-const showAllWs = reactive(new Set()) // 点过「显示更多」的工作区
+const showAllWs = reactive(new Set()) // 展开了全部会话的工作区（再点一次「收起会话」移出）
 const SESSION_PREVIEW = 3             // 每组默认先露出最近 3 条会话
 const scroller = ref(null)
 const inputEl = ref(null)
@@ -101,6 +102,9 @@ const sessionFor = ref('')     // 正在新建会话的工作区 id（'' = 没�
 const sessionForm = reactive({ agent: '' })
 // 删除确认弹窗：{ kind:'thread'|'workspace', id, title, count }；null = 没打开
 const pendingDelete = ref(null)
+const deleteDlg = ref(null)        // 确认弹窗本体（打开时接住焦点，回车才能直达确认）
+const rename = reactive({ open: false, id: '', title: '', saving: false }) // 重命名弹窗（暂存）
+const renameInput = ref(null)
 const fileInput = ref(null)
 const fileDrawer = ref(null)       // 文件预览抽屉（时间线里点文件路径 chip 打开）
 
@@ -335,7 +339,8 @@ function visibleSessions(ws) {
   const list = wsThreadsWithOrder(ws.id)
   return showAllWs.has(ws.id) ? list : list.slice(0, SESSION_PREVIEW)
 }
-function hiddenCount(ws) { return Math.max(0, wsThreadsWithOrder(ws.id).length - visibleSessions(ws).length) }
+// 超出预览条数的会话数：展开后也要保留这个数，底部的开关才不会消失（否则收不回去）。
+function overflowCount(ws) { return Math.max(0, wsThreadsWithOrder(ws.id).length - SESSION_PREVIEW) }
 function wsGenerating(id) { return wsThreadsWithOrder(id).filter(t => generating(t.id)).length }
 function wsUnread(id) { return wsThreadsWithOrder(id).filter(isUnread).length }
 // 「最近更新」视图：跨工作区摊平，行上标出它属于哪个工作区
@@ -418,13 +423,14 @@ function onDocClick(e) {
 function onKey(e) {
   if (e.key !== 'Escape' || e.defaultPrevented) return
   const hasLayer = popOpen.value || capOpen.value || ctxOpen.value || !!wsMenu.value ||
-    !!threadMenu.value || wsDlg.open || !!pendingDelete.value
+    !!threadMenu.value || wsDlg.open || !!pendingDelete.value || rename.open
   if (hasLayer) {
     e.preventDefault()
     setPop(false); capOpen.value = ''; ctxOpen.value = false
     closeWsMenu(); closeThreadMenu()
     if (wsDlg.open) closeWsDialog() // 弹窗里按 Esc 直接放弃暂存的编辑
     if (pendingDelete.value) cancelDelete()
+    if (rename.open) closeRenameDialog()
     return
   }
   if (busy.value && e.target && typeof e.target.closest === 'function' && e.target.closest('.ag-foot, .ag-scroller')) {
@@ -608,7 +614,10 @@ function collapseAll() {
   sessionFor.value = ''
   showAllWs.clear()
 }
-function showMoreWs(id) { showAllWs.add(id) }
+function toggleShowAll(id) {
+  if (showAllWs.has(id)) showAllWs.delete(id)
+  else showAllWs.add(id)
+}
 // 「最近更新」里点一条：选中它，同时把它所属的工作区标记成展开——
 // 切回「按工作区」视图时直接落在那一组上，不用自己再找。
 function openFromRecent(t) {
@@ -630,27 +639,37 @@ function togglePin(ws) {
    同一时刻只展开一组的菜单，点外面或 Esc 收起。 */
 const wsMenu = ref('')          // 展开菜单的工作区 id
 const threadMenu = ref('')      // 展开菜单的会话 id
-const threadEdit = reactive({ id: '', title: '' }) // 行内改标题
 function toggleWsMenu(id) { wsMenu.value = wsMenu.value === id ? '' : id }
 function closeWsMenu() { wsMenu.value = '' }
 function toggleThreadMenu(id) { threadMenu.value = threadMenu.value === id ? '' : id }
 function closeThreadMenu() { threadMenu.value = '' }
 
-// 会话标题：在行内改。留空 = 回到自动（下一轮按那时的消息重新派生）
+// 会话标题：弹窗里改（双击标题或「…」→重命名）。留空 = 回到自动（下一轮按那时的消息重新派生）。
 function startRenameThread(t) {
   closeThreadMenu()
-  threadEdit.id = t.id
-  threadEdit.title = t.title || ''
+  rename.open = true
+  rename.id = t.id
+  rename.title = t.title || ''
+  nextTick(() => { renameInput.value?.focus(); renameInput.value?.select() })
+}
+function closeRenameDialog() { if (!rename.saving) rename.open = false }
+// 回车提交；焦点在按钮上时把回车留给按钮自己（取消仍是取消）。
+function onRenameEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.target?.closest?.('button')) return
+  e.preventDefault()
+  commitRenameThread()
 }
 async function commitRenameThread() {
-  if (!threadEdit.id) return
-  const id = threadEdit.id
-  const title = threadEdit.title.trim()
-  threadEdit.id = ''
+  if (!rename.open || rename.saving) return
+  rename.saving = true
+  const id = rename.id
+  const title = rename.title.trim()
   try {
     await api('POST', `/api/acp/threads/${id}`, { title })
     await load()
-  } catch (e) { toast('改名失败：' + e.message, true) }
+    rename.open = false
+  } catch (e) { toast('改名失败：' + e.message, true) } finally { rename.saving = false }
 }
 
 /* 编辑工作区弹窗：改名 + 源文件夹的增删与主目录，都在这里改。
@@ -714,7 +733,7 @@ async function saveWsDialog() {
 // 删除是不可逆的本地记录操作：统一走确认弹窗，不靠带时限的「再点一次」。
 function askRemoveWorkspace(ws) {
   closeWsMenu()
-  pendingDelete.value = { kind: 'workspace', id: ws.id, title: ws.name, count: wsThreads(ws.id).length }
+  askDelete({ kind: 'workspace', id: ws.id, title: ws.name, count: wsThreads(ws.id).length })
 }
 async function doRemoveWorkspace(id) {
   try {
@@ -775,11 +794,23 @@ const dirDialog = ref(null)
 function openDirPicker(onPick, startPath) { dirDialog.value?.open(onPick, startPath) }
 
 // 行尾「×」与会话菜单共用这一条删除入口：先弹确认，再真删。
+function askDelete(target) {
+  pendingDelete.value = target
+  // 焦点收进弹窗：回车直达确认（Esc 走全局监听，不依赖焦点在哪）。
+  nextTick(() => deleteDlg.value?.focus())
+}
 function askRemoveThread(t) {
   closeThreadMenu()
-  pendingDelete.value = { kind: 'thread', id: t.id, title: t.title || '新会话', count: 0 }
+  askDelete({ kind: 'thread', id: t.id, title: t.title || '新会话', count: 0 })
 }
 function cancelDelete() { pendingDelete.value = null }
+// 焦点不在按钮上时回车 = 确认；在按钮上时交给浏览器（取消仍是取消，不会误删）。
+function onDeleteEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.target?.closest?.('button')) return
+  e.preventDefault()
+  confirmDelete()
+}
 async function confirmDelete() {
   const p = pendingDelete.value
   if (!p) return
@@ -964,7 +995,9 @@ async function startTurn(owner, text, shots) {
       if (data.step) { pushToolStep(ensureBot(), data.step); scrollAfterRender() }
       if (data.delta) {
         if (typing.label) typing.label = ''
-        pushText(ensureBot(), data.delta)
+        const b = ensureBot()
+        pushText(b, data.delta)
+        b.rate = feedRate(b, data.delta)
         scrollAfterRender()
       }
       if (data.done) {
@@ -1219,14 +1252,9 @@ function previewImages(urls, at = 0) {
                      @click="select(t.id)" @keydown.enter.prevent="select(t.id)">
                   <span class="ag-item-main">
                     <span class="ag-title">
-                      <input v-if="threadEdit.id === t.id" v-model="threadEdit.title" class="ag-title-edit"
-                             aria-label="会话标题" placeholder="新会话"
-                             @click.stop @keydown.enter.prevent="commitRenameThread" @blur="commitRenameThread">
-                      <template v-else>
-                        <span @dblclick.stop="startRenameThread(t)" :title="'双击改标题：' + (t.title || '新会话')">{{ t.title || '新会话' }}</span>
-                        <span v-if="t.state === 'interrupted'" class="ag-state warn" title="上次会话被中断，继续发消息会重接上下文">已中断</span>
-                        <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
-                      </template>
+                      <span @dblclick.stop="startRenameThread(t)" :title="'双击改标题：' + (t.title || '新会话')">{{ t.title || '新会话' }}</span>
+                      <span v-if="t.state === 'interrupted'" class="ag-state warn" title="上次会话被中断，继续发消息会重接上下文">已中断</span>
+                      <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
                     </span>
                     <!-- 行上不铺路径：agent + 多久之前动过（完整目录在会话头部与「编辑工作区」里看） -->
                     <span class="meta">{{ t.agent }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
@@ -1247,8 +1275,10 @@ function previewImages(urls, at = 0) {
                     </div>
                   </span>
                 </div>
-                <button v-if="hiddenCount(ws)" class="ws-act" @click="showMoreWs(ws.id)">
-                  显示更多（还有 {{ hiddenCount(ws) }} 条）
+                <button v-if="overflowCount(ws)" class="ws-act"
+                        :aria-expanded="showAllWs.has(ws.id) ? 'true' : 'false'"
+                        @click="toggleShowAll(ws.id)">
+                  {{ showAllWs.has(ws.id) ? '收起会话' : `显示更多（还有 ${overflowCount(ws)} 条）` }}
                 </button>
                 <div v-if="!wsThreads(ws.id).length && sessionFor !== ws.id" class="meta ws-none">
                   这个工作区还没有会话。
@@ -1370,7 +1400,7 @@ function previewImages(urls, at = 0) {
                 </div>
                 <div v-else-if="m.role === 'bot'" class="turn">
                   <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
-                                  :base-dir="current?.cwd || ''" @preview="path => fileDrawer.open(path)" />
+                                  :rate="m.rate || 0" :base-dir="current?.cwd || ''" @preview="path => fileDrawer.open(path)" />
                   <button v-if="m.changes && m.changes.files.length && !m.streaming"
                           type="button" class="turn-changes" :class="{ reverted: m.changes.revertedAt }"
                           :aria-label="'查看本轮改动的 ' + m.changes.files.length + ' 个文件'"
@@ -1569,13 +1599,39 @@ function previewImages(urls, at = 0) {
   <FilePreviewDrawer ref="fileDrawer" />
   <!-- 附件全图预览：气泡上方的缩略图与输入区待发缩略图共用一层 -->
   <ImageLightbox ref="imgLightbox" />
+  <!-- 会话重命名：双击标题或「…」→重命名打开；回车提交，Esc/遮罩取消。
+       暂存在弹窗里，点「保存」才落后端（留空 = 回到自动命名）。 -->
+  <Teleport to="body">
+    <div v-if="rename.open" class="dlg-mask" @click.self="closeRenameDialog">
+      <div class="dlg dlg-confirm" role="dialog" aria-modal="true" aria-label="重命名会话"
+           @keydown.enter="onRenameEnter" @keydown.esc="closeRenameDialog">
+        <div class="dlg-form">
+          <header class="dlg-head">
+            <h3 class="dlg-title">重命名会话</h3>
+          </header>
+          <div class="dlg-body">
+            <input ref="renameInput" v-model="rename.title" class="dlg-input" aria-label="会话标题" placeholder="新会话">
+            <p class="meta dlg-hint">留空 = 回到自动命名（下一轮按消息重新派生）。</p>
+          </div>
+          <footer class="dlg-foot">
+            <div class="dlg-btns">
+              <button type="button" class="btn sm" aria-label="取消重命名" @click="closeRenameDialog">取消</button>
+              <button type="button" class="btn sm primary" aria-label="确认重命名"
+                      :disabled="rename.saving" @click="commitRenameThread">保存</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </Teleport>
   <!-- 删除确认：会话与工作区共用一张，标题和影响范围随目标变化。遮罩、Esc 与「取消」
-       同义；破坏性动作不放 ✕，也不靠「再点一次」的带时限第二下。 -->
+       同义；破坏性动作不放 ✕，也不靠「再点一次」的带时限第二下。打开即接住焦点，
+       回车确认（焦点在「取消」上时回车仍是取消）。 -->
   <Teleport to="body">
     <div v-if="pendingDelete" class="dlg-mask" @click.self="cancelDelete">
-      <div class="dlg dlg-confirm" role="dialog" aria-modal="true"
+      <div ref="deleteDlg" class="dlg dlg-confirm" role="dialog" aria-modal="true" tabindex="-1"
            :aria-label="pendingDelete.kind === 'workspace' ? '删除工作区确认' : '删除会话确认'"
-           @keydown.esc="cancelDelete">
+           @keydown.enter="onDeleteEnter" @keydown.esc="cancelDelete">
         <div class="dlg-form">
           <header class="dlg-head">
             <h3 class="dlg-title">{{ pendingDelete.kind === 'workspace' ? '删除工作区？' : '删除会话？' }}</h3>

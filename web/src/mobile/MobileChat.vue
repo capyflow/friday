@@ -2,13 +2,14 @@
 // 移动端对话视图：主会话（/api/chat）与智能体线程（/api/acp/threads/:id/chat）
 // 共用这一个组件，靠 kind 区分——SSE 帧协议、块状态机（blocks.js）与时间线渲染
 // （TimelineBlocks）都是桌面端原样复用，只换一层数字端版式。
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { toast } from '../store.js'
 import {
   closeRunningTools, finishRound, pushText, pushThinking, pushToolStep, turnTotalText,
 } from '../blocks.js'
+import { feedRate } from '../speed.js'
 import TimelineBlocks from '../components/TimelineBlocks.vue'
 
 const props = defineProps({
@@ -145,7 +146,8 @@ async function stream(body, reuseBot, urlOverride) {
   let errMsg = ''
   const ensureBot = () => {
     if (!bot) {
-      bot = { role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 }
+      // reactive 与桌面端一致：正文/块/速率都是流式改写的，裸对象不会触发重渲染。
+      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
       messages.value.push(bot)
       scrollBottom()
     }
@@ -180,7 +182,9 @@ async function stream(body, reuseBot, urlOverride) {
       }
       if (data.delta) {
         if (typing.value) typing.value = ''
-        pushText(ensureBot(), data.delta)
+        const b = ensureBot()
+        pushText(b, data.delta)
+        b.rate = feedRate(b, data.delta)
         scrollBottom()
       }
       if (data.plan && data.plan.title) typing.value = '计划：' + data.plan.title
@@ -260,7 +264,7 @@ defineExpose({ load })
         <div v-else class="mrow" :class="m.role">
           <div v-if="m.role === 'bot'" class="turn">
             <TimelineBlocks :blocks="m.blocks" :streaming="m.streaming" :paused="m.paused" :round="m.round"
-                            @preview="path => emit('preview', path)" />
+                            :rate="m.rate || 0" @preview="path => emit('preview', path)" />
             <div v-if="m.turn || (!m.streaming && m.blocks.some(b => b.kind === 'text' && b.text))" class="turn-foot">
               <div v-if="m.turn" class="turn-total">
                 {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>

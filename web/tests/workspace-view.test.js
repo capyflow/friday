@@ -796,15 +796,16 @@ describe('会话：在工作区里创建与删除', () => {
     expect(wrapper.get('.ag-form-acts .primary').element.disabled).toBe(true)
   })
 
-  it('双击会话标题就地改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
+  it('双击会话标题弹窗改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
     await show()
     const title = wrapper.get('.ag-item .ag-title span')
     await title.trigger('dblclick')
-    const input = wrapper.get('[aria-label="会话标题"]')
+    const input = wrapper.get('[aria-label="重命名会话"] [aria-label="会话标题"]')
     expect(input.element.value).toBe('第一件事')
     await input.setValue('  换个   名字 ')
     await input.trigger('keydown.enter')
     await flushPromises()
+    expect(wrapper.find('[aria-label="重命名会话"]').exists()).toBe(false) // 提交后关窗
     // 改名之后紧跟一次列表刷新（GET），所以按"改名请求"过滤后再断言，别被最后一次 GET 骗了
     const titlePosts = () => api.mock.calls
       .filter(([m, u]) => m === 'POST' && u === '/api/acp/threads/th1')
@@ -815,19 +816,31 @@ describe('会话：在工作区里创建与删除', () => {
 
     // 清空 = 回到自动：行上显示「新会话」，请求里传空串
     await wrapper.get('.ag-item .ag-title span').trigger('dblclick')
-    await wrapper.get('[aria-label="会话标题"]').setValue('')
-    await wrapper.get('[aria-label="会话标题"]').trigger('keydown.enter')
+    const again = wrapper.get('[aria-label="重命名会话"] [aria-label="会话标题"]')
+    await again.setValue('')
+    await again.trigger('keydown.enter')
     await flushPromises()
     expect(titlePosts()).toEqual(['换个   名字', ''])
     expect(wrapper.get('.ag-item').text()).toContain('新会话')
   })
 
-  it('菜单里的「重命名」进同一个行内编辑', async () => {
+  it('重命名弹窗按 Esc 关闭：放弃输入，不发请求', async () => {
+    await show()
+    api.mockClear()
+    await wrapper.get('.ag-item .ag-title span').trigger('dblclick')
+    await wrapper.get('[aria-label="重命名会话"] [aria-label="会话标题"]').setValue('不要了')
+    await wrapper.get('[aria-label="重命名会话"]').trigger('keydown.esc')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="重命名会话"]').exists()).toBe(false)
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/th1', expect.anything())
+  })
+
+  it('菜单里的「重命名」打开同一个弹窗', async () => {
     await show()
     const menu = await openThreadMenu('第一件事')
     await menu.get('[aria-label="重命名 第一件事"]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[aria-label="会话标题"]').element.value).toBe('第一件事')
+    expect(wrapper.get('[aria-label="重命名会话"] [aria-label="会话标题"]').element.value).toBe('第一件事')
     expect(wrapper.find('.ag-menu-wrap .ws-menu').exists()).toBe(false) // 进编辑就收起菜单
   })
 
@@ -854,6 +867,25 @@ describe('会话：在工作区里创建与删除', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
     expect(wrapper.text()).toContain('这个工作区还没有会话')
+  })
+
+  it('删除弹窗支持回车确认、Esc 取消', async () => {
+    await show()
+    api.mockClear()
+    const menu = await openThreadMenu('第一件事')
+    await menu.get('[aria-label="删除 第一件事"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="删除会话确认"]').trigger('keydown.esc')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="删除会话确认"]').exists()).toBe(false)
+    expect(api).not.toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
+
+    const again = await openThreadMenu('第一件事')
+    await again.get('[aria-label="删除 第一件事"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="删除会话确认"]').trigger('keydown.enter')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
   })
 })
 
@@ -1255,7 +1287,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.text()).not.toContain('未读')
   })
 
-  it('会话多于三条先收着，「显示更多」再露全', async () => {
+  it('会话多于三条先收着，「显示更多」露全后还能再收起', async () => {
     const extra = ['th3', 'th4'].map((id, i) => ({
       id, workspaceId: 'ws1', agent: 'codex', cwd: '/home/u/proj', title: '第' + (i + 3) + '件事',
       state: 'idle', updatedAt: '2026-10-1' + (6 - i) + 'T08:00:00Z', messages: [],
@@ -1268,6 +1300,11 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     await more.trigger('click')
     await flushPromises()
     expect(wrapper.findAll('.ag-item')).toHaveLength(4)
+    const less = wrapper.findAll('button').find(b => b.text() === '收起会话')
+    expect(less.attributes('aria-expanded')).toBe('true')
+    await less.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.ag-item')).toHaveLength(3) // 收回预览态
   })
 
   it('「收起全部」把组全折起来，只留一行行标题', async () => {
