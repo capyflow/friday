@@ -139,7 +139,7 @@ desktop/
 
 平台差异：
 
-- **macOS**：透明窗需 `macOSPrivateApi`（已配）；分发需 Apple Developer（$99/年）签名+公证，否则首次打开要右键绕过 Gatekeeper
+- **macOS**：透明窗需 `macOSPrivateApi`（已配）；正式分发需 Developer ID Application 签名+公证；内部测试包使用完整 ad-hoc 签名，下载后仍需用户在系统设置放行，不能保证右键打开即可解决
 - **Windows**：WebView2 自动引导安装；SmartScreen 警告需代码签名证书（首期未签名）
 - **Linux**：X11 全局快捷键正常，Wayland 依赖 compositor 协议支持；产物 deb/AppImage
 
@@ -151,4 +151,4 @@ desktop/
 - 矩阵：macos-14（arm64）/ macos-13（x64）/ ubuntu / windows → 每个 runner：`gen-icon.py` + `npx tauri icon` 生成图标 → `CGO_ENABLED=0 go build -ldflags "-X main.version=<tag>"` 出 `binaries/friday-<triple>` → rust-toolchain + tauri-action 出安装包
 - 产物：`.dmg`（双架构）、`.exe`（NSIS）、`.deb`/`.AppImage`，tag 时自动创建 GitHub Release
 - 私有模块：`webfactory/ssh-agent` + secrets SSH 私钥（`DEPLOY_SSH_KEY`，与 Docker 构建同一把）+ `GOPRIVATE`
-- 签名 secrets 预留注释位（APPLE_CERTIFICATE… / WINDOWS_CERTIFICATE…），补上即出签名包
+- macOS 签名流程已在 [desktop/README.md](../desktop/README.md#macos-正确打包流程2026-11-09-起) 落地：默认完整 ad-hoc 签名；正式发布使用 `--macos-release`，要求 Developer ID 与公证凭据，并校验 app、DMG 内置 app、装订票据与 Gatekeeper。CI 接入后仍必须走同一校验流程；仅添加 secrets 不代表已经通过发布验收。

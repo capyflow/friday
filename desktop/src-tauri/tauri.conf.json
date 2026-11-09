@@ -45,6 +45,9 @@
     "resources": [
       "resources/config.yaml.example"
     ],
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

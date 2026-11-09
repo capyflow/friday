@@ -13,6 +13,7 @@ desktop/
 ├── ui/                        # 壳本地页（index=启动占位，error=内核退出）
 ├── scripts/
 │   ├── build-release.sh       # ★ 打包脚本：一条命令出安装包
+│   ├── verify-macos.sh        # macOS 签名 / DMG / 公证校验（失败即停止）
 │   └── gen-icon.py            # 图标底图绘制器（纯 stdlib；icns/ico 由 tauri icon 出）
 └── src-tauri/
     ├── Cargo.toml / tauri.conf.json / capabilities/
@@ -42,7 +43,7 @@ desktop/scripts/build-release.sh
 
 脚本依次完成：生成图标 → `CGO_ENABLED=0 go build` 出 sidecar（版本经
 `-ldflags -X main.version=` 注入）→ 拷贝 `config.yaml.example` 到随包资源 →
-`npx tauri build` 出安装包 → 列出产物。常用参数：
+`npx tauri build` 出安装包 → macOS 校验内核和完整应用签名、DMG 完整性及内置应用一致性 → 列出产物。任何校验失败都不能发布。常用参数：
 
 ```bash
 desktop/scripts/build-release.sh --debug            # 调试构建
@@ -62,21 +63,23 @@ Windows 为 NSIS `.exe`；Linux 为 `.deb` / `.AppImage`。
 `bundle/dmg/*.dmg` 是同一个 app 的压缩分发壳——挂载后里面除 `Friday.app` 只多一个
 `Applications` 快捷方式，逐文件比对与 `bundle/macos/Friday.app` 无差异。发给别人、放
 Release 才用 dmg；本机直接 `ditto` app 目录更快，也不会带上从网络下载产生的
-`com.apple.quarantine`（那是首次打开被 Gatekeeper 拦的根源，本地构建 ad-hoc 签名本就不过公证）。
+`com.apple.quarantine`。浏览器下载会触发 Gatekeeper；完整 ad-hoc 签名仅保证代码/资源完整性，不代表通过 Apple 公证，首次打开仍可能需要用户放行。
 
 ```bash
 # 1) 退出运行中的 Friday（托盘菜单「退出 Friday」；只关窗口是驻留，二进制仍被占着）
 pgrep -x friday-desktop && osascript -e 'quit app "Friday"' && sleep 2
-# 2) 留一份可回退的旧包（放 /Applications 之外）
-cp -R /Applications/Friday.app /tmp/Friday.prev.app
-# 3) 替换（ditto 保留权限与符号链接）
+# 2) 移走旧包（备份在新目录，避免 ditto 合并保留旧隔离属性或残留文件）
+FRIDAY_BACKUP_DIR=$(mktemp -d /tmp/friday-backup.XXXXXX)
+mv /Applications/Friday.app "$FRIDAY_BACKUP_DIR/Friday.app"
+echo "旧包备份：$FRIDAY_BACKUP_DIR/Friday.app"
+# 3) 复制到已腾空的目标路径（ditto 保留权限与符号链接）
 ditto desktop/src-tauri/target/release/bundle/macos/Friday.app /Applications/Friday.app
 # 4) 启动，然后验版本（应等于打包日志里的"版本：…"）
 open /Applications/Friday.app
 /Applications/Friday.app/Contents/MacOS/friday --version
 ```
 
-回滚：`ditto /tmp/Friday.prev.app /Applications/Friday.app`。只替换 app 不动数据目录
+回滚时先将新 app 移到其他位置，再从上面打印的备份路径用 `ditto` 复制回来。只替换 app 不动数据目录
 （`~/Library/Application Support/Friday`），要干净重装才按 [docs/DESKTOP.md](../docs/DESKTOP.md) 的清单删数据。
 
 **版本口径（三处数字长得不一样，别拿错地方判断新旧）**：
@@ -138,10 +141,91 @@ cd desktop/src-tauri && npx tauri dev               # 2. 起外壳（改 Rust/�
 
 - CI 按 docs/DESKTOP.md 第六节：push tag `desktop-v*` 触发四平台矩阵
   （`desktop-release.yml` 待接入；本地脚本与 CI 步骤一一对应）
-- **macOS 分发**：需 Apple Developer（$99/年）签名+公证，否则首次打开要
-  右键 → 打开 绕过 Gatekeeper；签名 secrets 预留位见 workflow 注释
+- **macOS 分发**：正式包必须使用 Developer ID Application 签名并完成公证，具体流程见下文。
 - **Windows**：未签名会有 SmartScreen 警告（首期接受）
 - **自动更新**：后续接 updater 插件（需签名密钥对），见 docs/DESKTOP.md 第五节路径表
+
+### macOS 正确打包流程（2026-11-09 起）
+
+**不要直接将裸 `cargo build` / 未配置签名的 Tauri 产物作为可直接打开的正式包分发。**
+0.4.4 旧包只有链接器写入的 Mach-O 临时签名，缺少整个 `.app` 的资源封装，
+`codesign --verify --deep --strict` 报 `code has no resources but signature indicates they must be present`。
+DMG 校验通过也不能证明内部应用签名有效。浏览器下载带来的隔离属性让这个问题在安装后暴露。
+
+配置现已显式设置 `bundle.macOS.signingIdentity = "-"`，由 Tauri 在封装 DMG 前
+为 sidecar 和完整 `.app` 做 ad-hoc 签名；`APPLE_SIGNING_IDENTITY` 可覆盖此默认值。
+签名完成后不能再修改二进制、Info.plist、图标或其他资源；需要修改就重新打包。
+
+#### 本地 / 内部测试包（无需开发者证书）
+
+在仓库根目录运行（生成当前机器架构，Apple Silicon 为 aarch64）：
+
+```bash
+# 明确选择 ad-hoc；未配置 Apple 凭据的开发机也可省略环境变量。
+APPLE_SIGNING_IDENTITY=- desktop/scripts/build-release.sh --version v0.4.4 --skip-icon
+```
+
+产物为 `desktop/src-tauri/target/release/bundle/macos/Friday.app` 和
+`desktop/src-tauri/target/release/bundle/dmg/Friday_0.4.4_aarch64.dmg`，
+DMG 旁同时生成 `.dmg.sha256`。本机按上文备份旧 app 后替换即可。
+SHA-256 用于下载后对照可信发布渠道提供的校验值，不能替代代码签名、公证。
+
+**测试包签名有效不等于 Gatekeeper 放行。** 浏览器下载的 ad-hoc 包仍可能被阻止，
+先验证来源与校验值，再在「系统设置 → 隐私与安全性」允许该应用打开。
+若可信内部测试包仍提示「已损坏」，可仅对该已校验的应用移除下载隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Friday.app
+open /Applications/Friday.app
+```
+
+这只是测试用户的本机放行操作，不是修复签名，也不能作为正式发布流程。
+不要关闭系统全局 Gatekeeper；旧包签名失败时应先换成重打包的版本。
+
+#### 正式分发包（Developer ID + Apple 公证）
+
+1. 在钥匙串导入带私钥的 **Developer ID Application** 证书；用
+   `security find-identity -v -p codesigning` 确认身份可用。
+2. 从安全凭据管理器加载环境变量，不把密码、私钥或证书写入仓库。
+3. 执行正式模式，Tauri 负责签名、向 Apple 提交公证并装订票据，脚本执行最终验收。
+
+```bash
+export APPLE_SIGNING_IDENTITY='Developer ID Application: 公司名称 (TEAMID)'
+# 方案 A：App Store Connect API key（从安全位置加载真实值）
+export APPLE_API_ISSUER='<Issuer ID>'
+export APPLE_API_KEY='<Key ID>'
+export APPLE_API_KEY_PATH='/安全路径/AuthKey_KEYID.p8'
+# 或方案 B：APPLE_ID、APPLE_PASSWORD（App 专用密码）、APPLE_TEAM_ID
+# 两种方案选一种；APPLE_PASSWORD 不是 Apple ID 登录密码。
+
+desktop/scripts/build-release.sh --version v0.4.4 --skip-icon --macos-release
+```
+
+`--macos-release` 要求显式版本、Developer ID 身份及完整公证凭据；缺失则停止。
+本机没有可用证书时只能生成测试包，不能将其标为「已公证」。
+CI 额外用 `APPLE_CERTIFICATE`（p12 的 base64）和 `APPLE_CERTIFICATE_PASSWORD`
+导入证书，仍应使用同一个脚本和正式模式，不能跳过最终验收。
+
+#### 发布前验收与上传
+
+脚本自动执行以下检查，也可独立重跑（测试包去掉 `--notarized`）：
+
+```bash
+desktop/scripts/verify-macos.sh \
+  desktop/src-tauri/target/release/bundle/macos/Friday.app \
+  desktop/src-tauri/target/release/bundle/dmg/Friday_0.4.4_aarch64.dmg \
+  --kernel-version v0.4.4 --notarized
+```
+
+检查包含 sidecar 签名、整个 app 的深度严格签名校验、实际执行内核 `--version`、
+DMG 校验和、只读挂载 DMG 后再次检查内置应用签名并逐文件比对。
+正式模式还要求 `xcrun stapler validate` 和 `spctl --assess --type execute` 通过。
+失败时脚本非零退出，不能上传；只上传通过验收的 DMG 及其 `.sha256`。
+替换已发布同名文件时同时更新校验值，并在发布说明标明重新打包，避免缓存旧包。
+最终还应在一台干净的目标 Mac 上通过浏览器下载、拖入 Applications、首次打开并验版本；
+本机直接运行不覆盖带隔离属性的真实下载场景。
+
+官方依据：[Tauri macOS 签名与公证](https://v2.tauri.app/distribute/sign/macos/)。
 
 ## 已知边界（首期）
 

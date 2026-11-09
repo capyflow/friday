@@ -9,6 +9,7 @@
 #   desktop/scripts/build-release.sh --sidecar-only     # 只编译 sidecar 与资源（配合 `npx tauri dev` 本地开发）
 #   desktop/scripts/build-release.sh --skip-icon        # 不动 icons/（已放置正式设计资源时）
 #   desktop/scripts/build-release.sh --bundles dmg      # 覆盖产物类型（默认按系统：mac=dmg / linux=deb,appimage / win=nsis）
+#   desktop/scripts/build-release.sh --version v0.4.4 --macos-release # 正式 macOS 分发：必须配置 Developer ID 与公证凭据
 #
 # 产物位置（macOS 为例）：
 #   desktop/src-tauri/target/release/bundle/dmg/Friday_<ver>_<arch>.dmg   # 分发/归档用
@@ -24,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TAURI_DIR="$REPO_ROOT/desktop/src-tauri"
 
-DEBUG=0 SIDECAR_ONLY=0 SKIP_ICON=0 FORCE_ICON=0 VERSION="" VERSION_SET=0 BUNDLES=""
+DEBUG=0 SIDECAR_ONLY=0 SKIP_ICON=0 FORCE_ICON=0 VERSION="" VERSION_SET=0 BUNDLES="" MACOS_RELEASE=0
 usage() { grep '^#   ' "$0" | sed 's/^#   //'; exit 0; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
     --sidecar-only) SIDECAR_ONLY=1 ;;
     --skip-icon) SKIP_ICON=1 ;;
     --force-icon) FORCE_ICON=1 ;;
+    --macos-release) MACOS_RELEASE=1 ;;
     --version) VERSION="${2:?--version 需要参数，如 v0.2.0}"; VERSION_SET=1; shift ;;
     --bundles) BUNDLES="${2:?--bundles 需要参数，如 dmg 或 deb,appimage}"; shift ;;
     -h|--help|help) usage ;;
@@ -46,6 +48,23 @@ trap 'echo "" >&2; echo "打包失败（见上方日志）。首次构建需联�
 
 # ---- 0. 前置检查 ----
 step "前置检查"
+OS="$(uname -s)"
+if [ "$MACOS_RELEASE" = 1 ]; then
+  [ "$OS" = Darwin ] || die "--macos-release 只能在 macOS 使用"
+  [ "$DEBUG" = 0 ] && [ "$SIDECAR_ONLY" = 0 ] && [ "$VERSION_SET" = 1 ] \
+    || die "正式发布需显式 --version，不能使用 --debug 或 --sidecar-only"
+  case "${APPLE_SIGNING_IDENTITY:-}" in
+    "Developer ID Application: "*) ;;
+    *) die "正式发布需 APPLE_SIGNING_IDENTITY='Developer ID Application: 名称 (TEAMID)'" ;;
+  esac
+  if [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY:-}" ] && [ -r "${APPLE_API_KEY_PATH:-}" ]; then
+    : # App Store Connect API 公证凭据
+  elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+    : # Apple ID + app-specific password 公证凭据
+  else
+    die "正式发布缺少 Apple 公证凭据；见 desktop/README.md「发布 / 签名」"
+  fi
+fi
 command -v go >/dev/null || die "未安装 Go（https://go.dev/dl/）"
 command -v cargo >/dev/null || die "未安装 Rust（https://rustup.rs）"
 command -v npx >/dev/null || die "未安装 Node/npx（Tauri CLI 经 npx 运行）"
@@ -125,13 +144,18 @@ if [ "$SIDECAR_ONLY" = 1 ]; then
 fi
 
 # ---- 6. Tauri 打包（首次编译 Rust 依赖需数分钟）----
-OS="$(uname -s)"
 if [ -z "$BUNDLES" ]; then
   case "$OS" in
     Darwin) BUNDLES="app,dmg" ;;
     Linux) BUNDLES="deb,appimage" ;;
     MINGW* | MSYS* | CYGWIN*) BUNDLES="nsis" ;;
     *) die "未知系统 ${OS}，请用 --bundles 指定产物类型" ;;
+  esac
+fi
+if [ "$MACOS_RELEASE" = 1 ]; then
+  case ",$BUNDLES," in
+    *,app,*|*,dmg,*) ;;
+    *) die "正式 macOS 发布的 --bundles 必须包含 app 或 dmg" ;;
   esac
 fi
 step "Tauri 打包（--bundles $BUNDLES$([ "$DEBUG" = 1 ] && echo ' --debug')）"
@@ -143,21 +167,49 @@ if [ "$VERSION_SET" = 1 ]; then
 fi
 ( cd "$TAURI_DIR" && "${TAURI_CLI[@]}" "${BUILD_ARGS[@]}" )
 
-# ---- 7. 产物清单 ----
+# ---- 7. 产物校验（必须在报告成功前完成）----
 BUNDLE_ROOT="$TAURI_DIR/target/$([ "$DEBUG" = 1 ] && echo debug || echo release)/bundle"
+if [ "$OS" = Darwin ]; then
+  VERIFY_ARGS=("$BUNDLE_ROOT/macos/Friday.app")
+  case ",$BUNDLES," in
+    *,dmg,*)
+      # 只检查本次版本/架构，不能误取上一次构建遗留的 DMG。
+      APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${VERIFY_ARGS[0]}/Contents/Info.plist")
+      DMG_ARCH="${TRIPLE%%-*}"
+      [ "$DMG_ARCH" != x86_64 ] || DMG_ARCH=x64
+      VERIFY_ARGS+=("$BUNDLE_ROOT/dmg/Friday_${APP_VERSION}_${DMG_ARCH}.dmg")
+      ;;
+  esac
+  VERIFY_ARGS+=(--kernel-version "$VERSION")
+  [ "$MACOS_RELEASE" = 0 ] || VERIFY_ARGS+=(--notarized)
+  "$SCRIPT_DIR/verify-macos.sh" "${VERIFY_ARGS[@]}" || die "macOS 产物验收失败，禁止分发"
+  if [ "$MACOS_RELEASE" = 0 ]; then
+    echo "提示：当前为测试构建；临时签名不等于 Apple 公证，浏览器下载后仍需在系统设置允许打开。"
+    echo "正式分发请配置 Developer ID / 公证凭据并使用 --macos-release。"
+  fi
+fi
+
+# ---- 8. 产物清单 ----
 step "打包完成，产物："
-find "$BUNDLE_ROOT" -type f \( -name '*.dmg' -o -name '*.app' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
-  -exec ls -lh {} \; | awk '{print "  " $5 "  " $9}'
+if [ "$OS" = Darwin ]; then
+  echo "  ${VERIFY_ARGS[0]}"
+  case ",$BUNDLES," in *,dmg,*) ls -lh "${VERIFY_ARGS[1]}" "${VERIFY_ARGS[1]}.sha256" ;; esac
+else
+  find "$BUNDLE_ROOT" -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+    -exec ls -lh {} \; | awk '{print "  " $5 "  " $9}'
+fi
 [ -d "$BUNDLE_ROOT" ] || die "未找到产物目录 $BUNDLE_ROOT"
 if [ "$OS" = "Darwin" ]; then
   # 本机更新只认一个东西：外壳与内核在同一个 .app 里（一体包），dmg 只是它的压缩外壳。
   # 每次把这段贴出来，避免"装哪个包/怎么确认装上了"再问一遍。
   APP="$BUNDLE_ROOT/macos/Friday.app"
-  DMG_FOUND="$(find "$BUNDLE_ROOT/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+  DMG_FOUND=""
+  case ",$BUNDLES," in *,dmg,*) DMG_FOUND="${VERIFY_ARGS[1]}" ;; esac
   step "本机更新（一个包：替换 .app 即可，数据目录不动）"
   echo "  1. 退出运行中的 Friday（托盘菜单「退出 Friday」，不是关窗口）"
-  echo "  2. ditto '$APP' /Applications/Friday.app"
-  echo "  3. 验版本：'/Applications/Friday.app/Contents/MacOS/friday' --version   # 应输出 ${VERSION}"
+  echo "  2. 将旧 /Applications/Friday.app 移到备份目录，腾空原路径（不要直接合并覆盖）"
+  echo "  3. ditto '$APP' /Applications/Friday.app"
+  echo "  4. 验版本：'/Applications/Friday.app/Contents/MacOS/friday' --version   # 应输出 ${VERSION}"
   echo "     或看数据目录日志的新行：grep '\\[启动\\] Friday' ~/Library/Application\\ Support/Friday/friday-kernel.log | tail -1"
   echo "     （Info.plist 的版本串只在显式 --version 时才跟着变，别拿它判断新旧）"
   if [ -n "$DMG_FOUND" ]; then
