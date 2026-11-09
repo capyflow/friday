@@ -77,6 +77,50 @@ func TestMarkReadPersistsAcrossRestartAndSaveFailureRollsBack(t *testing.T) {
 	}
 }
 
+// MarkAllRead 一次把可见未读全标已读，并且和单条已读一样：保存失败不能只改
+// 内存；成功后重启仍是已读，再点一次是无操作。
+func TestMarkAllReadPersistsAndRollsBackOnSaveFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notifications.json")
+	c := newCenter(t, path, nil)
+	base := testTask()
+	for i, id := range []string{"reminder-a", "reminder-b"} {
+		tk := base
+		tk.ID = id
+		tk.When = base.When.Add(time.Duration(i) * time.Minute)
+		tk.Next = tk.When
+		if err := c.Enqueue(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	processNotice(t, c)
+	processNotice(t, c)
+	if c.Unread() != 2 {
+		t.Fatalf("可见通知应未读 2 条: %d", c.Unread())
+	}
+	restore := blockNoticePath(t, path)
+	if _, err := c.MarkAllRead(); err == nil {
+		t.Fatal("全部已读保存失败应返回错误")
+	}
+	if c.Unread() != 2 {
+		t.Fatalf("失败的全读污染内存: %d", c.Unread())
+	}
+	restore()
+	n, err := c.MarkAllRead()
+	if err != nil || n != 2 {
+		t.Fatalf("MarkAllRead = %d, %v，want 2, nil", n, err)
+	}
+	if c.Unread() != 0 {
+		t.Fatalf("全部已读后未读数 = %d", c.Unread())
+	}
+	r := newCenter(t, path, nil)
+	if r.Unread() != 0 {
+		t.Fatalf("重启丢失全部已读: %d", r.Unread())
+	}
+	if n, err := r.MarkAllRead(); err != nil || n != 0 {
+		t.Fatalf("重复全部已读 = %d, %v，want 0, nil", n, err)
+	}
+}
+
 type blockingReadTarget struct {
 	started chan struct{}
 	release chan struct{}

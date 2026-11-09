@@ -237,7 +237,7 @@ type Server struct {
 	skillUpdateMu sync.Mutex
 	notifications *notification.Center
 	noticeHub     *noticeHub // 通知长链接（手机端实时推送；通知中心挂钩子写入）
-	heartbeatFile string // HEARTBEAT.md 路径
+	heartbeatFile string     // HEARTBEAT.md 路径
 	pricer        *cost.Pricer
 	guard         *cost.Guard
 	skills        *skill.Store
@@ -515,6 +515,7 @@ func (s *Server) Handler() http.Handler {
 	if s.notifications != nil {
 		root.AddRouter([]string{http.MethodGet}, "/api/notifications", s.wrap(s.handleNotifications))
 		root.AddRouter([]string{http.MethodGet}, "/api/notifications/ws", s.wrapMedia(s.handleNotificationsWS))
+		root.AddRouter([]string{http.MethodPost}, "/api/notifications/read-all", s.wrap(s.handleReadAllNotifications))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/retry", s.wrap(s.handleRetryNotification))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/read", s.wrap(s.handleReadNotification))
 		root.AddRouter([]string{http.MethodPost}, "/api/notifications/:id/snooze", s.wrap(s.handleSnoozeNotification))

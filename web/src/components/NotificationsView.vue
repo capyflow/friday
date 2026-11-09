@@ -1,6 +1,6 @@
 <script setup>
 // 通知中心保存提醒正文与投递结果；远程投递失败后可在此重试。
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
 import { fmtDT } from '../format.js'
 import { toast } from '../store.js'
@@ -11,6 +11,7 @@ import EmptyState from './art/EmptyState.vue'
 const notifications = ref([])
 const retrying = reactive(new Set())
 const loading = ref(false)
+const markingAll = ref(false)
 const STATUS = {
   pending: ['待处理', 'warn'], processing: ['处理中', 'blue'], delivered: ['已送达', 'teal'],
   failed: ['失败', 'warn'], silent: ['静默', ''],
@@ -38,6 +39,22 @@ async function markRead(item) {
   try { await api('POST', '/api/notifications/' + encodeURIComponent(item.id) + '/read', {}); if (!disposed) await load() }
   catch (e) { if (!disposed) toast(e.message, true) }
   finally { retrying.delete(item.id) }
+}
+
+// 全部已读：只处理页面上可见的未读（已准备结果且需要推送的），与后端 Unread 口径一致。
+const unreadCount = computed(() =>
+  notifications.value.filter(item => item.prepared && item.push && !item.readAt).length)
+
+async function markAllRead() {
+  if (markingAll.value || disposed || !unreadCount.value) return
+  markingAll.value = true
+  try {
+    const r = await api('POST', '/api/notifications/read-all', {})
+    if (disposed) return
+    toast(r.message || '已全部标记为已读')
+    await load()
+  } catch (e) { if (!disposed) toast(e.message, true) }
+  finally { markingAll.value = false }
 }
 
 async function snooze(item) {
@@ -75,6 +92,8 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
         <div class="row" style="margin-bottom:16px">
           <button class="btn" :disabled="notificationSettings.busy" @click="enableSystemNotifications">开启系统通知</button>
           <span class="meta" role="status">{{ notificationSettings.status }} · 提醒同时保留在此页面</span>
+          <button class="btn sm" style="margin-left:auto" :disabled="!unreadCount || markingAll"
+                  @click="markAllRead">{{ markingAll ? '处理中…' : `全部已读${unreadCount ? '（' + unreadCount + '）' : ''}` }}</button>
         </div>
         <div class="panel-title">提醒与投递记录</div>
         <div v-if="notifications.length" style="overflow-x:auto">

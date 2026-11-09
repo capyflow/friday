@@ -170,4 +170,30 @@ describe('通知中心', () => {
     await flushPromises()
     expect(toast).not.toHaveBeenCalledWith('旧会话成功')
   })
+
+  it('全部已读：一次提交，成功后未读数清零且按钮置灰', async () => {
+    const unreadA = { ...failed, id: 'a', status: 'delivered', prepared: true, push: true }
+    const unreadB = { ...failed, id: 'b', status: 'delivered', prepared: true, push: true }
+    api.mockResolvedValueOnce({ notifications: [unreadA, unreadB], unread: 2 })
+    await showNotifications()
+    const all = () => wrapper.findAll('button').find(button => button.text().startsWith('全部已读'))
+    expect(all().text()).toContain('2')
+    api.mockResolvedValueOnce({ message: '已全部标记为已读', count: 2 })
+      .mockResolvedValueOnce({ notifications: [
+        { ...unreadA, readAt: '2026-10-10T11:00:00+08:00' },
+        { ...unreadB, readAt: '2026-10-10T11:00:00+08:00' },
+      ], unread: 0 })
+    await all().trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/notifications/read-all', {})
+    expect(store.unread).toBe(0)
+    expect(wrapper.text()).not.toContain('未读')
+    expect(all().element.disabled).toBe(true)
+  })
+
+  it('没有未读时「全部已读」不可点', async () => {
+    await showNotifications()
+    const all = wrapper.findAll('button').find(button => button.text().startsWith('全部已读'))
+    expect(all.element.disabled).toBe(true)
+  })
 })

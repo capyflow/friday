@@ -182,6 +182,40 @@ func (c *Center) MarkRead(id string) error {
 	return c.putLocked(n)
 }
 
+// MarkAllRead 把当前所有"可见未读"通知（已准备结果且需要推送的）标为已读，
+// 返回本次改动的条数。一次落盘、失败回滚：与 MarkRead 一样，保存失败不能把
+// 内存状态改成"已读"而磁盘还是未读。
+func (c *Center) MarkAllRead() (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	type prior struct {
+		id string
+		n  Notice
+	}
+	changed := make([]prior, 0)
+	for id, n := range c.notices {
+		if n.ReadAt != nil || !n.Prepared || !n.Push {
+			continue
+		}
+		changed = append(changed, prior{id: id, n: n})
+		at := now
+		n.ReadAt = &at
+		n.UpdatedAt = now
+		c.notices[id] = n
+	}
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	if err := c.saveLocked(); err != nil {
+		for _, p := range changed {
+			c.notices[p.id] = p.n
+		}
+		return 0, err
+	}
+	return len(changed), nil
+}
+
 // Snooze 先持久化固定任务 ID/时间，再通过幂等 Schedule 接收；任务文件失败时
 // 保留待恢复计划，RetrySnoozes 在重启前恢复，避免创建多个延后提醒。
 func (c *Center) Snooze(id string, delay time.Duration, eng *task.Engine) (task.Task, error) {
