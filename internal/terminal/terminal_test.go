@@ -132,6 +132,23 @@ func TestMaxSessionsCap(t *testing.T) {
 	}
 }
 
+func TestNoSessionCapByDefault(t *testing.T) {
+	cfg := testConfig() // MaxSessions 取默认值：不限
+	m := managerOf(t, cfg)
+	if got := cfg.Max(); got != 0 {
+		t.Fatalf("默认上限应为 0（不限），实际 %d", got)
+	}
+	// 旧默认是 4，这里开 5 个证明默认不再拦
+	for i := 0; i < 5; i++ {
+		if _, err := m.Start(80, 24, ""); err != nil {
+			t.Fatalf("第 %d 个终端不该被拦: %v", i+1, err)
+		}
+	}
+	if m.Count() != 5 {
+		t.Fatalf("应有 5 个活跃终端，实际 %d", m.Count())
+	}
+}
+
 func TestConfiguredShellMissingIsError(t *testing.T) {
 	cfg := testConfig()
 	cfg.Shell = filepath.Join(t.TempDir(), "没这个 shell")

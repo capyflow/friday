@@ -12,8 +12,7 @@ import (
 func TestAcpNormalized(t *testing.T) {
 	c := AcpConfig{Enabled: true}
 	n := c.Normalized()
-	if n.MaxConcurrent != AcpDefaultMaxConcurrent ||
-		n.IdleKillSeconds != AcpDefaultIdleKillSeconds ||
+	if n.IdleKillSeconds != AcpDefaultIdleKillSeconds ||
 		n.HandshakeTimeoutSeconds != AcpDefaultHandshakeSeconds ||
 		n.SessionTimeoutSeconds != AcpDefaultSessionSeconds {
 		t.Fatalf("默认值不符: %+v", n)
@@ -85,7 +84,6 @@ mcp:
 	}
 	next := AcpConfig{
 		Enabled:         true,
-		MaxConcurrent:   3,
 		IdleKillSeconds: 300,
 		Agents: []AcpAgentConfig{
 			{Name: "codex", Command: "npx", Args: []string{"-y", "@zed-industries/codex-acp"},
@@ -116,7 +114,7 @@ mcp:
 	if err != nil {
 		t.Fatalf("回读失败: %v", err)
 	}
-	if !cfg.Acp.Enabled || cfg.Acp.MaxConcurrent != 3 || cfg.Acp.IdleKillSeconds != 300 {
+	if !cfg.Acp.Enabled || cfg.Acp.IdleKillSeconds != 300 {
 		t.Fatalf("全局参数不符: %+v", cfg.Acp)
 	}
 	// Load 已经归一化（清单最前是注入的内置 friday），所以按名字取那两台外部 agent，

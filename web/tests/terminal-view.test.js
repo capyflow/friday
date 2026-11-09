@@ -182,6 +182,16 @@ describe('内置终端页', () => {
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('上限 1'), true)
   })
 
+  it('maxSessions 为 0 时不限数量，继续新建', async () => {
+    api.mockImplementation((method, url) => Promise.resolve(
+      url === '/api/terminal' ? terminalInfo({ maxSessions: 0 }) : {}))
+    await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
+    expect(FakeSocket.instances).toHaveLength(2)
+    expect(toast).not.toHaveBeenCalled()
+  })
+
   it('不可用时不建任何连接，页面说清原因与开法', async () => {
     api.mockImplementation((method, url) => Promise.resolve(
       url === '/api/terminal'

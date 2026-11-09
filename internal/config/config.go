@@ -72,7 +72,7 @@ type TerminalConfig struct {
 	// Enabled 总开关（默认开启）。它只管"能不能开新终端"：远程部署的硬闸在
 	// admin 层——非本机回环的连接一律拒绝，这个配置关不掉那条判断。
 	Enabled *bool `yaml:"enabled"`
-	// MaxSessions 同时可开的终端数（<=0 用默认 4）。
+	// MaxSessions 同时可开的终端数；<=0（默认）不限制。
 	MaxSessions int `yaml:"maxSessions"`
 	// Shell 指定用哪个 shell；空则按 $SHELL → zsh → bash → sh。
 	// 写了个本机没有的路径会直接报错，不悄悄换一个（用户以为自己在 zsh 里跑）。

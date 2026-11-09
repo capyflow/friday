@@ -57,7 +57,7 @@ const second = {
   messages: [{ role: 'user', text: '另一个问题' }, { role: 'assistant', text: '另一个回答' }],
 }
 const config = {
-  enabled: true, maxConcurrent: 2,
+  enabled: true,
   agents: [{ name: 'codex', command: 'npx', enabled: true, workspace: '/home/u/proj' },
     { name: 'opencode', command: 'opencode', enabled: true }],
 }

@@ -143,6 +143,16 @@ bug 类问题已于同日修复（附录 A）。
   acp 与 admin 全绿。
   **剩余风险**：同一 agent 的多个会话并发写它自己的登录态/会话库（如 codex 的
   `~/.codex`）仍未验证真实 agent 的表现——目前只在 fake 上过。
+- **补充**（2026-11-09）：复用模型撞上了 CodeBuddy 的连接级串行——它的 ACP 每条
+  连接只有一条 prompt 渲染循环（`activeRenderConnections` 按 connectionId 去重，
+  循环体逐条 `await`），同项目多会话共连接时，第二个 prompt 只能排到第一个 turn
+  结束，表现为「其它会话都在等第一个」。为此加 `oneSessionPerProcess`（全局 +
+  逐 agent 三态）：true 时复用键带上 threadID，一会话一连接一进程；缺省按 agent
+  判定（CodeBuddy 自动 true，其余保持共享）。顺带解掉「停止一个会话会强杀同连接
+  其他会话」的连坐——独占模式下每条连接只有它自己。
+- **再补充**（2026-11-09）：`maxConcurrent` 配置项直接删除——这是 Friday 自己的
+  资源闸，不是 ACP 协议或 Zed 的要求（Zed 的 `agent_servers` 只有 command/args/env，
+  没有并发上限）。槽位表、排队态 `queued` 与等待提示一并移除，进程多寡交给机器。
 
 
 ### M-7 协议演进观察（v2 / elicitation / config options）

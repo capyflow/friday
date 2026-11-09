@@ -504,8 +504,8 @@ func main() {
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
 		// 内置条目不算进配置里的 agent 数（它是代码给的，用户没配过）
-		log.Printf("[智能体] 已启用（%d 个 agent + 内置 Friday，并发 %d，空闲 %ds 回收）",
-			len(cfg.Acp.WithoutBuiltin().Agents), cfg.Acp.MaxConcurrent, cfg.Acp.IdleKillSeconds)
+		log.Printf("[智能体] 已启用（%d 个 agent + 内置 Friday，进程并发不设上限，空闲 %ds 回收）",
+			len(cfg.Acp.WithoutBuiltin().Agents), cfg.Acp.IdleKillSeconds)
 	}
 
 	// 内置终端：服务端 PTY + 界面里的 xterm.js，只服务本机回环（admin 层硬闸，

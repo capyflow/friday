@@ -5,10 +5,28 @@
 // 由此变成一句话报错（带 stderr 尾部）。
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../../api.js'
+import SelectBox from '../SelectBox.vue'
+
+// 每会话独立进程是三态：auto = 按 agent 判定（CodeBuddy 默认独占）；
+// on = 全部独占；off = 全部共享。SelectBox 只收字符串，落盘时转回 bool/null。
+const isoOptions = [
+  { value: 'auto', label: '按 agent 判定（CodeBuddy 自动独占）' },
+  { value: 'on', label: '全部独占' },
+  { value: 'off', label: '全部共享' },
+]
+const isoAgentOptions = [
+  { value: 'auto', label: '跟随全局' },
+  { value: 'on', label: '独占' },
+  { value: 'off', label: '共享' },
+]
+function boolToTri(v) { return v === true ? 'on' : v === false ? 'off' : 'auto' }
+function triToBool(v) { return v === 'on' ? true : v === 'off' ? false : null }
 
 const cfg = reactive({
-  enabled: false, maxConcurrent: 2, idleKillSeconds: 600,
+  enabled: false, idleKillSeconds: 600,
   handshakeTimeoutSeconds: 10, sessionTimeoutSeconds: 60, showThought: true,
+  // auto = 按 agent 判定（CodeBuddy 默认独占）；on/off 全局覆盖。
+  oneSessionPerProcess: 'auto',
   // 工具门面（facade）：外部 agent 建会话时挂上的 MCP server，能调哪些 Friday
   // 工具由这里的全局清单 + 逐 agent 的 allowedFacadeTools 决定。可编辑态随
   // /api/acp/config 保存；运行态（地址/计数/调用记录）只读，来自 /api/acp/facade。
@@ -66,7 +84,7 @@ function shortTime(iso) {
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
            enabled: true, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
-           degradeResume: false, version: '', testing: false, facadeTools: [] }
+           degradeResume: false, oneSessionPerProcess: 'auto', version: '', testing: false, facadeTools: [] }
 }
 // launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
 // 一眼看出是哪个 agent、怎么起的。
@@ -87,6 +105,8 @@ function toAgent(a) {
     handshakeTimeoutSeconds: Math.max(0, Math.floor(Number(a.handshakeTimeoutSeconds) || 0)),
     sessionTimeoutSeconds: Math.max(0, Math.floor(Number(a.sessionTimeoutSeconds) || 0)),
     degradeResume: a.degradeResume,
+    // 三态：auto = 跟随全局/按 agent 判定；on = 独占；off = 共享。
+    oneSessionPerProcess: triToBool(a.oneSessionPerProcess),
     version: a.version || '',   // 安装时登记的版本戳（M-4），保存时原样带回
     // Friday 工具白名单逐 agent 覆盖：空数组 = 用全局清单（后端不落盘）。
     allowedFacadeTools: (a.facadeTools || []).filter(Boolean),
@@ -206,11 +226,11 @@ async function load() {
     const a = r.acp || {}
     Object.assign(cfg, {
       enabled: !!a.enabled,
-      maxConcurrent: a.maxConcurrent ?? 2,
       idleKillSeconds: a.idleKillSeconds ?? 600,
       handshakeTimeoutSeconds: a.handshakeTimeoutSeconds ?? 10,
       sessionTimeoutSeconds: a.sessionTimeoutSeconds ?? 60,
       showThought: a.showThought !== false,
+      oneSessionPerProcess: boolToTri(a.oneSessionPerProcess),
       // 后端回的是归一化后的值：tools 为空会补默认只读清单，勾选框直接以它为准；
       // 全部取消再保存即回到默认（落盘时与默认相同就不写 facade 段）。
       facade: {
@@ -226,6 +246,7 @@ async function load() {
       argsText: (x.args || []).join(', '), envText: envText(x.env),
       workspace: x.workspace || '', enabled: x.enabled !== false,
       degradeResume: !!x.degradeResume,
+      oneSessionPerProcess: boolToTri(x.oneSessionPerProcess),
       handshakeTimeoutSeconds: x.handshakeTimeoutSeconds || 0,
       sessionTimeoutSeconds: x.sessionTimeoutSeconds || 0,
       version: x.version || '',
@@ -238,11 +259,12 @@ async function save() {
   busy.value = true
   try {
     const payload = {
-      enabled: cfg.enabled, maxConcurrent: num(cfg.maxConcurrent, 2),
+      enabled: cfg.enabled,
       idleKillSeconds: num(cfg.idleKillSeconds, 600),
       handshakeTimeoutSeconds: num(cfg.handshakeTimeoutSeconds, 10),
       sessionTimeoutSeconds: num(cfg.sessionTimeoutSeconds, 60),
       showThought: cfg.showThought,
+      oneSessionPerProcess: triToBool(cfg.oneSessionPerProcess),
       facade: {
         enabled: cfg.facade.enabled,
         disableAuth: cfg.facade.disableAuth,
@@ -281,11 +303,13 @@ onMounted(load)
         <span>启用智能体（侧栏「智能体」页；启用前先在下方添加 agent 并点「测试」确认已登录）</span>
       </label>
       <div class="acp-grid">
-        <label><span>进程并发上限</span><input v-model="cfg.maxConcurrent" type="number" min="1"></label>
         <label><span>空闲回收（秒）</span><input v-model="cfg.idleKillSeconds" type="number" min="0"></label>
         <label><span>握手超时（秒）</span><input v-model="cfg.handshakeTimeoutSeconds" type="number" min="1"></label>
         <label><span>建会话超时（秒）</span><input v-model="cfg.sessionTimeoutSeconds" type="number" min="1"
                 title="session/new 与 session/load 的等待上限：skill 表多的 agent 首启很慢，10 秒建不出会话"></label>
+        <label><span>每会话独立进程</span>
+          <SelectBox v-model="cfg.oneSessionPerProcess" :options="isoOptions"
+                     aria-label="每会话独立进程（全局）"></SelectBox></label>
       </div>
       <p class="meta acp-coldnote">npx 这类「每次现拉包」的启动命令，第一次拉起会自动按 90 秒冷启动预算等；起过一次之后回到上面的握手值。</p>
       <label class="acp-check">
@@ -405,6 +429,9 @@ onMounted(load)
             <label class="acp-check"><input v-model="a.enabled" type="checkbox"><span>启用</span></label>
             <label class="acp-check"><input v-model="a.degradeResume" type="checkbox">
               <span>会话恢复不可靠（重开对话不再尝试重接，直接新开并标注）</span></label>
+            <label class="acp-check"><span>每会话独立进程</span>
+              <SelectBox v-model="a.oneSessionPerProcess" :options="isoAgentOptions" compact
+                         aria-label="每会话独立进程"></SelectBox></label>
           </div>
           <div class="acp-facade-agent">
             <span class="acp-facade-agent-label">Friday 工具白名单（留空 = 用全局清单；审批类工具不可选）</span>

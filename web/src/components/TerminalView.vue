@@ -189,8 +189,9 @@ async function newTerminal() {
     toast(info.value.reason || '内置终端不可用', true)
     return
   }
-  const max = info.value?.maxSessions || 4
-  if (tabs.value.length >= max) {
+  // maxSessions <= 0 表示内核不设上限（默认），这里就不用拦
+  const max = Number(info.value?.maxSessions) || 0
+  if (max > 0 && tabs.value.length >= max) {
     toast(`已经开了 ${tabs.value.length} 个终端，上限 ${max}：先关掉一个`, true)
     return
   }

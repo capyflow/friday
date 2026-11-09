@@ -15,8 +15,6 @@ import (
 
 // Acp 运行参数默认值（agent 条目内 0 值沿用全局）。
 const (
-	// AcpDefaultMaxConcurrent 同时存活的 agent 进程上限。
-	AcpDefaultMaxConcurrent = 2
 	// AcpDefaultIdleKillSeconds 空闲回收：最后一轮结束后保留进程的时长（秒）。
 	// 回收后上下文不丢——重开 thread 经 session/load 重接。
 	AcpDefaultIdleKillSeconds = 600
@@ -62,9 +60,6 @@ var FacadeDefaultTools = []string{
 type AcpConfig struct {
 	// Enabled 总开关（默认关闭）。关闭时不拉起任何 agent，thread 接口拒绝新消息。
 	Enabled bool `yaml:"enabled" json:"enabled"`
-	// MaxConcurrent 同时存活的 agent 进程上限（默认 2）。每个进程都会加载
-	// agent 自己的 MCP server 与 skill 表，内存不可忽略。
-	MaxConcurrent int `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
 	// IdleKillSeconds 空闲回收秒数（默认 600）。0 视为默认；负数不回收。
 	IdleKillSeconds int `yaml:"idleKillSeconds,omitempty" json:"idleKillSeconds,omitempty"`
 	// HandshakeTimeoutSeconds initialize 握手超时秒数（默认 10）。
@@ -76,6 +71,11 @@ type AcpConfig struct {
 	ShowThought *bool `yaml:"showThought,omitempty" json:"showThought,omitempty"`
 	// Facade 工具门面配置（config.yaml acp.facade 段；nil = 默认开启 + 只读白名单）。
 	Facade *AcpFacadeConfig `yaml:"facade,omitempty" json:"facade,omitempty"`
+	// OneSessionPerProcess 让每个会话独占一条 agent 连接（= 一个 agent 进程）。
+	// 缺省按 agent 判定：CodeBuddy 的 ACP 一条连接只有一条 prompt 渲染循环，
+	// 同项目多会话共连接会把 prompt 排成队列，因此它默认独占；其余 agent 沿用
+	// 「agent+目录 一进程」的复用模型。true/false 可全局覆盖。
+	OneSessionPerProcess *bool `yaml:"oneSessionPerProcess,omitempty" json:"oneSessionPerProcess,omitempty"`
 	// Agents 已声明的 agent 清单。
 	Agents []AcpAgentConfig `yaml:"agents,omitempty" json:"agents,omitempty"`
 }
@@ -118,6 +118,11 @@ type AcpAgentConfig struct {
 	// DegradeResume 标记该 agent 的 session/load 恢复保真度实测不可靠：
 	// 重开 thread 不再尝试重接，直接新开会话并标注「上下文已重置」。
 	DegradeResume bool `yaml:"degradeResume,omitempty" json:"degradeResume,omitempty"`
+	// OneSessionPerProcess 让这个 agent 的每个会话独占一条连接（一个进程）。
+	// 缺省：CodeBuddy 为 true（一条连接只有一条 prompt 渲染循环，多会话共连接
+	// 会串行）；其余 agent 为 false（沿用 agent+目录 一进程的复用模型）。
+	// 显式设置优先于 acp.oneSessionPerProcess 全局值。
+	OneSessionPerProcess *bool `yaml:"oneSessionPerProcess,omitempty" json:"oneSessionPerProcess,omitempty"`
 	// AllowedFacadeTools 该 agent 可调用的 Friday 门面工具白名单（空 = 用全局
 	// acp.facade.tools）。只该比全局更紧或按需放宽；门面按 token 逐会话执行。
 	AllowedFacadeTools []string `yaml:"allowedFacadeTools,omitempty" json:"allowedFacadeTools,omitempty"`
@@ -135,9 +140,7 @@ func (a AcpAgentConfig) IsEnabled() bool { return a.Enabled == nil || *a.Enabled
 
 // Normalized 填充 0 值默认。不修改调用者。
 func (c AcpConfig) Normalized() AcpConfig {
-	if c.MaxConcurrent <= 0 {
-		c.MaxConcurrent = AcpDefaultMaxConcurrent
-	}
+	// MaxConcurrent 的 0 本身就是有效值（不限），不再回填默认值。
 	if c.IdleKillSeconds == 0 {
 		c.IdleKillSeconds = AcpDefaultIdleKillSeconds
 	}
@@ -257,7 +260,7 @@ func (c AcpConfig) Validate() error {
 			return fmt.Errorf("config: acp.agents[%s].sessionTimeoutSeconds 不能为负", a.Name)
 		}
 	}
-	if c.MaxConcurrent < 0 || c.IdleKillSeconds < 0 ||
+	if c.IdleKillSeconds < 0 ||
 		c.HandshakeTimeoutSeconds < 0 || c.SessionTimeoutSeconds < 0 {
 		return fmt.Errorf("config: acp 各项数值不能为负")
 	}
@@ -317,9 +320,6 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 			&yaml.Node{Kind: yaml.ScalarNode, Value: boolYAML(v), Tag: "!!bool"})
 	}
 	boolPair(section, "enabled", cfg.Enabled)
-	if cfg.MaxConcurrent > 0 {
-		intPair(section, "maxConcurrent", cfg.MaxConcurrent)
-	}
 	if cfg.IdleKillSeconds > 0 {
 		intPair(section, "idleKillSeconds", cfg.IdleKillSeconds)
 	}

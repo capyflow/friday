@@ -11,7 +11,7 @@
 //
 // 生命周期：一条连接对应一个终端。连接断开就把那条 shell 所在的进程组收掉，不留孤儿
 // ——刷新页面等于重开一个终端，正在跑的命令会被终止，界面上写清了这一点。同时开几个
-// 由 maxSessions 兜底；内核退出时 CloseAll 统一收尾。
+// 由 maxSessions 兜底（默认不限）；内核退出时 CloseAll 统一收尾。
 package terminal
 
 import (
@@ -28,9 +28,9 @@ import (
 	"time"
 )
 
-// 默认上限：四个够并行看几路输出，再多就是拿本机内存换"舍不得关"。
+// 默认不设上限：开几个由你自己决定，内存是使用者自己的账。
 const (
-	DefaultMaxSessions = 4
+	DefaultMaxSessions = 0
 	maxReadChunk       = 32 << 10 // 单次从 PTY 读的最大字节
 	outputBuffer       = 64       // 输出通道缓冲；写不过来就自然回压给 PTY
 )
@@ -39,13 +39,13 @@ const (
 type Config struct {
 	// Enabled 关掉时连不上新终端，已开的也不受影响（内核启动时读一次）。
 	Enabled bool
-	// MaxSessions 同时可开的终端数（<=0 用 DefaultMaxSessions）。
+	// MaxSessions 同时可开的终端数；<=0 表示不限制（默认）。
 	MaxSessions int
 	// Shell 指定用的 shell（空则按 $SHELL → zsh → bash → sh）。
 	Shell string
 }
 
-// Max 返回生效的并发上限。
+// Max 返回生效的并发上限；0 表示不限制。
 func (c Config) Max() int {
 	if c.MaxSessions <= 0 {
 		return DefaultMaxSessions
@@ -178,11 +178,10 @@ func (m *Manager) Start(cols, rows int, cwd string) (*Session, error) {
 	}
 
 	m.mu.Lock()
-	if len(m.active) >= cfg.Max() {
+	if max := cfg.Max(); max > 0 && len(m.active) >= max {
 		n := len(m.active)
-		max := cfg.Max()
 		m.mu.Unlock()
-		return nil, fmt.Errorf("已经开了 %d 个终端，上限 %d：先关掉一个再开（上限见 config.yaml 的 terminal.maxSessions）", n, max)
+		return nil, fmt.Errorf("已经开了 %d 个终端，上限 %d：先关掉一个再开（上限见 config.yaml 的 terminal.maxSessions，设为 0 表示不限）", n, max)
 	}
 	m.mu.Unlock()
 

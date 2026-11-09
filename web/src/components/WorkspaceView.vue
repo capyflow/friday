@@ -132,7 +132,7 @@ const imgLightbox = ref(null)      // 附件全图预览层（气泡上方的缩
 /* 每个 thread 一份前端态：消息缓冲、进行中的一轮、能力清单、上下文水位、输入草稿、
    待发的图片。currentId 只是"现在显示哪一份"——切换 thread 不打断别的 thread 正在
    跑的一轮：它的 SSE 继续往自己的缓冲里写，切回去就是实时进度（服务端同一 thread
-   的 turn 串行、不同 thread 可并行，上限 acp.maxConcurrent）。
+   的 turn 串行、不同 thread 可并行）。
    AbortController 放在响应式之外：原生对象经 proxy 调用 abort() 会丢内部状态。 */
 const states = reactive({})    // thread id -> 该会话的前端态
 const inflight = new Map()     // thread id -> AbortController
@@ -334,7 +334,7 @@ const isBuiltinThread = computed(() => !!(current.value && isBuiltinAgent(curren
 const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
-const stateLabel = { idle: '空闲', running: '对话中', queued: '排队中', interrupted: '已中断', orphaned: 'agent 已删除' }
+const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中断', orphaned: 'agent 已删除' }
 
 // 工作区 → 会话的两级栏。排序按主流 agent 工具的项目栏习惯：置顶优先，其余按
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
@@ -403,7 +403,6 @@ const dirsNote = computed(() => {
 })
 
 const STATE_HINT = {
-  queued: '并发已满，这条消息在等空闲的 agent 进程；前面那轮收尾后自动开跑（上限见设置 → 智能体）。',
   interrupted: '上次会话被中断（服务重启或进程退出）。继续发消息会重新拉起 agent 并尝试重接上下文。',
   orphaned: '该会话绑定的智能体已被删除；历史仍可查看，但不能继续对话。',
 }

@@ -162,7 +162,7 @@ admin:
 # 正在跑的命令会被终止。目前只支持 macOS/Linux——Windows 要接 ConPTY，还没做。
 # terminal:
 #   enabled: true
-#   maxSessions: 4            # 同时可开的终端数
+#   maxSessions: 0            # 同时可开的终端数；0 = 不限（默认）
 #   shell: ""                 # 留空按 $SHELL → /bin/zsh → /bin/bash → /bin/sh
 
 # 钉钉通道：让小五住进你的钉钉（Stream 模式，WebSocket 接入，无需公网 IP）。
@@ -345,7 +345,11 @@ context:
 # 配置里的审批模式需设为"每次询问"。
 # acp:
 #   enabled: false             # 默认关闭：启用依赖启动命令可解析 + agent 已登录
-#   maxConcurrent: 2           # 同时存活的 agent 进程上限（各带自己的 MCP/skill 表）
+#   oneSessionPerProcess: false # 每个会话独占一条 agent 连接（一个进程）。
+#                              # 缺省按 agent 判定：CodeBuddy 为 true（它一条连接只有
+#                              # 一条 prompt 渲染循环，同项目多会话共连接会串行排队）；
+#                              # 其余 agent 沿用「agent+目录 一进程」的复用模型。
+#                              # 在这里写 true/false 可全局覆盖；也可按 agent 覆盖。
 #   idleKillSeconds: 600       # 空闲回收秒数（回收不丢对话记录；0 视为默认，负数不回收）
 #   turnTimeoutSeconds: 300    # 单轮对话超时
 #   handshakeTimeoutSeconds: 10 # initialize 握手超时（未登录的故障靠它快速报错）
@@ -365,3 +369,5 @@ context:
 #       handshakeTimeoutSeconds: 0 # 0 = 用全局值（npx 型 agent 首启慢，可只给它放宽）
 #       sessionTimeoutSeconds: 0   # 0 = 用全局值
 #       degradeResume: false   # session/load 恢复保真度实测不可靠时置 true
+#       oneSessionPerProcess: false # 该 agent 是否每个会话独占一条连接（不写则按 agent 判定，
+#                              # CodeBuddy 默认 true；显式设置优先于全局值）

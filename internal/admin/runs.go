@@ -90,9 +90,7 @@ func (s *Server) handleRuns(ctx *vhttp.Context) error {
 			names[ws.ID] = ws.Name
 		}
 		for _, th := range s.acp.List() {
-			// 排队中的会话也要列出来：它没在跑，但用户已经发了消息，不列就是“没反应”。
-			if th.State != acp.StateRunning && th.State != acp.StateQueued &&
-				th.State != acp.StateInterrupted {
+			if th.State != acp.StateRunning && th.State != acp.StateInterrupted {
 				continue
 			}
 			title := th.Title
@@ -118,10 +116,8 @@ func (s *Server) handleRuns(ctx *vhttp.Context) error {
 					switch s {
 					case acp.StateRunning:
 						return 0
-					case acp.StateQueued:
-						return 1
 					default:
-						return 2
+						return 1
 					}
 				}
 				return rank(acpRuns[i].State) < rank(acpRuns[j].State)
