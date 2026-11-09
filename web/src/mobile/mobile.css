@@ -266,6 +266,35 @@ textarea.m-input { resize: none; line-height: 1.5; }
 .m-composer-row .m-input { flex: 1; min-height: 42px; max-height: 120px; }
 .m-composer-row .m-btn { width: 42px; height: 42px; padding: 0; border-radius: 12px; flex: none; }
 
+/* 会话配置 chips：输入框上方一行，横向滚动不换行；点开底部弹层选 */
+.m-cap-row { display: flex; gap: 6px; overflow-x: auto; padding: 0 2px; scrollbar-width: none; }
+.m-cap-row::-webkit-scrollbar { display: none; }
+.m-cap-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 5px; max-width: 74vw;
+  border: 1px solid var(--border); background: var(--card); color: var(--fg-2);
+  border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 12px;
+  white-space: nowrap; cursor: pointer;
+}
+.m-cap-chip.open { border-color: var(--border-strong); background: var(--bg-muted); color: var(--fg); }
+.m-cap-chip:disabled { opacity: .5; }
+.m-cap-chip.is-loading { color: var(--faint-fg); }
+.m-cap-k { color: var(--faint-fg); }
+.m-cap-v { overflow: hidden; text-overflow: ellipsis; }
+.m-cap-sheet .m-opt-list { display: flex; flex-direction: column; gap: 2px; }
+.m-opt {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  border: none; background: none; color: var(--fg); font: inherit; font-size: 14px;
+  padding: 11px 8px; border-radius: 10px; cursor: pointer;
+}
+.m-opt.on { background: var(--bg-muted); font-weight: 600; }
+.m-opt-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-opt-val {
+  flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--faint-fg);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.m-opt-check { flex: none; color: var(--accent); }
+
 .m-attach-row { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 4px; }
 .m-attach { position: relative; width: 52px; height: 52px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
 .m-attach img { width: 100%; height: 100%; object-fit: cover; display: block; }

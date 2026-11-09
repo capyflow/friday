@@ -1950,24 +1950,19 @@ html[data-theme="dark"] .wfd-check-detail { background: rgba(0,0,0,.10); }
 .ag-tools.focus { flex: 1; min-width: 0; }
 .ag-tools-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 9px 12px;
                  border-bottom: 1px solid var(--border); }
-.ag-tools-title { flex: none; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ag-tools-title { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .ag-tools-title b { font-size: 12.5px; font-weight: 650; color: var(--fg); white-space: nowrap; }
 .ag-tools-title .meta { font-size: 11px; color: var(--faint-fg); white-space: nowrap;
                         overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-.ag-tools-tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto;
-                 scrollbar-width: none; }
-.ag-tools-tabs::-webkit-scrollbar { display: none; }
-.ag-tools-tab { flex: none; border: none; border-radius: 7px; background: transparent; color: var(--muted-fg);
-                font: inherit; font-size: 11.5px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
-.ag-tools-tab:hover { color: var(--fg); background: var(--bg-muted); }
-.ag-tools-tab.on { color: var(--fg); background: var(--bg-muted); font-weight: 600; }
-html[data-theme="dark"] .ag-tools-tab.on { background: rgba(255,255,255,.09); }
 .ag-tools-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .ag-tools-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+/* 嵌在统一工具面板里，终端是「面板里的一个视图」：要撑满整块高度。
+   .wt-panel 默认 flex:none 是给旧并排分栏用的，放进列向 flex 会按内容只占上半截。 */
+.ag-tools-pane > .wt-panel { flex: 1; min-height: 0; min-width: 0; width: 100%; border-left: none; }
 .ag-tools-hint { padding: 16px; line-height: 1.7; }
 
 /* 抽屉在面板里（embedded）：不再是浮层，没有遮罩与自己的头部，
-   内容直接铺满面板区；外层标签行已经说明了当前在看哪一项。 */
+   内容直接铺满面板区；外层图标条已经说明了当前在看哪一项。 */
 .wfd-wrap.is-embed { flex: 1; min-height: 0; display: flex; }
 .wfd-panel.is-embed { position: static; width: auto; height: auto; flex: 1; min-height: 0;
                       border-left: none; box-shadow: none; animation: none; }

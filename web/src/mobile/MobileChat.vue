@@ -2,7 +2,7 @@
 // 移动端对话视图：主会话（/api/chat）与智能体线程（/api/acp/threads/:id/chat）
 // 共用这一个组件，靠 kind 区分——SSE 帧协议、块状态机（blocks.js）与时间线渲染
 // （TimelineBlocks）都是桌面端原样复用，只换一层数字端版式。
-import { nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { toast } from '../store.js'
@@ -108,6 +108,7 @@ async function send() {
   const text = input.value.trim()
   if (!canSend()) return
   if (paused.value) return resume()
+  capSheet.value = ''
   const atts = [...attachments.value]
   messages.value.push({
     role: 'user', text,
@@ -246,12 +247,64 @@ async function stream(body, reuseBot, urlOverride) {
         bot.blocks.push({ kind: 'text', text: '（本轮没有产出文本）' })
       }
     }
+    // 轮末刷新一次能力清单：agent 可能在回答里改了模型/档位，chip 要跟上
+    if (props.kind === 'thread' && !paused.value) loadCaps()
     scrollBottom()
   }
 }
 
 // 线程会话的 agent 名，给输入框占位符一点上下文。
 const agentName = () => (props.kind === 'thread' && props.thread ? props.thread.agent : '')
+
+/* ---------- 会话配置：模型 / 思考强度 / 审批档位 ---------- */
+// 与桌面端同一份能力清单（GET /api/acp/threads/:id/options）：agent 报什么显示什么，
+// 不支持的能力整条缺席。手机端没有 hover/右键，chips 排在输入框上方，点开底部弹层选。
+// 回答途中不给切：服务端按会话串行，options 请求会一直卡到轮末。
+const caps = ref(null)
+const capsLoading = ref(false)
+const capBusy = ref(false)
+const capSheet = ref('') // 展开的能力 id（'' = 收起）
+const CAP_LABEL = { model: '模型', thought_level: '思考强度', approval_mode: '审批模式' }
+const capLabel = cap => CAP_LABEL[cap.kind] || cap.name
+const capCurrentName = cap =>
+  ((cap.values || []).find(v => v.value === cap.currentValue) || {}).name || cap.currentValue
+const openCap = computed(() => (caps.value || []).find(c => c.id === capSheet.value) || null)
+
+async function loadCaps() {
+  if (props.kind !== 'thread' || !props.thread?.id || capsLoading.value) return
+  capsLoading.value = true
+  try {
+    const r = await api('GET', `/api/acp/threads/${props.thread.id}/options`)
+    caps.value = r.capabilities || []
+  } catch (e) {
+    // 拉不到就整行不显示，不拿这条错误打断对话
+  } finally { capsLoading.value = false }
+}
+function openCapSheet(cap) {
+  if (streaming.value || capBusy.value) return
+  capSheet.value = capSheet.value === cap.id ? '' : cap.id
+}
+async function setCap(cap, value) {
+  if (capBusy.value || streaming.value) return
+  if (value === cap.currentValue) { capSheet.value = ''; return }
+  capBusy.value = true
+  try {
+    const r = await api('POST', `/api/acp/threads/${props.thread.id}/options`, { id: cap.id, value })
+    caps.value = r.capabilities || []
+    const fresh = (caps.value || []).find(c => c.id === cap.id)
+    toast(capLabel(cap) + '已切换为 ' + (fresh ? capCurrentName(fresh) : value))
+    capSheet.value = ''
+  } catch (e) {
+    toast('切换失败：' + e.message, true)
+  } finally { capBusy.value = false }
+}
+
+// 选中/切换会话即拉清单；轮末再拉一次，agent 自己改过的默认值也能跟上。
+watch(() => (props.kind === 'thread' && props.thread ? props.thread.id : ''), id => {
+  caps.value = null
+  capSheet.value = ''
+  if (id) loadCaps()
+}, { immediate: true })
 
 defineExpose({ load })
 </script>
@@ -296,6 +349,17 @@ defineExpose({ load })
 
     <div class="m-composer">
       <div v-if="paused" class="m-composer-hint">上一条回答已暂停，部分内容已保留</div>
+      <!-- 会话配置：模型 / 思考强度 / 审批档位。主会话没有会话级配置，整行不出现。 -->
+      <div v-if="kind === 'thread' && (capsLoading || (caps && caps.length))" class="m-cap-row">
+        <span v-if="capsLoading && !caps" class="m-cap-chip is-loading">配置加载中…</span>
+        <button v-for="cap in (caps || [])" :key="cap.id" type="button" class="m-cap-chip"
+                :class="{ open: capSheet === cap.id }" :disabled="streaming || capBusy"
+                :aria-label="capLabel(cap) + '：' + capCurrentName(cap)"
+                @click="openCapSheet(cap)">
+          <span class="m-cap-k">{{ capLabel(cap) }}</span>
+          <span class="m-cap-v">{{ capCurrentName(cap) }}</span>
+        </button>
+      </div>
       <div v-if="attachments.length" class="m-attach-row">
         <span v-for="(id, j) in attachments" :key="id" class="m-attach">
           <img :src="mediaURL(attachURL(id))" alt="">
@@ -319,6 +383,27 @@ defineExpose({ load })
         </button>
       </div>
       <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onPicked">
+    </div>
+
+    <!-- 会话配置底部弹层：点 chip 展开，选完即关（ZCode / MiniMax 手机端同款） -->
+    <div v-if="openCap" class="m-sheet-mask" @click.self="capSheet = ''">
+      <div class="m-sheet m-cap-sheet" role="dialog" :aria-label="capLabel(openCap)">
+        <div class="m-sheet-title">{{ capLabel(openCap) }}<span class="m-sheet-note">{{ agentName() }}</span></div>
+        <div class="m-opt-list">
+          <button v-for="v in openCap.values" :key="v.value" type="button" class="m-opt"
+                  :class="{ on: v.value === openCap.currentValue }" :disabled="streaming || capBusy"
+                  @click="setCap(openCap, v.value)">
+            <span class="m-opt-name">{{ v.name }}</span>
+            <span v-if="v.value !== v.name" class="m-opt-val">{{ v.value }}</span>
+            <svg v-if="v.value === openCap.currentValue" class="m-opt-check" width="16" height="16"
+                 viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>
+          </button>
+        </div>
+        <div class="m-sheet-acts">
+          <button class="m-btn block" type="button" @click="capSheet = ''">关闭</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

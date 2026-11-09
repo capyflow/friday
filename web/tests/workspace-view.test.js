@@ -1322,7 +1322,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     await show()
     await wrapper.get('[aria-label="工具面板"]').trigger('click')
     await flushPromises()
-    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('项目记忆')).trigger('click')
+    await wrapper.get('.ag-tools-rail-btn[aria-label="项目记忆"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('项目约定')
     await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('项目约定')).trigger('click')
@@ -1379,7 +1379,7 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     await flushPromises()
     expect(wrapper.get('.wfd-code').text()).toContain('new')
 
-    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('改动')).trigger('click')
+    await wrapper.get('.ag-tools-rail-btn[aria-label="改动"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('.wfd-diff').text()).toContain('old')
     expect(wrapper.find('.wfd-diff-row.add').text()).toContain('new')
@@ -1393,77 +1393,12 @@ describe('工作区栏：置顶、视图切换与源文件夹管理', () => {
     expect(wrapper.text()).toContain('本轮已还原')
   })
 
-  it('验证标签：本地预览、检查命令提交与运行输出', async () => {
-    data.threads[0].messages[2].text = '服务起来了，看 http://localhost:5173 就行'
+  it('验证入口已从工具面板去掉：图标条里不再有这一项', async () => {
     await show()
     await wrapper.get('[aria-label="工具面板"]').trigger('click')
     await flushPromises()
-    const verifyTab = () => wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('验证'))
-    await verifyTab().trigger('click')
-    await flushPromises()
-
-    // 预览地址从时间线里认出来
-    expect(wrapper.get('.wfd-check-main').text()).toBe('http://localhost:5173')
-    // 手填地址只收本机：外站明确拒绝，不悄悄收下
-    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('https://example.com')
-    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
-    expect(wrapper.text()).toContain('只能预览本机地址')
-    await wrapper.get('[aria-label="添加本地预览地址"]').setValue('http://127.0.0.1:3000')
-    await wrapper.findAll('.wfd-check-add button').find(b => b.text() === '添加').trigger('click')
-    expect(wrapper.get('.wfd-frame').attributes('src')).toBe('http://127.0.0.1:3000')
-    // 内嵌 iframe 不带同源权限：预览页读不到 Friday 的登录态
-    expect(wrapper.get('.wfd-frame').attributes('sandbox')).not.toContain('allow-same-origin')
-
-    // 建议命令一键跑，提交后进审批队列
-    await wrapper.findAll('.wfd-sugs button')[0].trigger('click')
-    await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks',
-      { command: 'npm test', timeoutSec: 300 })
-    expect(checkRuns[0].state).toBe('awaiting')
-    expect(wrapper.text()).toContain('等你在审批卡上批准后执行')
-    expect(wrapper.text()).toContain('待批准')
-    // 有命令待批时运行按钮收着（避免排队歧义），但可以在详情里停止
-    expect(wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行')
-      .attributes('disabled')).toBeDefined()
-    expect(wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').exists()).toBe(true)
-
-    // 审批通过后刷新：状态、退出码与输出尾部（失败行标红）
-    checkRuns[0].state = 'failed'
-    checkRuns[0].exitCode = 1
-    checkRuns[0].note = '退出码 1'
-    checkRuns[0].durationMs = 8200
-    checkRuns[0].output = 'PASS a.test.js\nFAIL b.test.js\n  期望 1 得到 2'
-    await wrapper.findAll('.ag-tools-tab').find(b => b.text().includes('文件')).trigger('click')
-    await flushPromises()
-    await verifyTab().trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.wfd-out').text()).toContain('期望 1 得到 2')
-    expect(wrapper.findAll('.wfd-out-line.bad')).toHaveLength(1)
-    expect(wrapper.text()).toContain('8.2 秒')
-    expect(wrapper.text()).toContain('退出码 1')
-    // 退出码不重复播报，跑完了「等你批准」的提示也该撤掉
-    expect(wrapper.find('.wfd-notice').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('等你在审批卡上批准后执行')
-
-    // 再跑一条并停止
-    await wrapper.get('[aria-label="验证命令"]').setValue('npm run build')
-    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
-    await flushPromises()
-    expect(checkRuns[0].command).toBe('npm run build')
-    await wrapper.findAll('.wfd-change-row').find(b => b.text().includes('npm run build')).trigger('click')
-    await flushPromises()
-    await wrapper.findAll('.wfd-detail-acts button').find(b => b.text() === '停止').trigger('click')
-    await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/checks/c2/stop')
-    expect(checkRuns[0].state).toBe('killed')
-    expect(wrapper.text()).toContain('已停止')
-
-    // 毁灭性命令：后端拒绝时把原因原样显示出来
-    await wrapper.get('[aria-label="验证命令"]').setValue('rm -rf /tmp/x')
-    await wrapper.findAll('.wfd-check-run button').find(b => b.text() === '运行').trigger('click')
-    await flushPromises()
-    expect(wrapper.text()).toContain('毁灭性片段')
-    expect(wrapper.text()).not.toContain('undefined')
+    expect(wrapper.find('.ag-tools-rail-btn[aria-label="验证"]').exists()).toBe(false)
+    expect(wrapper.find('.ag-tools-tabs').exists()).toBe(false) // 面板内不再重复一排文字标签
   })
 
   it('审批档位退让到别的档时，头部标出实际落点', async () => {
@@ -1678,9 +1613,10 @@ describe('统一工具面板：窄图标条 / 展开 / 分栏拖拽', () => {
     expect(wrapper.find('.ag-tools').attributes('style')).not.toContain('display: none')
     expect(wrapper.find('.wt-divider').attributes('style')).not.toContain('display: none')
     expect(wrapper.find('.wt-divider').exists()).toBe(true)
-    // 面板上排着六个工具标签
-    const labels = wrapper.findAll('.ag-tools-tab').map(b => b.text())
-    expect(labels).toEqual(['终端', '文件', '改动', 'Git 管理', '项目记忆', '验证'])
+    // 只有右侧图标条上的五个入口；面板里不再重复一排文字标签
+    const labels = wrapper.findAll('.ag-tools-rail-btn').map(b => b.attributes('aria-label'))
+    expect(labels).toEqual(['终端', '文件', '改动', 'Git 管理', '项目记忆'])
+    expect(wrapper.find('.ag-tools-tabs').exists()).toBe(false)
   })
 
   it('右上角展开按钮把工作区一分为二：左边会话、右边工具视图', async () => {

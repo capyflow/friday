@@ -1,7 +1,7 @@
 <script setup>
 // WorkspaceTools 是工作区右侧的统一工具面板：终端、文件、改动、Git 管理、
-// 项目记忆、验证都收在这一列里（参考 ZCode 的右侧面板：一列面板 + 若干标签，
-// 而不是每个工具各开一个抽屉）。
+// 项目记忆都收在这一列里（参考 ZCode 的右侧面板：一列面板 + 若干标签，
+// 而不是每个工具各开一个抽屉）。切换只走外层图标条——面板里不再重复一排文字标签。
 //
 // 三种形态（都只发生在工作区内部，不动左侧会话列表）：
 //   rail  —— 默认：只剩一条窄图标条，对话占满剩余宽度；
@@ -31,13 +31,12 @@ const TABS = [
   { id: 'changes', label: '改动', icon: 'i-diff' },
   { id: 'git', label: 'Git 管理', icon: 'i-git' },
   { id: 'memory', label: '项目记忆', icon: 'i-mem' },
-  { id: 'verify', label: '验证', icon: 'i-check' },
 ]
 const TAB_LABEL = TABS.reduce((m, t) => (m[t.id] = t.label, m), {})
 
-// 抽屉那四个标签（文件/改动/记忆/验证）由 WorkspaceFilesDrawer 自己实现，
+// 抽屉那三个标签（文件/改动/记忆）由 WorkspaceFilesDrawer 自己实现，
 // 这里只做转发：面板切到哪个标签，就把哪个标签交给抽屉渲染。
-const DRAWER_TABS = ['files', 'changes', 'memory', 'verify']
+const DRAWER_TABS = ['files', 'changes', 'memory']
 
 const TAB_KEY = 'friday-workspace-tools-tab'
 const tab = ref(readTab())
@@ -204,12 +203,7 @@ defineExpose({ open, openMemory, pickTab, setView, toggle })
           <b>{{ TAB_LABEL[tab] }}</b>
           <span class="meta" :title="thread && thread.cwd ? thread.cwd : ''">{{ thread && thread.agent ? thread.agent : '' }}</span>
         </div>
-        <!-- 标签行：面板里换工具视图 -->
-        <div class="ag-tools-tabs" role="tablist" aria-label="工具视图标签">
-          <button v-for="t in TABS" :key="t.id" type="button" role="tab"
-                  class="ag-tools-tab" :class="{ on: tab === t.id }" :aria-selected="tab === t.id"
-                  :title="t.label" @click="pickTab(t.id)">{{ t.label }}</button>
-        </div>
+        <!-- 标签行已去掉：切工具只走右侧图标条，面板内不再重复一排文字入口 -->
         <!-- 右上角展开按钮：工作区内一分为二，左会话、右工具视图 -->
         <button class="ib-btn" :class="{ active: focusOn }"
                 :aria-label="focusOn ? '退出展开视图' : '展开工具视图'"
@@ -245,7 +239,7 @@ defineExpose({ open, openMemory, pickTab, setView, toggle })
           </div>
         </div>
 
-        <!-- 文件 / 改动 / 项目记忆 / 验证：抽屉那套内容，嵌在面板里 -->
+        <!-- 文件 / 改动 / 项目记忆：抽屉那套内容，嵌在面板里 -->
         <WorkspaceFilesDrawer ref="drawer" v-show="DRAWER_TABS.indexOf(tab) >= 0" embedded
                               :thread="thread" :messages="messages" :workspace-id="workspaceId"
                               :active-tab="tab"
