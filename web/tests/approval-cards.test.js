@@ -10,6 +10,10 @@ vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()
 let wrapper
 beforeEach(() => {
   store.loggedIn = true
+  store.view = 'chat'
+  store.mode = 'life'
+  store.acpCurrentThread = ''
+  store.acpOpenThread = ''
   api.mockReset().mockImplementation(async (method, url) => {
     if (method === 'GET' && url === '/api/approvals') {
       return { approvals: [{ id: 7, tool: '智能体权限', summary: '执行 rm', detail: 'rm -rf tmp/' }] }
@@ -77,6 +81,41 @@ async function showQuestion(item = questionItem) {
   })
   await show()
 }
+
+describe('审批卡归属（不是当前会话就收进右上角提示）', () => {
+  const acpApproval = {
+    id: 31, tool: '智能体权限', summary: '执行 pnpm test', detail: 'cd web && pnpm test',
+    source: 'acp', threadId: 'th-1', threadTitle: '修构建', agent: 'codex',
+  }
+  async function showAcp() {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/approvals') return { approvals: [acpApproval] }
+      return { message: '已批准' }
+    })
+    await show()
+  }
+
+  it('其他会话的审批不铺在当前页，右上角提示条数并可跳到对应会话', async () => {
+    await showAcp()
+    expect(wrapper.find('.approval-card').exists()).toBe(false)
+    const hint = wrapper.get('#approvalHint')
+    expect(hint.text()).toContain('1 个待处理')
+    await hint.get('.ah-btn').trigger('click')
+    expect(wrapper.get('.ah-item').text()).toContain('修构建')
+    await wrapper.get('.ah-item').trigger('click')
+    expect(store.mode).toBe('work')
+    expect(store.view).toBe('agent')
+    expect(store.acpOpenThread).toBe('th-1')
+  })
+
+  it('切到目标会话后卡片就地展开，不再占用右上角提示', async () => {
+    store.view = 'agent'
+    store.acpCurrentThread = 'th-1'
+    await showAcp()
+    expect(wrapper.get('.approval-card').text()).toContain('执行 pnpm test')
+    expect(wrapper.find('#approvalHint').exists()).toBe(false)
+  })
+})
 
 describe('问答卡（agent 在问用户，不是请求授权）', () => {
   it('按钮换成 agent 给的选项，授权那三个键不再出现', async () => {

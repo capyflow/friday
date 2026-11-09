@@ -11,6 +11,7 @@
 package approval
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -35,6 +36,27 @@ var ErrDisabled = errors.New("exec 工具已被禁用（tools.exec.mode=off）")
 // KindQuestion 是问答卡的 Kind 值：agent 在问用户（选项由 agent 自己给），
 // 不是请求授权。空 Kind 按授权卡处理，老调用方不受影响。
 const KindQuestion = "question"
+
+// 审批卡的来源入口：前端据此决定卡片就地展开还是收进右上角的「其他会话待处理」。
+// SourceChat 是内置主对话（含心跳/任务等无会话归属的调用）；SourceACP 是工作区
+// 里某条会话（外部 agent 或内置 Friday 都算）。
+const (
+	SourceChat = "chat"
+	SourceACP  = "acp"
+)
+
+// Origin 描述一次审批属于哪个对话入口。Thread* 只在 SourceACP 里有值：
+// 前端靠 threadId 判断"这是不是我正在看的会话"，并据此跳转。
+type Origin struct {
+	Source      string `json:"source,omitempty"`
+	ThreadID    string `json:"threadId,omitempty"`
+	ThreadTitle string `json:"threadTitle,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+}
+
+// OriginResolver 把一次审批问询的 ctx 还原成来源。内置 Friday 的工作区会话只有
+// ctx 里带着会话 key（approval 包不认识 ACP），所以由装配方注入反查函数。
+type OriginResolver func(context.Context) Origin
 
 // ErrDenied 表示操作被用户拒绝或审批超时。
 var ErrDenied = errors.New("用户未批准")
@@ -106,6 +128,9 @@ type Item struct {
 	// （elicitation / 扩展方法）能真正收多条答案；权限通道协议一次只认一个
 	// optionId（zcode 把多选题拆成逐条 yes/no），所以那边永远单选。
 	MultiSelect bool `json:"multiSelect,omitempty"`
+	// Origin 标出这张卡属于哪个对话入口（聊天 / 某条工作区会话）。前端据此把
+	// 卡片放回原来的页面：不是当前会话的卡收进右上角提示，点击跳过去再处理。
+	Origin
 }
 
 // decision 是审批结果：是否批准，以及是否"批准并记住"（本进程内相同工具
@@ -135,6 +160,9 @@ type Queue struct {
 	// editsFree 编辑类内部审批（write_file/edit_file/mcp_edit 变更）免审批开关：
 	// permissions.mode 为 acceptEdits/fullAccess 时开启（运行时经设置页热切换）。
 	editsFree bool
+	// origin 把审批问询的 ctx 还原成来源（工作区会话 / 主对话）。为 nil 时一律
+	// 按主对话处理——只装配了队列、没接工作区反查的运行形态（测试）仍然可用。
+	origin OriginResolver
 }
 
 // New 创建审批队列。mode 非法时回退为 confirm（最保守）；allowlist 为 exec
@@ -159,6 +187,29 @@ func New(mode string, allowlist []string, timeout time.Duration) *Queue {
 
 // Mode 返回当前审批模式。
 func (q *Queue) Mode() Mode { return q.mode }
+
+// SetOriginResolver 注入来源反查（启动时调用一次）。入队的每张卡都会带上
+// 解析出的来源，前端据此决定卡片就地展开还是挂到右上角提示。
+func (q *Queue) SetOriginResolver(r OriginResolver) {
+	q.mu.Lock()
+	q.origin = r
+	q.mu.Unlock()
+}
+
+// originFrom 解析 ctx 的来源；没装配解析器时按主对话处理。
+func (q *Queue) originFrom(ctx context.Context) Origin {
+	q.mu.Lock()
+	r := q.origin
+	q.mu.Unlock()
+	if r == nil {
+		return Origin{Source: SourceChat}
+	}
+	o := r(ctx)
+	if o.Source == "" {
+		o.Source = SourceChat
+	}
+	return o
+}
 
 // SetEditsFree 设置编辑类内部审批免审批开关（permissions.mode 切换时由热更新
 // 路径调用；只影响 write_file/edit_file/mcp_edit 的内部审批，exec 与权限层无关）。
@@ -187,11 +238,18 @@ func (q *Queue) InternalApprovalRequired() bool {
 // Timeout 返回审批等待时长。
 func (q *Queue) Timeout() time.Duration { return q.timeout }
 
-// Request 发起一次审批：confirm 模式入队并阻塞等待（批准返回 nil，
-// 拒绝/超时返回 ErrDenied）；auto 模式直接放行（exec 的白名单匹配由权限层
-// 完成，不经此入口）。off 模式返回 ErrDisabled。
+// Request 发起一次审批（无 ctx 版本，来源按主对话处理）。需要把卡片归还到
+// 对应工作区会话的调用方用 RequestCtx。confirm 模式入队并阻塞等待（批准返回
+// nil，拒绝/超时返回 ErrDenied）；auto 模式直接放行；off 模式返回 ErrDisabled。
 func (q *Queue) Request(tool, summary, detail string) error {
 	_, err := q.RequestRemember(tool, summary, detail)
+	return err
+}
+
+// RequestCtx 同 Request，但带调用方 ctx：来源解析器据此判断这张卡属于哪个
+// 对话入口（工作区会话 / 主对话）。
+func (q *Queue) RequestCtx(ctx context.Context, tool, summary, detail string) error {
+	_, err := q.RequestRememberCtx(ctx, tool, summary, detail)
 	return err
 }
 
@@ -199,7 +257,12 @@ func (q *Queue) Request(tool, summary, detail string) error {
 // 批准返回 remember（用户选择了"批准并记住"），拒绝/超时返回 ErrDenied；
 // auto 模式直接放行；off 模式返回 ErrDisabled。
 func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, err error) {
-	_, remember, err = q.request(tool, summary, detail, 0, true)
+	return q.RequestRememberCtx(context.Background(), tool, summary, detail)
+}
+
+// RequestRememberCtx 是 RequestRemember 的带 ctx 版本。
+func (q *Queue) RequestRememberCtx(ctx context.Context, tool, summary, detail string) (remember bool, err error) {
+	_, remember, err = q.request(ctx, tool, summary, detail, 0, true)
 	return remember, err
 }
 
@@ -208,7 +271,7 @@ func (q *Queue) RequestRemember(tool, summary, detail string) (remember bool, er
 // ——这是对话空间的独立闸门，不随 exec 审批模式联动；超时也远长于 exec
 // 审批（人可能不在屏幕前）。批准返回 true；拒绝/超时返回 ErrDenied。
 func (q *Queue) RequestAlways(tool, summary, detail string, timeout time.Duration) (bool, error) {
-	allow, _, err := q.request(tool, summary, detail, timeout, false)
+	allow, _, err := q.request(context.Background(), tool, summary, detail, timeout, false)
 	return allow, err
 }
 
@@ -240,6 +303,8 @@ type Card struct {
 	TextPlaceholder string
 	// MultiSelect 允许一次勾选多条选项提交（见 Item.MultiSelect）。
 	MultiSelect bool
+	// Origin 是这张卡的来源；空 Source 按主对话处理。
+	Origin Origin
 }
 
 // RequestCancelable 入队一次审批并立即返回句柄（不阻塞）。timeout<=0 用队列
@@ -250,8 +315,13 @@ func (q *Queue) RequestCancelable(tool, summary, detail string, timeout time.Dur
 }
 
 // RequestCard 入队一张授权卡或问答卡，语义同 RequestCancelable（无视队列模式
-// 强制入队——智能体的权限闸门是对话空间的独立闸门）。
+// 强制入队——智能体的权限闸门是对话空间的独立闸门）。card.Origin 会原样带到
+// 卡片上，前端据此把卡片放回对应会话。
 func (q *Queue) RequestCard(card Card, timeout time.Duration) *Pending {
+	origin := card.Origin
+	if origin.Source == "" {
+		origin.Source = SourceChat
+	}
 	q.mu.Lock()
 	if timeout <= 0 {
 		timeout = q.timeout
@@ -263,7 +333,7 @@ func (q *Queue) RequestCard(card Card, timeout time.Duration) *Pending {
 			CreatedAt: time.Now(), Kind: card.Kind,
 			Options: card.Options, Questions: card.Questions,
 			AllowText: card.AllowText, TextPlaceholder: card.TextPlaceholder,
-			MultiSelect: card.MultiSelect,
+			MultiSelect: card.MultiSelect, Origin: origin,
 		},
 		ch: make(chan decision, 1),
 	}
@@ -329,8 +399,9 @@ func (p *Pending) WaitDecision() (Outcome, error) {
 func (p *Pending) Cancel() { p.once.Do(func() { close(p.cancel) }) }
 
 // request 是审批入队的内部实现：respectMode=false 时无视模式强制入队。
-// 返回 (是否批准, 是否"批准并记住", 错误)。
-func (q *Queue) request(tool, summary, detail string, timeout time.Duration, respectMode bool) (allow bool, remember bool, err error) {
+// 返回 (是否批准, 是否"批准并记住", 错误)。ctx 只用于解析卡片来源。
+func (q *Queue) request(ctx context.Context, tool, summary, detail string, timeout time.Duration, respectMode bool) (allow bool, remember bool, err error) {
+	origin := q.originFrom(ctx)
 	q.mu.Lock()
 	if respectMode && q.mode != ModeConfirm {
 		q.mu.Unlock()
@@ -344,8 +415,9 @@ func (q *Queue) request(tool, summary, detail string, timeout time.Duration, res
 	}
 	q.seq++
 	req := &request{
-		item: Item{ID: q.seq, Tool: tool, Summary: summary, Detail: detail, CreatedAt: time.Now()},
-		ch:   make(chan decision, 1),
+		item: Item{ID: q.seq, Tool: tool, Summary: summary, Detail: detail,
+			CreatedAt: time.Now(), Origin: origin},
+		ch: make(chan decision, 1),
 	}
 	q.pending[req.item.ID] = req
 	q.mu.Unlock()

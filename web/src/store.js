@@ -21,6 +21,9 @@ export const store = reactive({
   unread: 0,
   traceFilter: '',   // 调用轨迹的会话过滤（如 goal-<id> / plan-<id>，从自动化页跳转带入）
   acpOpenThread: '', // 运行看板 → 工作区：要打开哪条 ACP 会话（消费后清零）
+  // 工作区当前正在显示的会话：审批卡片靠它判断"这张卡是不是当前对话的"，
+  // 不是的话收进右上角提示。由 WorkspaceView 在切换会话时同步（含清空）。
+  acpCurrentThread: '',
   // 应用内全屏（专注对话）：隐藏左侧全局导航、页面吃满窗口，Esc 由我们自己处理。
   // 不持久化——每次启动都从普通布局开始，免得忘了自己处在哪种模式。
   fullscreen: false,

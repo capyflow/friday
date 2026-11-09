@@ -137,6 +137,10 @@ const imgLightbox = ref(null)      // 附件全图预览层（气泡上方的缩
 const states = reactive({})    // thread id -> 该会话的前端态
 const inflight = new Map()     // thread id -> AbortController
 
+// 正在显示的会话同步到全局：审批卡据此判断卡片是否属于当前对话（不属于就收进
+// 右上角提示、点击跳过来），不依赖 WorkspaceView 的内部状态。
+watch(currentId, id => { store.acpCurrentThread = id }, { immediate: true })
+
 function stateOf(id) {
   if (!id) return null
   if (!states[id]) {

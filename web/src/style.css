@@ -976,6 +976,37 @@ html[data-theme="dark"] .approval-card {
   line-height: 1.5; outline: none; }
 .aq-text textarea:focus { border-color: var(--accent); }
 .aq-text textarea:disabled { opacity: .6; }
+
+/* ---------- 右上角「其他会话待处理」提示 ---------- */
+/* 只在当前页面看不到对应会话时出现：不打断手头的对话，但又让人一眼知道
+   "还有几件事在等我"。点开列出每条请求属于哪个会话，点一条跳过去。 */
+#approvalHint { position: fixed; top: 56px; right: 18px; z-index: 96;
+  display: flex; flex-direction: column; align-items: flex-end; }
+.ah-btn { display: inline-flex; align-items: center; gap: 7px; padding: 7px 13px;
+  border-radius: 999px; border: 1px solid #D97706; background: var(--card);
+  color: var(--fg); font: inherit; font-size: 12.5px; font-weight: 600;
+  cursor: pointer; box-shadow: var(--shadow-overlay); }
+.ah-btn svg { color: #D97706; }
+.ah-btn:hover { background: var(--warn-subtle); }
+.ah-pop { margin-top: 8px; width: 330px; max-height: 46vh; overflow: auto;
+  padding: 10px; background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow-overlay); }
+html[data-theme="dark"] .ah-pop { background: rgba(24,24,24,.96);
+  border-color: rgba(255,255,255,.1);
+  backdrop-filter: blur(24px) saturate(1.4); -webkit-backdrop-filter: blur(24px) saturate(1.4); }
+.ah-tip { margin: 2px 4px 8px; font-size: 11.5px; color: var(--muted-fg); }
+.ah-item { display: grid; grid-template-columns: auto auto 1fr; gap: 3px 8px;
+  align-items: baseline; width: 100%; padding: 8px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.ah-item:hover { background: var(--bg-subtle); }
+.ah-where { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px; font-weight: 600; }
+.ah-kind { padding: 1px 6px; border-radius: 999px; background: var(--warn-subtle);
+  color: var(--warn); font-size: 10.5px; }
+.ah-kind.q { background: var(--accent-subtle); color: var(--accent-fg); }
+.ah-sum { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--fg-2); }
+
 #toast { position: fixed; top: 16px; left: 50%; transform: translate(-50%, -8px);
          background: var(--primary); color: var(--on-primary); font-size: 13px; font-weight: 500;
          padding: 9px 18px; border-radius: 10px; opacity: 0; pointer-events: none;
@@ -1288,6 +1319,8 @@ html[data-theme="dark"] .selbox-pop {
   #termPanes { padding: 8px 10px 10px; }
   .wiki-layout { grid-template-columns: 1fr; }
   #approvalBar { right: 12px; left: 12px; width: auto; }
+  #approvalHint { top: 52px; right: 12px; left: 12px; align-items: stretch; }
+  .ah-pop { width: auto; }
   /* 设置弹窗全屏；左右两列布局保持不变——导航固定列宽、超高时导航内上下滚动 */
   .set-mask { padding: 0; }
   .set-dialog { width: 100%; height: 100%; border: none; border-radius: 0; }
@@ -1585,6 +1618,9 @@ html[data-theme="dark"] .chat-md .file-chip, html[data-theme="dark"] .fp-md .fil
 .fp-panel { position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 92vw);
   z-index: 226; background: var(--card); box-shadow: var(--shadow-overlay);
   display: flex; flex-direction: column; animation: fp-in .22s ease; }
+/* 深色下 --card 是 4.5% 白，抽屉压在正文上会透出底下的字；抽屉必须是实心面 */
+html[data-theme="dark"] .fp-panel { background: #181818;
+  border-left: 1px solid rgba(255,255,255,.1); }
 @keyframes fp-in { from { transform: translateX(28px); opacity: 0; } }
 .fp-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 8px; }
 .fp-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

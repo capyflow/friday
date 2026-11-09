@@ -200,10 +200,12 @@ func (m *Manager) StartCheck(threadID, command string, timeout time.Duration) (*
 	var pend *approval.Pending
 	if m.approver != nil {
 		// 与 agent 权限卡同源：无论全局审批模式如何都要人点一次。
-		pend = m.approver.RequestCancelable("验证命令",
-			fmt.Sprintf("在 %s 执行：%s", filepath.Base(cwd), clipLine(command, 80)),
-			fmt.Sprintf("目录：%s\n超时：%d 秒\n命令：%s", cwd, int(timeout/time.Second), command),
-			checkApprovalWait)
+		pend = m.approver.RequestCard(approval.Card{
+			Tool:    "验证命令",
+			Summary: fmt.Sprintf("在 %s 执行：%s", filepath.Base(cwd), clipLine(command, 80)),
+			Detail:  fmt.Sprintf("目录：%s\n超时：%d 秒\n命令：%s", cwd, int(timeout/time.Second), command),
+			Origin:  m.ThreadOrigin(threadID, ""),
+		}, checkApprovalWait)
 		reg.mu.Lock()
 		reg.handles[run.ID].pend = pend
 		reg.mu.Unlock()

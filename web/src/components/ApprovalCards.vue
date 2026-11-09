@@ -3,9 +3,11 @@
 // 两种卡分开画：授权卡是「批准/拒绝/批准并记住」；问答卡（kind=question，agent
 // 借权限通道问用户）的按钮就是它自己给的选项，点哪条把那条的 id 回给 agent——
 // 压成批准/拒绝会把答案丢掉。
-import { onMounted, onUnmounted, reactive, watch } from 'vue'
+// 归属：只有"当前正在看的会话"的卡才铺在页面上；其他会话的卡收进右上角提示
+// （几条、哪条会话），点一下跳过去再处理——不再在任何页面凭空弹出来。
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
-import { store, toast } from '../store.js'
+import { store, toast, setMode } from '../store.js'
 
 const items = reactive([])
 const texts = reactive({})      // 问答卡的自由文本答案（按卡片 id 存）
@@ -24,6 +26,43 @@ const isMulti = it => isQuestion(it) && !!it.multiSelect
 // 明说一句，别让人以为点完还能补选。
 const multiHint = it => !isMulti(it) && (it.questions || []).some(g => g.multiSelect)
 const isSelected = (it, oid) => (selections[it.id] || []).includes(oid)
+
+/* ---------- 卡片归属：当前对话就地展开，其他会话收进右上角提示 ---------- */
+// source 由后端带上：acp = 工作区里某条会话（threadId 指路），空/chat = 主对话。
+// 只有"正在看的那条会话"的卡才铺在页面上；否则用户分不清是哪个窗口在申请。
+const isAcp = it => it.source === 'acp'
+function inCurrentChat(it) {
+  if (!isAcp(it)) return store.view === 'chat'
+  return store.view === 'agent' && !!it.threadId && store.acpCurrentThread === it.threadId
+}
+const inlineItems = computed(() => items.filter(inCurrentChat))
+const otherItems = computed(() => items.filter(it => !inCurrentChat(it)))
+const hintOpen = ref(false)
+
+function targetLabel(it) {
+  if (!isAcp(it)) return '聊天 · 小五'
+  return (it.threadTitle || '').trim() || it.agent || '智能体会话'
+}
+
+// jumpTo 跳到这条卡所属的会话：到了那边卡片会自己铺开，再决定批/答。
+function jumpTo(it) {
+  hintOpen.value = false
+  if (!isAcp(it)) {
+    setMode('life')
+    store.view = 'chat'
+    return
+  }
+  setMode('work')
+  if (it.threadId) store.acpOpenThread = it.threadId
+  store.view = 'agent'
+}
+
+function onDocClick(e) {
+  if (hintOpen.value && !e.target?.closest?.('#approvalHint')) hintOpen.value = false
+}
+
+// 卡全处理完就收起提示层，别留一个空面板。
+watch(() => otherItems.value.length, n => { if (!n) hintOpen.value = false })
 
 function toggleOption(it, oid) {
   if (pending.has(it.id) || !store.loggedIn || disposed) return
@@ -140,14 +179,24 @@ async function answerText(it) {
   }
 }
 
-onMounted(() => { poll(); timer = setInterval(poll, 5000) })
-onUnmounted(() => { disposed = true; generation++; clearInterval(timer) })
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  poll()
+  timer = setInterval(poll, 5000)
+})
+onUnmounted(() => {
+  disposed = true
+  generation++
+  clearInterval(timer)
+  document.removeEventListener('click', onDocClick)
+})
 </script>
 
 <template>
-  <div v-if="store.loggedIn" id="approvalBar" aria-live="polite">
-    <div v-for="it in items" :key="it.id" class="approval-card" :class="{ 'is-question': isQuestion(it) }"
-         :aria-busy="pending.has(it.id)">
+  <template v-if="store.loggedIn">
+    <div v-if="inlineItems.length" id="approvalBar" aria-live="polite">
+      <div v-for="it in inlineItems" :key="it.id" class="approval-card" :class="{ 'is-question': isQuestion(it) }"
+           :aria-busy="pending.has(it.id)">
       <h4>
         <svg v-if="isQuestion(it)" width="15" height="15" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
@@ -216,6 +265,29 @@ onUnmounted(() => { disposed = true; generation++; clearInterval(timer) })
           <button class="btn sm primary" :disabled="pending.has(it.id)" @click="decide(it, true, false)">{{ pending.has(it.id) ? '处理中…' : '批准' }}</button>
         </div>
       </template>
+      </div>
     </div>
-  </div>
+
+    <!-- 右上角提示：不属于当前会话的待处理卡。点一条跳到对应会话再处理——
+         卡片不会凭空换页面弹出来，用户始终知道是"哪条会话在等自己"。 -->
+    <div v-if="otherItems.length" id="approvalHint" :class="{ open: hintOpen }">
+      <button type="button" class="ah-btn" :aria-expanded="hintOpen" aria-haspopup="dialog"
+              :aria-label="otherItems.length + ' 个待处理审批或提问，点击查看'"
+              @click.stop="hintOpen = !hintOpen">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <use href="#i-bell"/>
+        </svg>
+        <span>{{ otherItems.length }} 个待处理</span>
+      </button>
+      <div v-if="hintOpen" class="ah-pop" role="dialog" aria-label="其他会话的待处理请求">
+        <p class="ah-tip">这些请求来自其他会话，点一条跳过去处理：</p>
+        <button v-for="it in otherItems" :key="it.id" type="button" class="ah-item" @click="jumpTo(it)">
+          <span class="ah-where">{{ targetLabel(it) }}</span>
+          <span class="ah-kind" :class="{ q: isQuestion(it) }">{{ isQuestion(it) ? '提问' : '审批' }}</span>
+          <span class="ah-sum">{{ it.summary }}</span>
+        </button>
+      </div>
+    </div>
+  </template>
 </template>

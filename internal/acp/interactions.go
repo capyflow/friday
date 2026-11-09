@@ -529,6 +529,7 @@ func (m *Manager) askPrompt(ctx context.Context, threadID, agentName string, pro
 		AllowText:       prompt.AllowText,
 		TextPlaceholder: prompt.TextPlaceholder,
 		MultiSelect:     prompt.MultiSelect,
+		Origin:          m.ThreadOrigin(threadID, agentName),
 	}, timeout)
 	hint := "选一项"
 	if prompt.MultiSelect {

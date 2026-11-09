@@ -136,7 +136,7 @@ func approvalUI(q *approval.Queue) vxagent.ApprovalUI {
 		summary, detail := describeCall(info)
 		trace.Record(ctx, "approval", "%s 未放行，进入审批队列（超时 %s）", info.Tool, q.Timeout())
 		trace.Record(ctx, "approval", "待审批：%s", summary)
-		remember, err := q.RequestRemember(info.Tool, summary, detail)
+		remember, err := q.RequestRememberCtx(ctx, info.Tool, summary, detail)
 		if err != nil {
 			trace.Record(ctx, "approval", "%s 未获批准：%v", info.Tool, err)
 			return vxagent.Decision{Allowed: false}

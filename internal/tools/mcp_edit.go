@@ -416,7 +416,7 @@ func requestMcpApproval(ctx context.Context, q *approval.Queue, action, name, de
 	}
 	summary := "mcp_edit " + action + " 服务器 " + name
 	trace.Record(ctx, "approval", "%s，等待网页审批（超时 %s）", summary, q.Timeout())
-	if err := q.Request("mcp_edit", summary, detail); err != nil {
+	if err := q.RequestCtx(ctx, "mcp_edit", summary, detail); err != nil {
 		trace.Record(ctx, "approval", "%s 未获批准：%v", summary, err)
 		return err
 	}

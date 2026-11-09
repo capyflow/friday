@@ -64,7 +64,7 @@ func requestWriteApproval(ctx context.Context, q *approval.Queue, tool, path, de
 		return nil
 	}
 	trace.Record(ctx, "approval", "%s 请求写入 %s，等待网页审批（超时 %s）", tool, path, q.Timeout())
-	if err := q.Request(tool, fmt.Sprintf("%s：%s", tool, path), detail); err != nil {
+	if err := q.RequestCtx(ctx, tool, fmt.Sprintf("%s：%s", tool, path), detail); err != nil {
 		trace.Record(ctx, "approval", "%s %s 未获批准：%v", tool, path, err)
 		return err
 	}

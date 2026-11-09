@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -426,5 +428,67 @@ func TestWaitDecisionTimeoutKeepsDeniedSemantics(t *testing.T) {
 	}
 	if out.OptionID != "" || out.Allow {
 		t.Errorf("超时不该带选项: %+v", out)
+	}
+}
+
+// TestCardCarriesOrigin 卡片来源要原样带到待审批列表（前端靠它判断该不该就
+// 地展开）；不填来源的老调用方按主对话处理。
+func TestCardCarriesOrigin(t *testing.T) {
+	q := New("confirm", nil, time.Minute)
+	card := q.RequestCard(Card{Tool: "智能体权限", Summary: "执行命令",
+		Origin: Origin{Source: SourceACP, ThreadID: "t1", ThreadTitle: "修构建", Agent: "codex"}},
+		time.Minute)
+	defer card.Cancel()
+	items := q.Pending()
+	if len(items) != 1 {
+		t.Fatalf("应有 1 条待审批: %+v", items)
+	}
+	got := items[0]
+	if got.Source != SourceACP || got.ThreadID != "t1" ||
+		got.ThreadTitle != "修构建" || got.Agent != "codex" {
+		t.Fatalf("来源信息未带到卡片: %+v", got)
+	}
+	// 前端按顶层字段读，别把 Origin 序列化成嵌套对象。
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["source"] != SourceACP || fields["threadId"] != "t1" {
+		t.Fatalf("来源字段未平铺到卡片 JSON: %s", raw)
+	}
+
+	plain := q.RequestCard(Card{Tool: "write_file", Summary: "写文件"}, time.Minute)
+	defer plain.Cancel()
+	for _, it := range q.Pending() {
+		if it.ID == plain.ID() && it.Source != SourceChat {
+			t.Fatalf("未指定来源应回落到主对话: %+v", it)
+		}
+	}
+}
+
+// TestRequestCtxUsesOriginResolver 带 ctx 的审批走注入的来源解析器（内置
+// Friday 在工作区里的审批就靠这条路径找回 thread）。
+func TestRequestCtxUsesOriginResolver(t *testing.T) {
+	q := New("confirm", nil, 3*time.Second)
+	q.SetOriginResolver(func(context.Context) Origin {
+		return Origin{Source: SourceACP, ThreadID: "t9", ThreadTitle: "后台会话"}
+	})
+	done := make(chan error, 1)
+	go func() { done <- q.RequestCtx(context.Background(), "write_file", "写文件", "detail") }()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	items := q.Pending()
+	if len(items) != 1 || items[0].ThreadID != "t9" || items[0].Source != SourceACP {
+		t.Fatalf("来源解析未生效: %+v", items)
+	}
+	q.Decide(items[0].ID, true)
+	if err := <-done; err != nil {
+		t.Fatalf("批准后应放行: %v", err)
 	}
 }

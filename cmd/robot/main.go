@@ -471,6 +471,18 @@ func main() {
 	// （acp.enabled: false），关闭时接口拒绝新消息、侧栏入口由前端隐藏。
 	acpMgr := acp.NewManager(func() config.AcpConfig { return cfg.Snapshot().Acp.Normalized() },
 		approver, "acp-threads.json")
+	// 审批卡的来源：工作区里的内置 Friday 走的是同一个权限层，ctx 里只带着
+	// 「acp-<会话 id>」这个 key；在这里反查回 thread，前端才能把卡片放回对应
+	// 会话。其余（主对话、心跳、任务）一律归聊天入口。
+	approver.SetOriginResolver(func(ctx context.Context) approval.Origin {
+		if robotagent.OriginFrom(ctx) != robotagent.OriginAcp {
+			return approval.Origin{Source: approval.SourceChat}
+		}
+		if origin, ok := acpMgr.OriginForSessionKey(robotagent.SessionKeyFrom(ctx)); ok {
+			return origin
+		}
+		return approval.Origin{Source: approval.SourceACP}
+	})
 	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
 	// 系统提示桥：审批卡入队、一轮结束这两个时刻，人通常已经切到别的窗口，
 	// 页面里的卡片和气泡等于没发生。走通知中心的 PostOnce（按 key 幂等，同一

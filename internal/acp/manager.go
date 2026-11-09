@@ -26,8 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	vxagent "github.com/capyflow/vortexagent/agent"
+	acp "github.com/coder/acp-go-sdk"
 
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
@@ -467,6 +467,42 @@ func (m *Manager) Get(id string) (Thread, bool) {
 		cp.State = StateOrphaned
 	}
 	return cp, true
+}
+
+// ThreadOrigin 给审批卡补上来源会话：前端靠 threadId 判断"这张卡是不是我
+// 正在看的会话"，不是的话收进右上角提示、点击跳过来再处理。
+func (m *Manager) ThreadOrigin(threadID, agentName string) approval.Origin {
+	o := approval.Origin{Source: approval.SourceACP, ThreadID: threadID, Agent: agentName}
+	if th, ok := m.Get(threadID); ok {
+		o.ThreadTitle = th.Title
+		if o.Agent == "" {
+			o.Agent = th.Agent
+		}
+	}
+	return o
+}
+
+// OriginForSessionKey 把内置会话在 SessionPool 里的 key（acp-<会话 id>）还原成
+// 它所属的工作区会话。审批队列不认识 ACP，装配时把 ctx 里的会话 key 交给这里
+// 反查，内置 Friday 在工作区里的审批卡才不会被误当成主对话的卡。
+func (m *Manager) OriginForSessionKey(key string) (approval.Origin, bool) {
+	key = strings.TrimSpace(key)
+	if !strings.HasPrefix(key, builtinKeyPrefix) {
+		return approval.Origin{}, false
+	}
+	sid := strings.TrimPrefix(key, builtinKeyPrefix)
+	if sid == "" {
+		return approval.Origin{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, th := range m.threads {
+		if th.SessionID == sid {
+			return approval.Origin{Source: approval.SourceACP, ThreadID: th.ID,
+				ThreadTitle: th.Title, Agent: th.Agent}, true
+		}
+	}
+	return approval.Origin{}, false
 }
 
 // sessionsBaseDirFn 可被测试替换：没选目录时，临时工作区目录的父目录。
@@ -1318,16 +1354,20 @@ func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 		groups := questionGroups(r)
 		question := isQuestionRequest(r)
 		var card *approval.Pending
+		origin := m.ThreadOrigin(threadID, agentName)
 		if question {
 			card = m.approver.RequestCard(approval.Card{
 				Tool: "智能体提问", Summary: summary, Detail: questionDetail(agentName, groups),
 				Kind: approval.KindQuestion, Options: toApprovalOptions(r.Options), Questions: groups,
+				Origin: origin,
 			}, timeout)
 			m.notice(fmt.Sprintf("acp:%s:question:%d", threadID, card.ID()),
 				fmt.Sprintf("%s 在等你回答：%s。回到 Friday 的 agent 对话页选一项；"+
 					"%d 分钟内无人处理按未选择结算。", agentName, summary, timeout/time.Minute))
 		} else {
-			card = m.approver.RequestCancelable("智能体权限", summary, detail, timeout)
+			card = m.approver.RequestCard(approval.Card{
+				Tool: "智能体权限", Summary: summary, Detail: detail, Origin: origin,
+			}, timeout)
 			// 等人回来批：卡入队即提示一次。审批等待最长 30 分钟，多数情况下人已经
 			// 切到别的窗口，页面里的卡片看不见就等于没发生。
 			m.notice(fmt.Sprintf("acp:%s:approval:%d", threadID, card.ID()),
