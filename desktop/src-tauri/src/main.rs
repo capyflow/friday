@@ -872,6 +872,10 @@ fn main() {
             app.manage(NativeNotifications::load(
                 data_dir.join("desktop-notifications.json"),
             ));
+            // macOS 必须指定前台展示委托，否则应用激活时通知只进通知中心、
+            // 不弹右上角横幅（用户看到的就是"系统通知没生效"）。
+            #[cfg(target_os = "macos")]
+            mac_notifications::install_delegate(app.handle().clone());
             app.manage(Kernel {
                 addr: Mutex::new(None),
                 child: Mutex::new(None),
@@ -1509,14 +1513,81 @@ fn show_native_notice(app: &tauri::AppHandle, notice: &NativeNotice) -> Result<(
 mod mac_notifications {
     use super::*;
     use block2::RcBlock;
-    use objc2::runtime::Bool;
+    use objc2::rc::Retained;
+    use objc2::runtime::{Bool as ObjCBool, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass};
     use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
-        UNNotificationRequest, UNNotificationSettings, UNUserNotificationCenter,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::ptr::NonNull;
     use std::sync::mpsc;
+
+    struct DelegateIvars {
+        app: tauri::AppHandle,
+    }
+
+    // 前台展示委托：macOS 默认"应用在前台时只把通知塞进通知中心、不弹横幅"，
+    // 必须由 UNUserNotificationCenterDelegate 明确要求 Banner/Sound 才会在右上角
+    // 冒出来。以前只调了 addNotificationRequest，系统收下了（所以历史上不报错），
+    // 但窗口激活时用户什么也看不到——这就是「系统通知没生效」的根因。
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[ivars = DelegateIvars]
+        struct NotificationDelegate;
+
+        unsafe impl NSObjectProtocol for NotificationDelegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for NotificationDelegate {
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion_handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                completion_handler.call((
+                    UNNotificationPresentationOptions::Banner
+                        | UNNotificationPresentationOptions::Sound
+                        | UNNotificationPresentationOptions::List,
+                ));
+            }
+
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _response: &UNNotificationResponse,
+                completion_handler: &block2::DynBlock<dyn Fn()>,
+            ) {
+                // 点横幅：把主窗口叫到前台，并通知前端切到通知页。
+                if let Some(win) = self.ivars().app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+                let _ = self.ivars().app.emit("friday:notice-click", ());
+                completion_handler.call(());
+            }
+        }
+    );
+
+    impl NotificationDelegate {
+        fn new(app: tauri::AppHandle) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(DelegateIvars { app });
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// 挂上前台展示委托。委托属性是弱引用，泄漏到进程结束才能一直有效。
+    pub fn install_delegate(app: tauri::AppHandle) {
+        let delegate = NotificationDelegate::new(app);
+        UNUserNotificationCenter::currentNotificationCenter()
+            .setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        std::mem::forget(delegate);
+    }
 
     pub fn granted() -> Result<bool, String> {
         let (tx, rx) = mpsc::channel();
@@ -1536,7 +1607,7 @@ mod mac_notifications {
 
     pub fn request() -> Result<bool, String> {
         let (tx, rx) = mpsc::channel();
-        let callback = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+        let callback = RcBlock::new(move |granted: ObjCBool, error: *mut NSError| {
             let _ = tx.send(granted.as_bool() && error.is_null());
         });
         UNUserNotificationCenter::currentNotificationCenter()

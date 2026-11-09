@@ -95,11 +95,22 @@ onMounted(() => {
   window.addEventListener('friday:theme', onThemeChange)
   startNotifications()
 })
+// 点系统通知横幅：外壳把主窗口叫回来后发这个事件，这里落到通知中心。
+// 浏览器直连没有事件通道，拿不到就静默跳过。
+let unlistenNotice = null
+onMounted(async () => {
+  const listen = window.__TAURI__?.event?.listen
+  if (!listen) return
+  try {
+    unlistenNotice = await listen('friday:notice-click', () => { store.view = 'notifications' })
+  } catch { /* 外壳事件通道不可用 */ }
+})
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   document.removeEventListener('click', onDocClick)
   window.removeEventListener('friday:setup-refresh', refreshSetup)
   window.removeEventListener('friday:theme', onThemeChange)
+  if (unlistenNotice) unlistenNotice()
   stopNotifications()
 })
 
@@ -128,6 +139,7 @@ async function logout() {
   store.settingsOpen = false
   store.loggedIn = false
   store.acpOpenThread = ''
+  store.acpCurrentThread = ''
   toast('已退出登录')
 }
 </script>

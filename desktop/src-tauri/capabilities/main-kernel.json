@@ -6,6 +6,7 @@
   "windows": ["main"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "permissions": [
+    "core:event:default",
     "allow-auth-get-token",
     "allow-auth-set-token",
     "allow-auth-clear-token",
