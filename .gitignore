@@ -91,3 +91,9 @@ evidence/
 
 # token 统计写入残留临时文件
 /token-usage.json.tmp-*
+
+# 内核 JWT 签名密钥（dev 跑在仓库根时落盘，含密钥永不入库）
+/auth-key
+
+# 仓库根临时 node_modules（脚本/npm 临时安装）
+/node_modules/

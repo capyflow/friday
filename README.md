@@ -282,6 +282,15 @@ macOS 上内核可装成 launchd 常驻服务（`friday service install`，桌�
 会自动安装）：开机自启、崩溃自拉，桌面 app 与手机都是它的客户端——架构细节
 见 [docs/DESKTOP.md](docs/DESKTOP.md)「服务模式」。
 
+## 桌面打包与发布（重要）
+
+macOS 正式分发包必须使用 **Developer ID Application 证书签名 + Apple 公证**，
+**禁止把 ad-hoc 测试包发布到 GitHub Release**（ad-hoc 包浏览器下载会被 Gatekeeper 拦）。
+每次打包前先读 [desktop/README.md「macOS 正确打包流程」](desktop/README.md#macos-正确打包流程2026-11-09-起)：
+`--macos-release` 会校验 Developer ID 证书与公证凭据，缺一即停止；产物必须过
+`desktop/scripts/verify-macos.sh` 验收才能上传。给 AI 助手/新成员的检查清单见
+[AGENTS.md](AGENTS.md)。
+
 ## 自定义功能
 
 **自定义指令**（config.yaml，重启生效）：
