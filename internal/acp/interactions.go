@@ -540,7 +540,8 @@ func (m *Manager) askPrompt(ctx context.Context, threadID, agentName string, pro
 	}
 	m.notice(fmt.Sprintf("acp:%s:question:%d", threadID, card.ID()),
 		fmt.Sprintf("%s 在等你回答：%s。回到 Friday 的 agent 对话页%s；"+
-			"%d 分钟内无人处理按未选择结算。", agentName, summary, hint, timeout/time.Minute))
+			"%d 分钟内无人处理按未选择结算。", agentName, summary, hint, timeout/time.Minute),
+		threadID)
 	go func() {
 		select {
 		case <-ctx.Done():

@@ -104,3 +104,38 @@ describe('侧栏的使用模式开关', () => {
     expect(fresh.store.mode).toBe('work')
   })
 })
+
+// ---------- 系统通知横幅：点开直接跳到对应会话 ----------
+// 外壳把主窗口叫回前台后 emit 这个事件，载荷是这条通知归属的会话 id。
+// 带会话就跳那条会话（用户点横幅的意图是「回到那儿接着看」），
+// 没带会话的（生活模式提醒等）仍旧落到通知页。
+describe('系统通知横幅点击', () => {
+  let listeners = {}
+  const listen = vi.fn(async (name, cb) => {
+    listeners[name] = cb
+    return () => { delete listeners[name] }
+  })
+  beforeEach(() => {
+    listeners = {}
+    window.__TAURI__ = { event: { listen } }
+  })
+  afterEach(() => {
+    delete window.__TAURI__
+  })
+  async function fireNotice(threadId) {
+    await showApp()
+    expect(typeof listeners['friday:notice-click']).toBe('function')
+    listeners['friday:notice-click']({ payload: threadId })
+    await flushPromises()
+  }
+  it('带会话 id 的横幅：跳到那条会话（工作模式 + 工作区页）', async () => {
+    await fireNotice('th-42')
+    expect(store.mode).toBe('work')
+    expect(store.view).toBe('agent')
+    expect(store.acpOpenThread).toBe('th-42')
+  })
+  it('没带会话 id 的横幅：落到通知页', async () => {
+    await fireNotice('')
+    expect(store.view).toBe('notifications')
+  })
+})

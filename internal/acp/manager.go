@@ -391,7 +391,7 @@ type Manager struct {
 	// notifier 是系统提示桥（key 幂等，见 notification.Center.PostOnce）：只在
 	// "人不在这一页上也得知道"的两个时刻用——审批卡入队、一轮结束。未注入时
 	// 静默跳过（测试、或没装配通知中心的运行形态）。
-	notifier func(key, text string)
+	notifier func(key, text, threadID string)
 	// checks 是验证面板的运行记录与取消句柄（内存态：进程重启后「在跑」无意义）。
 	checks checkRegistry
 	// warmAgents 记下哪些 agent 已经成功起过一次：npx 型命令只有第一次要联网装包，
@@ -1291,7 +1291,8 @@ func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 			}, timeout)
 			m.notice(fmt.Sprintf("acp:%s:question:%d", threadID, card.ID()),
 				fmt.Sprintf("%s 在等你回答：%s。回到 Friday 的 agent 对话页选一项；"+
-					"%d 分钟内无人处理按未选择结算。", agentName, summary, timeout/time.Minute))
+					"%d 分钟内无人处理按未选择结算。", agentName, summary, timeout/time.Minute),
+				threadID)
 		} else {
 			card = m.approver.RequestCard(approval.Card{
 				Tool: "智能体权限", Summary: summary, Detail: detail, Origin: origin,
@@ -1300,7 +1301,8 @@ func (m *Manager) handlePermission(threadID, agentName string) permissionHook {
 			// 切到别的窗口，页面里的卡片看不见就等于没发生。
 			m.notice(fmt.Sprintf("acp:%s:approval:%d", threadID, card.ID()),
 				fmt.Sprintf("%s 在等你批准：%s。回到 Friday 的 agent 对话页处理；"+
-					"%d 分钟内无人处理会自动拒绝。", agentName, summary, timeout/time.Minute))
+					"%d 分钟内无人处理会自动拒绝。", agentName, summary, timeout/time.Minute),
+				threadID)
 		}
 		go func() {
 			select {
@@ -1437,7 +1439,7 @@ func (m *Manager) SetMemory(store *memory.WikiStore) {
 
 // SetNotifier 注入系统提示桥（启动时调用一次）。key 由调用方保证身份稳定，
 // 重复触发不会二次打扰——见 notification.Center.PostOnce。
-func (m *Manager) SetNotifier(notify func(key, text string)) {
+func (m *Manager) SetNotifier(notify func(key, text, threadID string)) {
 	m.mu.Lock()
 	m.notifier = notify
 	m.mu.Unlock()
@@ -1539,14 +1541,14 @@ func sameStringSlice(a, b []string) bool {
 
 // notice 投一条系统提示。没装配通知中心就什么都不做；桥本身出错由注入方
 // 记日志，这里不拦 agent 的活。
-func (m *Manager) notice(key, text string) {
+func (m *Manager) notice(key, text, threadID string) {
 	m.mu.Lock()
 	fn := m.notifier
 	m.mu.Unlock()
 	if fn == nil {
 		return
 	}
-	fn(key, text)
+	fn(key, text, threadID)
 }
 
 // noticeClip 是系统通知里"原因"一段的字数上限：通知条就一行，长 stderr 留在
@@ -1603,7 +1605,7 @@ func (m *Manager) notifyTurnEnd(a turnNotice) {
 			text += "（" + files + "）"
 		}
 	}
-	m.notice(fmt.Sprintf("acp:%s:%s:done", a.threadID, a.turnID), text)
+	m.notice(fmt.Sprintf("acp:%s:%s:done", a.threadID, a.turnID), text, a.threadID)
 }
 
 // zhDuration 通知文案里的短时长：45 秒 / 1 分 20 秒 / 2 小时 3 分。

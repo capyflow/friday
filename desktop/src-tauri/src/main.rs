@@ -59,10 +59,28 @@ impl Kernel {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct NativeNotice {
     id: String,
     text: String,
+    // thread_id：这条通知归属的工作区会话（可空）。点横幅时靠它跳回那条会话，
+    // 而不是停在通知页。空串 = 没有具体会话，仍然跳通知页。
+    #[serde(rename = "threadId", default)]
+    thread_id: String,
+}
+
+// 会话 id 与通知 id 之间的分隔符：两者都是十六进制短串，不会出现这个符号。
+const THREAD_ID_SEP: &str = "|";
+
+impl NativeNotice {
+    // identifier 是这条通知在 macOS 里的唯一标识。带会话时把会话 id 拼在前面，
+    // 点开时才知道该跳哪条会话。
+    fn identifier(&self) -> String {
+        if self.thread_id.is_empty() {
+            return self.id.clone();
+        }
+        format!("{}{}{}", self.thread_id, THREAD_ID_SEP, self.id)
+    }
 }
 
 #[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -1559,20 +1577,34 @@ mod mac_notifications {
             fn did_receive(
                 &self,
                 _center: &UNUserNotificationCenter,
-                _response: &UNNotificationResponse,
+                response: &UNNotificationResponse,
                 completion_handler: &block2::DynBlock<dyn Fn()>,
             ) {
-                // 点横幅：把主窗口叫到前台，并通知前端切到通知页。
+                // 点横幅：把主窗口叫到前台，并通知前端跳到对应的会话
+                // （通知里带了 threadId 就跳那条会话，没带就跳通知页）。
                 if let Some(win) = self.ivars().app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.unminimize();
                     let _ = win.set_focus();
                 }
-                let _ = self.ivars().app.emit("friday:notice-click", ());
+                let thread_id = notice_thread_id(response);
+                let _ = self.ivars().app.emit("friday:notice-click", thread_id);
                 completion_handler.call(());
             }
         }
     );
+
+    // notice_thread_id 从被点开的通知里取出归属会话：identifier 是通知自带的数据，
+    // 点开时系统原样交回来——不用我们另存一份「通知 id → 会话」的映射。
+    // 取不到就返回空串，前端会退回通知页。
+    fn notice_thread_id(response: &UNNotificationResponse) -> String {
+        let identifier = response.notification().request().identifier();
+        let raw = identifier.to_string();
+        match raw.split_once(THREAD_ID_SEP) {
+            Some((thread_id, _)) => thread_id.to_string(),
+            None => String::new(),
+        }
+    }
 
     impl NotificationDelegate {
         fn new(app: tauri::AppHandle) -> Retained<Self> {
@@ -1623,8 +1655,11 @@ mod mac_notifications {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str("Friday 提醒"));
         content.setBody(&NSString::from_str(&notice.text));
+        // 会话 id 编进 identifier：点横幅时 macOS 原样把这个 identifier 交回来，
+        // 前端据此跳回那条会话（而不是停在通知页）。没带会话的通知只带自己的 id，
+        // 前端照样跳通知页。
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str(&notice.id),
+            &NSString::from_str(&notice.identifier()),
             &content,
             None,
         );
@@ -1668,6 +1703,45 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn notice_parser_keeps_thread_id() {
+        // 内核发来的 FRIDAY_NOTICE 里带着 threadId：外壳要留住它，
+        // 点横幅时才知道该跳哪条会话。
+        let notice = parse_native_notice(
+            r#"FRIDAY_NOTICE={"id":"n1","text":"这一轮跑完了","threadId":"th42"}"#,
+        )
+        .expect("应解析出通知");
+        assert_eq!(notice.id, "n1");
+        assert_eq!(notice.thread_id, "th42");
+        // 老版本内核不带这个字段时也不能崩（按「没有具体会话」处理）。
+        let old = parse_native_notice(r#"FRIDAY_NOTICE={"id":"n2","text":"提醒"}"#)
+            .expect("应解析出通知");
+        assert_eq!(old.thread_id, "");
+    }
+
+    #[test]
+    fn notice_identifier_carries_thread_id() {
+        // 带会话的通知：identifier 里要能原样取回会话 id（点横幅据此跳会话）。
+        let notice = NativeNotice {
+            id: "abc123".to_string(),
+            text: "这一轮跑完了".to_string(),
+            thread_id: "th42".to_string(),
+        };
+        let identifier = notice.identifier();
+        assert_eq!(
+            identifier.split_once(THREAD_ID_SEP).map(|(t, _)| t.to_string()),
+            Some("th42".to_string())
+        );
+        // 没有会话的通知：identifier 就是自己的 id，取不出会话（前端退回通知页）。
+        let plain = NativeNotice {
+            id: "abc123".to_string(),
+            text: "记得喝水".to_string(),
+            thread_id: String::new(),
+        };
+        assert_eq!(plain.identifier(), "abc123");
+        assert!(plain.identifier().split_once(THREAD_ID_SEP).is_none());
     }
 
     #[test]
@@ -1880,6 +1954,7 @@ mod tests {
         let notice = NativeNotice {
             id: "notice-1".into(),
             text: "private reminder".into(),
+            thread_id: String::new(),
         };
         assert!(!state
             .dispatch(&notice, true, |_| panic!("must not dispatch before opt in"))
@@ -1917,6 +1992,7 @@ mod tests {
         let notice = NativeNotice {
             id: "notice".into(),
             text: "private".into(),
+            thread_id: String::new(),
         };
         assert!(!state
             .dispatch(&notice, true, |_| panic!(
@@ -1941,6 +2017,7 @@ mod tests {
         let notice = NativeNotice {
             id: "notice".into(),
             text: "private".into(),
+            thread_id: String::new(),
         };
         assert!(!state
             .dispatch(&notice, true, |_| panic!(
@@ -1964,6 +2041,7 @@ mod tests {
                 let notice = NativeNotice {
                     id: "same-notice".into(),
                     text: "private".into(),
+                    thread_id: String::new(),
                 };
                 state
                     .dispatch(&notice, true, |_| {

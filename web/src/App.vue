@@ -95,14 +95,25 @@ onMounted(() => {
   window.addEventListener('friday:theme', onThemeChange)
   startNotifications()
 })
-// 点系统通知横幅：外壳把主窗口叫回来后发这个事件，这里落到通知中心。
-// 浏览器直连没有事件通道，拿不到就静默跳过。
+// 点系统通知横幅：外壳把主窗口叫回来后发这个事件，载荷是这条通知归属的会话 id
+// （没有具体会话时是空串）。带会话就直接跳到那条会话——用户点横幅的意图是
+// 「回到那儿接着看」，不是「去看通知列表」；没带会话的（生活模式提醒等）仍旧
+// 落到通知中心。浏览器直连没有事件通道，拿不到就静默跳过。
 let unlistenNotice = null
 onMounted(async () => {
   const listen = window.__TAURI__?.event?.listen
   if (!listen) return
   try {
-    unlistenNotice = await listen('friday:notice-click', () => { store.view = 'notifications' })
+    unlistenNotice = await listen('friday:notice-click', (e) => {
+      const threadId = (e && e.payload) || ''
+      if (threadId) {
+        setMode('work')
+        store.acpOpenThread = threadId
+        store.view = 'agent'
+        return
+      }
+      store.view = 'notifications'
+    })
   } catch { /* 外壳事件通道不可用 */ }
 })
 onUnmounted(() => {

@@ -2455,20 +2455,34 @@ func TestSilenceWatchdogStaysQuietWhenAgentTalks(t *testing.T) {
 
 // ---------- 系统提示桥（审批待处理 / 一轮结束） ----------
 
-// noticeLog 收集 notifier 投递的 key+text，供断言。
+// noticeLog 收集 notifier 投递的 key+text+threadID，供断言。
 type noticeLog struct {
-	mu    sync.Mutex
-	keys  []string
-	texts []string
+	mu        sync.Mutex
+	keys      []string
+	texts     []string
+	threadIDs []string
 }
 
-func (n *noticeLog) fn() func(key, text string) {
-	return func(key, text string) {
+func (n *noticeLog) fn() func(key, text, threadID string) {
+	return func(key, text, threadID string) {
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		n.keys = append(n.keys, key)
 		n.texts = append(n.texts, text)
+		n.threadIDs = append(n.threadIDs, threadID)
 	}
+}
+
+// threadOf 返回第一条正文含 substr 的通知归属的会话。
+func (n *noticeLog) threadOf(substr string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, t := range n.texts {
+		if strings.Contains(t, substr) {
+			return n.threadIDs[i]
+		}
+	}
+	return ""
 }
 
 // find 返回第一条正文含 substr 的 key。
@@ -2536,6 +2550,11 @@ func TestNoticeOnApprovalAndTurnEnd(t *testing.T) {
 	}
 	if !strings.HasPrefix(key, "acp:"+th.ID+":approval:") {
 		t.Errorf("审批提示的 key 应带会话与卡片身份，实际 %q", key)
+	}
+	// 提示还要单独带上归属会话：系统横幅点开时前端靠它跳回这条会话
+	// （key 里的身份串前端解不开，得有一条现成的会话 id）。
+	if got := notices.threadOf("在等你批准"); got != th.ID {
+		t.Errorf("审批提示应带上归属会话 %q，实际 %q", th.ID, got)
 	}
 	if body := notices.body(key); !strings.Contains(body, "写 a.go") {
 		t.Errorf("提示正文应带上要批准的操作摘要，实际 %q", body)

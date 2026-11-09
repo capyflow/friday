@@ -29,9 +29,12 @@ type Target interface {
 type Resolver func(context.Context, task.Task) (string, bool, error)
 
 type Notice struct {
-	ID              string     `json:"id"`
-	TaskID          string     `json:"taskId"`
-	Text            string     `json:"text"`
+	ID     string `json:"id"`
+	TaskID string `json:"taskId"`
+	Text   string `json:"text"`
+	// ThreadID 是这条通知归属的工作区会话（空 = 与具体会话无关，比如
+	// 生活模式的提醒）。系统横幅点开时靠它跳回那条会话，而不是停在通知页。
+	ThreadID        string     `json:"threadId,omitempty"`
 	Status          string     `json:"status"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
@@ -305,7 +308,7 @@ func (c *Center) SetWebEnabled(enabled bool) { c.mu.Lock(); c.webEnabled = enabl
 // 行为只进通知中心、不走桌面提示桥；需要"人不在页面上也得弹一下"的走 PostOnce。
 func (c *Center) PostManual(text string, delivered []string) (Notice, error) {
 	return c.postManual("manual:"+text+":"+time.Now().Format(time.RFC3339Nano),
-		text, delivered, false)
+		text, "", delivered, false)
 }
 
 // PostOnce 记录一条有身份的手动通知：key 就是它的身份（如
@@ -316,15 +319,22 @@ func (c *Center) PostManual(text string, delivered []string) (Notice, error) {
 // 这一下得把他叫回来"的场景。发完不标失败重试：桥失败只说明系统通知没开或
 // 外壳拒绝，内容仍在通知中心。
 func (c *Center) PostOnce(key, text string, delivered []string) (Notice, error) {
+	return c.PostOnceFor(key, text, "", delivered)
+}
+
+// PostOnceFor 与 PostOnce 同义，但多带一个 threadID：这条通知归属哪条工作区
+// 会话。系统横幅点开时前端靠它跳回那条会话，而不是停在通知页——
+// 没带 threadID 的通知（生活模式的提醒等）仍然跳通知页。
+func (c *Center) PostOnceFor(key, text, threadID string, delivered []string) (Notice, error) {
 	if strings.TrimSpace(key) == "" {
 		return Notice{}, fmt.Errorf("通知标识为空")
 	}
-	return c.postManual("once:"+key, text, delivered, true)
+	return c.postManual("once:"+key, text, strings.TrimSpace(threadID), delivered, true)
 }
 
 // postManual 是两条手动通知的共同落档路径。pushDesktop 决定是否走桌面提示桥；
 // 已存在同键通知就直接返回既有记录，不再提示第二次。
-func (c *Center) postManual(key, text string, delivered []string, pushDesktop bool) (Notice, error) {
+func (c *Center) postManual(key, text, threadID string, delivered []string, pushDesktop bool) (Notice, error) {
 	if strings.TrimSpace(text) == "" {
 		return Notice{}, fmt.Errorf("通知正文为空")
 	}
@@ -337,6 +347,7 @@ func (c *Center) postManual(key, text string, delivered []string, pushDesktop bo
 	n := Notice{
 		ID:          hex.EncodeToString(sum[:16]),
 		Text:        strings.TrimSpace(text),
+		ThreadID:    threadID,
 		Status:      status,
 		CreatedAt:   now,
 		UpdatedAt:   now,

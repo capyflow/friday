@@ -1,6 +1,6 @@
 import { reactive, watch } from 'vue'
 import { api } from './api.js'
-import { store } from './store.js'
+import { setMode, store } from './store.js'
 import { desktopInvoke } from './open-url.js'
 import { getPref, setPref } from './prefs.js'
 
@@ -99,7 +99,20 @@ export async function pollNotifications() {
       if (window.Notification?.permission !== 'granted') { notificationSettings.status = '系统未授权，请使用通知中心'; continue }
       try {
         const native = new window.Notification('小五提醒', { body: notice.text, tag: notice.id })
-        native.onclick = () => { window.focus(); store.view = 'notifications'; native.close() }
+        native.onclick = () => {
+          window.focus()
+          // 通知归属某条会话（工作区里 agent 的一轮结束、等你批准等）时直接跳到那条
+          // 会话：点横幅的意图是「回到那儿接着看」，不是「去看通知列表」。
+          // 没有具体会话的（生活模式提醒等）仍然落到通知页。
+          if (notice.threadId) {
+            setMode('work')
+            store.acpOpenThread = notice.threadId
+            store.view = 'agent'
+          } else {
+            store.view = 'notifications'
+          }
+          native.close()
+        }
         seen.add(notice.id)
       } catch { notificationSettings.status = '系统通知暂不可用，请使用通知中心' }
     }

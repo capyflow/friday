@@ -178,6 +178,49 @@ func TestPostOnceRejectsEmptyKey(t *testing.T) {
 	}
 }
 
+// TestPostOnceForCarriesThreadID 钉住「通知归属哪条会话」这条链路：
+// 系统横幅点开时前端靠 threadId 跳回那条会话，没有它就只能停在通知页。
+func TestPostOnceForCarriesThreadID(t *testing.T) {
+	c := manualCenter(t)
+	n, err := c.PostOnceFor("acp:th1:approval:7", "codex 在等你批准：写 a.go", "th1", nil)
+	if err != nil {
+		t.Fatalf("PostOnceFor: %v", err)
+	}
+	if n.ThreadID != "th1" {
+		t.Fatalf("通知应带上归属会话: %+v", n)
+	}
+	// 落档后重启仍要带着（横幅可能在下次启动后才被点开）。
+	reopened, err := New(filepath.Join(filepath.Dir(c.path), "notifications.json"), nil, nil)
+	if err != nil {
+		t.Fatalf("重开通知中心: %v", err)
+	}
+	found := false
+	for _, got := range reopened.ListForTask("") {
+		if got.ID == n.ID {
+			found = true
+			if got.ThreadID != "th1" {
+				t.Fatalf("重开后丢了归属会话: %+v", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("重启后找不到这条通知")
+	}
+}
+
+// TestPostOnceWithoutThreadIDHasNone 没有会话的通知不该带 threadId：
+// 前端据此退回通知页。
+func TestPostOnceWithoutThreadIDHasNone(t *testing.T) {
+	c := manualCenter(t)
+	n, err := c.PostOnce("manual:记得喝水", "记得喝水", nil)
+	if err != nil {
+		t.Fatalf("PostOnce: %v", err)
+	}
+	if n.ThreadID != "" {
+		t.Fatalf("没有会话的通知不该带 threadId: %+v", n)
+	}
+}
+
 // TestPostManualKeepsNoDesktopPrompt 手动告警维持原行为：只进通知中心，
 // 不抢桌面提示桥（要弹提示请走 PostOnce 给出身份键）。
 func TestPostManualKeepsNoDesktopPrompt(t *testing.T) {
