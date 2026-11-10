@@ -14,7 +14,7 @@ const WORKSPACES = [
   { id: 'ws-photos', name: '照片服务', dirs: ['~/photos'] },
 ]
 const THREADS = [
-  { id: 't1', title: 'Plugins 最新', workspaceId: 'ws-plugins', agent: 'zcode', updatedAt: '2026-11-07T10:00:00Z', tokensIn: 900, tokensOut: 600 },
+  { id: 't1', title: 'Plugins 最新', workspaceId: 'ws-plugins', agent: 'zcode', updatedAt: '2026-11-07T10:00:00Z' },
   { id: 't2', title: 'Photos 更新', workspaceId: 'ws-photos', agent: 'codex', updatedAt: '2026-11-07T09:00:00Z' },
   { id: 't3', title: 'Plugins 旧', workspaceId: 'ws-plugins', agent: 'claude', updatedAt: '2026-11-06T08:00:00Z' },
 ]
@@ -53,7 +53,6 @@ describe('mobile workspace two-level view', () => {
     const rows = w.findAll('.m-row')
     expect(rows.length).toBe(2)
     expect(rows[0].text()).toContain('Plugins 最新')
-    expect(rows[0].text()).toContain('1.5k tokens') // 行副标题：zcode · 1.5k tokens · 3天前
     await w.find('.m-ico-btn').trigger('click')
     expect(w.findAll('.m-row').length).toBe(2)
     w.unmount()

@@ -97,6 +97,7 @@ type fakeAgent struct {
 	models         map[string]any   // 协议原生 models 状态（nil = agent 不回报）
 	modes          map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
 	newSessionHang time.Duration    // >0：session/new 先挂这么久（验证建会话超时的文案与预算）
+	usageExtra     map[string]any   // 追加进 prompt 响应 usage 的字段（缓存读/写等；Send 前设好即只读）
 
 	mu           sync.Mutex
 	methods      []string
@@ -422,10 +423,11 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 					fc.w.respondErr(promptID, strings.TrimPrefix(stop, "ERR:"))
 					return
 				}
-				fc.w.respond(promptID, map[string]any{
-					"stopReason": stop,
-					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
-				})
+				usage := map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}
+				for k, v := range f.usageExtra { // Send 前设好即只读，不加锁
+					usage[k] = v
+				}
+				fc.w.respond(promptID, map[string]any{"stopReason": stop, "usage": usage})
 			}()
 		case "session/cancel":
 			f.mu.Lock()
@@ -1080,23 +1082,33 @@ func TestUsageContextWatermark(t *testing.T) {
 	}
 }
 
-// 会话列表/详情带累计 tokens：List/Get 在响应副本上从逐轮 Entry 现算，
-// 会话行（"zcode · 1.2k tokens · 刚刚"）直接吃这两个字段，不再查用量账本。
-func TestThreadTokenTotals(t *testing.T) {
-	f := &fakeAgent{promptScript: defaultScript}
+// 会话头部统计（List/Get 响应副本现算）：平均输出速率 = ΣOut/ΣMs（整轮 wall
+// time，含工具调用）；缓存命中率只统计上报过缓存读的轮次，没报就是 0。
+func TestThreadHeadStats(t *testing.T) {
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		time.Sleep(20 * time.Millisecond) // Ms 按毫秒取整，睡一下保证分母 > 0
+		return "end_turn"
+	}
 	m := newTestManager(t, nil, nil, f)
 	th := mustThread(t, m)
+	// 默认 usage 固定 10+5 且不带缓存字段：有速率、无命中率
 	if _, err := m.Send(context.Background(), th.ID, "hello", nil, TurnHooks{}); err != nil {
 		t.Fatal(err)
 	}
-	// fake agent 的 PromptResponse.Usage 固定 10+5，一轮就是 10/5
 	list := m.List()
-	if len(list) != 1 || list[0].TokensIn != 10 || list[0].TokensOut != 5 {
-		t.Fatalf("List 应带累计 tokens（10/5）: %+v", list)
+	if len(list) != 1 || list[0].OutRate <= 0 || list[0].CacheHit != 0 {
+		t.Fatalf("未上报缓存时应只有输出速率: %+v", list)
+	}
+	// 第二轮上报缓存读/写：命中率只按有读值的轮次计 990/(990+10+10)
+	f.usageExtra = map[string]any{"cachedReadTokens": 990, "cachedWriteTokens": 10}
+	if _, err := m.Send(context.Background(), th.ID, "again", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
 	}
 	got, ok := m.Get(th.ID)
-	if !ok || got.TokensIn != 10 || got.TokensOut != 5 {
-		t.Fatalf("Get 应带累计 tokens（10/5）: ok=%v %+v", ok, got)
+	want := float64(990) / float64(990+10+10)
+	if !ok || got.CacheHit < want-1e-9 || got.CacheHit > want+1e-9 || got.OutRate <= 0 {
+		t.Fatalf("头部统计不符: ok=%v outRate=%v cacheHit=%v want=%v", ok, got.OutRate, got.CacheHit, want)
 	}
 }
 

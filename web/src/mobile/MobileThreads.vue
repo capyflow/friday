@@ -7,7 +7,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
 import { toast } from '../store.js'
-import { ago, fmtTokens } from '../format.js'
+import { ago } from '../format.js'
 import SelectBox from '../components/SelectBox.vue'
 
 const emit = defineEmits(['open'])
@@ -70,12 +70,6 @@ const orderedWorkspaces = computed(() => workspaces.value.slice().sort((a, b) =>
 const wsThreads = computed(() => threads.value
   .filter(t => currentWs.value && t.workspaceId === currentWs.value.id)
   .sort((a, b) => ts(b.updatedAt).localeCompare(ts(a.updatedAt))))
-
-// 会话行副标题里的累计 tokens（后端 List 从逐轮记录现算下发；没量就不占位）
-function tokensMeta(t) {
-  const n = (t.tokensIn || 0) + (t.tokensOut || 0)
-  return n > 0 ? ' · ' + fmtTokens(n) + ' tokens' : ''
-}
 
 function openWs(w) {
   currentWs.value = w
@@ -312,7 +306,7 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
         <button v-for="t in wsThreads" :key="t.id" type="button" class="m-row" @click="open(t)">
           <span class="m-row-main">
             <span class="m-row-title">{{ t.title || '未命名会话' }}</span>
-            <span class="m-row-sub">{{ t.agent }}{{ tokensMeta(t) }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
+            <span class="m-row-sub">{{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
           </span>
           <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
           <span class="m-row-x" role="button" aria-label="删除会话" @click.stop="askDeleteThread(t)">×</span>

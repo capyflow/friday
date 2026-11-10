@@ -44,7 +44,7 @@ const wsA = { id: 'ws1', name: 'proj-a', dirs: ['/home/u/proj', '/home/u/shared'
 const thread = {
   id: 'th1', workspaceId: 'ws1', agent: 'codex', cwd: '/home/u/proj', title: '第一件事',
   state: 'idle', degraded: false, updatedAt: '2026-10-17T10:01:00Z',
-  tokensIn: 1200, tokensOut: 300, // 后端 List 从逐轮记录现算下发的累计
+  outRate: 384.8, cacheHit: 0.998, // 后端 List 从逐轮记录现算下发的头部统计
   messages: [
     { role: 'user', text: '帮我看下目录', at: '2026-10-17T10:00:00Z' },
     { role: 'note', text: '上下文已重置（历史记录仍可见）' },
@@ -408,16 +408,22 @@ describe('工作区页：两级栏与投影', () => {
     expect(head.text()).toContain('2 个文件夹 · 1 条会话')
     expect(head.text()).not.toContain('/home/u')          // 组头不铺路径
     expect(wrapper.find('.ws-dirs').exists()).toBe(false) // 源文件夹收进「编辑工作区」弹窗
-    // 会话行：agent + 累计 tokens + 多久之前动过，点分段，不带目录名
+    // 会话行：agent + 多久之前动过，不带目录名也不带 tokens（统计在会话头部）
     const row = wrapper.get('.ag-item')
     expect(row.text()).toContain('第一件事')
     expect(row.text()).toContain('codex ·')
-    expect(row.text()).toContain('1.5k tokens')
+    expect(row.text()).not.toContain('tokens')
     expect(row.text()).not.toContain('shared')
     expect(timeline()).toContain('帮我看下目录')
     expect(timeline()).toContain('上下文已重置')
     expect(timeline()).toContain('看完了。')
     expect(timeline()).toContain('本轮 · ')
+    // 会话头部统计：平均输出速率 + 缓存命中率（后端现算，没数不占位）。
+    // 显式选中 th1：自动选中可能落在没有统计字段的 second 上。
+    // fmtRate 口径：≥100 取整（384.8 → 385）。
+    await pickSession('第一件事')
+    expect(headMeta()).toContain('↓385 tok/s')
+    expect(headMeta()).toContain('缓存命中 99.8%')
     expect(wrapper.find('[aria-label="复制回答正文"]').exists()).toBe(true)
   })
 

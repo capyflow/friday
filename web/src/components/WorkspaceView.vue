@@ -17,7 +17,7 @@ import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
-import { feedRate } from '../speed.js'
+import { feedRate, fmtRate } from '../speed.js'
 import { ago, fmtTokens } from '../format.js'
 import { getPref, setPref } from '../prefs.js'
 import { store, toast } from '../store.js'
@@ -319,11 +319,6 @@ const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中�
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
 // 组内会话同样最近优先，默认只露出最近几条，多的收在「显示更多」里。
 function ts(v) { return v || '' }
-// 会话行副标题里的累计 tokens（后端 List 从逐轮记录现算下发；没量就不占位）
-function tokensMeta(t) {
-  const n = (t.tokensIn || 0) + (t.tokensOut || 0)
-  return n > 0 ? ' · ' + fmtTokens(n) + ' tokens' : ''
-}
 function wsThreadsWithOrder(wsId) {
   return threads.value
     .filter(t => t.workspaceId === wsId)
@@ -1193,7 +1188,7 @@ function previewImages(urls, at = 0) {
                 <span v-if="t.state === 'interrupted'" class="ag-state warn" title="上次会话被中断，继续发消息会重接上下文">已中断</span>
                 <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
               </span>
-              <span class="meta">{{ wsName(t.workspaceId) }} · {{ t.agent }}{{ tokensMeta(t) }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
+              <span class="meta">{{ wsName(t.workspaceId) }} · {{ t.agent }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
             </span>
             <span v-if="isUnread(t)" class="ws-unread" title="上次打开之后这条会话又有新动静">未读</span>
             <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"
@@ -1275,7 +1270,7 @@ function previewImages(urls, at = 0) {
                       <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
                     </span>
                     <!-- 行上不铺路径：agent + 多久之前动过（完整目录在会话头部与「编辑工作区」里看） -->
-                    <span class="meta">{{ t.agent }}{{ tokensMeta(t) }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
+                    <span class="meta">{{ t.agent }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
                   </span>
                   <span v-if="isUnread(t)" class="ws-unread" title="上次打开之后这条会话又有新动静">未读</span>
                   <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"
@@ -1359,6 +1354,11 @@ function previewImages(urls, at = 0) {
             <span class="meta" :title="(currentWs ? currentWs.name + ' · ' : '') + current.cwd">
               <template v-if="currentWs">{{ currentWs.name }} · </template>{{ current.agent }}<template v-if="isBuiltinThread">（内置，模型与权限走全局设置）</template> · {{ current.cwd }}
               · {{ stateLabel[current.state] || current.state }}
+              <!-- 会话头部统计：平均输出速率与缓存命中率（List/Get 现算下发）。
+                   速率是整轮吞吐（含工具调用），回答中的实时速度看时间线角标；
+                   agent 没报缓存就不占位，不装作有数。 -->
+              <template v-if="current.outRate"> · <span title="会话累计输出 tokens ÷ 累计整轮耗时（含工具调用）；回答中的实时速度在时间线角标上">↓{{ fmtRate(current.outRate) }} tok/s</span></template>
+              <template v-if="current.cacheHit"> · <span title="缓存读 ÷（缓存读 + 缓存写 + 输入），只统计 agent 上报过缓存的轮次">缓存命中 {{ (current.cacheHit * 100).toFixed(1) }}%</span></template>
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
               <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>

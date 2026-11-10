@@ -83,7 +83,11 @@ type Entry struct {
 	In      int64     `json:"in,omitempty"`
 	Out     int64     `json:"out,omitempty"`
 	Ms      int64     `json:"ms,omitempty"`
-	Stopped string    `json:"stopped,omitempty"` // end_turn | cancelled | error…
+	// CacheRead/CacheWrite 是 agent 在 PromptResponse.Usage 里自报的缓存读/写
+	// token（不上报就是 0）；会话头部的缓存命中率按有读值的轮次统计。
+	CacheRead  int64 `json:"cacheRead,omitempty"`
+	CacheWrite int64 `json:"cacheWrite,omitempty"`
+	Stopped    string `json:"stopped,omitempty"` // end_turn | cancelled | error…
 	// Changes 是这一轮的改动摘要（不含逐文件 diff；详情按 turnId 单独取）。
 	Changes *TurnChanges `json:"changes,omitempty"`
 }
@@ -140,10 +144,12 @@ type Thread struct {
 	PolicyFallback  bool   `json:"policyFallback,omitempty"`
 	// TurnStartedAt 是当前这一轮的开始时刻（运行看板用；空闲/结束时清零）。
 	TurnStartedAt time.Time `json:"turnStartedAt,omitempty"`
-	// TokensIn/TokensOut 是本会话累计的输入/输出 token：只在 List/Get 的响应
-	// 副本上从逐轮 Entry 现算，不落盘——Entries 本来就带逐轮值，存总量必然漂移。
-	TokensIn  int64 `json:"tokensIn,omitempty"`
-	TokensOut int64 `json:"tokensOut,omitempty"`
+	// OutRate / CacheHit 是会话头部统计（List/Get 在响应副本上从逐轮 Entry
+	// 现算，不落盘）：OutRate = ΣOut/ΣMs（tok/s，整轮 wall time 含工具调用——
+	// ACP 只报整轮 usage，没有逐 token 时刻）；CacheHit = 缓存读 ÷（缓存读+
+	// 缓存写+输入），只统计上报过缓存读的轮次，0 = 没数据（agent 没报）。
+	OutRate  float64 `json:"outRate,omitempty"`
+	CacheHit float64 `json:"cacheHit,omitempty"`
 }
 
 // UnmarshalJSON 兼容 261029 之前的投影：那时会话直接带 `workspace`（目录路径）、
@@ -176,11 +182,13 @@ type Image struct {
 
 // TurnResult 是一轮对话的归集结果。
 type TurnResult struct {
-	Answer     string
-	In, Out    int64
-	Ms         int64
-	StopReason string
-	Changes    *TurnChanges
+	Answer  string
+	In, Out int64
+	// CacheRead/CacheWrite 来自 PromptResponse.Usage 的缓存读/写（可能缺报）。
+	CacheRead, CacheWrite int64
+	Ms                    int64
+	StopReason            string
+	Changes               *TurnChanges
 }
 
 // live 是一个 thread 当前的会话与运行态。进程按「agent + 主目录」共享（procState）：
@@ -466,13 +474,26 @@ func (m *Manager) threadLock(id string) *sync.Mutex {
 
 // ---------- thread CRUD ----------
 
-// sumTokens 把逐轮 Entry 的 in/out 累成会话总量（List/Get 的响应副本用）。
-func sumTokens(msgs []Entry) (in, out int64) {
+// headStats 把逐轮 Entry 聚成会话头部的两个统计。平均输出速率用整轮 wall
+// time（含工具调用与思考停顿），是"这轮活儿干得多快"的吞吐，不是模型的
+// 纯生成速度；缓存命中率只算 agent 上报过缓存读的轮次，没报就是 0。
+func headStats(msgs []Entry) (outRate, cacheHit float64) {
+	var out, ms, read, denom int64
 	for i := range msgs {
-		in += msgs[i].In
 		out += msgs[i].Out
+		ms += msgs[i].Ms
+		if msgs[i].CacheRead > 0 {
+			read += msgs[i].CacheRead
+			denom += msgs[i].CacheRead + msgs[i].CacheWrite + msgs[i].In
+		}
 	}
-	return in, out
+	if ms > 0 {
+		outRate = float64(out) / (float64(ms) / 1000)
+	}
+	if denom > 0 {
+		cacheHit = float64(read) / float64(denom)
+	}
+	return outRate, cacheHit
 }
 
 // List 返回全部 thread（含动态计算的状态）。
@@ -486,7 +507,7 @@ func (m *Manager) List() []Thread {
 			continue
 		}
 		cp := *th
-		cp.TokensIn, cp.TokensOut = sumTokens(th.Messages)
+		cp.OutRate, cp.CacheHit = headStats(th.Messages)
 		cp.Messages = nil
 		// Normalized：内置条目（friday）是代码注入的、不在 config.yaml 里，
 		// 拿原始清单判存在会把每条内置会话都显示成「已失联」。
@@ -510,7 +531,7 @@ func (m *Manager) Get(id string) (Thread, bool) {
 	}
 	cp := *th
 	cp.Messages = append([]Entry{}, th.Messages...)
-	cp.TokensIn, cp.TokensOut = sumTokens(th.Messages)
+	cp.OutRate, cp.CacheHit = headStats(th.Messages)
 	if _, ok := m.cfgFn().Normalized().Agent(th.Agent); !ok {
 		cp.State = StateOrphaned
 	}
@@ -1909,6 +1930,12 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	if res.Usage != nil { // 错误路径下 res 为零值，Usage 为 nil
 		result.In = int64(res.Usage.InputTokens)
 		result.Out = int64(res.Usage.OutputTokens)
+		if res.Usage.CachedReadTokens != nil {
+			result.CacheRead = int64(*res.Usage.CachedReadTokens)
+		}
+		if res.Usage.CachedWriteTokens != nil {
+			result.CacheWrite = int64(*res.Usage.CachedWriteTokens)
+		}
 	}
 	var runErr error
 	var errText string
@@ -1994,7 +2021,8 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 		Role: "user", Text: question, At: time.Now(), Images: len(files), Files: files,
 	})
 	entry := Entry{Role: "assistant", Text: r.Answer, At: time.Now(),
-		In: r.In, Out: r.Out, Ms: r.Ms, Stopped: r.StopReason, Changes: r.Changes}
+		In: r.In, Out: r.Out, Ms: r.Ms, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
+		Stopped: r.StopReason, Changes: r.Changes}
 	if entry.Text == "" {
 		entry.Text = "（本轮没有产出文本）"
 	}
