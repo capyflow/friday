@@ -23,12 +23,12 @@ describe('feedRate', () => {
     expect(feedRate(m, '你好', 1000)).toBe(4) // 4 token / 1s
   })
 
-  it('停顿超过 1.5s 后清零重算，不把停顿摊进速度', () => {
+  it('停顿超过 1.5s 后清零重算，但读数保留上一次的值', () => {
     const m = {}
     feedRate(m, '你好', 0)
     expect(feedRate(m, '你好', 1000)).toBe(4)
-    expect(feedRate(m, '你好', 5000)).toBe(0) // 停顿后第一片：新窗口还没攒够
-    expect(feedRate(m, '你好', 6000)).toBe(4)
+    expect(feedRate(m, '你好', 5000)).toBe(4) // 停顿：窗口清零，读数不跳回 0
+    expect(feedRate(m, '你好', 6000)).toBe(4) // 新窗口攒够后照常重算
   })
 
   it('窗口外的旧样本不参与计算', () => {

@@ -5,7 +5,8 @@
 // 近似。数字只用于"当前写得多快"的体感，轮末的准确量仍以 done 帧的 in/out 为准。
 //
 // 速率用最近 3 秒的滑动窗口算；隔了 1.5 秒才来的第一片视为停顿（思考、工具
-// 调用），窗口清零重新起算，不把停顿摊进速度里。
+// 调用），窗口清零重新起算，不把停顿摊进速度里；但**读数保留上一次的值**——
+// 清零会在每次停顿后把头部的数字打回 0/会话平均，看起来像"不实时刷新"。
 
 const WINDOW_MS = 3000
 const PAUSE_MS = 1500
@@ -38,7 +39,7 @@ export function feedRate(target, text, now = Date.now()) {
   if (!m) { m = { samples: [], last: 0, rate: 0 }; meters.set(target, m) }
   const n = estimateTokens(text)
   if (n <= 0) return m.rate
-  if (m.last && now - m.last > PAUSE_MS) { m.samples = []; m.rate = 0 } // 停顿之后重新起算
+  if (m.last && now - m.last > PAUSE_MS) m.samples = [] // 停顿之后重新起算（保留上次读数）
   m.last = now
   m.samples.push([now, n])
   const from = now - WINDOW_MS
