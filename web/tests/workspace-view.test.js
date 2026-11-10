@@ -317,6 +317,7 @@ async function show() {
 
 function timeline() { return wrapper.find('.ag-scroller').text() }
 function headMeta() { return wrapper.get('.ag-head-txt .meta').text() }
+function headTitle() { return wrapper.get('.ag-head-txt .meta').attributes('title') || '' }
 async function pickSession(title) {
   const item = wrapper.findAll('.ag-item').find(b => b.text().includes(title))
   await item.trigger('click')
@@ -430,28 +431,30 @@ describe('工作区页：两级栏与投影', () => {
   it('头部一行说清目录语义：握手过且支持 → 扩展目录已下发', async () => {
     data.session = { th1: sessionOf('/home/u/proj', wsA.dirs, true) }
     await show()
-    expect(headMeta()).toContain('proj-a · codex · /home/u/proj')
-    expect(headMeta()).toContain('+1 个扩展目录已下发')
+    expect(headMeta()).toContain('codex · /home/u/proj') // 头部只留 agent + 主目录
+    expect(headMeta()).not.toContain('proj-a ·')          // 工作区名收进悬停提示
+    expect(headTitle()).toContain('+1 个扩展目录已下发')
   })
 
   it('agent 不支持 additionalDirectories 时明说其余目录不生效', async () => {
     data.session = { th1: sessionOf('/home/u/proj', wsA.dirs, false) }
     await show()
-    expect(headMeta()).toContain('另 1 个目录不生效（本 agent 只认主目录）')
-    expect(headMeta()).not.toContain('已下发')
+    expect(headTitle()).toContain('另 1 个目录不生效（本 agent 只认主目录）')
+    expect(headTitle()).not.toContain('已下发')
+    expect(headMeta()).not.toContain('目录') // 扩展目录的生效情况不再占正文
   })
 
   it('还没握手时不下结论（待确认）', async () => {
     data.session = { th1: sessionOf('/home/u/proj', wsA.dirs, null) }
     await show()
-    expect(headMeta()).toContain('生效情况待 agent 握手确认')
+    expect(headTitle()).toContain('生效情况待 agent 握手确认')
   })
 
   it('只有一个目录时不出现「扩展」字样', async () => {
     data.workspaces = [{ id: 'ws1', name: 'solo', dirs: ['/home/u/only'] }]
     data.session = { th1: sessionOf('/home/u/only', ['/home/u/only'], true) }
     await show()
-    expect(headMeta()).not.toContain('扩展目录')
+    expect(headTitle()).not.toContain('扩展目录')
   })
 
   it('agent 自报上下文时，composer 左组出现只读水位 chip，点开看 used/size', async () => {
@@ -670,7 +673,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
       dirs: [{ name: 'ref', path: '/home/u/proj/ref' }] }
     dirPages['/home/u/proj/ref'] = { path: '/home/u/proj/ref', parent: '/home/u/proj', dirs: [] }
     await show()
-    expect(headMeta()).toContain('+1 个扩展目录已下发')
+    expect(headTitle()).toContain('+1 个扩展目录已下发')
     const dlg = await openDialog('proj-a')
     await dlg.findAll('button').find(b => b.text().includes('添加源文件夹')).trigger('click')
     await flushPromises()
@@ -682,7 +685,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     expect(wrapper.findAll('[role="dialog"] .ws-dir')).toHaveLength(3)
     await wrapper.get('[aria-label="保存"]').trigger('click')
     await flushPromises()
-    expect(headMeta()).toContain('+2 个扩展目录已下发')
+    expect(headTitle()).toContain('+2 个扩展目录已下发')
   })
 
   it('文件夹被删掉时组头标「缺N」，弹窗里那一行写「已不存在」', async () => {

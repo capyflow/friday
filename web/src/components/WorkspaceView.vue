@@ -1365,15 +1365,13 @@ function previewImages(urls, at = 0) {
         <header class="ag-head">
           <div class="ag-head-txt">
             <b>{{ current.title || '新会话' }}</b>
-            <span class="meta" :title="(currentWs ? currentWs.name + ' · ' : '') + current.cwd">
-              <template v-if="currentWs">{{ currentWs.name }} · </template>{{ current.agent }}<template v-if="isBuiltinThread">（内置，模型与权限走全局设置）</template> · {{ current.cwd }}
-              · {{ stateLabel[current.state] || current.state }}
-              <!-- 会话头部统计：输出速率 + 缓存命中率（List/Get 现算下发）。
-                   速率两态：回答中实时（滑动窗口估算）、空闲会话平均；agent
-                   没报缓存就不占位，不装作有数。 -->
+            <!-- 头部一行只说四件事：agent、主目录、输出速率、缓存命中率。
+                 工作区名/运行状态/扩展目录的生效情况收进 title 悬停提示，不占版面。 -->
+            <span class="meta" :title="[(currentWs ? currentWs.name + ' · ' : '') + current.cwd,
+                                       stateLabel[current.state] || current.state, dirsNote].filter(Boolean).join(' · ')">
+              {{ current.agent }}<template v-if="isBuiltinThread">（内置，模型与权限走全局设置）</template> · {{ current.cwd }}
               <template v-if="headRate"> · <span title="回答中：实时输出速度（滑动窗口估算，暂时没有文本增量时显示会话平均）；空闲：会话累计输出 ÷ 累计整轮耗时（含工具调用，跳过 agent 未上报用量的轮次）">↓{{ fmtRate(headRate) }} tok/s</span></template>
               <template v-if="current.cacheHit"> · <span title="缓存读 ÷（缓存读 + 缓存写 + 输入），只统计 agent 上报过缓存的轮次">缓存命中 {{ (current.cacheHit * 100).toFixed(1) }}%</span></template>
-              <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
               <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>
               <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
