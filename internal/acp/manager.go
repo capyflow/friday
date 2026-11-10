@@ -140,6 +140,10 @@ type Thread struct {
 	PolicyFallback  bool   `json:"policyFallback,omitempty"`
 	// TurnStartedAt 是当前这一轮的开始时刻（运行看板用；空闲/结束时清零）。
 	TurnStartedAt time.Time `json:"turnStartedAt,omitempty"`
+	// TokensIn/TokensOut 是本会话累计的输入/输出 token：只在 List/Get 的响应
+	// 副本上从逐轮 Entry 现算，不落盘——Entries 本来就带逐轮值，存总量必然漂移。
+	TokensIn  int64 `json:"tokensIn,omitempty"`
+	TokensOut int64 `json:"tokensOut,omitempty"`
 }
 
 // UnmarshalJSON 兼容 261029 之前的投影：那时会话直接带 `workspace`（目录路径）、
@@ -462,6 +466,15 @@ func (m *Manager) threadLock(id string) *sync.Mutex {
 
 // ---------- thread CRUD ----------
 
+// sumTokens 把逐轮 Entry 的 in/out 累成会话总量（List/Get 的响应副本用）。
+func sumTokens(msgs []Entry) (in, out int64) {
+	for i := range msgs {
+		in += msgs[i].In
+		out += msgs[i].Out
+	}
+	return in, out
+}
+
 // List 返回全部 thread（含动态计算的状态）。
 func (m *Manager) List() []Thread {
 	m.mu.Lock()
@@ -473,6 +486,7 @@ func (m *Manager) List() []Thread {
 			continue
 		}
 		cp := *th
+		cp.TokensIn, cp.TokensOut = sumTokens(th.Messages)
 		cp.Messages = nil
 		// Normalized：内置条目（friday）是代码注入的、不在 config.yaml 里，
 		// 拿原始清单判存在会把每条内置会话都显示成「已失联」。
@@ -496,6 +510,7 @@ func (m *Manager) Get(id string) (Thread, bool) {
 	}
 	cp := *th
 	cp.Messages = append([]Entry{}, th.Messages...)
+	cp.TokensIn, cp.TokensOut = sumTokens(th.Messages)
 	if _, ok := m.cfgFn().Normalized().Agent(th.Agent); !ok {
 		cp.State = StateOrphaned
 	}

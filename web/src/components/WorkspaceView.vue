@@ -319,6 +319,11 @@ const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中�
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
 // 组内会话同样最近优先，默认只露出最近几条，多的收在「显示更多」里。
 function ts(v) { return v || '' }
+// 会话行副标题里的累计 tokens（后端 List 从逐轮记录现算下发；没量就不占位）
+function tokensMeta(t) {
+  const n = (t.tokensIn || 0) + (t.tokensOut || 0)
+  return n > 0 ? ' · ' + fmtTokens(n) + ' tokens' : ''
+}
 function wsThreadsWithOrder(wsId) {
   return threads.value
     .filter(t => t.workspaceId === wsId)
@@ -1188,7 +1193,7 @@ function previewImages(urls, at = 0) {
                 <span v-if="t.state === 'interrupted'" class="ag-state warn" title="上次会话被中断，继续发消息会重接上下文">已中断</span>
                 <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
               </span>
-              <span class="meta">{{ wsName(t.workspaceId) }} · {{ t.agent }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
+              <span class="meta">{{ wsName(t.workspaceId) }} · {{ t.agent }}{{ tokensMeta(t) }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
             </span>
             <span v-if="isUnread(t)" class="ws-unread" title="上次打开之后这条会话又有新动静">未读</span>
             <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"
@@ -1270,7 +1275,7 @@ function previewImages(urls, at = 0) {
                       <span v-else-if="t.state === 'orphaned'" class="ag-state bad" title="绑定的 agent 已被删除，历史仍可查看">不可用</span>
                     </span>
                     <!-- 行上不铺路径：agent + 多久之前动过（完整目录在会话头部与「编辑工作区」里看） -->
-                    <span class="meta">{{ t.agent }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
+                    <span class="meta">{{ t.agent }}{{ tokensMeta(t) }}{{ ago(t.updatedAt) ? ' · ' + ago(t.updatedAt) : '' }}</span>
                   </span>
                   <span v-if="isUnread(t)" class="ws-unread" title="上次打开之后这条会话又有新动静">未读</span>
                   <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"

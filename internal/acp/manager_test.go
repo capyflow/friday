@@ -1080,6 +1080,26 @@ func TestUsageContextWatermark(t *testing.T) {
 	}
 }
 
+// 会话列表/详情带累计 tokens：List/Get 在响应副本上从逐轮 Entry 现算，
+// 会话行（"zcode · 1.2k tokens · 刚刚"）直接吃这两个字段，不再查用量账本。
+func TestThreadTokenTotals(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	if _, err := m.Send(context.Background(), th.ID, "hello", nil, TurnHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	// fake agent 的 PromptResponse.Usage 固定 10+5，一轮就是 10/5
+	list := m.List()
+	if len(list) != 1 || list[0].TokensIn != 10 || list[0].TokensOut != 5 {
+		t.Fatalf("List 应带累计 tokens（10/5）: %+v", list)
+	}
+	got, ok := m.Get(th.ID)
+	if !ok || got.TokensIn != 10 || got.TokensOut != 5 {
+		t.Fatalf("Get 应带累计 tokens（10/5）: ok=%v %+v", ok, got)
+	}
+}
+
 func TestStopCancelled(t *testing.T) {
 	f := &fakeAgent{}
 	f.cancelSeen = make(chan struct{}, 1)
