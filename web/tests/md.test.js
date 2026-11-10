@@ -149,3 +149,21 @@ describe('相对链接按基准目录拼绝对路径', () => {
     expect(joinFilePath('relative/dir', 'a.md')).toBe('')
   })
 })
+
+describe('代码块复制按钮', () => {
+  const src = '行内 `x=1` 不加按钮。\n\n```js\nconst a = "<b>1</b>"\n```'
+
+  it('codeCopy 开启：块级代码包一层带复制按钮，行内代码不受影响', () => {
+    const html = renderMD(src, { codeCopy: true })
+    expect(html).toContain('<div class="md-code"><pre>')
+    expect((html.match(/md-copy/g) || []).length).toBe(1) // 只包块级代码
+    expect(html).toContain('<button type="button" class="md-copy">复制</button>')
+    expect(html).toContain('const a = ') // 代码本体仍在 pre 里，按钮不带代码文本
+  })
+
+  it('默认不开 codeCopy：记忆/闪念等正文不出现按钮', () => {
+    const html = renderMD(src)
+    expect(html).not.toContain('md-copy')
+    expect(html).toContain('<pre><code')
+  })
+})

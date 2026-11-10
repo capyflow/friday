@@ -6,6 +6,7 @@
 // 直接改写它们。
 import { computed } from 'vue'
 import { renderMD, localFileHref, joinFilePath } from '../md.js'
+import { copyText } from '../clipboard.js'
 import { fmtRate } from '../speed.js'
 import ToolStep from './ToolStep.vue'
 import { blockIndex, thinkPreview } from '../blocks.js'
@@ -27,10 +28,26 @@ const props = defineProps({
   rate: { type: Number, default: 0 },
 })
 
+// 复制按钮反馈：直接改文字，1.2s 后还原。流式重渲染可能中途换掉节点，
+// 那时反馈自然消失，不额外追踪。
+function flashCopy(btn, msg) {
+  if (!btn.isConnected) return
+  btn.textContent = msg
+  setTimeout(() => { if (btn.isConnected) btn.textContent = '复制' }, 1200)
+}
+
 // 正文里的文件路径 chip 与文件链接都转后端只读预览（v-html 内的点击走委托）。
+// 代码块右上角的复制按钮也在这里接：按文本取相邻 pre 的 textContent。
 // http(s)/mailto 外链不在这拦：桌面壳由 App.vue 的全局委托转系统浏览器，浏览器
 // 直连保持原生行为（中键/右键不受影响）。
 function onTextClick(e) {
+  const copyBtn = e.target.closest?.('.md-copy')
+  if (copyBtn) {
+    const pre = copyBtn.closest('.md-code')?.querySelector('pre')
+    const text = pre ? pre.textContent : ''
+    if (text) copyText(text).then(() => flashCopy(copyBtn, '已复制'), () => flashCopy(copyBtn, '复制失败'))
+    return
+  }
   const chip = e.target.closest?.('.file-chip')
   if (chip?.dataset.path) { emit('preview', chip.dataset.path); return }
   const a = e.target.closest?.('a[href]')
@@ -123,6 +140,6 @@ function cursorOn(bi) {
     <ToolStep v-else-if="r.b.kind === 'tool'" :b="r.b" :own="ownTools" @toggle="r.b.open = !r.b.open" />
 
     <!-- 正文块（fileChips：行内代码里的本机文件路径渲染成可点预览 chip） -->
-    <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(r.b.text, { fileChips: true })"></span><span v-if="cursorOn(r.bi)" class="cursor"></span><span v-if="cursorOn(r.bi) && rate > 0" class="tok-rate">↑{{ fmtRate(rate) }} tok/s</span></div>
+    <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(r.b.text, { fileChips: true, codeCopy: true })"></span><span v-if="cursorOn(r.bi)" class="cursor"></span><span v-if="cursorOn(r.bi) && rate > 0" class="tok-rate">↑{{ fmtRate(rate) }} tok/s</span></div>
   </template>
 </template>

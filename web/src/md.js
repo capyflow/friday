@@ -125,7 +125,17 @@ function linkifyFileChips(html) {
   return changed ? tpl.innerHTML : html
 }
 
-export function renderMD(src, { fileChips = false } = {}) {
+// 对话正文开启 codeCopy：给每个块级代码块包一层，右上角放复制按钮。按钮不带
+// 代码文本（大段代码不重复进 DOM），点击时从相邻 pre 取 textContent——复制
+// 逻辑在 TimelineBlocks 的点击委托里，md.js 只管把结构摆出来。放在 sanitize
+// 之后做，不往白名单里加 button。
+function wrapCodeCopy(html) {
+  return html
+    .replace(/<pre>/g, '<div class="md-code"><pre>')
+    .replace(/<\/pre>/g, '</pre><button type="button" class="md-copy">复制</button></div>')
+}
+
+export function renderMD(src, { fileChips = false, codeCopy = false } = {}) {
   let s = String(src ?? '')
   if ((s.match(/```/g) || []).length % 2 === 1) s += '\n```'
   let html
@@ -133,5 +143,6 @@ export function renderMD(src, { fileChips = false } = {}) {
     html = markdown.parse(s, { async: false })
   } catch { html = '<p>' + escapeHTML(s).replace(/\n/g, '<br>') + '</p>' }
   html = DOMPurify.sanitize(html, SANITIZE_OPTIONS)
+  if (codeCopy) html = wrapCodeCopy(html)
   return fileChips ? linkifyFileChips(html) : html
 }

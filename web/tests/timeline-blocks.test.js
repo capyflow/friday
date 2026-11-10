@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 import TimelineBlocks from '../src/components/TimelineBlocks.vue'
 
 // 时间线的工具行按来源分两种口径：ChatView（Friday 自己的 agent）传 own-tools 走展示目录，
@@ -63,5 +63,41 @@ describe('正文里的文件链接转预览', () => {
     expect(w.emitted('preview')).toBeUndefined()
     await w.get('.file-chip').trigger('click')
     expect(w.emitted('preview')).toEqual([['/tmp/b.md']])
+  })
+})
+
+describe('代码块复制按钮', () => {
+  const codeBlock = [{ kind: 'text', text: '```bash\nosascript -e "quit"\n```' }]
+
+  function stubClipboard(writeText) {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  }
+
+  // flashCopy 有 isConnected 守卫（防流式重渲染换掉节点），必须挂在真实文档上才生效
+  function mountAttached() {
+    return mount(TimelineBlocks, { props: { blocks: codeBlock }, attachTo: document.body })
+  }
+
+  it('点右上角复制：写入剪贴板并提示已复制', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    stubClipboard(writeText)
+    const w = mountAttached()
+    expect(w.find('.md-copy').exists()).toBe(true)
+    await w.get('.md-copy').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('osascript -e "quit"\n')
+    expect(w.get('.md-copy').text()).toBe('已复制')
+    w.unmount()
+    delete navigator.clipboard
+  })
+
+  it('写剪贴板失败：提示复制失败，不假装成功', async () => {
+    stubClipboard(vi.fn().mockRejectedValue(new Error('denied')))
+    const w = mountAttached()
+    await w.get('.md-copy').trigger('click')
+    await flushPromises()
+    expect(w.get('.md-copy').text()).toBe('复制失败')
+    w.unmount()
+    delete navigator.clipboard
   })
 })
