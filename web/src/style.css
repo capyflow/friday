@@ -1440,7 +1440,6 @@ html[data-theme="dark"] .ws-missing { color: #FBBF24; }
 .ws-act:hover { color: var(--fg); background: rgba(127, 127, 127, .08); }
 .ws-act.primary-act { border-style: solid; }
 .ws-none { padding: 6px 4px; font-size: 12px; }
-.ws-session-form { border: none; border-top: 1px solid var(--border); padding: 8px 4px 2px; }
 .ws-rename { width: 100%; font-size: 13px; font-family: inherit; padding: 3px 6px;
              border: 1px solid var(--border-strong); border-radius: 6px;
              background: var(--bg); color: var(--fg); }
@@ -1453,8 +1452,6 @@ html[data-theme="dark"] .ws-missing { color: #FBBF24; }
 .ws-dlg-empty { padding: 8px 10px; }
 .ws-dlg-hint { margin: 0; font-size: 11.5px; line-height: 1.6; }
 .ws-dlg-state { flex: 1; min-width: 0; }
-/* 新建会话表单里的主目录提示与行内改标题 */
-.ws-session-hint { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; word-break: break-all; }
 /* 会话行右侧的「…」：平时淡出，悬停/选中/菜单开着才显形，别让每行都挂一个图标 */
 .ag-menu-wrap { position: relative; flex: none; }
 .ag-menu-wrap .ws-icon { width: 22px; height: 22px; opacity: 0; transition: opacity .12s ease; }

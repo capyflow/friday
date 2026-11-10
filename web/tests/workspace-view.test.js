@@ -532,7 +532,7 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     await wrapper.findAll('button').find(b => b.text() === '创建').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces', { name: 'notes', dirs: ['/home/u/proj'] })
-    // 建完直接进下一步：会话表单在新技术区里摊开，agent 默认选中第一个
+    // 建完直接进下一步：新建会话弹窗在新技术区里弹出，agent 默认选中第一个
     expect(wrapper.get('.ws-item.active').text()).toContain('notes')
     expect(selectedText('选择智能体')).toBe('codex')
   })
@@ -546,8 +546,8 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     await flushPromises()
     expect(api).toHaveBeenCalledWith('POST', '/api/acp/workspaces', { name: '', dirs: [] })
     expect(toast).toHaveBeenCalledWith('已创建工作区，选个 agent 就能开聊')
-    // 回退出来的目录照样能用：会话表单里写明它当主目录（完整路径在 title 里）
-    const hint = wrapper.get('.ws-session-hint')
+    // 回退出来的目录照样能用：新建会话弹窗里写明它当主目录（完整路径在 title 里）
+    const hint = wrapper.get('.ws-dlg-hint')
     expect(hint.text()).toContain('ws1')
     expect(hint.attributes('title')).toBe('/home/u/data/acp-sessions/ws1')
   })
@@ -713,18 +713,21 @@ describe('工作区：新建、目录增删、改名、删除', () => {
 })
 
 describe('会话：在工作区里创建与删除', () => {
-  it('新建会话表单只选 agent：主目录由工作区的第一个源文件夹决定', async () => {
+  it('新建会话弹窗：选 agent、可预设标题（留空自动命名），主目录用第一个源文件夹', async () => {
     data.workspaces = [{ id: 'ws1', name: 'solo', dirs: ['/home/u/only'] }]
     data.threads = []
     await show()
     await newSession('solo')
-    expect(wrapper.get('.ws-session-hint').text()).toContain('only')
+    expect(wrapper.get('.ws-dlg-hint').text()).toContain('only')
     expect(wrapper.find('[aria-label="选择主目录"]').exists()).toBe(false) // 没有主目录下拉
-    expect(wrapper.find('[aria-label="会话标题"]').exists()).toBe(false)   // 也没有标题输入
+    expect(wrapper.get('[aria-label="会话标题"]').exists()).toBe(true)     // 标题可预设
     api.mockClear()
+    await wrapper.get('[aria-label="会话标题"]').setValue('  我的新会话  ')
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'codex' })
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'codex', title: '我的新会话' })
+    // 弹窗随创建关闭，标题不残留到下一次
+    expect(wrapper.find('[aria-label="会话标题"]').exists()).toBe(false)
   })
 
   it('多源文件夹的工作区也不弹主目录选择：提示写着用第一个，换主目录去编辑弹窗', async () => {
@@ -732,12 +735,12 @@ describe('会话：在工作区里创建与删除', () => {
     await show()
     await newSession('proj-a')
     expect(wrapper.find('[aria-label="选择主目录"]').exists()).toBe(false)
-    expect(wrapper.get('.ws-session-hint').text()).toContain('proj')
+    expect(wrapper.get('.ws-dlg-hint').text()).toContain('proj')
     await pickOption('选择智能体', 'opencode')
     api.mockClear()
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'opencode' })
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'opencode', title: '' })
     expect(wrapper.get('.ag-head-txt b').text()).toBe('新会话') // 建好即进对话页，标题等首轮
   })
 
@@ -793,7 +796,7 @@ describe('会话：在工作区里创建与删除', () => {
     opt.element.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
     await flushPromises()
     expect(box.props('modelValue')).toBe('')
-    expect(wrapper.get('.ag-form-acts .primary').element.disabled).toBe(true)
+    expect(wrapper.get('[aria-label="创建会话"]').element.disabled).toBe(true)
   })
 
   it('双击会话标题弹窗改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
@@ -1536,7 +1539,7 @@ describe('工作区清单里的内置 Friday', () => {
     api.mockClear()
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'codex' })
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'codex', title: '' })
   })
 
   it('一台外部 agent 都没配时，默认就是内置那条（不装 agent 也能开工作区会话）', async () => {
@@ -1548,7 +1551,7 @@ describe('工作区清单里的内置 Friday', () => {
     api.mockClear()
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'friday' })
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads', { workspaceId: 'ws1', agent: 'friday', title: '' })
   })
 
   it('选中内置那条先说清没有会话级档位，创建后的提示也不提"切模型"', async () => {
@@ -1557,7 +1560,7 @@ describe('工作区清单里的内置 Friday', () => {
     await show()
     await newSession('proj-a')
     await pickOption('选择智能体', 'friday（内置）')
-    const hints = wrapper.findAll('.ws-session-hint').map(h => h.text())
+    const hints = wrapper.findAll('.ws-dlg-hint').map(h => h.text())
     expect(hints.join('\n')).toContain('没有会话级的模型与审批档位')
     api.mockClear()
     await wrapper.findAll('button').find(b => b.text() === '创建会话').trigger('click')

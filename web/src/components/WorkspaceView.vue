@@ -99,7 +99,9 @@ const inputEl = ref(null)
 const creatingWs = ref(false)  // 新建工作区表单展开
 const wsForm = reactive({ name: '', dirs: [] })
 const sessionFor = ref('')     // 正在新建会话的工作区 id（'' = 没在建）
-const sessionForm = reactive({ agent: '' })
+const sessionForm = reactive({ agent: '', title: '' })
+const sessionNameInput = ref(null)
+const sessionWs = computed(() => workspaces.value.find(w => w.id === sessionFor.value) || null)
 // 删除确认弹窗：{ kind:'thread'|'workspace', id, title, count }；null = 没打开
 const pendingDelete = ref(null)
 const deleteDlg = ref(null)        // 确认弹窗本体（打开时接住焦点，回车才能直达确认）
@@ -763,6 +765,16 @@ function openSessionForm(wsId) {
   // 一台外部 agent 都没配时，默认就是内置 Friday——这时它确实是唯一能用的。
   const pick = list.find(a => !a.builtin) || list[0]
   sessionForm.agent = pick ? pick.name : ''
+  sessionForm.title = ''
+  // 弹窗起来焦点直接落标题框：选 agent 有默认值，起名才是唯一要动手的步骤
+  nextTick(() => sessionNameInput.value?.focus())
+}
+// 标题框回车＝创建；焦点在按钮上时把回车留给按钮自己（取消仍是取消）。
+function onSessionEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.target?.closest?.('button')) return
+  e.preventDefault()
+  submitSession()
 }
 async function submitSession() {
   if (!sessionForm.agent) { toast('请先在「设置 → 智能体」添加并开启 agent', true); return }
@@ -770,6 +782,7 @@ async function submitSession() {
   try {
     const r = await api('POST', '/api/acp/threads', {
       workspaceId: sessionFor.value, agent: sessionForm.agent,
+      title: sessionForm.title.trim(),
     })
     sessionFor.value = ''
     await load()
@@ -1207,7 +1220,7 @@ function previewImages(urls, at = 0) {
                     :title="'该工作区有 ' + wsGenerating(ws.id) + ' 条会话正在生成'">{{ wsGenerating(ws.id) }} 生成中</span>
               <!-- 新建会话与「…」并列：一行只留这两个动作，其余收进菜单 -->
               <button class="ib-btn ws-icon" :class="{ active: sessionFor === ws.id }"
-                      :aria-label="'在 ' + ws.name + ' 新建会话'" title="新建会话（选 agent 与主目录）"
+                      :aria-label="'在 ' + ws.name + ' 新建会话'" title="新建会话（选 agent、可预设标题）"
                       @click.stop="toggleSessionForm(ws.id)">
                 <!-- 对话气泡里带个加号：与「…」区分开，"在这组里再开一条" -->
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -1282,26 +1295,6 @@ function previewImages(urls, at = 0) {
                 </button>
                 <div v-if="!wsThreads(ws.id).length && sessionFor !== ws.id" class="meta ws-none">
                   这个工作区还没有会话。
-                </div>
-
-                <!-- 新建会话：只选 agent 工具。主目录就是工作区的第一个源文件夹，
-                     标题建好后在会话行的「…」里改（首条消息也会自动起一个） -->
-                <div v-if="sessionFor === ws.id" class="ag-form ws-session-form">
-                  <label class="meta">智能体工具</label>
-                  <SelectBox v-model="sessionForm.agent" :options="agentOptions" aria-label="选择智能体" />
-                  <!-- 内置那条要说清差别：它没有会话级模型/审批档位，工作区档位也不下发。
-                       不写这句，选了它才发现切不了模型，读起来就像功能坏了。 -->
-                  <p v-if="isBuiltinAgent(sessionForm.agent)" class="meta ws-session-hint">
-                    内置 Friday 用「设置 → 模型服务 / 权限」的全局配置：没有会话级的模型与审批档位，
-                    工作区档位不下发（改动仍会记录并可还原）。
-                  </p>
-                  <p class="meta ws-session-hint" :title="ws.dirs[0]">
-                    主目录：{{ base(ws.dirs[0]) }}（工作区的第一个源文件夹；要换去「编辑工作区」）
-                  </p>
-                  <div class="ag-form-acts">
-                    <button class="btn sm primary" :disabled="!sessionForm.agent" @click="submitSession">创建会话</button>
-                    <button class="btn sm" @click="sessionFor = ''">取消</button>
-                  </div>
                 </div>
               </div>
             </div>
@@ -1618,6 +1611,43 @@ function previewImages(urls, at = 0) {
               <button type="button" class="btn sm" aria-label="取消重命名" @click="closeRenameDialog">取消</button>
               <button type="button" class="btn sm primary" aria-label="确认重命名"
                       :disabled="rename.saving" @click="commitRenameThread">保存</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+  <!-- 新建会话：弹窗里选 agent、可预设标题（留空自动取首条消息）。主目录是
+       工作区的第一个源文件夹；Esc/点遮罩取消，标题框回车直接建。 -->
+  <Teleport to="body">
+    <div v-if="sessionFor" class="dlg-mask" @click.self="sessionFor = ''">
+      <div class="dlg" role="dialog" aria-modal="true" aria-label="新建会话"
+           @keydown.enter="onSessionEnter" @keydown.esc="sessionFor = ''">
+        <div class="dlg-form">
+          <header class="dlg-head">
+            <h3 class="dlg-title">新建会话 · {{ sessionWs ? sessionWs.name : '' }}</h3>
+          </header>
+          <div class="dlg-body">
+            <label class="meta" for="sessionDlgAgent">智能体工具</label>
+            <SelectBox id="sessionDlgAgent" v-model="sessionForm.agent" :options="agentOptions" aria-label="选择智能体" />
+            <label class="meta ws-dlg-sec" for="sessionDlgTitle">标题（可选）</label>
+            <input ref="sessionNameInput" id="sessionDlgTitle" v-model="sessionForm.title" class="dlg-input"
+                   aria-label="会话标题" placeholder="留空自动取首条消息">
+            <!-- 内置那条要说清差别：它没有会话级模型/审批档位，工作区档位也不下发。
+                 不写这句，选了它才发现切不了模型，读起来就像功能坏了。 -->
+            <p v-if="isBuiltinAgent(sessionForm.agent)" class="meta ws-dlg-hint">
+              内置 Friday 用「设置 → 模型服务 / 权限」的全局配置：没有会话级的模型与审批档位，
+              工作区档位不下发（改动仍会记录并可还原）。
+            </p>
+            <p v-if="sessionWs" class="meta ws-dlg-hint" :title="sessionWs.dirs[0]">
+              主目录：{{ base(sessionWs.dirs[0]) }}（工作区的第一个源文件夹；要换去「编辑工作区」）
+            </p>
+          </div>
+          <footer class="dlg-foot">
+            <div class="dlg-btns">
+              <button type="button" class="btn sm" aria-label="取消新建会话" @click="sessionFor = ''">取消</button>
+              <button type="button" class="btn sm primary" aria-label="创建会话"
+                      :disabled="!sessionForm.agent" @click="submitSession">创建会话</button>
             </div>
           </footer>
         </div>
