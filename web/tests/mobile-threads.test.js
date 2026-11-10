@@ -58,6 +58,47 @@ describe('mobile workspace two-level view', () => {
     w.unmount()
   })
 
+  it('会话按最近活动倒序：接口给的创建顺序不等于活跃顺序时，最新的排前面', async () => {
+    apiMock.mockImplementation(async (_m, path) => {
+      if (path === '/api/acp/threads') {
+        return {
+          workspaces: WORKSPACES,
+          // 模拟投影文件的创建顺序：最旧的 t3 排在数组最前
+          threads: [THREADS[2], THREADS[1], THREADS[0]],
+          acp: { agents: [{ name: 'zcode' }] },
+        }
+      }
+      return { ok: true }
+    })
+    const w = mount(MobileThreads)
+    await flushPromises()
+    await w.findAll('.m-row')[0].trigger('click') // 进入 Plugins
+    const rows = w.findAll('.m-row')
+    expect(rows.length).toBe(2)
+    expect(rows[0].text()).toContain('Plugins 最新') // t1(10:00) 排在 t3(11-06) 前
+    w.unmount()
+  })
+
+  it('项目列表按最近活动倒序：活跃晚的项目排前面', async () => {
+    apiMock.mockImplementation(async (_m, path) => {
+      if (path === '/api/acp/threads') {
+        return {
+          // 照片服务放在数组前面，但它的最新会话（09:00）晚于 Plugins（10:00）
+          workspaces: [WORKSPACES[1], WORKSPACES[0]],
+          threads: THREADS,
+          acp: { agents: [{ name: 'zcode' }] },
+        }
+      }
+      return { ok: true }
+    })
+    const w = mount(MobileThreads)
+    await flushPromises()
+    const rows = w.findAll('.m-row')
+    expect(rows[0].text()).toContain('Plugins')
+    expect(rows[1].text()).toContain('照片服务')
+    w.unmount()
+  })
+
   it('新建项目：浏览目录 → 在此创建 → POST workspaces 并进入新项目', async () => {
     const w = await mountView()
     await w.find('.m-pane-head .m-btn').trigger('click')

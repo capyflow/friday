@@ -56,6 +56,21 @@ const wsInfo = computed(() => {
   return map
 })
 
+// 排序与桌面端 WorkspaceView 对齐：会话按最近活动倒序（接口给的是投影文件里的
+// 创建顺序，直接渲染会让老会话永远沉在下面）；项目列表置顶优先、其余按组内
+// 最近活动倒序（没有会话的项目退回工作区自身时间）。
+function ts(v) { return v || '' }
+function wsActivity(w) {
+  return ts((wsInfo.value[w.id] || {}).latest) || ts(w.updatedAt) || ts(w.createdAt)
+}
+const orderedWorkspaces = computed(() => workspaces.value.slice().sort((a, b) => {
+  if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
+  return ts(wsActivity(b)).localeCompare(ts(wsActivity(a)))
+}))
+const wsThreads = computed(() => threads.value
+  .filter(t => currentWs.value && t.workspaceId === currentWs.value.id)
+  .sort((a, b) => ts(b.updatedAt).localeCompare(ts(a.updatedAt))))
+
 function openWs(w) {
   currentWs.value = w
   view.value = 'ws'
@@ -260,7 +275,7 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
         <div v-if="!workspaces.length && !loading" class="m-empty">
           还没有项目。点右上角「＋ 新项目」，选一个电脑上的目录创建。
         </div>
-        <button v-for="w in workspaces" :key="w.id" type="button" class="m-row" @click="openWs(w)">
+        <button v-for="w in orderedWorkspaces" :key="w.id" type="button" class="m-row" @click="openWs(w)">
           <span class="m-row-main">
             <span class="m-row-title">{{ w.name }}</span>
             <span class="m-row-sub">
@@ -285,19 +300,17 @@ const shortPath = p => (p || '').replace(/^\/Users\/[^/]+/, '~')
         <button class="m-btn primary small" type="button" @click="openWsSheet">＋ 新会话</button>
       </div>
       <div class="m-list">
-        <div v-if="!threads.some(t => currentWs && t.workspaceId === currentWs.id) && !loading" class="m-empty">
+        <div v-if="!wsThreads.length && !loading" class="m-empty">
           这个项目还没有会话。点右上角「＋ 新会话」开始。
         </div>
-        <template v-for="t in threads" :key="t.id">
-          <button v-if="currentWs && t.workspaceId === currentWs.id" type="button" class="m-row" @click="open(t)">
-            <span class="m-row-main">
-              <span class="m-row-title">{{ t.title || '未命名会话' }}</span>
-              <span class="m-row-sub">{{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
-            </span>
-            <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
-            <span class="m-row-x" role="button" aria-label="删除会话" @click.stop="askDeleteThread(t)">×</span>
-          </button>
-        </template>
+        <button v-for="t in wsThreads" :key="t.id" type="button" class="m-row" @click="open(t)">
+          <span class="m-row-main">
+            <span class="m-row-title">{{ t.title || '未命名会话' }}</span>
+            <span class="m-row-sub">{{ t.agent }}<template v-if="t.updatedAt"> · {{ ago(t.updatedAt) }}前</template></span>
+          </span>
+          <span v-if="isRunning(t)" class="m-dot run" title="运行中"></span>
+          <span class="m-row-x" role="button" aria-label="删除会话" @click.stop="askDeleteThread(t)">×</span>
+        </button>
         <div v-if="loading" class="m-empty">加载中…</div>
       </div>
     </template>
