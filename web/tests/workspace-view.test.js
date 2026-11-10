@@ -807,6 +807,21 @@ describe('会话：在工作区里创建与删除', () => {
     expect(wrapper.get('[aria-label="创建会话"]').element.disabled).toBe(true)
   })
 
+  it('头部速率两态：回答中实时 tok/s，结束回落会话平均', async () => {
+    await show()
+    await pickSession('第一件事')
+    const held = await startTurn('看看速度')
+    held.push({ delta: '你好呀，' })
+    await new Promise(r => setTimeout(r, 350)) // feedRate 窗口要攒 ≥300ms 才出数
+    held.push({ delta: '这是第二段' })
+    await flushPromises()
+    expect(headMeta()).toMatch(/↓\d+(\.\d+)? tok\/s/) // 实时值（估算，具体数不定）
+    held.close()
+    await flushPromises()
+    expect(headMeta()).toContain('↓385 tok/s') // 空闲回落会话平均（fixture 384.8 → 取整）
+    expect(headMeta()).toContain('缓存命中 99.8%')
+  })
+
   it('双击会话标题弹窗改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
     await show()
     const title = wrapper.get('.ag-item .ag-title span')
