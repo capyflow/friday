@@ -822,6 +822,20 @@ describe('会话：在工作区里创建与删除', () => {
     expect(headMeta()).toContain('缓存命中 99.8%')
   })
 
+  it('回答中暂无可估算速率时回落到会话平均，不整段消失', async () => {
+    await show()
+    await pickSession('第一件事')
+    const held = await startTurn('看看速度')
+    await flushPromises()
+    // 还没吐字（思考/工具调用阶段）：实时值为 0，应显示会话平均而不是空一截
+    expect(headMeta()).toContain('↓385 tok/s')
+    held.push({ delta: '开始写' })
+    await flushPromises()
+    expect(headMeta()).toMatch(/↓\d+(\.\d+)? tok\/s/)
+    held.close()
+    await flushPromises()
+  })
+
   it('双击会话标题弹窗改名：回车提交，列表与头部一起换；留空回到新会话', async () => {
     await show()
     const title = wrapper.get('.ag-item .ag-title span')

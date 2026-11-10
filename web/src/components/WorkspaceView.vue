@@ -320,15 +320,18 @@ const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中�
 // 组内会话同样最近优先，默认只露出最近几条，多的收在「显示更多」里。
 function ts(v) { return v || '' }
 // 头部速率：回答中用流式角标的实时值（滑动窗口按字符估算），空闲回落到会话
-// 平均（ΣOut/ΣMs，轮末才更新）。缓存命中只有轮末口径，不跟着实时变。
+// 平均（ΣOut/ΣMs，轮末才更新）。实时值只在真收到文本增量时有数——思考/工具
+// 调用期间是 0，此时回落到会话平均而不是整段消失（否则看起来"时有时无"）。
+// 缓存命中只有轮末口径，不跟着实时变。
 const headRate = computed(() => {
+  const avg = current.value?.outRate || 0
   if (current.value && generating(current.value.id)) {
     const st = states[current.value.id]
     for (let i = st.messages.length - 1; i >= 0; i--) {
-      if (st.messages[i].role === 'bot') return st.messages[i].rate || 0
+      if (st.messages[i].role === 'bot') return st.messages[i].rate || avg
     }
   }
-  return current.value?.outRate || 0
+  return avg
 })
 function wsThreadsWithOrder(wsId) {
   return threads.value
@@ -1368,7 +1371,7 @@ function previewImages(urls, at = 0) {
               <!-- 会话头部统计：输出速率 + 缓存命中率（List/Get 现算下发）。
                    速率两态：回答中实时（滑动窗口估算）、空闲会话平均；agent
                    没报缓存就不占位，不装作有数。 -->
-              <template v-if="headRate"> · <span title="回答中：实时输出速度（滑动窗口估算）；空闲：会话累计输出 ÷ 累计整轮耗时（含工具调用）">↓{{ fmtRate(headRate) }} tok/s</span></template>
+              <template v-if="headRate"> · <span title="回答中：实时输出速度（滑动窗口估算，暂时没有文本增量时显示会话平均）；空闲：会话累计输出 ÷ 累计整轮耗时（含工具调用，跳过 agent 未上报用量的轮次）">↓{{ fmtRate(headRate) }} tok/s</span></template>
               <template v-if="current.cacheHit"> · <span title="缓存读 ÷（缓存读 + 缓存写 + 输入），只统计 agent 上报过缓存的轮次">缓存命中 {{ (current.cacheHit * 100).toFixed(1) }}%</span></template>
               <template v-if="dirsNote"> · {{ dirsNote }}</template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>

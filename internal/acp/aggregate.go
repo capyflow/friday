@@ -66,6 +66,12 @@ type turnSink struct {
 	costAmount   float64 // 会话累计花费（agent 自报，仅展示——C10 纪律：不进预算）
 	costCurrency string
 
+	// 非标准扩展：部分 agent 把真实用量塞在 usage_update._meta.usage 里（见
+	// usage_caps.go）。一轮内每次模型调用各一条，按 messageId/requestId 去重后
+	// 在轮末求和——只在这类 agent 上启用。
+	caps       usageCaps
+	metaUsages map[string]metaUsage
+
 	In, Out, Cached int64
 	rawUpdates      int
 	dropped         int64
@@ -86,8 +92,8 @@ func (s *turnSink) context() (used, size int, costAmount float64, costCurrency s
 	return s.used, s.size, s.costAmount, s.costCurrency
 }
 
-func newTurnSink(hooks TurnHooks) *turnSink {
-	s := &turnSink{hooks: hooks, startedAt: time.Now(),
+func newTurnSink(hooks TurnHooks, agent string) *turnSink {
+	s := &turnSink{hooks: hooks, startedAt: time.Now(), caps: usageCapsFor(agent),
 		toolTitles: map[string]string{}, toolStatus: map[string]string{}, toolDetail: map[string]string{},
 		toolInput: map[string]string{}, toolOutput: map[string]string{}}
 	s.quiet.Store(true)
@@ -168,11 +174,16 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 		// M-5：usage_update 是上下文水位（size=窗口总量、used=当前占用）加可选
 		// 的会话累计 cost——不是单轮 in/out。记到 sink，turn 结束随投影落盘；
 		// 单轮记账仍以 PromptResponse.Usage 为准（usage.Record 维度不变）。
+		// 唯一的例外是白名单里的 agent（usage_caps.go）：它们不给响应级 usage，
+		// 真实用量只在这个通知的 _meta 里。
 		s.used = u.UsageUpdate.Used
 		s.size = u.UsageUpdate.Size
 		if u.UsageUpdate.Cost != nil {
 			s.costAmount = u.UsageUpdate.Cost.Amount
 			s.costCurrency = u.UsageUpdate.Cost.Currency
+		}
+		if s.caps.meta {
+			s.absorbMetaUsage(u.UsageUpdate.Meta)
 		}
 	default:
 		// available_commands_update（单条实测 25KB，含用户 skill 全表）、
@@ -183,6 +194,84 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 // finish 在 turn 结束（Prompt 返回）后调用：清空残留缓冲并归集结果。
 func (s *turnSink) finish() {
 	s.flushNow()
+}
+
+// metaUsage 是一次模型调用的真实用量（来自 usage_update._meta.usage）。
+type metaUsage struct {
+	In, Out, CacheRead, CacheWrite int64
+}
+
+// absorbMetaUsage 从 usage_update._meta 里取出 usage 并记录。
+// 字段名各家不同（OpenAI 风格 prompt_tokens/completion_tokens，也有 camelCase），
+// 这里按常见别名取值；取不到就跳过，不猜。
+// 同一轮里同一 messageId 会重复上报（流式中途一次、收尾一次，数字递增），
+// 以最后一次为准；不同 messageId 是不同模型调用，轮末求和。
+func (s *turnSink) absorbMetaUsage(meta map[string]any) {
+	if meta == nil {
+		return
+	}
+	raw, ok := meta["usage"].(map[string]any)
+	if !ok {
+		return
+	}
+	in := metaInt(raw, "prompt_tokens", "inputTokens", "input_tokens", "promptTokens")
+	out := metaInt(raw, "completion_tokens", "outputTokens", "output_tokens", "completionTokens")
+	read := metaInt(raw, "prompt_cache_hit_tokens", "cache_read_input_tokens", "cachedReadTokens", "cached_tokens")
+	write := metaInt(raw, "cache_creation_input_tokens", "cacheWriteInputTokens", "cachedWriteTokens")
+	// prompt_tokens 含缓存命中部分；ACP 的 In 语义是「未命中缓存的输入」，
+	// 否则缓存命中率的分母会把命中数算两遍。
+	if miss := metaInt(raw, "prompt_cache_miss_tokens"); miss > 0 {
+		in = miss
+	} else if in > 0 && read > 0 {
+		in -= read
+	}
+	if in <= 0 && out <= 0 {
+		return
+	}
+	key, _ := meta["codebuddy.ai/messageId"].(string)
+	if key == "" {
+		key, _ = meta["codebuddy.ai/requestId"].(string)
+	}
+	if key == "" {
+		key = "default"
+	}
+	if s.metaUsages == nil {
+		s.metaUsages = map[string]metaUsage{}
+	}
+	s.metaUsages[key] = metaUsage{In: in, Out: out, CacheRead: read, CacheWrite: write}
+}
+
+// metaTotals 汇总本轮所有模型调用的用量（没有就返回零值）。
+func (s *turnSink) metaTotals() metaUsage {
+	var t metaUsage
+	for _, u := range s.metaUsages {
+		t.In += u.In
+		t.Out += u.Out
+		t.CacheRead += u.CacheRead
+		t.CacheWrite += u.CacheWrite
+	}
+	return t
+}
+
+// metaInt 按别名顺序取第一个正数（JSON 解码后都是 float64）。
+func metaInt(m map[string]any, keys ...string) int64 {
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case float64:
+			if v > 0 {
+				return int64(v)
+			}
+		case int64:
+			if v > 0 {
+				return v
+			}
+		case int:
+			if v > 0 {
+				return int64(v)
+			}
+		}
+	}
+	return 0
 }
 
 // flushNow 立即投出文本/思考缓冲。工具步骤前必须先调：文本是按 3s/1200 字

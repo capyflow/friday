@@ -37,7 +37,7 @@ func messageChunk(text string) acp.SessionNotification {
 // collect 跑一串 update，返回投出的步骤事件。
 func collect(updates ...acp.SessionNotification) []agent.Step {
 	var steps []agent.Step
-	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }})
+	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }}, "codex")
 	for _, u := range updates {
 		sink.handle(u)
 	}
@@ -99,7 +99,7 @@ func TestToolStepFlushesPendingTextFirst(t *testing.T) {
 	sink := newTurnSink(TurnHooks{
 		OnText: func(s string) { events = append(events, "text:"+s) },
 		OnStep: func(s agent.Step) { events = append(events, "step:"+s.Status) },
-	})
+	}, "codex")
 	sink.handle(messageChunk("先看看文件"))
 	sink.handle(toolCall("t1", "Bash", acp.ToolCallStatusInProgress))
 	sink.handle(toolUpdate("t1", "completed"))
@@ -118,7 +118,7 @@ func TestToolStepFlushesPendingTextFirst(t *testing.T) {
 
 func TestToolDetailsCarryInputAndOutput(t *testing.T) {
 	var steps []agent.Step
-	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }})
+	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }}, "codex")
 	sink.handle(acp.SessionNotification{Update: acp.SessionUpdate{
 		ToolCall: &acp.SessionUpdateToolCall{
 			ToolCallId: "t1", Title: "Bash", Kind: acp.ToolKindExecute,
@@ -163,7 +163,7 @@ func ptrStatus(s string) *acp.ToolCallStatus {
 
 func TestToolProgressCarriesArgsAndOutput(t *testing.T) {
 	var steps []agent.Step
-	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }})
+	sink := newTurnSink(TurnHooks{OnStep: func(s agent.Step) { steps = append(steps, s) }}, "codex")
 	sink.handle(toolCall("t1", "Bash", acp.ToolCallStatusInProgress)) // 首条没有参数
 	sink.handle(acp.SessionNotification{Update: acp.SessionUpdate{
 		ToolCallUpdate: &acp.SessionToolCallUpdate{

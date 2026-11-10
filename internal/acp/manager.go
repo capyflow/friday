@@ -75,18 +75,18 @@ func activeTurnBusy(err error) bool {
 
 // Entry 是投影对话记录里的一条消息。
 type Entry struct {
-	Role    string    `json:"role"` // user | assistant | note
-	Text    string    `json:"text"`
-	At      time.Time `json:"at"`
-	Images  int       `json:"images,omitempty"` // 随消息发送的图片数（旧数据只有数量）
-	Files   []string  `json:"files,omitempty"`  // 图片的上传 ID，前端经 /api/upload/:id 回显原图
-	In      int64     `json:"in,omitempty"`
-	Out     int64     `json:"out,omitempty"`
-	Ms      int64     `json:"ms,omitempty"`
+	Role   string    `json:"role"` // user | assistant | note
+	Text   string    `json:"text"`
+	At     time.Time `json:"at"`
+	Images int       `json:"images,omitempty"` // 随消息发送的图片数（旧数据只有数量）
+	Files  []string  `json:"files,omitempty"`  // 图片的上传 ID，前端经 /api/upload/:id 回显原图
+	In     int64     `json:"in,omitempty"`
+	Out    int64     `json:"out,omitempty"`
+	Ms     int64     `json:"ms,omitempty"`
 	// CacheRead/CacheWrite 是 agent 在 PromptResponse.Usage 里自报的缓存读/写
 	// token（不上报就是 0）；会话头部的缓存命中率按有读值的轮次统计。
-	CacheRead  int64 `json:"cacheRead,omitempty"`
-	CacheWrite int64 `json:"cacheWrite,omitempty"`
+	CacheRead  int64  `json:"cacheRead,omitempty"`
+	CacheWrite int64  `json:"cacheWrite,omitempty"`
 	Stopped    string `json:"stopped,omitempty"` // end_turn | cancelled | error…
 	// Changes 是这一轮的改动摘要（不含逐文件 diff；详情按 turnId 单独取）。
 	Changes *TurnChanges `json:"changes,omitempty"`
@@ -396,10 +396,10 @@ type Manager struct {
 	spawnMu    sync.Mutex            // 进程创建串行（同一 key 不并发拉两个）
 	locks      map[string]*sync.Mutex
 	lastCfg    config.AcpConfig // Reload 的差异比较基准
-	path         string           // acp-threads.json（工作区与会话同一份投影）
-	cfgFn        func() config.AcpConfig
-	approver     *approval.Queue
-	memory       *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	path       string           // acp-threads.json（工作区与会话同一份投影）
+	cfgFn      func() config.AcpConfig
+	approver   *approval.Queue
+	memory     *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 	// notifier 是系统提示桥（key 幂等，见 notification.Center.PostOnce）：只在
 	// "人不在这一页上也得知道"的两个时刻用——审批卡入队、一轮结束。未注入时
 	// 静默跳过（测试、或没装配通知中心的运行形态）。
@@ -477,14 +477,21 @@ func (m *Manager) threadLock(id string) *sync.Mutex {
 // headStats 把逐轮 Entry 聚成会话头部的两个统计。平均输出速率用整轮 wall
 // time（含工具调用与思考停顿），是"这轮活儿干得多快"的吞吐，不是模型的
 // 纯生成速度；缓存命中率只算 agent 上报过缓存读的轮次，没报就是 0。
+//
+// 没上报用量的轮次（取消/报错最常见：agent 只回 stopReason，没有 usage）整轮
+// 跳过，不能只把耗时计进分母——那样会把平均值稀释成 0，看起来像"统计时有时无"。
 func headStats(msgs []Entry) (outRate, cacheHit float64) {
 	var out, ms, read, denom int64
 	for i := range msgs {
-		out += msgs[i].Out
-		ms += msgs[i].Ms
-		if msgs[i].CacheRead > 0 {
-			read += msgs[i].CacheRead
-			denom += msgs[i].CacheRead + msgs[i].CacheWrite + msgs[i].In
+		e := &msgs[i]
+		if e.Out == 0 && e.In == 0 && e.CacheRead == 0 && e.CacheWrite == 0 {
+			continue
+		}
+		out += e.Out
+		ms += e.Ms
+		if e.CacheRead > 0 {
+			read += e.CacheRead
+			denom += e.CacheRead + e.CacheWrite + e.In
 		}
 	}
 	if ms > 0 {
@@ -1756,7 +1763,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	// 事件由进程级常驻泵按 sessionId 分发（M-6）：这里只登记本轮接收器，
 	// Prompt 返回后立刻摘掉——之后迟到的通知没有接收方，泵会丢弃。
-	sink := newTurnSink(hooks)
+	sink := newTurnSink(hooks, th.Agent)
 	lv.setSink(sink)
 
 	// 静默看门狗：agent 收下这一轮却迟迟不吐任何 update（opencode 实测会卡在
@@ -1935,6 +1942,14 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		}
 		if res.Usage.CachedWriteTokens != nil {
 			result.CacheWrite = int64(*res.Usage.CachedWriteTokens)
+		}
+	}
+	// 响应级没有 usage 的 agent（白名单，见 usage_caps.go）：用本轮 usage_update
+	// 里累加的真实用量补上——取消的轮次也能拿到已发生的那几次模型调用。
+	if result.In == 0 && result.Out == 0 {
+		if m := sink.metaTotals(); m.In > 0 || m.Out > 0 {
+			result.In, result.Out = m.In, m.Out
+			result.CacheRead, result.CacheWrite = m.CacheRead, m.CacheWrite
 		}
 	}
 	var runErr error

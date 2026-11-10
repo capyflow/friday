@@ -98,6 +98,7 @@ type fakeAgent struct {
 	modes          map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
 	newSessionHang time.Duration    // >0：session/new 先挂这么久（验证建会话超时的文案与预算）
 	usageExtra     map[string]any   // 追加进 prompt 响应 usage 的字段（缓存读/写等；Send 前设好即只读）
+	usageNil       bool             // prompt 响应不带 usage（模拟只报 _meta.usage 的 agent）
 
 	mu           sync.Mutex
 	methods      []string
@@ -426,6 +427,10 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 				usage := map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}
 				for k, v := range f.usageExtra { // Send 前设好即只读，不加锁
 					usage[k] = v
+				}
+				if f.usageNil {
+					fc.w.respond(promptID, map[string]any{"stopReason": stop})
+					return
 				}
 				fc.w.respond(promptID, map[string]any{"stopReason": stop, "usage": usage})
 			}()
@@ -1109,6 +1114,74 @@ func TestThreadHeadStats(t *testing.T) {
 	want := float64(990) / float64(990+10+10)
 	if !ok || got.CacheHit < want-1e-9 || got.CacheHit > want+1e-9 || got.OutRate <= 0 {
 		t.Fatalf("头部统计不符: ok=%v outRate=%v cacheHit=%v want=%v", ok, got.OutRate, got.CacheHit, want)
+	}
+}
+
+// 没上报用量的轮次（取消/报错）不进平均值的分母：否则一轮 10 分钟的取消会
+// 把整条会话的速率稀释到接近 0，看起来像"统计时有时无"。
+func TestHeadStatsSkipsNoUsageTurns(t *testing.T) {
+	msgs := []Entry{
+		{Role: "assistant", In: 100, Out: 1000, Ms: 10000},                              // 10s → 100 tok/s
+		{Role: "assistant", Out: 0, Ms: 600000, Stopped: "cancelled"},                   // 取消轮：跳过
+		{Role: "assistant", In: 50, Out: 500, Ms: 10000, CacheRead: 900, CacheWrite: 0}, // 90%
+	}
+	rate, hit := headStats(msgs)
+	if rate < 74.9 || rate > 75.1 { // 1500 / 20s
+		t.Fatalf("取消轮不该进分母: outRate=%v", rate)
+	}
+	if want := 900.0 / 950.0; hit < want-1e-9 || hit > want+1e-9 { // 900/(900+0+50)
+		t.Fatalf("缓存命中率不符: %v want %v", hit, want)
+	}
+}
+
+// 白名单 agent（codebuddy-code）不给响应级 usage：用量从 usage_update._meta.usage
+// 取，同一次模型调用重复上报只算最后一次，多次调用求和。
+func TestMetaUsageFromUpdate(t *testing.T) {
+	f := &fakeAgent{usageNil: true}
+	msg := func(id string, prompt, hit, miss, completion int) map[string]any {
+		return map[string]any{
+			"size": 1000000, "used": prompt,
+			"_meta": map[string]any{
+				"codebuddy.ai/messageId": id,
+				"usage": map[string]any{
+					"prompt_tokens": prompt, "prompt_cache_hit_tokens": hit,
+					"prompt_cache_miss_tokens": miss, "completion_tokens": completion,
+				},
+			},
+		}
+	}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		time.Sleep(20 * time.Millisecond) // Ms 按毫秒取整，睡一下保证分母 > 0
+		fc.w.notify("session/update", update(sid, "usage_update", msg("m1", 1000, 900, 100, 50)))
+		fc.w.notify("session/update", update(sid, "usage_update", msg("m1", 1000, 900, 100, 80))) // 收尾更新
+		fc.w.notify("session/update", update(sid, "usage_update", msg("m2", 500, 0, 500, 20)))
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("好了。")}))
+		return "end_turn"
+	}
+	cfg := testConfig(t)
+	cfg.Agents = append(cfg.Agents, config.AcpAgentConfig{Name: "codebuddy-code", Command: "fake-bin"})
+	m := newTestManager(t, &cfg, nil, f)
+	ws := mustWorkspace(t, m)
+	th, err := m.CreateSession("codebuddy-code", ws.ID, "", "")
+	if err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+
+	res, err := m.Send(context.Background(), th.ID, "跑一下", nil, TurnHooks{})
+	if err != nil {
+		t.Fatalf("Send 失败: %v", err)
+	}
+	// m1 取最后一次（80），m2 另计 20；输入按未命中缓存的口径求和
+	if res.Out != 100 || res.In != 600 || res.CacheRead != 900 {
+		t.Fatalf("_meta 用量归集不符: in=%d out=%d cacheRead=%d", res.In, res.Out, res.CacheRead)
+	}
+	got, ok := m.Get(th.ID)
+	if !ok || got.OutRate <= 0 {
+		t.Fatalf("头部速率应可算: ok=%v rate=%v", ok, got.OutRate)
+	}
+	if want := 900.0 / 1500.0; got.CacheHit < want-1e-9 || got.CacheHit > want+1e-9 { // 900 命中 /(900+600 未命中)
+		t.Fatalf("缓存命中率不符: %v want %v", got.CacheHit, want)
 	}
 }
 
