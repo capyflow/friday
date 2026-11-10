@@ -2437,8 +2437,8 @@ func statusLog() (TurnHooks, func() []string) {
 		}
 }
 
-// npx 型命令第一次拉起要联网装包，握手按冷启动预算给；起过一次之后回落到
-// 常规值——不能为了第一次慢把每次等待都拉长（V-2）。
+// npx 型命令每次启动都要重新解析包（实测 30s+），热了也按冷启动预算给；
+// 直接跑绝对路径的命令才回落到常规握手值。
 func TestHandshakeBudgetCoversColdStart(t *testing.T) {
 	cfg := testConfig(t) // HandshakeTimeoutSeconds: 5
 	cfg.Agents = []config.AcpAgentConfig{
@@ -2462,8 +2462,8 @@ func TestHandshakeBudgetCoversColdStart(t *testing.T) {
 		t.Fatalf("内置条目应按常规握手值，实际 %v", got)
 	}
 	m.markWarm("fake")
-	if got := m.handshakeBudget(fakeCfg); got != 5*time.Second {
-		t.Fatalf("起过一次后应回落到握手值，实际 %v", got)
+	if got := m.handshakeBudget(fakeCfg); got != time.Duration(config.AcpColdStartHandshakeSeconds)*time.Second {
+		t.Fatalf("npx 型命令热了也要按冷启动预算（每次都要现解析包），实际 %v", got)
 	}
 	// 显式写了更大的覆盖值时不能被"回落"缩掉
 	big := fakeCfg

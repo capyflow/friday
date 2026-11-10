@@ -310,6 +310,31 @@ const current = computed(() => threads.value.find(t => t.id === currentId.value)
 // 内置会话没有会话级能力项（模型与权限都在全局设置里），头部要说明它是内置那条，
 // 而不是让"没有 chips"看着像清单没加载出来。
 const isBuiltinThread = computed(() => !!(current.value && isBuiltinAgent(current.value.agent)))
+// 内置 Friday 的权限是全局的（不走会话级 capabilities）：头部给一个直连全局设置的
+// 档位选择——切它等于改「设置 → 权限」，对主对话同样生效。
+const permModes = [
+  { id: 'confirm', name: '确认', hint: '危险操作/白名单外命令逐次网页批准' },
+  { id: 'acceptEdits', name: '免审编辑', hint: '写文件、改 MCP 配置免审批；执行命令仍需批准' },
+  { id: 'fullAccess', name: '全放行', hint: '全部免审批（毁灭性命令黑名单仍拦截）' },
+]
+const permMode = ref('')
+async function loadPermMode() {
+  if (permMode.value) return
+  try { permMode.value = (await api('GET', '/api/permissions')).mode || 'confirm' }
+  catch { permMode.value = 'confirm' } // 读不到就按默认档显示，不挡住头部
+}
+async function setPermMode(v) {
+  const prev = permMode.value
+  permMode.value = v
+  try {
+    await api('POST', '/api/permissions', { mode: v })
+    toast('权限模式已切到「' + (permModes.find(m => m.id === v)?.name || v) + '」（全局生效）')
+  } catch (e) {
+    permMode.value = prev
+    toast('切换权限失败：' + e.message, true)
+  }
+}
+watch(isBuiltinThread, b => { if (b) loadPermMode() }, { immediate: true })
 const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId.value) || null)
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
@@ -1369,9 +1394,16 @@ function previewImages(urls, at = 0) {
                  工作区名/运行状态/扩展目录的生效情况收进 title 悬停提示，不占版面。 -->
             <span class="meta" :title="[(currentWs ? currentWs.name + ' · ' : '') + current.cwd,
                                        stateLabel[current.state] || current.state, dirsNote].filter(Boolean).join(' · ')">
-              {{ current.agent }}<template v-if="isBuiltinThread">（内置，模型与权限走全局设置）</template> · {{ current.cwd }}
+              {{ current.agent }}<template v-if="isBuiltinThread">（内置）</template> · {{ current.cwd }}
               <template v-if="headRate"> · <span title="回答中：实时输出速度（滑动窗口估算，暂时没有文本增量时显示会话平均）；空闲：会话累计输出 ÷ 累计整轮耗时（含工具调用，跳过 agent 未上报用量的轮次）">↓{{ fmtRate(headRate) }} tok/s</span></template>
               <template v-if="current.cacheHit"> · <span title="缓存读 ÷（缓存读 + 缓存写 + 输入），只统计 agent 上报过缓存的轮次">缓存命中 {{ (current.cacheHit * 100).toFixed(1) }}%</span></template>
+              <!-- 内置 Friday 没有会话级能力项：权限是全局的那一份，这里直接给档位选择，
+                   切换即 POST /api/permissions（与「设置 → 权限」同一入口、同样全局生效）。 -->
+              <template v-if="isBuiltinThread && permMode"> · <select class="ag-perm" :value="permMode"
+                      aria-label="全局权限模式" title="全局生效：主对话与所有内置 Friday 会话共用一档"
+                      @change="setPermMode($event.target.value)">
+                <option v-for="m in permModes" :key="m.id" :value="m.id" :title="m.hint">{{ m.name }}</option>
+              </select></template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
               <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>
               <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>

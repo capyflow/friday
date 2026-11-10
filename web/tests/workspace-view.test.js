@@ -119,6 +119,11 @@ afterEach(() => { wrapper?.unmount(); wrapper = null; vi.unstubAllGlobals() })
 const json = v => JSON.parse(JSON.stringify(v === undefined ? null : v))
 async function server(method, url, body) {
   if (method === 'GET' && url === '/api/acp/threads') return json({ ...data })
+  if (method === 'GET' && url === '/api/permissions') return json({ mode: data.permMode || 'acceptEdits' })
+  if (method === 'POST' && url === '/api/permissions') {
+    data.permMode = body.mode
+    return json({ mode: body.mode })
+  }
   if (method === 'GET' && url === '/api/terminal') {
     return json({ enabled: true, local: true, active: 0, maxSessions: 2 })
   }
@@ -1614,9 +1619,24 @@ describe('工作区清单里的内置 Friday', () => {
     data.threads = [{ ...copy(thread), id: 'thB', agent: 'friday', title: '内置这条' }]
     await show()
     await pickSession('内置这条')
-    expect(headMeta()).toContain('friday（内置，模型与权限走全局设置）')
-    // 档位没下发的那句仍按既有形态出现（不新加一颗开关）
+    expect(headMeta()).toContain('friday（内置）')
+    // 内置没有会话级 capabilities，但权限这一项在头部直接可切（全局档）
+    expect(wrapper.get('[aria-label="全局权限模式"]').element.value).toBe('acceptEdits')
     expect(headMeta()).not.toContain('undefined')
+  })
+
+  it('内置会话头部切换全局权限档位：POST /api/permissions', async () => {
+    withBuiltin()
+    data.threads = [{ ...copy(thread), id: 'thB', agent: 'friday', title: '内置这条' }]
+    await show()
+    await pickSession('内置这条')
+    const sel = wrapper.get('[aria-label="全局权限模式"]')
+    expect(sel.element.value).toBe('acceptEdits')
+    await sel.setValue('confirm')
+    await flushPromises()
+    const post = api.mock.calls.find(([m, u]) => m === 'POST' && u === '/api/permissions')
+    expect(post[2]).toEqual({ mode: 'confirm' })
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('全局生效'))
   })
 
   it('新建工作区的默认目录仍取外部 agent 配的那份（内置那条没有默认目录）', async () => {

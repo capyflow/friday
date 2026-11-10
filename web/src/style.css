@@ -1562,6 +1562,9 @@ html[data-theme="dark"] .qbar-head .ib-btn.sm[aria-pressed="true"] { color: #FBB
 .ag-full { flex: none; }
 .ag-head-txt b { font-size: 14px; }
 .ag-head-txt .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-perm { font: inherit; font-size: 11.5px; color: var(--muted-fg); margin-left: 2px;
+           background: rgba(127, 127, 127, .1); border: 1px solid var(--border);
+           border-radius: 999px; padding: 1px 6px; cursor: pointer; }
 .ag-hint { margin: 10px 22px 0; padding: 8px 12px; border-radius: 10px;
            background: rgba(245, 158, 11, .1); font-size: 12px; }
 .ag-scroller { flex: 1; overflow-y: auto; padding: 20px 18px 8px; }

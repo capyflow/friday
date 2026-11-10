@@ -945,16 +945,18 @@ func coldStartLauncher(command string) bool {
 	return coldStartLaunchers[base]
 }
 
-// handshakeBudget 决定这次 initialize 给多久：包管理器型命令的首次拉起按冷启动预算给，
-// 同一 agent 成功起过之后就回落到常规握手值——不必为了第一次慢把每次等待都拉长。
+// handshakeBudget 决定这次 initialize 给多久。
+//
+// 包管理器型命令（npx 等）**每次都按冷启动预算给**：这类命令每次启动都要重新
+// 解析/校验包，实测 codex 走 npx 稳定 30~38s（直接 node 跑 adapter 只要 6s），
+// "成功起过一次就算热"的假设对它们不成立——261110 实测：重启后第一条会话
+// 拿到 90s 冷启动预算能起来，之后按 10s 常规值就全超时（日志里连着一串
+// "握手超时（agent 无响应）"）。其余命令保持"热了就回落"。
 func (m *Manager) handshakeBudget(agentCfg config.AcpAgentConfig) time.Duration {
 	c := m.cfgFn().Normalized()
 	base := time.Duration(c.HandshakeSeconds(agentCfg)) * time.Second
 	cold := time.Duration(config.AcpColdStartHandshakeSeconds) * time.Second
-	m.mu.Lock()
-	warm := m.warmAgents[agentCfg.Name]
-	m.mu.Unlock()
-	if warm || cold <= base || !coldStartLauncher(agentCfg.Command) {
+	if !coldStartLauncher(agentCfg.Command) || cold <= base {
 		return base
 	}
 	return cold
