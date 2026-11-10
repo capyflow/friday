@@ -29,9 +29,9 @@ type facadeStubTool struct {
 	call   func(ctx context.Context, args map[string]any) (string, error)
 }
 
-func (t *facadeStubTool) Name() string                  { return t.name }
-func (t *facadeStubTool) Description() string           { return t.desc }
-func (t *facadeStubTool) Schema() map[string]any        { return t.schema }
+func (t *facadeStubTool) Name() string           { return t.name }
+func (t *facadeStubTool) Description() string    { return t.desc }
+func (t *facadeStubTool) Schema() map[string]any { return t.schema }
 func (t *facadeStubTool) Call(ctx context.Context, args map[string]any) (string, error) {
 	return t.call(ctx, args)
 }
@@ -583,6 +583,53 @@ func TestFacadeExposesAllToolsByDefault(t *testing.T) {
 	if _, r := facadePostAuth(t, http.HandlerFunc(g.handle), tok2, "tools/call",
 		map[string]any{"name": "write_file"}); r.Error == nil || r.Error.Code != -32602 {
 		t.Fatalf("白名单外的工具应 -32602: %+v", r.Error)
+	}
+}
+
+// TestFacadeGuardBlocksDeniedTool 门面在 Tool.Call 之前先过权限层：拒绝的调用
+// 不落到 Registry，返回 isError 的指令化文本并记 denied。
+func TestFacadeGuardBlocksDeniedTool(t *testing.T) {
+	reg := vxagent.NewRegistry()
+	called := 0
+	_ = reg.Add(&facadeStubTool{
+		name: "exec_command", desc: "执行命令", schema: map[string]any{"type": "object"},
+		call: func(ctx context.Context, args map[string]any) (string, error) {
+			called++
+			return "跑了", nil
+		},
+	})
+	f := newFacade(func() *vxagent.Registry { return reg }, nil, false)
+	f.guard = func(_ context.Context, tool string, _ map[string]any) (bool, string) {
+		if tool == "exec_command" {
+			return false, "命中 deny 规则 \"rm -rf\""
+		}
+		return true, ""
+	}
+	h := http.HandlerFunc(f.handle)
+	srv, _ := f.ServerFor(nil, "tester")
+	tok := facadeHeaderToken(t, srv)
+
+	code, r := facadePostAuth(t, h, tok, "tools/call",
+		map[string]any{"name": "exec_command", "arguments": map[string]any{"command": "rm -rf /"}})
+	if code != http.StatusOK || r.Error != nil {
+		t.Fatalf("拒绝应走工具级错误而不是协议错误: code=%d err=%+v", code, r.Error)
+	}
+	if called != 0 {
+		t.Fatalf("被拒绝的调用不该落到工具实现，实际调用 %d 次", called)
+	}
+	var res struct {
+		IsError bool `json:"isError"`
+	}
+	_ = json.Unmarshal(r.Result, &res)
+	if !res.IsError {
+		t.Fatalf("应标 isError: %s", string(r.Result))
+	}
+	if !strings.Contains(string(r.Result), "deny") {
+		t.Fatalf("应把拒绝原因带回给 agent: %s", string(r.Result))
+	}
+	last := f.Status().Records[0]
+	if last.Outcome != "denied" || last.Tool != "exec_command" {
+		t.Fatalf("调用记录应为 denied: %+v", last)
 	}
 }
 

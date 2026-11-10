@@ -163,3 +163,22 @@ func describeCall(info vxagent.CallInfo) (summary, detail string) {
 	}
 	return info.Tool, logx.Truncate(string(b), 800)
 }
+
+// ToolGuard 返回一个"按当前权限层判定一次工具调用"的函数，供 MCP 工具门面在
+// 执行外部 agent 的 tools/call 前调用。
+//
+// 为什么要显式判定：权限 Checker 挂在框架的 Agent.execTool 上（vortexagent
+// agent/ask.go），而门面是直接调 Tool.Call 的——不判定就等于绕过 deny 黑名单
+// （毁灭性命令）与 exec 审批。门面里的调用没有 Brain 的上下文，所以这里按
+// 队列当前生效的 Checker 走同一套规则；confirm 档会同步等网页审批，门面自身
+// 的 12s 超时到点即取消审批请求（不会在 agent 放弃后继续执行）。
+func ToolGuard(q *approval.Queue) func(context.Context, string, map[string]any) (bool, string) {
+	return func(ctx context.Context, tool string, args map[string]any) (bool, string) {
+		v, ok := liveCheckers.Load(q)
+		if !ok { // 还没建过 Checker（Brain 未就绪）：不额外拦，保持旧行为
+			return true, ""
+		}
+		verdict, reason := v.(*vxagent.Checker).Check(ctx, vxagent.CallInfo{Tool: tool, Args: args})
+		return verdict == vxagent.VerdictAllow, reason
+	}
+}

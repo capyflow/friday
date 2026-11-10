@@ -505,6 +505,10 @@ func main() {
 	// regFn 与设置页共用同一份——MCP 工具清单变化触发 rebuild 后，门面下次
 	// tools/list 自动拿到新清单。
 	acpMgr.SetRegistry(regFn)
+	// 门面执行前按同一套权限层判一次：外部 agent 经 MCP 调 Friday 工具时，
+	// deny 黑名单、exec 白名单与网页审批照常生效（门面直接调 Tool.Call，
+	// 不经过框架 Agent 的检查点）。
+	acpMgr.SetToolGuard(robotagent.ToolGuard(approver))
 	defer acpMgr.Close()
 	if cfg.Acp.Enabled {
 		// 内置条目不算进配置里的 agent 数（它是代码给的，用户没配过）

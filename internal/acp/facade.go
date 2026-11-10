@@ -36,8 +36,8 @@ import (
 	"sync"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	vxagent "github.com/capyflow/vortexagent/agent"
+	acp "github.com/coder/acp-go-sdk"
 )
 
 const (
@@ -93,10 +93,10 @@ type FacadeStatus struct {
 	URL          string `json:"url,omitempty"`
 	// FallbackTools 是全局兜底白名单（逐 agent 的 allowedFacadeTools 覆盖它，
 	// 清单在 /api/acp/config 的 agents 里）。
-	FallbackTools []string `json:"fallbackTools"`
-	Lists         int      `json:"lists"`   // tools/list 累计
-	Calls         int      `json:"calls"`   // tools/call 累计
-	Rejects       int      `json:"rejects"` // 401 累计（无/错/过期 token）
+	FallbackTools []string          `json:"fallbackTools"`
+	Lists         int               `json:"lists"`   // tools/list 累计
+	Calls         int               `json:"calls"`   // tools/call 累计
+	Rejects       int               `json:"rejects"` // 401 累计（无/错/过期 token）
 	Grants        []FacadeGrantInfo `json:"grants"`
 	Records       []facadeRecord    `json:"records"` // 最新在前，至多 facadeRecordCap 条
 }
@@ -114,6 +114,10 @@ type Facade struct {
 	regFn        func() *vxagent.Registry
 	fallback     []string // 鉴权关闭时的固定白名单
 	authDisabled bool
+	// guard 在执行 tools/call 前按 Friday 权限层判定一次（注入自 manager 的
+	// SetToolGuard）。门面直接调 Tool.Call，绕过了框架 Agent 的权限检查点，
+	// 不判定就会让 exec_command 之类跳过 deny 黑名单与审批。
+	guard func(ctx context.Context, tool string, args map[string]any) (bool, string)
 
 	mu      sync.Mutex
 	ln      net.Listener
@@ -412,6 +416,21 @@ func (f *Facade) handleCall(ctx context.Context, raw json.RawMessage, grant *fac
 	start := time.Now()
 	cctx, cancel := context.WithTimeout(ctx, facadeCallTimeout)
 	defer cancel()
+	if f.guard != nil {
+		if allow, reason := f.guard(cctx, p.Name, p.Arguments); !allow {
+			if cctx.Err() == context.DeadlineExceeded {
+				f.record(grant.agent, p.Name, "timeout", "等待 Friday 审批超时")
+				return f.toolResult(fmt.Sprintf(
+					"Friday 工具 %s 需要人工审批，%s 内没有等到批准，已放弃本次调用（不会在之后补执行）。"+
+						"不要原样重试；改用你自己的工具，或如实告知调用方该步骤未完成。",
+					p.Name, facadeCallTimeout), true), nil
+			}
+			f.record(grant.agent, p.Name, "denied", reason)
+			return f.toolResult(fmt.Sprintf(
+				"Friday 拒绝执行 %s：%s。换用其它工具完成任务，或如实告知调用方该步骤未完成。",
+				p.Name, strings.TrimSpace(reason)), true), nil
+		}
+	}
 	out, err := t.Call(cctx, p.Arguments)
 	if cctx.Err() == context.DeadlineExceeded {
 		// C1/C9：超时不挂死连接，回指令化文本让对方自行决策。

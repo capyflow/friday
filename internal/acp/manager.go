@@ -413,8 +413,11 @@ type Manager struct {
 	warmAgents map[string]bool
 
 	// regFn 是工具注册表取用函数（SetRegistry 注入）：工具门面据此枚举与调用
-	// Friday 的只读工具。nil 时门面不注入（mcpServers 保持空数组）。
+	// Friday 的工具。nil 时门面不注入（mcpServers 保持空数组）。
 	regFn func() *vxagent.Registry
+	// guardFn 是工具门面执行前的权限判定（SetToolGuard 注入）：门面直接调
+	// Tool.Call，绕过了框架的权限检查点，不注入就等于放开 deny 黑名单与审批。
+	guardFn func(ctx context.Context, tool string, args map[string]any) (bool, string)
 	// facade 是工具门面（facade.go）：惰性起监听，兜底白名单/鉴权开关变化时
 	// 重建（逐会话的 token 白名单走 grant 表，不触发重建）。
 	// facadeMu 只护这三个字段——不与 m.mu 混用，避免建会话路径上的锁倒挂。
@@ -1496,6 +1499,13 @@ func (m *Manager) SetRegistry(fn func() *vxagent.Registry) {
 	m.regFn = fn
 }
 
+// SetToolGuard 注入门面执行前的权限判定（启动时调用一次）：外部 agent 经
+// 门面调用 Friday 工具时，先按当前权限层判一次（deny 黑名单、exec 白名单、
+// 网页审批），与 Brain 里的工具调用同一套规则。fn 为 nil 时不判定。
+func (m *Manager) SetToolGuard(fn func(ctx context.Context, tool string, args map[string]any) (bool, string)) {
+	m.guardFn = fn
+}
+
 // facadeWhitelistFor 返回某 agent 生效的门面白名单：agent 自带
 // allowedFacadeTools 优先，否则用全局 acp.facade.tools。
 func facadeWhitelistFor(cfg config.AcpConfig, agentCfg config.AcpAgentConfig) []string {
@@ -1561,6 +1571,7 @@ func (m *Manager) ensureFacade(cfg config.AcpConfig) *Facade {
 		m.facade.Close()
 	}
 	m.facade = newFacade(m.regFn, fallback, authOff)
+	m.facade.guard = m.guardFn
 	m.facadeFallback = append([]string(nil), fallback...)
 	m.facadeAuthOff = authOff
 	return m.facade
