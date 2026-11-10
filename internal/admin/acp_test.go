@@ -580,7 +580,7 @@ func (t *facadeProbeTool) Call(_ context.Context, _ map[string]any) (string, err
 }
 
 // TestAcpFacadeStatusEndpoint S5：设置页「工具门面」卡片的数据面——运行状态
-// + 可勾选工具目录（denied/inDefault 标记驱动勾选框渲染）。
+// + 可勾选工具目录（第一版默认全部暴露，目录里不再有"审批类不可勾选"的标记）。
 func TestAcpFacadeStatusEndpoint(t *testing.T) {
 	s, _, token, _, _ := manageTestServer(t)
 	m := acp.NewManager(func() config.AcpConfig { return config.AcpConfig{} }, nil,
@@ -617,15 +617,17 @@ func TestAcpFacadeStatusEndpoint(t *testing.T) {
 		seen[item["name"].(string)] = item
 	}
 	getTime := seen["get_time"]
-	if getTime == nil || getTime["denied"] != false || getTime["inDefault"] != true {
-		t.Fatalf("get_time 应可勾选且属默认清单: %v", getTime)
+	if getTime == nil {
+		t.Fatalf("get_time 应在目录里: %v", getTime)
 	}
 	if desc := getTime["description"]; desc != "报当前时间" {
 		t.Fatalf("description 未带上: %v", desc)
 	}
-	writeFile := seen["write_file"]
-	if writeFile == nil || writeFile["denied"] != true {
-		t.Fatalf("write_file 应标 denied（不可勾选）: %v", writeFile)
+	if _, has := getTime["denied"]; has {
+		t.Fatalf("审批类护栏已取消，不应再有 denied 字段: %v", getTime)
+	}
+	if writeFile := seen["write_file"]; writeFile == nil {
+		t.Fatalf("write_file 也应出现在目录里: %v", writeFile)
 	}
 
 	// 未登录应被拦（wrap 鉴权）。

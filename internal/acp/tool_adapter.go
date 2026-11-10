@@ -16,24 +16,22 @@ type facadeTool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
-// facadeToolsFromRegistry 按 allowed 过滤注册表，返回 MCP 工具清单（按工具名
-// 字典序）。审批类工具（facadeDeniedTools，C1 护栏）无条件剔除。reg 为 nil
-// （启动早期注册表未就绪）返回 nil——外部 agent 下轮重建会话时会拿到完整
-// 清单。schema 为空的工具兜底成空 object，避免 schema 缺失让对方 agent 的
-// 校验直接拒掉整个 server。
+// facadeToolsFromRegistry 返回 MCP 工具清单（按工具名字典序）。allowed 为空
+// 表示不过滤——注册表里的全部工具都给出（第一版口径）。reg 为 nil（启动早期
+// 注册表未就绪）返回 nil——外部 agent 下轮重建会话时会拿到完整清单。
+// schema 为空的工具兜底成空 object，避免 schema 缺失让对方 agent 的校验直接
+// 拒掉整个 server。
 func facadeToolsFromRegistry(reg *vxagent.Registry, allowed []string) []facadeTool {
-	if reg == nil || len(allowed) == 0 {
+	if reg == nil {
 		return nil
 	}
 	allow := map[string]bool{}
 	for _, n := range allowed {
-		if !facadeDeniedTools[n] {
-			allow[n] = true
-		}
+		allow[n] = true
 	}
 	out := make([]facadeTool, 0, len(allowed))
 	for _, name := range reg.Names() { // Names 已按字典序排序，输出顺序确定
-		if !allow[name] {
+		if len(allow) > 0 && !allow[name] {
 			continue
 		}
 		t, ok := reg.Get(name)
@@ -53,16 +51,23 @@ func facadeToolsFromRegistry(reg *vxagent.Registry, allowed []string) []facadeTo
 	return out
 }
 
-// resolveFacadeTool 返回白名单内的工具实例；不在白名单、是审批类工具或注册表
+// resolveFacadeTool 返回白名单内的工具实例（白名单为空 = 全部工具）；注册表
 // 没有该名字时返回 false（调用方翻译成「未知工具」的 JSON-RPC error）。
 func resolveFacadeTool(reg *vxagent.Registry, allowed []string, name string) (vxagent.Tool, bool) {
-	if reg == nil || facadeDeniedTools[name] {
+	if reg == nil {
 		return nil, false
 	}
-	for _, n := range allowed {
-		if n == name {
-			return reg.Get(name)
+	if len(allowed) > 0 {
+		found := false
+		for _, n := range allowed {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, false
 		}
 	}
-	return nil, false
+	return reg.Get(name)
 }

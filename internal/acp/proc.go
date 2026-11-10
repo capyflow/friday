@@ -27,6 +27,11 @@ import (
 	"github.com/capyflow/friday/internal/config"
 )
 
+// authMethodTimeout 是运行期预认证（authenticate）的等待上限。个别 agent
+// （qoder 1.1.x）收下请求却不回响应，只能到时放行；实测请求发出 0.5s 内
+// 服务端就已生效，1.5s 留足余量。
+const authMethodTimeout = 1500 * time.Millisecond
+
 // agentProc 是一个存活中的 agent 进程与它的连接。
 type agentProc struct {
 	agent string // 配置名
@@ -200,6 +205,19 @@ func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Dur
 		p.kill()
 		return nil, fmt.Errorf("agent %q 协议版本不支持：agent 应答 v%d，Friday 只讲 v%d（等待 ACP SDK 跟进）",
 			cfg.Name, initRes.ProtocolVersion, acp.ProtocolVersionNumber)
+	}
+	// 有的 agent（qoder 1.1.x）要求客户端在 initialize 后显式 authenticate，
+	// 才会在 session/new 里报完整模型清单；不调它虽能建会话，models 却是空的
+	// ——前端表现成「一直拿不到模型」。它收下请求却不回响应（实测等不到 result），
+	// 所以给短超时后放行：认证在服务端已生效，真正能不能干活仍由 session/new 判定。
+	if method := strings.TrimSpace(cfg.AuthMethod); method != "" {
+		actx, acancel := context.WithTimeout(context.Background(), authMethodTimeout)
+		_, aerr := p.conn.Authenticate(actx, acp.AuthenticateRequest{MethodId: method})
+		timedOut := actx.Err() != nil
+		acancel()
+		if aerr != nil && !timedOut {
+			log.Printf("[智能体] %s 预认证 %s 失败（继续建会话）：%v", cfg.Name, method, aerr)
+		}
 	}
 	p.loadSession = initRes.AgentCapabilities.LoadSession
 	// sessionCapabilities.additionalDirectories：'{}' 即表示吃这个字段（协议里

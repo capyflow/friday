@@ -539,14 +539,12 @@ func TestFacadeServeAcceptsRealRequests(t *testing.T) {
 	}
 }
 
-// TestFacadeDeniesApprovalTools S3 护栏：审批类工具即使被白名单显式点名，
-// 也不出现在 tools/list、tools/call 也到不了 Registry（C1/C2 结构性约束）。
-func TestFacadeDeniesApprovalTools(t *testing.T) {
-	f := newFacade(func() *vxagent.Registry { return newFacadeStubRegistry() },
-		[]string{"get_time", "write_file"}, false) // 白名单点名 write_file
+// TestFacadeExposesAllToolsByDefault 第一版口径：白名单为空 = 注册表里的工具
+// 全部暴露（审批类也在内），调用直接落到 Registry；显式白名单才过滤。
+func TestFacadeExposesAllToolsByDefault(t *testing.T) {
+	f := newFacade(func() *vxagent.Registry { return newFacadeStubRegistry() }, nil, false)
 	h := http.HandlerFunc(f.handle)
-
-	srv, ok := f.ServerFor([]string{"get_time", "write_file"}, "tester")
+	srv, ok := f.ServerFor(nil, "tester")
 	if !ok {
 		t.Fatal("ServerFor 失败")
 	}
@@ -559,20 +557,32 @@ func TestFacadeDeniesApprovalTools(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &res); err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if code != http.StatusOK || len(res.Tools) != 1 || res.Tools[0].Name != "get_time" {
-		t.Fatalf("审批类工具不应出现在清单: code=%d tools=%+v", code, res.Tools)
+	if code != http.StatusOK || len(res.Tools) != 3 {
+		t.Fatalf("空清单应返回全部工具: code=%d tools=%+v", code, res.Tools)
 	}
-	if _, r := facadePostAuth(t, h, tok, "tools/call",
-		map[string]any{"name": "write_file"}); r.Error == nil || r.Error.Code != -32602 {
-		t.Fatalf("审批类工具调用应 -32602: %+v", r.Error)
+	if code, r := facadePostAuth(t, h, tok, "tools/call",
+		map[string]any{"name": "write_file"}); code != http.StatusOK || r.Error != nil {
+		t.Fatalf("审批类工具也应可调用: code=%d err=%+v", code, r.Error)
 	}
 
-	// 关鉴权模式同样被兜底白名单的构造期过滤挡住。
+	// 显式白名单仍然过滤：只点名 get_time 时 write_file 不可见。
 	g := newFacade(func() *vxagent.Registry { return newFacadeStubRegistry() },
-		[]string{"write_file"}, true)
-	if _, r := facadePostAuth(t, http.HandlerFunc(g.handle), "", "tools/call",
+		[]string{"get_time"}, false)
+	srv2, _ := g.ServerFor([]string{"get_time"}, "tester")
+	tok2 := facadeHeaderToken(t, srv2)
+	_, resp2 := facadePostAuth(t, http.HandlerFunc(g.handle), tok2, "tools/list", nil)
+	var res2 struct {
+		Tools []facadeTool `json:"tools"`
+	}
+	if err := json.Unmarshal(resp2.Result, &res2); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(res2.Tools) != 1 || res2.Tools[0].Name != "get_time" {
+		t.Fatalf("显式白名单应过滤: %+v", res2.Tools)
+	}
+	if _, r := facadePostAuth(t, http.HandlerFunc(g.handle), tok2, "tools/call",
 		map[string]any{"name": "write_file"}); r.Error == nil || r.Error.Code != -32602 {
-		t.Fatalf("关鉴权模式审批类工具仍应被拒: %+v", r.Error)
+		t.Fatalf("白名单外的工具应 -32602: %+v", r.Error)
 	}
 }
 
@@ -653,7 +663,7 @@ func TestFacadeStatusViaManager(t *testing.T) {
 	if len(st.Grants) != 1 || st.Grants[0].Agent != "fake" {
 		t.Fatalf("授权应归因到 fake: %+v", st.Grants)
 	}
-	if len(st.FallbackTools) != len(config.FacadeDefaultTools) {
-		t.Fatalf("兜底白名单应回显: %+v", st.FallbackTools)
+	if len(st.FallbackTools) != 0 {
+		t.Fatalf("兜底清单应为空（= 全部工具）: %+v", st.FallbackTools)
 	}
 }

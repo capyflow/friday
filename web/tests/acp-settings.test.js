@@ -223,9 +223,9 @@ const FACADE = {
     ],
   },
   tools: [
-    { name: 'read_file', description: '读文件', denied: false, inDefault: true },
-    { name: 'list_files', description: '列目录', denied: false, inDefault: true },
-    { name: 'write_file', description: '写文件', denied: true, inDefault: false },
+    { name: 'read_file', description: '读文件' },
+    { name: 'list_files', description: '列目录' },
+    { name: 'write_file', description: '写文件' },
   ],
 }
 
@@ -233,9 +233,9 @@ describe('设置 → 智能体 → 工具门面', () => {
   beforeEach(() => {
     api.mockImplementation(async (method, url) => {
       if (method === 'GET' && url === '/api/acp/config') {
-        // 后端回的是归一化后的值：facade.tools 为空会补默认只读清单，这里照实给。
+        // 后端回的是归一化后的值：白名单为空 = 全部工具（默认形态）。
         return { acp: { enabled: false,
-          facade: { enabled: true, disableAuth: false, tools: ['read_file', 'list_files'] },
+          facade: { enabled: true, disableAuth: false, tools: [] },
           agents: [{ name: 'minimax', command: 'minimax-acp' }] } }
       }
       if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
@@ -262,20 +262,16 @@ describe('设置 → 智能体 → 工具门面', () => {
     expect(rows[1].text()).toContain('minimax')
   })
 
-  it('审批类工具的勾选框禁用并带标记，勾不上', async () => {
+  it('默认全部工具：目录里的每一项都勾上（白名单为空 = 不过滤）', async () => {
     await show()
-    const box = facadeBox('write_file')
-    expect(box.find('input').attributes('disabled')).toBeDefined()
-    expect(box.text()).toContain('审批类')
-    await box.find('input').setValue(true) // disabled，事件不应改状态
-    const saved = await saveAndCapture()
-    expect(saved.acp.facade.tools).not.toContain('write_file')
+    for (const name of ['read_file', 'list_files', 'write_file']) {
+      expect(facadeBox(name).find('input').element.checked).toBe(true)
+    }
   })
 
-  it('勾选全局清单随 facade.tools 保存；agent 卡片勾选落到 allowedFacadeTools，未勾的 agent 为空数组', async () => {
+  it('取消一个工具 → 展开成全量减一的白名单；agent 卡片勾选落到 allowedFacadeTools', async () => {
     await show()
-    await facadeBox('read_file').find('input').setValue(true)
-    await facadeBox('list_files').find('input').setValue(true)
+    await facadeBox('write_file').find('input').setValue(false)
     // 展开 agent 卡片，勾一个逐 agent 白名单。
     await wrapper.get('.acp-agent-toggle').trigger('click')
     const agentCard = wrapper.get('.acp-agent')
@@ -288,11 +284,11 @@ describe('设置 → 智能体 → 工具门面', () => {
     expect(saved.acp.facade.disableAuth).toBe(false)
   })
 
-  it('全局清单全部取消 = 保存空数组（后端回默认只读清单）', async () => {
-    await show() // config 无 facade 段 → 默认清单回显；目录里 read_file/list_files 应勾上
-    expect(facadeBox('read_file').find('input').element.checked).toBe(true)
-    await facadeBox('read_file').find('input').setValue(false)
-    await facadeBox('list_files').find('input').setValue(false)
+  it('全部取消 = 空数组（后端按"全部工具"解释）', async () => {
+    await show()
+    for (const name of ['read_file', 'list_files', 'write_file']) {
+      await facadeBox(name).find('input').setValue(false)
+    }
     const saved = await saveAndCapture()
     expect(saved.acp.facade.tools).toEqual([])
   })

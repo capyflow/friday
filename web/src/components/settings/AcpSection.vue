@@ -50,8 +50,8 @@ function show(t, ok) {
 // ---------- 工具门面 ----------
 
 // facadeStatus 是运行态快照（url/计数/活授权/最近调用）；facadeTools 是注册表
-// 全目录（带 denied 审批类护栏标记与 inDefault 默认清单标记），全局清单和逐
-// agent 白名单的勾选框都靠它渲染。
+// 全目录，全局清单和逐 agent 白名单的勾选框都靠它渲染。白名单为空 = 全部工具
+// （第一版口径），所以全局那组在空清单时显示为全选。
 const facadeStatus = ref(null)
 const facadeTools = ref([])
 const facadeLoading = ref(false)
@@ -63,6 +63,18 @@ async function loadFacade() {
     facadeStatus.value = r.status || null
     facadeTools.value = r.tools || []
   } catch { /* 门面接口失败不阻塞主配置 */ } finally { facadeLoading.value = false }
+}
+
+// 全局清单为空 = 全部工具：勾选框据此显示全选，取消某一个时先展开成全量再从
+// 里面剔除（否则"取消"会变成"什么都别用"）。
+function globalToolChecked(name) {
+  const list = cfg.facade.tools
+  return list.length === 0 || list.includes(name)
+}
+function toggleGlobalTool(name) {
+  const list = cfg.facade.tools
+  if (list.length === 0) list.push(...facadeTools.value.map(t => t.name))
+  toggleIn(list, name)
 }
 
 // toggleIn 勾选/取消一个工具名（数组来自 reactive 树，原地改即可触发更新）。
@@ -84,7 +96,7 @@ function shortTime(iso) {
 function blankAgent() {
   return { name: '', command: '', argsText: '', envText: '', workspace: '', open: false,
            enabled: true, handshakeTimeoutSeconds: 0, sessionTimeoutSeconds: 0,
-           degradeResume: false, oneSessionPerProcess: 'auto', version: '', testing: false, facadeTools: [] }
+           authMethod: '', degradeResume: false, oneSessionPerProcess: 'auto', version: '', testing: false, facadeTools: [] }
 }
 // launchText 折叠态摘要：按真实启动形态拼一行（命令 + 空格分隔的参数），
 // 一眼看出是哪个 agent、怎么起的。
@@ -104,6 +116,9 @@ function toAgent(a) {
     enabled: a.enabled,
     handshakeTimeoutSeconds: Math.max(0, Math.floor(Number(a.handshakeTimeoutSeconds) || 0)),
     sessionTimeoutSeconds: Math.max(0, Math.floor(Number(a.sessionTimeoutSeconds) || 0)),
+    // 握手后要显式调用的 ACP 认证方法 id（如 qoder 的 qodercli-login）。
+    // 不填就保持旧行为：只握手、不认证。
+    authMethod: (a.authMethod || '').trim(),
     degradeResume: a.degradeResume,
     // 三态：auto = 跟随全局/按 agent 判定；on = 独占；off = 共享。
     oneSessionPerProcess: triToBool(a.oneSessionPerProcess),
@@ -249,6 +264,7 @@ async function load() {
       oneSessionPerProcess: boolToTri(x.oneSessionPerProcess),
       handshakeTimeoutSeconds: x.handshakeTimeoutSeconds || 0,
       sessionTimeoutSeconds: x.sessionTimeoutSeconds || 0,
+      authMethod: x.authMethod || '',
       version: x.version || '',
       facadeTools: [...(x.allowedFacadeTools || [])],
     }))
@@ -337,14 +353,14 @@ onMounted(load)
         <span v-if="facadeStatus.grants?.length">活授权：{{ facadeStatus.grants.map(g => g.agent || '（关鉴权）').join('、') }}</span>
       </div>
       <div class="acp-facade-tools">
-        <label v-for="t in facadeTools" :key="t.name" class="acp-check" :class="{ off: t.denied }">
-          <input type="checkbox" :checked="cfg.facade.tools.includes(t.name)" :disabled="t.denied"
-                 @change="toggleIn(cfg.facade.tools, t.name)">
-          <span>{{ t.name }}<i v-if="t.denied" class="acp-tool-tag">审批类</i></span>
+        <label v-for="t in facadeTools" :key="t.name" class="acp-check">
+          <input type="checkbox" :checked="globalToolChecked(t.name)"
+                 @change="toggleGlobalTool(t.name)">
+          <span>{{ t.name }}</span>
         </label>
         <p v-if="!facadeTools.length" class="meta">工具目录未就绪（Friday 大脑还没起工具），稍后点「刷新状态」。</p>
       </div>
-      <p class="meta acp-coldnote">全部取消勾选 = 恢复默认只读清单；逐 agent 可在其卡片里单独覆盖（留空 = 用这里的全局清单）。</p>
+      <p class="meta acp-coldnote">留空 = 全部工具（默认）；取消其中某几个才生成白名单。逐 agent 可在其卡片里单独覆盖（不勾 = 沿用这里的全局清单）。</p>
       <table v-if="facadeStatus?.records?.length" class="acp-facade-records" aria-label="最近调用">
         <thead><tr><th>时间</th><th>agent</th><th>工具</th><th>结果</th><th>详情</th></tr></thead>
         <tbody>
@@ -422,6 +438,8 @@ onMounted(load)
             <label><span>握手超时覆盖（秒，0=全局）</span><input v-model="a.handshakeTimeoutSeconds" type="number" min="0"></label>
             <label><span>建会话超时覆盖（秒，0=全局）</span><input v-model="a.sessionTimeoutSeconds" type="number" min="0"
                     title="该 agent 首启列 skill 表/初始化很慢时调大这一项，不必动全局"></label>
+            <label><span>预认证方法（可选）</span><input v-model="a.authMethod" placeholder="qodercli-login"
+                    title="握手后显式调用的 ACP authenticate 方法 id，留空则不调用。qoder 不调它时模型清单为空"></label>
           </div>
           <label class="acp-env"><span>额外环境变量（每行 K=V）</span>
             <textarea v-model="a.envText" rows="2" placeholder="API_KEY=sk-..."></textarea></label>
@@ -434,10 +452,10 @@ onMounted(load)
                          aria-label="每会话独立进程"></SelectBox></label>
           </div>
           <div class="acp-facade-agent">
-            <span class="acp-facade-agent-label">Friday 工具白名单（留空 = 用全局清单；审批类工具不可选）</span>
+            <span class="acp-facade-agent-label">Friday 工具白名单（不勾 = 沿用全局清单）</span>
             <div class="acp-facade-tools">
-              <label v-for="t in facadeTools" :key="t.name" class="acp-check" :class="{ off: t.denied }">
-                <input type="checkbox" :checked="a.facadeTools.includes(t.name)" :disabled="t.denied"
+              <label v-for="t in facadeTools" :key="t.name" class="acp-check">
+                <input type="checkbox" :checked="a.facadeTools.includes(t.name)"
                        @change="toggleIn(a.facadeTools, t.name)">
                 <span>{{ t.name }}</span>
               </label>
@@ -504,9 +522,6 @@ onMounted(load)
 .acp-facade-status { display: flex; gap: 14px; flex-wrap: wrap; margin: 0; font-size: 11.5px; }
 .acp-facade-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                     gap: 6px 14px; }
-.acp-facade-tools .acp-check.off { opacity: .55; cursor: not-allowed; }
-.acp-tool-tag { font-style: normal; margin-left: 6px; font-size: 10.5px; padding: 1px 6px;
-                border-radius: 999px; background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
 .acp-facade-records { width: 100%; border-collapse: collapse; font-size: 12px; }
 .acp-facade-records th { text-align: left; font-weight: 600; font-size: 11px;
                          color: var(--muted-fg); padding: 4px 8px 4px 0; }

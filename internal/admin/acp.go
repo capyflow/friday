@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,25 +37,19 @@ func (s *Server) handleAcpConfigGet(ctx *vhttp.Context) error {
 // handleAcpFacadeStatus 返回工具门面的运行状态、调用记录与可勾选的工具目录
 // （设置页「工具门面」卡片：状态 + 最近调用列表 + 按 agent 勾选的勾选框数据）。
 // 白名单的读写在 /api/acp/config（facade 段与 agents[].allowedFacadeTools 已随
-// 结构体往返）；本接口只补运行态与目录。工具目录带 denied（审批类护栏拒绝，
-// 不可勾选）与 inDefault（只读默认清单）标记，前端据此渲染。
+// 结构体往返）；本接口只补运行态与目录。默认（白名单为空）暴露全部工具，前端
+// 把"一个都没勾"渲染成全选。
 func (s *Server) handleAcpFacadeStatus(ctx *vhttp.Context) error {
 	st := s.acp.FacadeStatus()
 	type facadeToolItem struct {
 		Name        string `json:"name"`
 		Description string `json:"description,omitempty"`
-		Denied      bool   `json:"denied"`
-		InDefault   bool   `json:"inDefault"`
 	}
 	var tools []facadeToolItem
 	if s.regFn != nil {
 		if reg := s.regFn(); reg != nil {
 			for _, name := range reg.Names() { // 字典序，输出稳定
-				item := facadeToolItem{
-					Name:      name,
-					Denied:    acp.FacadeToolDenied(name),
-					InDefault: slices.Contains(config.FacadeDefaultTools, name),
-				}
+				item := facadeToolItem{Name: name}
 				if t, ok := reg.Get(name); ok {
 					item.Description = t.Description()
 				}

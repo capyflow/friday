@@ -101,36 +101,12 @@ type FacadeStatus struct {
 	Records       []facadeRecord    `json:"records"` // 最新在前，至多 facadeRecordCap 条
 }
 
-// facadeDeniedTools 结构性拒绝经门面暴露的工具：它们内部依赖 Friday 的审批
-// 队列/权限层（confirm 模式下同步等人），一旦被外部 agent 调用必然撞 C1 的
-// 15s 上限——审批卡弹着、agent 早已超时离开（docs/ACP-AGENTS.md C1/C2 的实测
-// 教训）。写文件/执行命令类需求由外部 agent 用自己的工具走 ACP 原生
-// request_permission 审批卡（一期 P1-D 已上线），不经门面；两拍审批 + 唤醒轮
-// 属作业模型范围（M6 §5.1），对话空间不做。见 docs/AGENT-TOOL-INJECTION.md §3.4。
-var facadeDeniedTools = map[string]bool{
-	"write_file":   true,
-	"edit_file":    true,
-	"exec_command": true,
-	"mcp_edit":     true,
-}
-
-// FacadeToolDenied 返回该工具是否属审批类（门面结构性拒绝暴露，C1 护栏）。
-// admin 设置页渲染勾选框用。
-func FacadeToolDenied(name string) bool { return facadeDeniedTools[name] }
-
-// facadeFilterDenied 从白名单里剔除拒绝暴露的工具，返回清洗后的清单与被剔除
-// 的名字（发 grant 前调用；日志最多每会话一条，不刷屏）。
-func facadeFilterDenied(allowed []string) (clean []string, dropped []string) {
-	clean = make([]string, 0, len(allowed))
-	for _, n := range allowed {
-		if facadeDeniedTools[n] {
-			dropped = append(dropped, n)
-			continue
-		}
-		clean = append(clean, n)
-	}
-	return clean, dropped
-}
+// 第一版口径：注册表里的工具全部暴露给外部 agent（白名单为空 = 不过滤）。
+// 审批类工具（write_file/edit_file/mcp_edit/exec_command）也在其中：它们内部
+// 走 Friday 的审批队列，confirm 档下会弹卡，等不到人点就撞门面的
+// facadeCallTimeout 上限、按工具错误返回；审批请求跟着 ctx 一起取消，不会在
+// agent 放弃之后继续执行。要收紧就在 acp.facade.tools / allowedFacadeTools
+// 里显式列名字。
 
 // Facade 把 Friday 注册表以 MCP server 形态暴露给外部 agent。惰性起监听：
 // 只有第一个外部 agent 要建会话时才占端口，内置 Friday 会话完全不经过它。
@@ -154,14 +130,9 @@ type Facade struct {
 // newFacade 构造门面（不立即监听）。兜底白名单先过一遍 C1 护栏（审批类工具
 // 无条件剔除）；authDisabled=true 时忽略发 token 流程，一律按该兜底清单放行。
 func newFacade(regFn func() *vxagent.Registry, fallbackAllowed []string, authDisabled bool) *Facade {
-	clean, dropped := facadeFilterDenied(fallbackAllowed)
-	if len(dropped) > 0 {
-		log.Printf("[MCP门面] 兜底白名单含审批类工具 %s，已剔除（这类工具不能经门面暴露，见 C1/C2）",
-			joinNames(dropped))
-	}
 	return &Facade{
 		regFn:        regFn,
-		fallback:     clean,
+		fallback:     append([]string{}, fallbackAllowed...),
 		authDisabled: authDisabled,
 		grants:       map[string]*facadeGrant{},
 		nonce:        randHex(6),
@@ -257,14 +228,8 @@ func (f *Facade) ensureListen() (string, bool) {
 	return f.url, true
 }
 
-// issueGrant 签发绑定 agent 与白名单的会话 token；剔除拒绝暴露的工具（C1
-// 护栏），顺手清掉过期授权。
+// issueGrant 签发绑定 agent 与白名单的会话 token（白名单为空 = 全部工具）。
 func (f *Facade) issueGrant(allowed []string, agent string) (string, bool) {
-	clean, dropped := facadeFilterDenied(allowed)
-	if len(dropped) > 0 {
-		log.Printf("[MCP门面] 白名单含审批类工具 %s，已剔除（这类工具不能经门面暴露，见 C1/C2）",
-			joinNames(dropped))
-	}
 	tok := randHex(16)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -276,7 +241,7 @@ func (f *Facade) issueGrant(allowed []string, agent string) (string, bool) {
 	}
 	f.grants[tok] = &facadeGrant{
 		agent:   agent,
-		allowed: clean,
+		allowed: append([]string{}, allowed...),
 		expires: now.Add(facadeTokenTTL),
 	}
 	return tok, true
@@ -524,12 +489,18 @@ func (f *Facade) toolResult(text string, isError bool) map[string]any {
 }
 
 // facadeInstructions 是 initialize 的 instructions 字段：告诉对方 agent 这台
-// MCP server 的边界（只读、无审批），避免它对写类能力做无谓尝试。
+// MCP server 的边界。白名单为空时说明是全部工具；审批类工具可能因等不到
+// 人工审批而超时，别原样重试。
 func facadeInstructions(allowed []string) string {
+	tools := "Friday 的全部工具"
+	if len(allowed) > 0 {
+		tools = "Friday 的工具（" + joinNames(allowed) + "）"
+	}
 	return fmt.Sprintf(
-		"Friday 工具门面：只提供 Friday 的只读工具（%s）。"+
-			"写入文件、执行命令、修改待办/记忆等能力未开放——那类需求请转告调用方走 Friday 对话流程。",
-		joinNames(allowed))
+		"Friday 工具门面：提供 %s。"+
+			"其中写文件、执行命令、改记忆/待办等操作可能要先在 Friday 侧人工审批；"+
+			"若返回超时或被拒，不要原样重试，改用你自己的工具完成，或如实告知调用方。",
+		tools)
 }
 
 func joinNames(names []string) string {

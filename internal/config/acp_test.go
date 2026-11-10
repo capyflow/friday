@@ -251,20 +251,20 @@ func TestAcpFacadeDefaults(t *testing.T) {
 	if !n.FacadeEnabled() {
 		t.Fatal("门面缺省应开启")
 	}
-	if len(n.FacadeTools()) != len(FacadeDefaultTools) || n.FacadeTools()[0] != "read_file" {
-		t.Fatalf("缺省白名单应为只读清单: %v", n.FacadeTools())
+	if len(n.FacadeTools()) != 0 {
+		t.Fatalf("缺省应为空清单（= 全部工具，不过滤）: %v", n.FacadeTools())
 	}
 	off := false
 	d := AcpConfig{Facade: &AcpFacadeConfig{Enabled: &off}}.Normalized()
 	if d.FacadeEnabled() {
 		t.Fatal("显式关闭应生效")
 	}
-	if len(d.Facade.Tools) != len(FacadeDefaultTools) {
-		t.Fatalf("显式关闭但未配清单时仍应补默认清单: %v", d.Facade.Tools)
+	if len(d.Facade.Tools) != 0 {
+		t.Fatalf("显式关闭也不该补默认清单: %v", d.Facade.Tools)
 	}
-	// 未归一化的裸配置同样回退默认清单（门面读数不依赖调用方先 Normalized）。
-	if got := (AcpConfig{}).FacadeTools(); len(got) != len(FacadeDefaultTools) {
-		t.Fatalf("裸配置应回退默认清单: %v", got)
+	// 未归一化的裸配置同样为空清单（门面读数不依赖调用方先 Normalized）。
+	if got := (AcpConfig{}).FacadeTools(); len(got) != 0 {
+		t.Fatalf("裸配置应为空清单: %v", got)
 	}
 }
 
@@ -316,8 +316,8 @@ func TestUpdateAcpFacadeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("回读失败: %v", err)
 	}
-	if !cfg2.Acp.FacadeEnabled() || len(cfg2.Acp.FacadeTools()) != len(FacadeDefaultTools) {
-		t.Fatalf("默认形态回读应回到缺省开启 + 只读清单: %+v", cfg2.Acp.Facade)
+	if !cfg2.Acp.FacadeEnabled() || len(cfg2.Acp.FacadeTools()) != 0 {
+		t.Fatalf("默认形态回读应回到缺省开启 + 空清单: %+v", cfg2.Acp.Facade)
 	}
 }
 

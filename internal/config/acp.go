@@ -46,16 +46,6 @@ func BuiltinAgent() AcpAgentConfig {
 	return AcpAgentConfig{Name: BuiltinAgentName, Builtin: true}
 }
 
-// FacadeDefaultTools 是工具门面的默认白名单：只读类工具。外部 agent 通过
-// MCP 门面只能调用这里列出的名字；写类（write_file/edit_file/mcp_edit）、
-// 命令执行（exec_command）、记忆与待办的增删改一律不进默认清单
-// （docs/AGENT-TOOL-INJECTION.md §3.2）。
-var FacadeDefaultTools = []string{
-	"read_file", "list_files",
-	"recall", "list_todos", "list_notes", "list_tasks",
-	"get_time", "web_search", "web_fetch",
-}
-
 // AcpConfig 是智能体层配置（config.yaml acp 段）。
 type AcpConfig struct {
 	// Enabled 总开关（默认关闭）。关闭时不拉起任何 agent，thread 接口拒绝新消息。
@@ -86,7 +76,7 @@ type AcpConfig struct {
 type AcpFacadeConfig struct {
 	// Enabled 门面开关（缺省开启）。关闭时 session/new 的 mcpServers 回到空数组。
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// Tools 暴露给外部 agent 的工具白名单（空 = 用 FacadeDefaultTools）。
+	// Tools 暴露给外部 agent 的工具白名单（空 = 全部工具，不过滤）。
 	// 各 agent 可用 allowedFacadeTools 覆盖（逐 agent 收紧或放宽）。
 	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
 	// DisableAuth 关掉门面的 Bearer token 鉴权（缺省开启鉴权）。逃生口：若某家
@@ -106,6 +96,11 @@ type AcpAgentConfig struct {
 	Args []string `yaml:"args,omitempty" json:"args,omitempty"`
 	// Env 额外环境变量（在继承进程环境的基础上追加）。
 	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	// AuthMethod 握手后要显式调用的 ACP 认证方法 id（空 = 不调用）。
+	// 个别 agent（qoder）把「登录态」与「模型清单」绑在 authenticate 上：不调它，
+	// session/new 照样成功，但 models / model 这个 config option 全空——前端表现
+	// 成「拿不到任何模型」。填 initialize 响应里 authMethods[].id（如 qodercli-login）。
+	AuthMethod string `yaml:"authMethod,omitempty" json:"authMethod,omitempty"`
 	// Workspace 默认工作目录（可空）：创建 thread 时预填，可改。
 	Workspace string `yaml:"workspace,omitempty" json:"workspace,omitempty"`
 	// Enabled 启用开关（缺省启用）。
@@ -153,9 +148,6 @@ func (c AcpConfig) Normalized() AcpConfig {
 	if c.Facade == nil {
 		c.Facade = &AcpFacadeConfig{}
 	}
-	if len(c.Facade.Tools) == 0 {
-		c.Facade.Tools = append([]string(nil), FacadeDefaultTools...)
-	}
 	c.Agents = withBuiltinAgent(c.Agents)
 	return c
 }
@@ -170,12 +162,13 @@ func (c AcpConfig) FacadeAuthDisabled() bool {
 	return c.Facade != nil && c.Facade.DisableAuth != nil && *c.Facade.DisableAuth
 }
 
-// FacadeTools 返回门面白名单（Normalized 后必有值；未归一化的裸配置回退默认清单）。
+// FacadeTools 返回门面白名单。空清单表示「不过滤」——注册表里的全部工具都
+// 暴露给外部 agent（第一版口径）；非空则只放列出的工具名。
 func (c AcpConfig) FacadeTools() []string {
-	if c.Facade != nil && len(c.Facade.Tools) > 0 {
-		return c.Facade.Tools
+	if c.Facade == nil {
+		return nil
 	}
-	return FacadeDefaultTools
+	return c.Facade.Tools
 }
 
 // withBuiltinAgent 把内置 Friday 排在 agent 清单最前：工作区新建会话时它就在那里，
@@ -332,8 +325,8 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 	if cfg.ShowThought != nil && !*cfg.ShowThought {
 		boolPair(section, "showThought", false)
 	}
-	// 工具门面：只在偏离代码默认时落盘（显式关闭、白名单与 FacadeDefaultTools
-	// 不同、或显式关鉴权），默认形态不写进 config.yaml，与「0 值沿用全局」的段落
+	// 工具门面：只在偏离代码默认时落盘（显式关闭、显式白名单、或显式关鉴权），
+	// 默认形态（全部工具、鉴权开启）不写进 config.yaml，与「0 值沿用全局」的段落
 	// 风格一致。
 	if cfg.Facade != nil {
 		fac := &yaml.Node{Kind: yaml.MappingNode}
@@ -343,7 +336,7 @@ func UpdateAcp(path string, cfg AcpConfig) error {
 		if cfg.Facade.DisableAuth != nil && *cfg.Facade.DisableAuth {
 			boolPair(fac, "disableAuth", true)
 		}
-		if len(cfg.Facade.Tools) > 0 && !sameStrings(cfg.Facade.Tools, FacadeDefaultTools) {
+		if len(cfg.Facade.Tools) > 0 {
 			fac.Content = append(fac.Content,
 				&yaml.Node{Kind: yaml.ScalarNode, Value: "tools"}, strSeqNode(cfg.Facade.Tools))
 		}
@@ -456,22 +449,4 @@ func strSeqNode(values []string) *yaml.Node {
 			&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
 	}
 	return seq
-}
-
-// sameStrings 判断两个切片作为集合是否相同（排序后逐项比较；白名单场景下
-// 重复项没有语义，顺序也不重要）。
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	sa := append([]string(nil), a...)
-	sb := append([]string(nil), b...)
-	sort.Strings(sa)
-	sort.Strings(sb)
-	for i := range sa {
-		if sa[i] != sb[i] {
-			return false
-		}
-	}
-	return true
 }

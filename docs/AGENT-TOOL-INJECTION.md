@@ -10,6 +10,14 @@
 > （写类工具不进门面、默认只读 + 按 agent opt-in）见 §五、§六。
 > S5 的 admin API 已就位（`GET /api/acp/facade`：状态 + 调用记录 + 可勾选工具目录），
 > 设置页 Vue 面板未接线；两拍审批 + 唤醒轮留给作业模型二期。
+>
+> **2026-11-10 变更（第一版口径，覆盖下方"默认只读 / 结构性拒绝审批类"的结论）：**
+> 门面默认**暴露注册表里的全部工具**——`acp.facade.tools` 为空即不过滤，
+> `facadeDeniedTools` 与 `FacadeToolDenied` 已删除；要收紧就在
+> `acp.facade.tools` / `allowedFacadeTools` 里显式列名字。审批类工具（写文件、
+> 执行命令、改记忆/待办）在 confirm 档下仍会弹 Friday 的审批卡，等不到人点就撞
+> 门面的 12s 上限并按工具错误返回；审批请求跟着 ctx 一起取消，不会在 agent
+> 放弃之后继续执行。
 
 ## 〇、一句话结论
 
