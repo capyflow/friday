@@ -1,15 +1,19 @@
 <script setup>
 // 移动端对话视图：主会话（/api/chat）与智能体线程（/api/acp/threads/:id/chat）
-// 共用这一个组件，靠 kind 区分——SSE 帧协议、块状态机（blocks.js）与时间线渲染
+// 共用这一个组件，靠 kind 区分——事件协议、块状态机（blocks.js）与时间线渲染
 // （TimelineBlocks）都是桌面端原样复用，只换一层数字端版式。
+//
+// 事件驱动（2026-11-11 起）：不再自己那条 SSE 连接消费帧，而是订阅
+// /api/events/stream 统一收事件——与桌面端走同一条渲染路径，所以移动端问完
+// 桌面端那边也能实时看见，桌面端问完这里也一样。
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { toast } from '../store.js'
-import {
-  closeRunningTools, finishRound, pushText, pushThinking, pushToolStep, turnTotalText,
-} from '../blocks.js'
+import { turnTotalText } from '../blocks.js'
 import { feedRate } from '../speed.js'
+import { subscribe, clientId, deviceLabel } from '../events.js'
+import { applyEvent } from '../turnevents.js'
 import TimelineBlocks from '../components/TimelineBlocks.vue'
 
 const props = defineProps({
@@ -30,6 +34,9 @@ const fileInput = ref(null)
 
 let controller = null
 let loadGen = 0
+let unsub = null            // 事件订阅句柄
+let myTurnId = ''           // 本端最近一次提交的 turnId：停止时按它精确操作
+const device = deviceLabel() // 设备标签：另一端看到消息时标「来自手机端」
 
 const canSend = () => !streaming.value && (input.value.trim() || attachments.value.length)
 
@@ -77,8 +84,79 @@ async function load() {
   scrollBottom()
 }
 
-onMounted(load)
-watch(() => props.kind === 'thread' && props.thread && props.thread.id, () => load())
+onMounted(() => {
+  load()
+  startEvents()
+})
+watch(() => props.kind === 'thread' && props.thread && props.thread.id, () => {
+  load()
+  startEvents()
+})
+
+/* ---------- 事件订阅（双端同步的核心） ---------- */
+// 会话 key：主会话固定 web；智能体线程用 acp:<threadID>——与后端一致。
+function sessionKey() {
+  return props.kind === 'main' ? 'web' : 'acp:' + (props.thread && props.thread.id)
+}
+
+// onEvent 把事件交给共享翻译层：移动端与桌面端同一条渲染路径。
+function onEvent(ev) {
+  applyEvent(ev, {
+    messages: messages.value,
+    mine: clientId,
+    makeBot: () => reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 }),
+    makeUser: (text, images) => reactive({ role: 'user', text, images: images || [] }),
+    onDelta: (bot, delta) => {
+      if (bot) bot.rate = feedRate(bot, delta)
+      if (typing.value) typing.value = ''
+      scrollBottom()
+    },
+    onThinking: () => scrollBottom(),
+    onStep: () => scrollBottom(),
+    onPaused: info => {
+      streaming.value = false
+      typing.value = ''
+      let q = ''
+      for (let i = messages.value.length - 1; i >= 0; i--) {
+        if (messages.value[i].role === 'user') { q = messages.value[i].text; break }
+      }
+      paused.value = { question: q, partial: info.partial || '' }
+      scrollBottom()
+    },
+    onEnd: () => {
+      streaming.value = false
+      typing.value = ''
+      scrollBottom()
+    },
+    onError: (text, bot) => {
+      streaming.value = false
+      typing.value = ''
+      if (bot) {
+        bot.streaming = false
+        if (!bot.text) bot.text = text
+        else bot.text += String.fromCharCode(10, 10) + text
+      } else {
+        messages.value.push({ role: 'err', text })
+      }
+      scrollBottom()
+    },
+    onStatus: text => { typing.value = text || '' },
+    onRemoteUser: () => scrollBottom(),
+  })
+}
+
+// onResync：缺口过大时全量重拉历史（宁可重拉，也不假装消息连续）。
+function onResync() {
+  load()
+}
+
+// startEvents 订阅当前会话的事件流。切会话时先停旧的再订新的。
+function startEvents() {
+  if (unsub) { unsub.stop(); unsub = null }
+  const key = sessionKey()
+  if (!key || key === 'acp:') return
+  unsub = subscribe(key, 0, { onEvent, onResync, onState: () => {} })
+}
 
 /* ---------- 图片附件：与桌面端同一条上传链路（png/jpeg/webp，单张 ≤5MB） ---------- */
 function pickImage() { fileInput.value && fileInput.value.click() }
@@ -132,129 +210,65 @@ async function resume() {
 
 async function stop() {
   try {
-    if (props.kind === 'main') await api('POST', '/api/chat/stop', { session: 'web' })
+    if (props.kind === 'main') await api('POST', '/api/chat/stop', { session: 'web', turnId: myTurnId })
     else await api('POST', `/api/acp/threads/${props.thread.id}/stop`, {})
   } catch (e) { toast('停止失败：' + e.message, true) }
 }
 
+// stream 提交一轮对话。
+//
+// 改造前这里自己建 SSE 连接、直接消费帧，发起端独占——桌面端因此看不到
+// 手机端问的东西。改造后 POST 只负责提交（立刻返回 turnId），回复内容统一
+// 从 /api/events/stream 的事件流里来（与桌面端同一条路径）。
 async function stream(body, reuseBot, urlOverride) {
   controller = new AbortController()
   streaming.value = true
   typing.value = ''
+  // 继续对话时复用上一轮那条被暂停的 bot 气泡；新的一轮由事件流创建。
   let bot = reuseBot || null
-  let done = false
-  let turnTotal = null
-  let errMsg = ''
-  const ensureBot = () => {
-    if (!bot) {
-      // reactive 与桌面端一致：正文/块/速率都是流式改写的，裸对象不会触发重渲染。
-      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0 })
-      messages.value.push(bot)
-      scrollBottom()
-    }
-    return bot
-  }
+  if (bot) { bot.paused = false; bot.streaming = true }
   try {
     const res = await fetch(urlOverride || chatURL(), {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, clientId, device }),
       signal: controller.signal,
     })
     if (res.status === 403) { authFailed(); return }
-    if (!res.ok || !res.body) {
+    let data = null
+    try { data = await res.json() } catch { /* 非 JSON 响应 */ }
+    if (!res.ok) {
       let msg = 'HTTP ' + res.status
-      try { const d = await res.json(); if (d.body && d.body.error) msg = d.body.error } catch { /* 无错误体 */ }
+      if (data && data.body && data.body.error) msg = data.body.error
       throw new Error(msg)
     }
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buf = ''
-    const handle = ev => {
-      let data
-      try { data = JSON.parse(ev) } catch { throw new Error('响应格式异常') }
-      if (data.error) throw new Error(data.error)
-      if (data.status) typing.value = data.status
-      if (data.thinking) { pushThinking(ensureBot(), data.thinking); scrollBottom() }
-      if (data.step) {
-        if (data.step.kind === 'round') finishRound(ensureBot(), data.step.detail)
-        else pushToolStep(ensureBot(), data.step)
-        scrollBottom()
+    const r = (data && data.body) || {}
+    myTurnId = r.turnId || ''
+    if (r.status === 'queued') {
+      // 会话忙（另一端正在生成）：这一轮进了 FIFO 队列。
+      streaming.value = false
+      typing.value = ''
+      const last = messages.value[messages.value.length - 1]
+      if (last && last.role === 'user') {
+        last.queued = true
+        last.position = r.position || 1
       }
-      if (data.delta) {
-        if (typing.value) typing.value = ''
-        const b = ensureBot()
-        pushText(b, data.delta)
-        b.rate = feedRate(b, data.delta)
-        scrollBottom()
-      }
-      if (data.plan && data.plan.title) typing.value = '计划：' + data.plan.title
-      if (data.paused) {
-        // 主会话被暂停（帧不带 done）：partial 已在 bot 上，整条置为暂停现场，
-        // 出现「继续回答」按钮；续跑时把同一条接回流里。
-        done = true
-        if (bot) { bot.streaming = false; bot.paused = true }
-        let q = ''
-        for (let i = messages.value.length - 1; i >= 0; i--) {
-          if (messages.value[i].role === 'user') { q = messages.value[i].text; break }
-        }
-        paused.value = { question: q, partial: data.partial || '' }
-        return
-      }
-      if (data.done) {
-        done = true
-        if (data.turn) turnTotal = data.turn
-        if (data.context && turnTotal) {
-          turnTotal.contextUsed = data.context.used || 0
-          turnTotal.contextSize = data.context.size || 0
-        }
-        if (data.error) errMsg = data.error
-      }
+      toast('小五正在回答（来自另一端），你的问题排在第 ' + (r.position || 1) + ' 位')
     }
-    const consume = () => {
-      buf = buf.replace(/\r\n/g, '\n')
-      let idx
-      while (!done && (idx = buf.indexOf('\n\n')) >= 0) {
-        const chunk = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        const data = chunk.split('\n').filter(line => line.startsWith('data:'))
-          .map(line => line.slice(5).trimStart()).join('\n')
-        if (data) handle(data)
-      }
-    }
-    while (!done) {
-      const chunk = await reader.read()
-      if (controller.signal.aborted) return
-      buf += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
-      consume()
-      if (chunk.done) break
-    }
-    if (!done && !paused.value) errMsg = errMsg || '回复连接已中断'
   } catch (e) {
-    if (e.name !== 'AbortError') errMsg = e.message
-  } finally {
-    controller = null
+    if (controller.signal.aborted) return
     streaming.value = false
     typing.value = ''
-    if (bot && !paused.value) {
-      bot.streaming = false
-      closeRunningTools(bot)
-      bot.turn = turnTotal
-      if (errMsg) {
-        bot.blocks.push({ kind: 'text', text: '⚠️ ' + errMsg })
-        bot.text += errMsg
-      } else if (!bot.blocks.length) {
-        bot.blocks.push({ kind: 'text', text: '（本轮没有产出文本）' })
-      }
-    }
-    // 轮末刷新一次能力清单：agent 可能在回答里改了模型/档位，chip 要跟上
-    if (props.kind === 'thread' && !paused.value) loadCaps()
+    messages.value.push({ role: 'err', text: e.message })
     scrollBottom()
+  } finally {
+    if (!controller.signal.aborted) {
+      // 事件流负责把这一轮收尾；这里只保证输入框不被锁死。
+      if (streaming.value && !myTurnId) streaming.value = false
+    }
   }
 }
 
-// 线程会话的 agent 名，给输入框占位符一点上下文。
-const agentName = () => (props.kind === 'thread' && props.thread ? props.thread.agent : '')
 
 /* ---------- 会话配置：模型 / 思考强度 / 审批档位 ---------- */
 // 与桌面端同一份能力清单（GET /api/acp/threads/:id/options）：agent 报什么显示什么，
@@ -305,6 +319,9 @@ watch(() => (props.kind === 'thread' && props.thread ? props.thread.id : ''), id
   capSheet.value = ''
   if (id) loadCaps()
 }, { immediate: true })
+
+// 线程会话的 agent 名，给输入框占位符一点上下文。
+const agentName = () => (props.kind === 'thread' && props.thread ? props.thread.agent : '')
 
 defineExpose({ load })
 </script>

@@ -802,6 +802,18 @@ html[data-theme="dark"] .tool-out { background: rgba(255,255,255,.04); }
 html[data-theme="dark"] .paused-chip { background: rgba(245,158,11,.16); color: #FBBF24;
                                        border-color: rgba(245,158,11,.35); }
 
+/* 排队态：这一轮还没开跑（同一会话另一端正在生成），标出排队位次。
+   用中性蓝而不是警告橙——排队是正常状态，不是错误。 */
+.queued-chip { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+               padding: 3px 10px; border-radius: 999px; font-size: 12px;
+               background: rgba(59,130,246,.12); color: #1D4ED8;
+               border: 1px solid rgba(59,130,246,.28); }
+html[data-theme="dark"] .queued-chip { background: rgba(59,130,246,.16); color: #93C5FD;
+                                       border-color: rgba(59,130,246,.34); }
+
+/* 另一端发来的消息：在气泡上方标出来源设备，用户才知道对面有人在用。 */
+.remote-tag { font-size: 11.5px; opacity: .6; margin-bottom: 4px; }
+
 /* 发送键三态：回复中=暂停（中性底），暂停后=继续（主色醒目），空闲=发送。 */
 .halt-btn { background: var(--bg-muted) !important; color: var(--fg) !important; box-shadow: none !important; }
 html[data-theme="dark"] .halt-btn {

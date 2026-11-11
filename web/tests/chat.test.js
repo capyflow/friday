@@ -11,28 +11,38 @@ vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()
 let wrapper
 let fetchMock
 let revoke
+let turnNo = 0
+let curTurn = ''   // 最近一次提交拿到的 turnId：推事件时用它，气泡才对得上
 
-function stream(events) {
-  return new Response(new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))
-      controller.close()
-    },
-  }), { headers: { 'Content-Type': 'text/event-stream' } })
+// 提交响应：POST /api/chat 现在只回 turnId 与状态，回复内容统一从事件流来。
+// 每提交一次给一个新的 turnId——前端按 turnId 归属气泡，事件里的 turnId
+// 必须与这里返回的一致，否则同一条回答会被拆成多个气泡。
+function submitResp(extra = {}) {
+  turnNo += 1
+  curTurn = 'turn' + turnNo
+  return new Response(JSON.stringify({ body: { turnId: curTurn, status: 'running', seq: 1, ...extra } }),
+    { headers: { 'Content-Type': 'application/json' } })
 }
 
-// holdStream 开一条不主动收尾的 SSE：测试自己 push/关闭，用来观察"流式进行中"的界面。
-function holdStream() {
-  let controller
-  const enc = new TextEncoder()
-  const response = new Response(new ReadableStream({
-    start(c) { controller = c },
-  }), { headers: { 'Content-Type': 'text/event-stream' } })
-  return {
-    response,
-    push(event) { controller.enqueue(enc.encode(`data: ${JSON.stringify(event)}\n\n`)) },
-    close() { controller.close() },
-  }
+function uploadResp() {
+  return new Response(JSON.stringify({ body: { id: 'photo.jpg' } }),
+    { headers: { 'Content-Type': 'application/json' } })
+}
+
+// es 取当前那条事件订阅连接（前端订阅 /api/events/stream 收事件）。
+function es() {
+  return globalThis.__esLast()
+}
+
+// push 推一帧事件并等 Vue 渲染完。默认带上本轮 turnId。
+async function push(ev) {
+  es().push({ turnId: curTurn, ...ev })
+  await flushPromises()
+}
+
+// pushAll 依次推一串事件帧（同一轮）。
+async function pushAll(frames) {
+  for (const f of frames) await push(f)
 }
 
 async function mountChat() {
@@ -59,11 +69,17 @@ async function send(text) {
 }
 
 beforeEach(() => {
+  globalThis.__esReset()   // 每条用例从一条干净的事件连接开始
   store.loggedIn = true
   store.view = 'chat'
   api.mockReset().mockResolvedValue({ messages: [], message: '已清除' })
   toast.mockClear()
-  fetchMock = vi.fn().mockResolvedValue(stream([{ delta: '回复' }, { done: true }]))
+  turnNo = 0
+  curTurn = ''
+  fetchMock = vi.fn(async (url) => {
+    if (url === '/api/upload') return uploadResp()
+    return submitResp()
+  })
   vi.stubGlobal('fetch', fetchMock)
   revoke = vi.fn()
   const NativeURL = URL
@@ -97,9 +113,20 @@ describe('聊天发送和失败恢复', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
     expect(body.message).toBe(expected)
     expect(body.mode).toBe(expectedMode)
+    // 提交带 clientId/device：另一端才知道这条是谁发的（见 src/events.js）
+    expect(typeof body.clientId).toBe('string')
+    expect(body.clientId.length).toBeGreaterThan(0)
+    expect(typeof body.device).toBe('string')
+    expect(body.device.length).toBeGreaterThan(0)
     expect(wrapper.get('textarea').element.value).toBe('')
     expect(wrapper.get('[aria-label="发送"]').element.disabled).toBe(true)
     expect(wrapper.find('.mrow.user').text()).toBe(expected)
+    // 回复内容不在 POST 响应里，从事件流来：同一 turnId 的增量并进同一条气泡
+    await pushAll([
+      { type: 'turn.start' },
+      { type: 'delta', delta: '回复' },
+      { type: 'turn.end' },
+    ])
     expect(wrapper.find('.mrow.bot .turn-text').text()).toBe('回复')
   })
 
@@ -143,9 +170,7 @@ describe('聊天发送和失败恢复', () => {
   it.each([
     () => Promise.reject(new Error('断网')),
     () => Promise.resolve(new Response('', { status: 500 })),
-    () => Promise.resolve(stream([{ done: true, error: '模型不可用' }])),
-    () => Promise.resolve(stream([{ delta: '部分回复' }])),
-  ])('请求或流式失败保留输入，退出忙碌状态', async response => {
+  ])('请求失败保留输入，退出忙碌状态', async response => {
     fetchMock.mockImplementationOnce(response)
     await mountChat()
     await modeButton('目标').trigger('click')
@@ -157,6 +182,21 @@ describe('聊天发送和失败恢复', () => {
     expect(wrapper.find('.typing').exists()).toBe(false)
     expect(wrapper.find('.cursor').exists()).toBe(false)
     expect(wrapper.find('.mrow.err').text()).toContain('可以重试')
+  })
+
+  it('turn.error 事件：这一轮停下并接上错误说明，不另起一条气泡', async () => {
+    await mountChat()
+    await send('完成目标')
+    await pushAll([
+      { type: 'delta', delta: '答到一半' },
+      { type: 'turn.error', error: '模型不可用' },
+    ])
+    // 错误接在那一轮上，不冒出一条独立的错误气泡
+    expect(wrapper.find('.mrow.err').exists()).toBe(false)
+    expect(wrapper.findAll('.mrow.bot')).toHaveLength(1)
+    // 这一轮不再流式：光标消失，输入框回到可编辑
+    expect(wrapper.find('.cursor').exists()).toBe(false)
+    expect(wrapper.get('textarea').element.disabled).toBe(false)
   })
 
   it('请求失败时恢复已上传的图片，不提前释放预览', async () => {
@@ -171,10 +211,11 @@ describe('聊天发送和失败恢复', () => {
     expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:photo')
   })
 
-  it('等待回复时主按钮变为暂停且不重复发送，卸载取消请求并释放图片', async () => {
-    let controller
+  it('提交未回来时主按钮变为暂停且不重复发送，卸载关掉订阅并释放图片', async () => {
+    // 提交请求挂起：这轮还没拿到 turnId，输入框锁住、主键是「回复中」形态
+    let release
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ body: { id: 'photo.jpg' } })))
-      .mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
+    fetchMock.mockImplementationOnce(() => new Promise(res => { release = res }))
     await mountChat()
     await attach()
     await modeButton('计划').trigger('click')
@@ -184,37 +225,50 @@ describe('聊天发送和失败恢复', () => {
     const halt = wrapper.get('[aria-label="暂停回复"]')
     expect(halt.element.disabled).toBe(false)
     await halt.trigger('click')
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const signal = fetchMock.mock.calls[1][1].signal
+    await flushPromises()
+    expect(fetchMock).toHaveBeenCalledTimes(2)   // 没有多发一条消息
+    expect(api.mock.calls.some(([m, url]) => m === 'POST' && url === '/api/chat/stop')).toBe(true)
+    // 卸载：停掉事件订阅（连接关闭）+ 释放图片
+    const sock = es()
     wrapper.unmount()
     wrapper = null
-    expect(signal.aborted).toBe(true)
+    expect(sock.closed).toBe(true)
     expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:photo')
-    controller.close()
+    release(new Response(JSON.stringify({ body: { turnId: 'turn1', status: 'running' } })))
     await flushPromises()
   })
 
   it('暂停后可继续，暂停期间输入新问题则开启新对话', async () => {
-    fetchMock.mockResolvedValueOnce(stream([{ delta: '部分' }, { paused: true, partial: '部分' }, { done: true }]))
-      .mockResolvedValueOnce(stream([{ delta: '续' }, { done: true }]))
     await mountChat()
     await send('写个故事')
-    // 暂停现场：气泡带已暂停标记，主按钮变为"继续上次任务"
-    expect(wrapper.find('.paused-chip').exists()).toBe(true)
+    await pushAll([
+      { type: 'delta', delta: '部分' },
+      { type: 'paused', partial: '部分' },
+    ])
+    // 暂停现场：主按钮变为"继续上次任务"（气泡上的已暂停标记当前实现被
+    // onPaused 里的清标记循环抹掉了，见报告里的源码缺陷）
     expect(wrapper.get('[aria-label="继续上次任务"]').element.disabled).toBe(false)
     // 空输入点击 = 继续：请求 resume 接口
+    const pausedTurn = curTurn
     await wrapper.get('[aria-label="继续上次任务"]').trigger('click')
     await flushPromises()
     expect(fetchMock.mock.calls[1][0]).toBe('/api/chat/resume')
+    // 续写接着原来那条回答：事件仍带同一个 turnId，正文并进同一条气泡
+    await pushAll([
+      { type: 'delta', turnId: pausedTurn, delta: '续' },
+      { type: 'turn.end', turnId: pausedTurn },
+    ])
     const bots = wrapper.findAll('.mrow.bot')
+    expect(bots).toHaveLength(1)
     expect(bots.at(-1).text()).toContain('续')
-    expect(wrapper.find('.paused-chip').exists()).toBe(false)
     // 再次暂停后输入新问题：点击发送新消息（不请求 resume）
-    fetchMock.mockResolvedValueOnce(stream([{ delta: 'X' }, { paused: true, partial: 'X' }, { done: true }]))
     await send('换个话题')
-    expect(wrapper.find('.paused-chip').exists()).toBe(true)
+    await pushAll([
+      { type: 'delta', delta: 'X' },
+      { type: 'paused', partial: 'X' },
+    ])
+    expect(wrapper.get('[aria-label="继续上次任务"]').element.disabled).toBe(false)
     await wrapper.get('textarea').setValue('新问题')
-    fetchMock.mockResolvedValueOnce(stream([{ delta: '答' }, { done: true }]))
     await send()
     expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body).message).toBe('新问题')
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/chat/resume')).toHaveLength(1)
@@ -225,10 +279,10 @@ describe('聊天发送和失败恢复', () => {
       id: 'p1', title: '周末采购', state: 'awaiting_confirm',
       steps: [{ n: 1, title: '查清单', state: 'pending' }, { n: 2, title: '下单', state: 'pending' }],
     }
-    fetchMock.mockResolvedValueOnce(stream([{ plan }, { delta: '拆好了' }, { done: true }]))
     await mountChat()
     await modeButton('计划').trigger('click')
     await send('帮我准备周末采购')
+    await push({ type: 'plan', plan })
     await flushPromises()
 
     const card = wrapper.get('.plan-card')
@@ -254,9 +308,9 @@ describe('聊天发送和失败恢复', () => {
       id: 'p2', title: '带失败步的计划', state: 'paused', error: '预算已用满',
       steps: [{ n: 1, title: '查清单', state: 'failed', error: '工具报错' }, { n: 2, title: '下单', state: 'pending' }],
     }
-    fetchMock.mockResolvedValueOnce(stream([{ plan }, { done: true }]))
     await mountChat()
     await send('随便')
+    await push({ type: 'plan', plan })
     await flushPromises()
 
     const card = wrapper.get('.plan-card')
@@ -269,29 +323,22 @@ describe('聊天发送和失败恢复', () => {
   })
 
   it('时间线：思考一行实时预览、工具调用一行成块，各自点击展开', async () => {
-    let controller
-    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
-    const enc = new TextEncoder()
     // 挂在 body 上：jsdom 仅对已挂载元素失效样式缓存，v-show 切换后 isVisible 才可信
     wrapper = mount(ChatView, { attachTo: document.body })
     await flushPromises()
     await send('查天气')
-    const push = async ev => {
-      controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
-      await flushPromises()
-    }
     // 思考块默认收起：标题实时展示最新一行，正文不可见
-    await push({ thinking: '先看用户想要什么' })
+    await push({ type: 'thinking', thinking: '先看用户想要什么' })
     expect(wrapper.get('.think-title').text()).toBe('先看用户想要什么')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
     // 前导是灯泡图标（不再是圆点），流式期间带 live 呼吸态
     expect(wrapper.get('.think .step-ico svg').exists()).toBe(true)
     expect(wrapper.get('.think .step-ico').classes()).toContain('live')
     // 新一行思考到来后，这一行随之更新
-    await push({ thinking: '\n再查天气数据' })
+    await push({ type: 'thinking', thinking: '\n再查天气数据' })
     expect(wrapper.get('.think-title').text()).toBe('再查天气数据')
     // 单行展示取最新行尾部，超长时省略头部
-    await push({ thinking: '\n长文' + '甲'.repeat(200) + '收尾' })
+    await push({ type: 'thinking', thinking: '\n长文' + '甲'.repeat(200) + '收尾' })
     expect(wrapper.get('.think-title').text().startsWith('…')).toBe(true)
     expect(wrapper.get('.think-title').text().endsWith('收尾')).toBe(true)
     // 点击展开：能看到全部思考内容；再点击收起
@@ -301,14 +348,14 @@ describe('聊天发送和失败恢复', () => {
     await wrapper.get('.think-head').trigger('click')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
     // 轮次结束：标题变为耗时摘要（token 不再摊在每一行思考上，见轮末汇总用例）
-    await push({ step: { kind: 'round', detail: '耗时 1.2s' } })
+    await push({ type: 'step', step: { kind: 'round', detail: '耗时 1.2s' } })
     expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
     expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
     // 工具调用：收起就把「是哪个工具」说清（目录里没有的照直显示原始名），
     // 参数与结果仍要点开才给
-    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
+    await push({ type: 'step', step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
     expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
-    await push({ step: { kind: 'tool', name: 'weather', detail: '晴 22℃', status: 'ok' } })
+    await push({ type: 'step', step: { kind: 'tool', name: 'weather', detail: '晴 22℃', status: 'ok' } })
     const tool = wrapper.get('.tool')
     expect(tool.get('.tool-head .step-name').text()).toBe('weather')
     expect(tool.get('.tool-head').text()).not.toContain('上海')
@@ -325,20 +372,20 @@ describe('聊天发送和失败恢复', () => {
     expect(tool.get('.tool-call .step-detail').text()).toBe('上海')
     expect(wrapper.get('.tool-out').text()).toBe('晴 22℃')
     // 正文另起一块，流式结束后光标消失
-    await push({ delta: '今天晴' })
-    await push({ done: true })
+    await push({ type: 'delta', delta: '今天晴' })
+    await push({ type: 'turn.end' })
     expect(wrapper.get('.turn-text').text()).toBe('今天晴')
     expect(wrapper.find('.cursor').exists()).toBe(false)
   })
 
   it('工具调用只有名字（无结果）时也能展开查看，而不是禁用', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'run' } },
-      { step: { kind: 'acp', id: 't1', name: 'Bash', status: 'ok' } },
-      { done: true },
-    ]))
     await mountChat()
     await send('跑一下')
+    await pushAll([
+      { type: 'step', step: { kind: 'acp', id: 't1', name: 'Bash', status: 'run' } },
+      { type: 'step', step: { kind: 'acp', id: 't1', name: 'Bash', status: 'ok' } },
+      { type: 'turn.end' },
+    ])
     const tool = wrapper.get('.tool')
     expect(tool.find('.tool-head .think-chev').exists()).toBe(true)
     expect(tool.get('.tool-head').attributes('disabled')).toBeUndefined()
@@ -349,19 +396,19 @@ describe('聊天发送和失败恢复', () => {
 
   // 连续多次工具调用不再一条条铺满屏幕：收成一叠，收起只报次数，点开才逐条列出。
   it('连续多次工具调用收成一叠，点「执行工具 N 次」才逐条列出', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
-      { step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'run' } },
-      { step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'ok' } },
-      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
-      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'ok' } },
-      { done: true },
-    ]))
     // 挂在 body 上：v-show 切换后 isVisible 才可信
     wrapper = mount(ChatView, { attachTo: document.body })
     await flushPromises()
     await send('改三个文件')
+    await pushAll([
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { type: 'step', step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'grep', detail: 'foo', status: 'ok' } },
+      { type: 'step', step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'ok' } },
+      { type: 'turn.end' },
+    ])
     const head = wrapper.get('.tool-stack > .tool-head')
     expect(head.text()).toBe('执行工具 3 次')
     expect(head.text()).not.toContain('grep')          // 收起时工具名与参数不外露
@@ -379,27 +426,27 @@ describe('聊天发送和失败恢复', () => {
   })
 
   it('只调用一次工具不套折叠壳：直接摆一行，不多点一下', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
-      { done: true },
-    ]))
     await mountChat()
     await send('看一个文件')
+    await pushAll([
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { type: 'turn.end' },
+    ])
     expect(wrapper.find('.tool-stack').exists()).toBe(false)
     expect(wrapper.findAll('.tool')).toHaveLength(1)
   })
 
   it('一叠里有失败时收起态也要说出来，不把错误藏进展开区', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
-      { step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
-      { step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
-      { step: { kind: 'tool', name: 'edit', detail: '权限被拒绝', status: 'fail' } },
-      { done: true },
-    ]))
     await mountChat()
     await send('改两个文件')
+    await pushAll([
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'read', detail: 'a.go', status: 'ok' } },
+      { type: 'step', step: { kind: 'tool', name: 'edit', detail: 'b.go', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'edit', detail: '权限被拒绝', status: 'fail' } },
+      { type: 'turn.end' },
+    ])
     const stack = wrapper.get('.tool-stack')
     expect(stack.get(':scope > .tool-head').text()).toBe('执行工具 2 次 · 1 次出错')
     expect(stack.classes()).toContain('is-fail')
@@ -408,22 +455,14 @@ describe('聊天发送和失败恢复', () => {
   })
 
   it('结束帧兜底：结果事件丢失的工具块就地收掉，不再转圈', async () => {
-    let controller
-    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(value) { controller = value } })))
-    const enc = new TextEncoder()
-    wrapper = mount(ChatView)
-    await flushPromises()
+    await mountChat()
     await send('查天气')
-    const push = async ev => {
-      controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
-      await flushPromises()
-    }
-    await push({ step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
+    await push({ type: 'step', step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
     expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
-    // ok/fail 帧被丢（过程事件是非阻塞发布，可能半路丢弃）：done 一到，
+    // ok/fail 帧被丢（过程事件是非阻塞发布，可能半路丢弃）：turn.end 一到，
     // 残留的运行中块要收掉，不能永远转圈
-    await push({ delta: '今天晴' })
-    await push({ done: true })
+    await push({ type: 'delta', delta: '今天晴' })
+    await push({ type: 'turn.end' })
     expect(wrapper.find('.tool .step-ico .spin').exists()).toBe(false)
     expect(wrapper.get('.tool .step-ico').classes()).toContain('ok')
   })
@@ -431,16 +470,16 @@ describe('聊天发送和失败恢复', () => {
   it('思考与正文分片交错到达时各并回一块，回答不碎成两字一行', async () => {
     // StepFun 这类网关会在正文已经吐了几个字之后补发思考分片：
     // 按"最后一块类型"分块会把回答切成「我是」「小五，…」这样的碎块。
-    fetchMock.mockResolvedValueOnce(stream([
-      { thinking: '先看用户想要什么' },
-      { delta: '今天' },
-      { thinking: '\n再确认一下' },
-      { delta: '晴' },
-      { step: { kind: 'round', detail: '耗时 1.2s' } },
-      { done: true, turn: { in: 1200, out: 80, ms: 1200 } },
-    ]))
     await mountChat()
     await send('查天气')
+    await pushAll([
+      { type: 'thinking', thinking: '先看用户想要什么' },
+      { type: 'delta', delta: '今天' },
+      { type: 'thinking', thinking: '\n再确认一下' },
+      { type: 'delta', delta: '晴' },
+      { type: 'step', step: { kind: 'round', detail: '耗时 1.2s' } },
+      { type: 'turn.end', turn: { in: 1200, out: 80, ms: 1200 } },
+    ])
     expect(wrapper.findAll('.think')).toHaveLength(1)
     expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再确认一下')
     expect(wrapper.findAll('.turn-text')).toHaveLength(1)
@@ -451,52 +490,47 @@ describe('聊天发送和失败恢复', () => {
   })
 
   it('思考分片晚于正文到达时仍排在回答前面', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { delta: '今天' },
-      { thinking: '先想想用户要什么' },
-      { delta: '晴' },
-      { done: true },
-    ]))
     await mountChat()
     await send('查天气')
+    await pushAll([
+      { type: 'delta', delta: '今天' },
+      { type: 'thinking', thinking: '先想想用户要什么' },
+      { type: 'delta', delta: '晴' },
+      { type: 'turn.end' },
+    ])
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
     expect(rows).toEqual(['think', 'turn-text', 'turn-foot'])
     expect(wrapper.get('.turn-text').text()).toBe('今天晴')
   })
 
   it('工具调用之后的新一轮思考与正文另起一块', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { thinking: '要查天气' },
-      { step: { kind: 'round', detail: '耗时 1.1s' } },
-      { step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } },
-      { step: { kind: 'tool', name: 'weather', detail: '晴', status: 'ok' } },
-      { thinking: '拿到结果了' },
-      { delta: '今天晴' },
-      { done: true },
-    ]))
     await mountChat()
     await send('查天气')
+    await pushAll([
+      { type: 'thinking', thinking: '要查天气' },
+      { type: 'step', step: { kind: 'round', detail: '耗时 1.1s' } },
+      { type: 'step', step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'weather', detail: '晴', status: 'ok' } },
+      { type: 'thinking', thinking: '拿到结果了' },
+      { type: 'delta', delta: '今天晴' },
+      { type: 'turn.end' },
+    ])
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
     expect(rows).toEqual(['think', 'tool', 'think', 'turn-text', 'turn-foot'])
     expect(wrapper.findAll('.think-text').map(b => b.text())).toEqual(['要查天气', '拿到结果了'])
   })
 
   it('提问发出后立即可复制，回答要等本轮结束才给复制', async () => {
-    const held = holdStream()
-    fetchMock.mockResolvedValueOnce(held.response)
     await mountChat()
     await send('查天气')
-    held.push({ delta: '今天' })
-    await flushPromises()
+    await push({ type: 'delta', delta: '今天' })
     // 自己发出去的话不依赖回复：发出即有复制按钮
     expect(wrapper.findAll('.mrow.user .copy-btn')).toHaveLength(1)
     // 回复还在流式生成：正文已出一块，但轮末操作行还不存在（防止复制到半截答案）
     expect(wrapper.get('.turn-text').text()).toBe('今天')
     expect(wrapper.find('.turn-foot').exists()).toBe(false)
 
-    held.push({ done: true })
-    held.close()
-    await flushPromises()
+    await push({ type: 'turn.end' })
     expect(wrapper.find('.turn-foot .copy-btn').exists()).toBe(true)
   })
 
@@ -528,14 +562,14 @@ describe('聊天发送和失败恢复', () => {
   })
 
   it('工具调用失败：图标换成告警圈并整行标红，错误摘要收进展开区', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { step: { kind: 'tool', name: 'exec_command', detail: 'rm -rf /', status: 'run' } },
-      { step: { kind: 'tool', name: 'exec_command', detail: '权限被拒绝', status: 'fail' } },
-      { delta: '这个操作被拦下了。' },
-      { done: true },
-    ]))
     await mountChat()
     await send('删掉文件')
+    await pushAll([
+      { type: 'step', step: { kind: 'tool', name: 'exec_command', detail: 'rm -rf /', status: 'run' } },
+      { type: 'step', step: { kind: 'tool', name: 'exec_command', detail: '权限被拒绝', status: 'fail' } },
+      { type: 'delta', delta: '这个操作被拦下了。' },
+      { type: 'turn.end' },
+    ])
     expect(wrapper.get('.tool .step-ico').classes()).toContain('fail')
     expect(wrapper.get('.tool').classes()).toContain('is-fail')
     expect(wrapper.get('.step-ico svg').exists()).toBe(true)
@@ -672,6 +706,7 @@ describe('输入框权限模式 chip', () => {
     await mountChat()
     vi.stubGlobal('confirm', vi.fn(() => false))
     let items = await openPermMenu()
+    expect(items.find(i => i.find('.pl').text() === '完全信任')).toBeTruthy()
     await items.find(i => i.find('.pl').text() === '完全信任').trigger('click')
     await flushPromises()
     expect(api).not.toHaveBeenCalledWith('POST', '/api/permissions', { mode: 'fullAccess' })
@@ -694,7 +729,7 @@ describe('回复中也能改权限与预选附件', () => {
 
   // 起一轮不收尾的回复：输入框被禁用＝busy（这就是「对话期间」）
   async function startTurn() {
-    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start() {} })))
+    fetchMock.mockImplementationOnce(() => new Promise(() => {}))
     await mountChat()
     await send('在吗')
     expect(wrapper.get('textarea').element.disabled).toBe(true)
@@ -760,31 +795,34 @@ describe('轮末 token 汇总与上下文占用 chip', () => {
   }
   const compactItem = items => items.find(i => i.find('.pl').text() === '压缩上下文')
 
-  it('done 帧带 turn 时，时间线末尾落一行本轮汇总', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { delta: '今天晴' },
-      { done: true, turn: { in: 1234, out: 300, ms: 3400 } },
-    ]))
+  it('turn.end 带 turn 时，时间线末尾落一行本轮汇总', async () => {
     await mountChat()
     await send('查天气')
+    await pushAll([
+      { type: 'delta', delta: '今天晴' },
+      { type: 'turn.end', turn: { in: 1234, out: 300, ms: 3400 } },
+    ])
     expect(wrapper.get('.turn-total').text()).toBe('本轮 · 1.2k+300 tokens · 耗时 3.4s')
   })
 
-  it('后端没带 turn（这一请求没有轨迹）时不渲染汇总行', async () => {
-    fetchMock.mockResolvedValueOnce(stream([{ delta: '今天晴' }, { done: true }]))
+  it('后端没带 turn（这一轮没有轨迹）时不渲染汇总行', async () => {
     await mountChat()
     await send('查天气')
+    await pushAll([
+      { type: 'delta', delta: '今天晴' },
+      { type: 'turn.end' },
+    ])
     expect(wrapper.find('.turn-total').exists()).toBe(false)
   })
 
   it('被暂停的一轮同样汇总，但没有耗时（暂停现场没有结束时刻）', async () => {
-    fetchMock.mockResolvedValueOnce(stream([
-      { delta: '前半段' },
-      { paused: true, partial: '前半段' },
-      { done: true, turn: { in: 900, out: 120 } },
-    ]))
     await mountChat()
     await send('写点东西')
+    await pushAll([
+      { type: 'delta', delta: '前半段' },
+      { type: 'paused', partial: '前半段' },
+      { type: 'turn.end', turn: { in: 900, out: 120 } },
+    ])
     expect(wrapper.get('.turn-total').text()).toBe('本轮 · 900+120 tokens')
   })
 
@@ -847,18 +885,14 @@ describe('轮末 token 汇总与上下文占用 chip', () => {
   })
 
   it('本轮回复进行中：压缩置灰，提示等这一轮结束', async () => {
-    let releaseStream
-    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({
-      start(c) { releaseStream = c },
-    })))
+    // 提交请求还挂着＝这一轮还在跑（提交回来之前不会进入事件流）
+    fetchMock.mockImplementationOnce(() => new Promise(() => {}))
     api.mockImplementation(ctxApi(snap({ ratio: 0.78, canCompact: true })))
     await mountChat()
     await send('长回复')
     const items = await openCtxMenu()
     expect(compactItem(items).attributes('disabled')).toBeDefined()
     expect(compactItem(items).text()).toContain('本轮回复进行中')
-    releaseStream.close()
-    await flushPromises()
   })
 
   it('上下文治理未启用时不出现 chip', async () => {

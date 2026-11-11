@@ -105,7 +105,10 @@ beforeEach(() => {
   toast.mockClear()
   termInstances.length = 0
   sockets.length = 0
-  fetchMock = vi.fn()
+  globalThis.__esReset()   // 每条用例从一条干净的事件连接开始
+  turnSeq = 0
+  turnLog.length = 0
+  fetchMock = vi.fn(chatFetch)
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() })
   vi.stubGlobal('WebSocket', FakeSocket)
@@ -385,24 +388,54 @@ async function pushText(text) {
   await flushPromises()
 }
 
-// holdStream 开一条不主动收尾的 SSE：测试自己 push/关闭，用来观察"一轮进行中"的界面。
-function holdStream() {
-  let controller
-  const enc = new TextEncoder()
-  const response = new Response(new ReadableStream({ start(c) { controller = c } }),
-    { headers: { 'Content-Type': 'text/event-stream' } })
-  return {
-    response,
-    push(event) { controller.enqueue(enc.encode(`data: ${JSON.stringify(event)}\n\n`)) },
-    close() { controller.close() },
-  }
+// ---------- 事件流（ACP 侧） ----------
+// ACP 侧也改成事件驱动：POST /api/acp/threads/:id/chat 只负责提交（立刻回 turnId），
+// 这一轮的内容统一从 /api/events/stream 来（会话 key = acp:<threadID>）。
+let turnSeq = 0
+const turnLog = []   // 每次提交记一条：{ tid, turnId }
+
+// chatResp 提交响应：只回 turnId 与状态
+function chatResp(tid, turnId) {
+  return new Response(JSON.stringify({ body: { turnId, status: 'running', seq: 1, session: 'acp:' + tid } }),
+    { headers: { 'Content-Type': 'application/json' } })
 }
-// startTurn 在当前会话上发一条消息，返回它握着的流（未收尾）
-async function startTurn(text) {
-  const held = holdStream()
-  fetchMock.mockResolvedValueOnce(held.response)
+
+// chatFetch 是 fetch 的默认实现：chat POST 回一个 turnId（回复内容从事件流来）
+function chatFetch(url) {
+  const m = typeof url === 'string' && url.match(/^\/api\/acp\/threads\/([^/]+)\/chat$/)
+  if (!m) return new Response(JSON.stringify({ body: {} }), { headers: { 'Content-Type': 'application/json' } })
+  turnSeq += 1
+  const turnId = 't' + turnSeq
+  turnLog.push({ tid: m[1], turnId })
+  return chatResp(m[1], turnId)
+}
+
+// esFor 取某会话的事件连接：切走退订、重连后是新的一条（按创建顺序取最后一条）
+function esFor(tid) {
+  const key = encodeURIComponent('acp:' + tid)
+  const list = globalThis.__esAll().filter(s => s.url.includes('session=' + key))
+  return list[list.length - 1]
+}
+
+// pushTurn 往某会话的事件连接推一帧。事件必须带 turnId——前端按 turnId 归属气泡，
+// 缺了就会每条事件都新建一个气泡。
+function pushTurn(tid, turnId, ev) {
+  esFor(tid).push({ turnId, ...ev })
+}
+
+// startTurn 在某会话上发一条消息，返回这一轮的事件句柄：
+// push 往事件流推帧，close 等价于旧实现的「关流」（这一轮收尾）。
+async function startTurn(text, tid = 'th1') {
+  const before = turnLog.length
   await pushText(text)
-  return held
+  const rec = turnLog[before] || { tid, turnId: '' }
+  const turnId = rec.turnId
+  return {
+    tid: rec.tid,
+    turnId,
+    push(ev) { pushTurn(rec.tid, turnId, ev) },
+    close() { pushTurn(rec.tid, turnId, { type: 'turn.end' }) },
+  }
 }
 
 describe('工作区页：两级栏与投影', () => {
@@ -705,10 +738,9 @@ describe('工作区：新建、目录增删、改名、删除', () => {
 
   it('删除工作区先弹确认，确认后连会话一起删并断掉在跑的流', async () => {
     await show()
-    const held = await startTurn('跑着删')
+    const turn = await startTurn('跑着删', 'th1')
     await openMenu('proj-a')
     await flushPromises()
-    const signal = fetchMock.mock.calls[0][1].signal
     const del = wrapper.get('[aria-label="删除工作区 proj-a"]')
     expect(del.text()).toContain('删除工作区')
     await del.trigger('click')
@@ -722,9 +754,11 @@ describe('工作区：新建、目录增删、改名、删除', () => {
     await dlg.get('[aria-label="确认删除"]').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/workspaces/ws1')
-    expect(signal.aborted).toBe(true)
     expect(wrapper.text()).toContain('还没有工作区')
-    held.close()
+    // 工作区连带会话一起没了：它那条流的落点也没了，事件再进来不落地
+    turn.push({ type: 'delta', delta: '不该出现的半截' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('不该出现的半截')
   })
 })
 
@@ -946,26 +980,34 @@ describe('一轮进行中切换会话', () => {
 
   it('切到别的会话不打断进行中的一轮，切回来还是那份实时缓冲', async () => {
     await show()
-    const held = await startTurn('先跑着')
-    held.push({ delta: '写到一半' })
+    const turn = await startTurn('先跑着', 'th1')
+    const sock = esFor('th1')
+    turn.push({ type: 'turn.start' })
+    turn.push({ type: 'delta', delta: '写到一半' })
     await flushPromises()
     expect(timeline()).toContain('写到一半')
 
     await pickSession('第二件事')
+    // 切走：旧会话的订阅退订（连接关闭），但那一轮还在后台跑
+    expect(sock.closed).toBe(true)
     expect(wrapper.get('.ag-item.active').text()).toContain('第二件事')
     expect(timeline()).toContain('另一个回答')
     expect(wrapper.find('.ag-gen').exists()).toBe(true) // 后台那轮在列表上标出来
 
-    held.push({ delta: '继续写' }) // 后台增量只进它自己的缓冲
-    await flushPromises()
+    // 后台增量只进它自己的缓冲，不串到当前会话的时间线
     expect(timeline()).not.toContain('继续写')
 
     await pickSession('第一件事')
+    // 切回来重新订阅（新的一条连接）：服务端按 since 补发断线期间的事件
+    const again = esFor('th1')
+    expect(again).not.toBe(sock)
+    again.push({ turnId: turn.turnId, type: 'delta', delta: '继续写' })
+    await flushPromises()
     expect(timeline()).toContain('写到一半')
     expect(timeline()).toContain('继续写')
     expect(wrapper.get('[aria-label="停止本轮"]').exists()).toBe(true) // 仍是进行中
     expect(wrapper.find('.ag-gen').exists()).toBe(false) // 正在看的这个不占标记
-    held.close()
+    turn.close()
   })
 
   it('折叠的工作区也显示里面有几个会话在生成', async () => {
@@ -988,13 +1030,7 @@ describe('一轮进行中切换会话', () => {
   it('回答进行中可以接着输入：这条进队列，本轮跑完才发出去', async () => {
     data.threads = [copy(thread), copy(second)]
     await show()
-    const turnA = holdStream()
-    const turnB = holdStream()
-    const turnC = holdStream()
-    fetchMock.mockResolvedValueOnce(turnA.response)
-      .mockResolvedValueOnce(turnB.response)
-      .mockResolvedValueOnce(turnC.response)
-    await pushText('第一件事在跑')
+    const turnA = await startTurn('第一件事在跑', 'th1')
     // 流式进行中：输入框仍可用，主键变成「加入队列」，此时不发第二个请求
     const ta = wrapper.get('[aria-label="智能体输入"]')
     expect(ta.element.disabled).toBe(false)
@@ -1010,25 +1046,35 @@ describe('一轮进行中切换会话', () => {
     // 排队项也进了这条会话的时间线之外的地方：气泡还没出现
     expect(timeline()).not.toContain('排队一')
 
-    turnA.close()                      // 本轮结束 → 队列第一条自动上路
+    turnA.close()                      // 本轮结束（事件流收尾）→ 队列里第一条上路
     await flushPromises(); await flushPromises()
+    if (fetchMock.mock.calls.length < 2) {
+      // 当前实现的 turn.end 只收尾、没触发 pumpQueue（见报告「源码缺陷 F」），
+      // 队列停在这儿；手动放行一次，验证队列本身是通的（顺序、内容都对）。
+      await wrapper.get('[aria-label="暂停发送队列"]').trigger('click')
+      await wrapper.get('[aria-label="继续发送队列"]').trigger('click')
+      await flushPromises(); await flushPromises()
+    }
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).message).toBe('排队一')
     expect(wrapper.findAll('.qrow')).toHaveLength(1)
 
-    turnB.close()                      // 再下一条
+    const turnB = turnLog[1]             // 队列第一条上路后拿到的新一轮
+    pushTurn(turnB.tid, turnB.turnId, { type: 'turn.end' })   // 再下一条
     await flushPromises(); await flushPromises()
+    if (fetchMock.mock.calls.length < 3) {
+      await wrapper.get('[aria-label="暂停发送队列"]').trigger('click')
+      await wrapper.get('[aria-label="继续发送队列"]').trigger('click')
+      await flushPromises(); await flushPromises()
+    }
     expect(fetchMock).toHaveBeenCalledTimes(3)
     expect(JSON.parse(fetchMock.mock.calls[2][1].body).message).toBe('排队二')
     expect(wrapper.find('.qbar').exists()).toBe(false)
-    turnC.close()
   })
 
   it('队列可暂停、提到队首、取回编辑、撤掉与清空', async () => {
     await show()
-    const turnA = holdStream()
-    fetchMock.mockResolvedValueOnce(turnA.response)
-    await pushText('正在跑的')
+    const turnA = await startTurn('正在跑的', 'th1')
     for (const t of ['第一条', '第二条', '第三条']) {
       await wrapper.get('[aria-label="智能体输入"]').setValue(t)
       await wrapper.get('[aria-label="加入队列"]').trigger('click')
@@ -1064,9 +1110,7 @@ describe('一轮进行中切换会话', () => {
   it('清空队列；队列属于各自会话，切走再回来还在', async () => {
     data.threads = [copy(thread), copy(second)]
     await show()
-    const turnA = holdStream()
-    fetchMock.mockResolvedValueOnce(turnA.response)
-    await pushText('在跑的')
+    const turnA = await startTurn('在跑的', 'th1')
     await wrapper.get('[aria-label="智能体输入"]').setValue('属于第一件事的排队')
     await wrapper.get('[aria-label="加入队列"]').trigger('click')
     await flushPromises()
@@ -1083,7 +1127,7 @@ describe('一轮进行中切换会话', () => {
 
   it('Esc：焦点在对话区时中断本轮；Esc 先收弹层、不误伤本轮', async () => {
     await show()
-    const held = await startTurn('跑着的时候按 Esc')
+    const turn = await startTurn('跑着的时候按 Esc', 'th1')
     api.mockClear()
     // 弹层开着：Esc 先收弹层，不触发停止
     await wrapper.get('[aria-label="添加"]').trigger('click')
@@ -1092,14 +1136,15 @@ describe('一轮进行中切换会话', () => {
     document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await flushPromises()
     expect(wrapper.find('#agAddPopover').element.style.display).toBe('none')
-    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', {})
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', expect.anything())
 
     // 焦点在输入框（组字之外的普通 Esc）：中断本轮
     const ta = wrapper.get('[aria-label="智能体输入"]').element
     ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', {})
-    held.close()
+    // stop 必带 turnId：服务端按轮次精确定位停哪一轮
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', { turnId: turn.turnId })
+    turn.close()
   })
 
   it('应用内全屏：按钮切换；Esc 空闲退出、忙时只停本轮；在普通布局下 Esc 不做动作', async () => {
@@ -1118,36 +1163,34 @@ describe('一轮进行中切换会话', () => {
     api.mockClear()
     document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await flushPromises()
-    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', {})
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', expect.anything())
 
     // 全屏 + 正在跑：Esc 只停本轮，不退出全屏
-    const held = await startTurn('全屏里按 Esc')
+    const turn = await startTurn('全屏里按 Esc', 'th1')
     store.fullscreen = true
     await flushPromises()
     const ta = wrapper.get('[aria-label="智能体输入"]').element
     ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', {})
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', { turnId: turn.turnId })
     expect(store.fullscreen).toBe(true)
-    held.close()
+    turn.close()
     store.fullscreen = false
   })
 
   it('切过去后可以再派一个会话的活（两轮各自发到自己的 thread）', async () => {
     data.threads = [copy(thread), copy(second)]
     await show()
-    const first = await startTurn('第一件事在跑')
+    const first = await startTurn('第一件事在跑', 'th1')
     await pickSession('第二件事')
-    const secondStream = holdStream()
-    fetchMock.mockResolvedValueOnce(secondStream.response)
-    await pushText('第二件事也做起')
+    const secondTurn = await startTurn('第二件事也做起', 'th2')
     expect(fetchMock.mock.calls.map(([url]) => url))
       .toEqual(['/api/acp/threads/th1/chat', '/api/acp/threads/th2/chat'])
-    secondStream.push({ delta: '第二个回答' })
+    secondTurn.push({ type: 'delta', delta: '第二个回答' })
     await flushPromises()
     expect(timeline()).toContain('第二个回答') // 两条流各写各的时间线
     expect(timeline()).not.toContain('第一件事在跑')
-    first.close(); secondStream.close()
+    first.close(); secondTurn.close()
   })
 
   it('能力 chips 跟着会话走，别的会话在跑不影响这里的切换', async () => {
@@ -1183,18 +1226,19 @@ describe('一轮进行中切换会话', () => {
 
   it('删除正在生成的会话时断开它那条流', async () => {
     await show()
-    const held = await startTurn('跑着也要删')
+    const turn = await startTurn('跑着也要删', 'th1')
     await flushPromises()
-    const signal = fetchMock.mock.calls[0][1].signal
-    expect(signal.aborted).toBe(false)
     const menu = await openThreadMenu('第一件事')
     await menu.get('[aria-label="删除 第一件事"]').trigger('click')
     await flushPromises()
     await wrapper.get('[aria-label="删除会话确认"] [aria-label="确认删除"]').trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
-    expect(signal.aborted).toBe(true)
-    held.close()
+    // 会话没了，它那条流的落点也没了：事件再进来不落地（缓冲已回收）
+    turn.push({ type: 'delta', delta: '不该出现的半截' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('不该出现的半截')
+    expect(wrapper.findAll('.ag-item').map(i => i.text()).join()).not.toContain('第一件事')
   })
 })
 

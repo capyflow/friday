@@ -17,3 +17,42 @@ if (typeof localStorage === 'undefined') {
 if (window.Element && !window.Element.prototype.scrollIntoView) {
   window.Element.prototype.scrollIntoView = function scrollIntoView() {}
 }
+
+// ---------- EventSource mock（事件驱动架构的前端测试底座） ----------
+// 改造后前端不再从 POST /api/chat 的响应体里读帧，而是订阅 /api/events/stream
+// 的一条 SSE 长连接（见 src/events.js）。jsdom 没实现 EventSource，Node 自带的
+// 那个也不接受我们的推送，所以这里补一个可控的假实现：
+//   - new EventSource(url) 时登记到全局列表，测试按创建顺序取实例；
+//   - 实例暴露 onopen / onmessage / onerror 与 push(obj)：push 把对象 JSON 化后
+//     当作一帧 SSE data 交给 onmessage，等价于服务端广播了一条事件；
+//   - close() 真的标记关闭（前端 stop() 会调它，断了的连接不该再收到帧）。
+class MockEventSource {
+  constructor(url) {
+    this.url = url
+    this.onopen = null
+    this.onmessage = null
+    this.onerror = null
+    this.closed = false
+    this.seq = 0            // 事件帧自带 seq（服务端递增），这里自动补
+    MockEventSource.instances.push(this)
+  }
+
+  // push 推一帧事件。seq 默认自增；显式给了就用给的（测缺口时要手动跳号）。
+  push(obj) {
+    if (this.closed) return
+    const frame = { seq: this.seq + 1, ...obj }
+    this.seq = frame.seq
+    if (this.onmessage) this.onmessage({ data: JSON.stringify(frame) })
+  }
+
+  close() {
+    this.closed = true
+  }
+}
+MockEventSource.instances = []
+
+globalThis.EventSource = MockEventSource
+// 测试取连接用：__esAll() 全部连接、__esLast() 最近一条、__esReset() 清空列表。
+globalThis.__esAll = () => MockEventSource.instances
+globalThis.__esLast = () => MockEventSource.instances[MockEventSource.instances.length - 1]
+globalThis.__esReset = () => { MockEventSource.instances.length = 0 }

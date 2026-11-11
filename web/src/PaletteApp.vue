@@ -8,6 +8,9 @@ import { nextTick, reactive, ref } from 'vue'
 import { authHeaders, hydrateToken } from './auth.js'
 import { nativeInvoke } from './tauri.js'
 import { renderMD } from './md.js'
+import { toast } from './store.js'
+import { subscribe, clientId, deviceLabel } from './events.js'
+import { applyEvent } from './turnevents.js'
 
 // 弹窗可能先于主窗口打开：先把原生冷备的 token 回填到本页的 localStorage，
 // 否则第一次提问会误报"还未登录"（memoized，重复调用零成本）。
@@ -25,6 +28,9 @@ const pausedTurn = ref(null) // 后端暂停现场 { question, partial }：有�
 const log = ref(null)
 const input = ref(null)
 let stick = true          // 用户没往上翻就跟着流走，翻了就先停在那儿
+let unsub = null            // 事件订阅句柄
+let myTurnId = ''           // 本端最近一次提交的 turnId：停止时按它精确操作
+const device = deviceLabel() // 设备标签：另一端看到消息时标「来自手机端」
 
 function hideWindow() {
   try {
@@ -105,7 +111,12 @@ async function stop() {
   if (!busy.value) return
   status.value = '暂停中…'
   try {
-    await fetch('/api/chat/stop', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }) })
+    await fetch('/api/chat/stop', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      // turnId 必填：服务端按轮次精确定位停哪一轮（另一端也在跑时尤其关键）。
+      body: JSON.stringify({ session: 'web', turnId: myTurnId }),
+    })
   } catch (_) { /* 暂停失败不打断流，回答照常继续 */ }
 }
 
@@ -118,10 +129,16 @@ function clearScreen() {
   status.value = ''
 }
 
+// stream 提交一轮对话。
+//
+// 改造前这里自己建 SSE 连接、直接消费帧——弹窗与主窗口虽然同一会话，但
+// 弹窗独占这条流，主窗口看不见弹窗里问的东西。改造后统一从事件流收，
+// 弹窗、主窗口、手机端三处看到的内容一致。
 async function stream(url, body, existing) {
   busy.value = true
   status.value = '思考中…'
-  const msg = existing || { role: 'bot', text: '', html: '', streaming: true }
+  // turnId 挂上：turnevents 按 turnId 归属气泡，缺了同一条回答会分裂成两块。
+  const msg = existing || { role: 'bot', text: '', html: '', streaming: true, turnId: '' }
   if (!existing) turns.push(msg)
   stick = true
   toBottom()
@@ -129,7 +146,7 @@ async function stream(url, body, existing) {
     const res = await fetch(url, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, clientId, device }),
     })
     if (res.status === 403) {
       msg.kind = 'err'
@@ -138,89 +155,102 @@ async function stream(url, body, existing) {
       status.value = ''
       return
     }
-    await readSSE(res, msg)
+    let data = null
+    try { data = await res.json() } catch (e) { /* 非 JSON 响应 */ }
+    if (!res.ok) {
+      const detail = (data && data.body && data.body.error) || ('HTTP ' + res.status)
+      throw Object.assign(new Error(detail), { surfaced: true })
+    }
+    const r = (data && data.body) || {}
+    myTurnId = r.turnId || ''
+    if (myTurnId) msg.turnId = myTurnId
+    if (r.status === 'queued') {
+      // 会话忙（另一端正在生成）：这一轮进了 FIFO 队列。
+      busy.value = false
+      status.value = ''
+      toast('小五正在回答（来自另一端），你的问题排在第 ' + (r.position || 1) + ' 位')
+    }
   } catch (e) {
     // 已经流出半截正文时不丢弃，只补一行错误说明：用户看得见答到哪儿断的。
-    // surfaced = 后端自己给的话（权限/参数问题），别再套"连接不上"这层误导描述。
+    // surfaced = 后端自己给的话（权限/参数问题），别再套「连接不上」这层误导描述。
     msg.kind = 'err'
     const why = e.surfaced ? e.message : '连接不上小五（' + e.message + '）'
     msg.text = (msg.text ? msg.text + '\n\n' : '') + why + '。'
     status.value = ''
   } finally {
-    msg.streaming = false
-    msg.html = renderMD(msg.text)
-    busy.value = false
-    // 暂停收尾时保留「已暂停，可继续」，其余一律清空状态行。
-    if (!msg.paused) status.value = ''
+    // 回复内容由事件流补齐；这里只把状态行让位，busy 由事件收尾时归位。
+    if (!myTurnId) busy.value = false
   }
 }
 
-// SSE 帧协议同主窗口（internal/web/chat.go HandleSSE 注释）：
-// delta 正文增量 / thinking 思考 / step 过程事件 / paused 暂停落地 / done 收尾。
-async function readSSE(res, msg) {
-  if (!res.ok || !res.body) {
-    let detail = 'HTTP ' + res.status
-    try {
-      const data = await res.json()
-      if (data.body && data.body.error) detail = data.body.error
-    } catch (_) { /* 非 JSON 响应保留状态码提示 */ }
-    throw Object.assign(new Error(detail), { surfaced: true })
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder('utf-8')
-  let buf = ''
-  let done = false
-  const handle = ev => {
-    let data
-    try { data = JSON.parse(ev) } catch (_) { throw Object.assign(new Error('聊天响应格式异常'), { surfaced: true }) }
-    if (data.error) throw Object.assign(new Error(data.error), { surfaced: true })
-    if (data.thinking) { status.value = '思考中…'; return }
-    if (data.step) {
+
+
+/* ---------- 事件订阅（双端同步） ---------- */
+// 弹窗与主窗口、手机端同属一条主会话（web）。统一从事件流收，三处内容一致。
+function onEvent(ev) {
+  applyEvent(ev, {
+    messages: turns,
+    mine: clientId,
+    // 只造不 push：turnevents 的 botFor 负责挂上去（这里再 push 会渲染两份）。
+    // blocks/round 必须有：turnevents 的 delta/step/paused 都走 blocks.js，
+    // 缺了会在 m.blocks.length 上炸掉（面板永远显示不出回答）。
+    makeBot: () => ({ role: 'bot', text: '', html: '', streaming: true, blocks: [], round: 0 }),
+    makeUser: (text, images) => ({ role: 'user', text, images: images || [] }),
+    onDelta: bot => {
+      if (bot) {
+        status.value = '' // 正文开始流出，状态行让位
+        scheduleRender(bot)
+      }
+    },
+    onStep: s => {
       // 弹窗不铺开过程块，只把「在忙什么」压进一行状态，浮层里堆工具卡片是噪音。
-      if (data.step.kind === 'tool') {
-        status.value = data.step.status === 'run'
-          ? '正在 ' + (data.step.name || data.step.detail || '处理')
+      if (s && s.kind === 'tool') {
+        status.value = s.status === 'run'
+          ? '正在 ' + (s.name || s.detail || '处理')
           : '思考中…'
       }
-      return
-    }
-    if (data.delta) {
-      msg.text += data.delta
-      status.value = '' // 正文开始流出，状态行让位
-      scheduleRender(msg)
-      return
-    }
-    if (data.paused) {
-      msg.paused = true
-      msg.streaming = false
-      pausedTurn.value = { question: lastQuestion(), partial: data.partial || msg.text }
+    },
+    onThinking: () => { status.value = '思考中…' },
+    onPaused: info => {
+      busy.value = false
       status.value = '已暂停，可继续'
-      return
-    }
-    if (data.done) done = true
-  }
-  const consume = () => {
-    buf = buf.replace(/\r\n/g, '\n')
-    let idx
-    while (!done && (idx = buf.indexOf('\n\n')) >= 0) {
-      const chunk = buf.slice(0, idx)
-      buf = buf.slice(idx + 2)
-      const ev = chunk.split('\n').filter(line => line.startsWith('data:'))
-        .map(line => line.slice(5).trimStart()).join('\n')
-      if (ev) handle(ev)
-    }
-  }
-  // 收尾再解一次：连接结束时解码器里可能还压着半截字节，漏掉就少一帧回答。
-  for (;;) {
-    const r = await reader.read()
-    buf += r.done ? decoder.decode() : decoder.decode(r.value, { stream: true })
-    consume()
-    if (r.done || done) break
-  }
+      pausedTurn.value = { question: lastQuestion(), partial: info.partial || '' }
+    },
+    onEnd: () => {
+      busy.value = false
+      status.value = ''
+    },
+    onError: (text, bot) => {
+      busy.value = false
+      status.value = ''
+      if (bot) {
+        bot.kind = 'err'
+        bot.text = (bot.text ? bot.text + '\n\n' : '') + text
+        bot.html = renderMD(bot.text)
+      }
+    },
+    onStatus: text => { if (text) status.value = text },
+    onRemoteUser: () => toBottom(),
+  })
 }
 
-// 外链交给系统浏览器：弹窗里点链接若在 WebView 内跳转，浮层就回不到问答页了。
-// 权限见 desktop/src-tauri/capabilities/palette.json（allow-open-url）。
+// onResync：缺口过大时全量重拉历史（宁可重拉，也不假装消息连续）。
+function onResync() {
+  loadHistory()
+}
+
+// startEvents 订阅主会话事件流。
+function startEvents() {
+  if (unsub) return
+  unsub = subscribe('web', 0, { onEvent, onResync, onState: () => {} })
+}
+
+function stopEvents() {
+  if (!unsub) return
+  unsub.stop()
+  unsub = null
+}
+
 function onLogClick(e) {
   const a = e.target.closest && e.target.closest('a')
   if (!a) return
@@ -255,6 +285,9 @@ async function loadHistory() {
 
 window.addEventListener('focus', () => { if (input.value) input.value.focus() })
 loadHistory()
+startEvents()
+// 页面关闭时停掉订阅：留着连接会在内核里留下一条没人读的连接。
+window.addEventListener('pagehide', () => stopEvents())
 </script>
 
 <template>

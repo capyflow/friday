@@ -10,6 +10,14 @@ vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()
 
 let wrapper
 let fetchMock
+let curTurn = ''   // 最近一次提交拿到的 turnId：推事件时用它，气泡才对得上
+
+// 提交响应：POST /api/chat 只回 turnId，回复内容统一从事件流来。
+function submitResp() {
+  curTurn = 'turn-' + (curTurn ? Number(curTurn.slice(5)) + 1 : 1)
+  return new Response(JSON.stringify({ body: { turnId: curTurn, status: 'running', seq: 1 } }),
+    { headers: { 'Content-Type': 'application/json' } })
+}
 
 async function mountChat() {
   wrapper = mount(ChatView, { global: { stubs: { teleport: true } } })
@@ -28,28 +36,25 @@ function sentBody() {
   return call ? JSON.parse(call[1].body) : null
 }
 
-// slowStream 回一段"已经出了字但还没结束"的 SSE：这一轮卡在流式里，
+// push 推一帧事件：这一轮已经出了字但还没结束（事件流里还没收到 turn.end），
 // 用来验切走再切回来时进度还在、也没被打断。
-function slowStream(text) {
-  return new Response(new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(`data: {"delta":"${text}"}\n\n`))
-    },
-  }), { headers: { 'Content-Type': 'text/event-stream' } })
+async function push(ev) {
+  globalThis.__esLast().push({ turnId: curTurn, ...ev })
+  await flushPromises()
 }
 
 beforeEach(() => {
+  globalThis.__esReset()
   localStorage.clear()
   Object.assign(store, { loggedIn: true, view: 'chat', mode: 'life' })
   toast.mockClear()
+  curTurn = ''
   api.mockReset().mockImplementation(path => {
     if (path.startsWith('/api/chat/history')) return Promise.resolve({ session: 'web', messages: [] })
     if (path === '/api/context') return Promise.resolve({ enabled: false })
     return Promise.resolve({ message: '好' })
   })
-  fetchMock = vi.fn().mockResolvedValue(new Response('data: {"done":true}\n\n', {
-    headers: { 'Content-Type': 'text/event-stream' },
-  }))
+  fetchMock = vi.fn(async () => submitResp())
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -80,8 +85,8 @@ describe('聊天页只有主会话', () => {
 
   it('切到工作模式再切回来：归属没变、也不重拉历史，那一轮的半截回答还在', async () => {
     await mountChat()
-    fetchMock.mockResolvedValue(slowStream('写到一半'))
     await send('慢慢说')
+    await push({ type: 'delta', delta: '写到一半' })
     expect(wrapper.text()).toContain('写到一半')
     api.mock.calls.length = 0
     setMode('work')

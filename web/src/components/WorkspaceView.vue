@@ -9,6 +9,9 @@
 // 一个会话正在回答时照样可以切到别的会话继续派活：会话状态按 thread 分开放
 // （见下方 states），切走不打断进行中的一轮，各会话自己写自己的缓冲，列表上
 // 标出哪几个正在生成。
+// 事件驱动（2026-11-11 起）：与聊天页、手机端共用同一条事件流——会话 key 是
+// acp:<threadID>。以前这里自己建 SSE 连接消费帧，发起端独占，手机端问的
+// 东西桌面端看不见；现在提交与订阅分离，两端都从 /api/events/stream 收。
 // 在 App 里用 v-show 常驻（同聊天页）：切换左侧导航不卸载组件，进行中的一轮
 // SSE 与滚动位置都不会丢。首次打开先拉配置/列表，拿到结果前显示加载态，
 // 不能把"还没加载完"当成"功能未开启"。
@@ -16,8 +19,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
-import { pushThinking, pushToolStep, pushText, closeRunningTools, turnTotalText, answerText } from '../blocks.js'
+import { turnTotalText, answerText } from '../blocks.js'
 import { feedRate, fmtRate } from '../speed.js'
+import { subscribe, clientId, deviceLabel } from '../events.js'
+import { applyEvent } from '../turnevents.js'
 import { ago, fmtTokens } from '../format.js'
 import { getPref, setPref } from '../prefs.js'
 import { store, toast } from '../store.js'
@@ -118,6 +123,11 @@ const imgLightbox = ref(null)      // 附件全图预览层（气泡上方的缩
    AbortController 放在响应式之外：原生对象经 proxy 调用 abort() 会丢内部状态。 */
 const states = reactive({})    // thread id -> 该会话的前端态
 const inflight = new Map()     // thread id -> AbortController
+const threadSubs = new Map() // thread id -> 事件订阅句柄
+const threadSeqs = new Map()   // thread id -> 最后收到的事件序号（重连时续传）
+const turnTotals = new Map()  // thread id -> 本轮 token 汇总（事件流带回）
+let myTurnId = ''             // 本端最近一次提交的 turnId：停止时按它精确操作
+const device = deviceLabel()  // 设备标签：另一端看到消息时标「来自手机端」
 
 // 正在显示的会话同步到全局：审批卡据此判断卡片是否属于当前对话（不属于就收进
 // 右上角提示、点击跳过来），不依赖 WorkspaceView 的内部状态。
@@ -142,7 +152,8 @@ function stateOf(id) {
   }
   return states[id]
 }
-function dropState(id) {
+function dropState(id) {  // 会话没了，事件流也要收掉——留着连接会在内核里积一条没人读的连接。
+  unsubscribeThread(id)
   const st = states[id]
   if (!st) return
   // 缓冲里的对象 URL 用完即释放（含排着没发的图片）
@@ -535,10 +546,48 @@ async function load() {
   }
 }
 
+// applyThreadMessages 用服务端投影覆盖本地消息缓冲。
+// 服务端投影是权威（每轮结束落盘），但正在跑的那一轮只在本机缓冲里，
+// 所以调用方要自己判断能不能盖（见 select 与 loadThreadMessages）。
+function applyThreadMessages(st, list) {
+  st.messages.length = 0
+  for (const e of list) {
+    if (e.role === 'user') {
+      st.messages.push({ role: 'user', text: e.text,
+        images: (e.files || []).map(f => '/api/upload/' + f), imgCount: e.images || 0 })
+    } else if (e.role === 'note') {
+      st.messages.push({ role: 'note', text: e.text })
+    } else {
+      st.messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
+        blocks: [{ kind: 'text', text: e.text, round: 0 }],
+        changes: e.changes || null,
+        turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
+    }
+  }
+}
+
+// loadThreadMessages 重拉某会话的历史（resync 用：事件缺口过大时全量重来）。
+// 正在跑的一轮不盖——那一轮的内容只在本机缓冲里，服务端投影要等轮末才落。
+async function loadThreadMessages(tid) {
+  const st = states[tid]
+  if (!st) return
+  try {
+    const r = await api('GET', '/api/acp/threads/' + tid)
+    if (states[tid] !== st) return
+    if (st.phase !== 'streaming') applyThreadMessages(st, r.thread.messages || [])
+    syncCtx(tid, r.thread.contextUsed, r.thread.contextSize)
+  } catch (e) {
+    // 重拉失败不打断对话：事件流仍会继续推，缺口那几条用户可能看不到，
+    // 但对话本身不受影响。
+  }
+}
+
 /* 切换会话：换"显示哪一份缓冲"，不打断任何会话正在跑的一轮。 */
 async function select(id) {
   if (!id || id === currentId.value) return
   const prev = currentId.value
+  // 切走就退订旧会话：订阅是按会话开的，留着会在内核里积一条没人读的连接。
+  if (prev) unsubscribeThread(prev)
   currentId.value = id
   markSeen(id) // 打开即算读过：未读点的语义就是"这条会话在你没看着的时候又动过"
   const owner = threads.value.find(t => t.id === id)
@@ -548,6 +597,8 @@ async function select(id) {
   popOpen.value = false
   sessionFor.value = '' // 进了会话就收起"新建会话"表单
   const st = stateOf(id)
+  // 打开即订阅该会话的事件流：手机端问的东西，这里要能实时看见。
+  subscribeThread(id)
   if (!st.loaded) {
     if (st.fetching) return // 同一次拉取已在飞（连点列表），别发第二个 GET
     st.fetching = true
@@ -556,20 +607,7 @@ async function select(id) {
       // 等回包期间用户可能已经发了一条出去：那一轮的内容只在本机缓冲里（服务端
       // 要到轮末才落投影），此时不能用历史投影盖掉它。
       if (st.phase !== 'streaming') {
-        st.messages.length = 0
-        for (const e of (r.thread.messages || [])) {
-          if (e.role === 'user') {
-            st.messages.push({ role: 'user', text: e.text,
-              images: (e.files || []).map(f => '/api/upload/' + f), imgCount: e.images || 0 })
-          } else if (e.role === 'note') {
-            st.messages.push({ role: 'note', text: e.text })
-          } else {
-            st.messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
-              blocks: [{ kind: 'text', text: e.text, round: 0 }],
-              changes: e.changes || null,
-              turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
-          }
-        }
+        applyThreadMessages(st, r.thread.messages || [])
       }
       syncCtx(id, r.thread.contextUsed, r.thread.contextSize)
       if (r.session) st.session = r.session
@@ -990,10 +1028,87 @@ function pumpQueue(owner) {
   startTurn(owner, item.text, item.shots)
 }
 
+// scrollAfterRender 渲染后滚到底：只在看的就是这个会话时才滚
+// （切到别的会话去了，别把别人的会话拽到底）。
+function scrollAfterRender() {
+  if (currentId.value === ownerId()) nextTick(() => stick())
+}
+
+// ownerId 当前查看的会话 id（事件回调里用它判断要不要滚）。
+function ownerId() { return currentId.value }
+
+/* ---------- 事件订阅（双端同步） ---------- */
+// 每个会话一条订阅（会话 key = acp:<threadID>）。打开会话时订阅，切走时退订，
+// 卸载组件时全部退掉——留着连接会在内核里积一条没人读的连接。
+function threadEventKey(tid) { return 'acp:' + tid }
+
+// onThreadEvent 把事件交给共享翻译层：与聊天页、手机端同一条渲染路径。
+function onThreadEvent(tid, ev) {
+  const st = states[tid]
+  if (!st) return
+  applyEvent(ev, {
+    messages: st.messages,
+    mine: clientId,
+    // 只造不 push：turnevents 的 botFor 负责挂上去（这里再 push 会渲染两份）。
+    makeBot: () => reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0, changes: null }),
+    // imgCount 可能是图片数量（ACP 侧）或附件数组长度（主会话），两种都收下。
+    makeUser: (text, images, imgCount) => reactive({ role: 'user', text, images: images || [], imgCount: typeof imgCount === 'number' ? imgCount : (images || []).length }),
+    onDelta: (bot, delta) => {
+      if (bot) bot.rate = feedRate(bot, delta)
+      scrollAfterRender()
+    },
+    onThinking: () => scrollAfterRender(),
+    onStep: () => scrollAfterRender(),
+    onEnd: (bot, ev2) => {
+      st.phase = 'idle'
+      if (ev2 && ev2.turn) turnTotals.set(tid, ev2.turn)
+      // 本轮了结：把队列里下一条放出去。不调的话排队消息永远卡住，
+      // 只能手动去点「暂停/继续发送队列」。
+      pumpQueue(tid)
+      scrollAfterRender()
+    },
+    onError: (text, bot) => {
+      st.phase = 'idle'
+      if (bot) {
+        bot.streaming = false
+        if (!bot.text) bot.text = text
+        else bot.text += String.fromCharCode(10, 10) + text
+      }
+      scrollAfterRender()
+    },
+    onStatus: text => { if (text) st.statusLine = text },
+    onRemoteUser: () => scrollAfterRender(),
+  })
+}
+
+// subscribeThread 订阅某会话的事件流。已订阅则不重复订阅。
+function subscribeThread(tid) {
+  if (!tid || threadSubs.has(tid)) return
+  const key = threadEventKey(tid)
+  // since 带上这条会话最后收到的 seq：服务端从那儿往后补发。
+  // 传 0 会让服务端从头重放，同一段回答被追加第二遍。
+  threadSubs.set(tid, subscribe(key, threadSeqs.get(tid) || 0, {
+    onEvent: ev => {
+      if (ev && ev.seq) threadSeqs.set(tid, ev.seq)
+      onThreadEvent(tid, ev)
+    },
+    // 缺口过大：全量重拉这个会话的历史（投影在服务端，以它为准）。
+    onResync: () => loadThreadMessages(tid),
+    onState: () => {},
+  }))
+}
+
+// unsubscribeThread 退订某会话的事件流。
+function unsubscribeThread(tid) {
+  const sub = threadSubs.get(tid)
+  if (!sub) return
+  sub.stop()
+  threadSubs.delete(tid)
+}
+
 async function startTurn(owner, text, shots) {
   const st = stateOf(owner)
   const shown = () => currentId.value === owner
-  const scrollAfterRender = () => { if (shown()) nextTick(() => stick()) }
 
   if (shown()) input.value = ''
   const attachments = shots.map(s => s.id)
@@ -1012,114 +1127,43 @@ async function startTurn(owner, text, shots) {
   const controller = new AbortController()
   inflight.set(owner, controller)
   const removeTyping = () => { const i = st.messages.indexOf(typing); if (i >= 0) st.messages.splice(i, 1) }
-  let bot = null
-  const ensureBot = () => {
-    removeTyping()
-    if (!bot) {
-      bot = reactive({ role: 'bot', text: '', streaming: true, paused: false, blocks: [], turn: null, round: 0, changes: null })
-      st.messages.push(bot)
-    }
-    return bot
-  }
-  let done = false
-  let turnTotal = null
-  let errMsg = ''
+  // bot 气泡由事件流创建（turnevents 的 botFor 按 turnId 归属），
+  // 这里不再自己造——否则同一条回答会分裂成两个气泡。
   try {
     const res = await fetch(`/api/acp/threads/${owner}/chat`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ message: text, attachments }),
+      body: JSON.stringify({ message: text, attachments, clientId, device }),
       signal: controller.signal,
     })
     if (res.status === 403) { authFailed(); return }
-    if (!res.ok || !res.body) {
-      let msg = 'HTTP ' + res.status
-      try { const d = await res.json(); if (d.body && d.body.error) msg = d.body.error } catch {}
+    let data = null
+    try { data = await res.json() } catch { /* 非 JSON 响应 */ }
+    if (!res.ok) {
+      const msg = (data && data.body && data.body.error) || ('HTTP ' + res.status)
       throw new Error(msg)
     }
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buf = ''
-    const handle = ev => {
-      let data
-      try { data = JSON.parse(ev) } catch { throw new Error('响应格式异常') }
-      if (data.error) throw new Error(data.error)
-      if (data.status) typing.label = data.status
-      if (data.thinking) { pushThinking(ensureBot(), data.thinking); scrollAfterRender() }
-      if (data.step) { pushToolStep(ensureBot(), data.step); scrollAfterRender() }
-      if (data.delta) {
-        if (typing.label) typing.label = ''
-        const b = ensureBot()
-        pushText(b, data.delta)
-        b.rate = feedRate(b, data.delta)
-        scrollAfterRender()
-      }
-      if (data.done) {
-        done = true
-        if (data.turn) turnTotal = data.turn
-        // M-5：agent 自报的上下文水位，并入轮末汇总一起展示；chip 立即跟上，
-        // 不必等 finally 里的列表刷新。
-        if (data.context && turnTotal) {
-          turnTotal.contextUsed = data.context.used || 0
-          turnTotal.contextSize = data.context.size || 0
-        }
-        if (data.context) syncCtx(owner, data.context.used, data.context.size)
-        if (data.changes && bot) bot.changes = data.changes
-        if (data.error) errMsg = data.error
-      }
-    }
-    const consume = () => {
-      buf = buf.replace(/\r\n/g, '\n')
-      let idx
-      while (!done && (idx = buf.indexOf('\n\n')) >= 0) {
-        const chunk = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        const data = chunk.split('\n').filter(line => line.startsWith('data:'))
-          .map(line => line.slice(5).trimStart()).join('\n')
-        if (data) handle(data)
-      }
-    }
-    while (!done) {
-      const chunk = await reader.read()
-      if (controller.signal.aborted) return
-      buf += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
-      consume()
-      if (chunk.done) break
+    // 提交成功：这一轮的内容从事件流来（会话 key = acp:<threadID>）。
+    const r = (data && data.body) || {}
+    myTurnId = r.turnId || ''
+    if (r.status === 'queued') {
+      // 会话忙（另一端正在生成）：这一轮进了 FIFO 队列。
+      st.phase = 'idle'
+      toast('小五正在回答（来自另一端），你的问题排在第 ' + (r.position || 1) + ' 位')
     }
   } catch (e) {
-    if (e.name !== 'AbortError') errMsg = e.message
+    if (e.name !== 'AbortError') toast('发送失败：' + e.message, true)
   } finally {
     if (inflight.get(owner) === controller) inflight.delete(owner)
-    st.phase = 'idle'
+    // 回复内容由事件流补齐；这里只把状态行让位，busy 由事件收尾时归位。
+    if (!myTurnId) st.phase = 'idle'
     removeTyping()
-    if (bot) {
-      // 本轮已了结：漏收尾的工具块不会再有结果事件了，就地收掉
-      bot.streaming = false
-      closeRunningTools(bot)
-      bot.turn = turnTotal
-      if (errMsg) {
-        bot.blocks.push({ kind: 'text', text: '⚠️ ' + errMsg })
-        bot.text += errMsg
-      } else if (!bot.blocks.length) {
-        bot.blocks.push({ kind: 'text', text: '（本轮没有产出文本）' })
-      }
-    } else if (errMsg) {
-      st.messages.push({ role: 'note', text: errMsg })
-    }
-    // 刷新列表状态（标题/状态/更新时间）；正在看着的这条会话顺手记成"已读"，
-    // 免得自己刚跑完的一轮反过来给自己挂个未读点。
-    load().then(() => { if (currentId.value === owner) markSeen(owner) })
-    // 一轮跑完会话必已建立：配置项（含 agent 侧的切换回推）跟着刷新。
-    // 会话被删掉时缓冲已回收，别再为它拉起 agent。
-    if (states[owner]) loadOptions(owner)
-    // 队列里还排着消息就放下一条上路（没暂停的话）
-    pumpQueue(owner)
   }
 }
 
 async function stop() {
   if (!currentId.value) return
-  try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, {}) } catch (e) { toast('停止失败：' + e.message, true) }
+  try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, { turnId: myTurnId }) } catch (e) { toast('停止失败：' + e.message, true) }
 }
 
 /* ---------- 图片附件（复用聊天页上传链路，单张 ≤5MB；按钮选图与粘贴共用） ---------- */
