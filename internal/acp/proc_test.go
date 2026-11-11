@@ -1,7 +1,7 @@
 package acp
 
-// proc_test.go 覆盖进程拉起的纯函数面：env 合并（同名 key 覆盖生效、结果无
-// 重复——直接 append 会让 libc 子进程读到旧值）与 stderr 尾部截取。
+// proc_test.go 覆盖进程拉起的纯函数面：init 错误分类与 stderr 尾部截取。
+// env 合并测试随 buildEnv 下沉到 config.MergeEnv（internal/config/npmcache_test.go）。
 
 import (
 	"context"
@@ -14,62 +14,6 @@ import (
 
 	"github.com/capyflow/friday/internal/config"
 )
-
-func envKeys(env []string) map[string][]string {
-	out := map[string][]string{}
-	for _, kv := range env {
-		i := strings.IndexByte(kv, '=')
-		if i <= 0 {
-			out[kv] = append(out[kv], "")
-			continue
-		}
-		out[kv[:i]] = append(out[kv[:i]], kv[i+1:])
-	}
-	return out
-}
-
-func TestBuildEnvOverride(t *testing.T) {
-	inherit := []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/home/user",
-		"LANG=zh_CN.UTF-8",
-		"EXISTING=old",
-	}
-	got := buildEnv(inherit, map[string]string{
-		"HOME":     "/tmp/agent-home",
-		"EXISTING": "new",
-		"FRESH":    "added",
-	})
-
-	keys := envKeys(got)
-	for name, want := range map[string]string{
-		"PATH":     "/usr/bin:/bin", // 未覆盖的 key 原样保留
-		"HOME":     "/tmp/agent-home",
-		"EXISTING": "new",
-		"FRESH":    "added",
-		"LANG":     "zh_CN.UTF-8",
-	} {
-		if len(keys[name]) != 1 {
-			t.Fatalf("%s 应恰好出现一次，实际 %d 次: %v", name, len(keys[name]), keys[name])
-		}
-		if keys[name][0] != want {
-			t.Fatalf("%s = %q，期望 %q", name, keys[name][0], want)
-		}
-	}
-}
-
-func TestBuildEnvDuplicateInheritKeepsFirst(t *testing.T) {
-	// 继承环境自身有重复时保留首条（与 libc getenv 同语义），配置覆盖仍生效。
-	inherit := []string{"FOO=first", "FOO=second", "BAR=x"}
-	got := buildEnv(inherit, map[string]string{"BAR": "y"})
-	keys := envKeys(got)
-	if len(keys["FOO"]) != 1 || keys["FOO"][0] != "first" {
-		t.Fatalf("继承重复应保留首条，实际 %v", keys["FOO"])
-	}
-	if len(keys["BAR"]) != 1 || keys["BAR"][0] != "y" {
-		t.Fatalf("配置覆盖应生效，实际 %v", keys["BAR"])
-	}
-}
 
 func TestStderrTailAfterKill(t *testing.T) {
 	dir := t.TempDir()

@@ -116,9 +116,23 @@ func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Dur
 
 	cmd := exec.Command(bin, cfg.Args...)
 	cmd.Dir = cwd
+	// 包管理器拉起器（npx 等）把 npm 包缓存收进数据目录 npm-cache/（261110 用户
+	// 清 ~/.npm/_npx 打瘫全部 agent 的事故）：注入放 extra 层，配置里显式给的
+	// npm_config_cache 仍优先，全局环境里的旧值被覆盖。
+	extra := make(map[string]string, len(cfg.Env)+1)
+	if config.IsPackageLauncher(command) {
+		if dir, err := config.NpmCacheDir(); err == nil {
+			extra[config.NpmCacheEnvKey] = dir
+		} else {
+			log.Printf("[acp] agent %s 未注入数据目录 npm 缓存: %v", cfg.Name, err)
+		}
+	}
+	for k, v := range cfg.Env {
+		extra[k] = v
+	}
 	// env 合并而非追加：同名 key 以配置为准。直接 append 会产生重复 key，
 	// libc 的 getenv 取第一个匹配——覆盖对 node 系 agent 会静默失效。
-	cmd.Env = buildEnv(os.Environ(), cfg.Env)
+	cmd.Env = config.MergeEnv(os.Environ(), extra)
 	// N1：独立进程组——kill 时连 npx→node→agent 自 spawn 的工具子进程一起带走。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -294,32 +308,6 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
-}
-
-// buildEnv 在继承环境上叠加覆盖：同名 key 原地替换，结果无重复 key。
-// 直接 append 会出现重复——libc 的 getenv 返回第一个匹配，覆盖对 node 等
-// 非 Go 子进程静默失效，故必须合并。
-func buildEnv(inherit []string, extra map[string]string) []string {
-	env := make([]string, 0, len(inherit)+len(extra))
-	at := make(map[string]int, len(inherit))
-	for _, kv := range inherit {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			if _, dup := at[kv[:i]]; dup {
-				continue // 继承环境自身有重复时保留首条，语义与 libc getenv 一致
-			}
-			at[kv[:i]] = len(env)
-		}
-		env = append(env, kv)
-	}
-	for k, v := range extra {
-		kv := k + "=" + v
-		if i, dup := at[k]; dup {
-			env[i] = kv
-		} else {
-			env = append(env, kv)
-		}
-	}
-	return env
 }
 
 // readTail 读取文件末尾至多 max 字节（诊断文件可能被刷到很大，截尾即可）。

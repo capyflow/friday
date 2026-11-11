@@ -28,7 +28,8 @@ const (
 	AcpDefaultSessionSeconds = 60
 	// AcpColdStartHandshakeSeconds 包管理器型启动命令（npx/pnpm/bunx/uvx…）首次
 	// 拉起的握手预算：冷启动要联网装包，10s 基本必踩；同一 agent 成功起过一次后
-	// 就回落到常规握手值（缓存见 acp 包的进程内记录）。
+	// 就回落到常规握手值（缓存见 acp 包的进程内记录）。包缓存在数据目录
+	// npm-cache/（spawn 时经 npm_config_cache 注入），清系统 ~/.npm 不影响。
 	AcpColdStartHandshakeSeconds = 90
 	// AcpPermissionTimeoutSeconds 智能体权限请求的审批等待（秒）——人可能不在
 	// 屏幕前，比 exec 审批的 5 分钟长得多。

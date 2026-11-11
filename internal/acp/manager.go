@@ -929,20 +929,11 @@ func (m *Manager) ensureProcess(ctx context.Context, th *Thread, agentCfg config
 	return ps, nil
 }
 
-// coldStartLaunchers 是"每次都要现拉包"的启动命令：第一次跑要联网装包，
-// 10 秒握手预算基本必踩（261030 验收：codex 首次 npx 冷启动握手超时，缓存热了才正常）。
-var coldStartLaunchers = map[string]bool{
-	"npx": true, "pnpm": true, "pnpm-dlx": true, "dlx": true, "bunx": true,
-	"yarn": true, "deno": true, "uvx": true, "pipx": true, "npm": true,
-}
-
 // coldStartLauncher 判断启动命令是不是包管理器拉起器（只看 basename，绝对路径也算）。
+// 表下沉在 config.IsPackageLauncher：同一张表还服务于 spawn 时的 npm_config_cache
+// 注入（proc.go，包缓存收进数据目录），单一判定来源。
 func coldStartLauncher(command string) bool {
-	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
-	if base == "pnpm" || base == "npm" || base == "yarn" || base == "deno" {
-		return true // 这几个只在"用 run/dlx 现拉包"时慢，但多给一次冷启动预算没有坏处
-	}
-	return coldStartLaunchers[base]
+	return config.IsPackageLauncher(command)
 }
 
 // handshakeBudget 决定这次 initialize 给多久。

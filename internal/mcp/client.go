@@ -13,11 +13,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/capyflow/friday/internal/config"
 )
 
 // protocolVersion 是本客户端声明的 MCP 协议版本。
@@ -100,12 +103,22 @@ func Start(name, command string, args []string, env map[string]string, onExit fu
 		return nil, fmt.Errorf("创建 stdout 管道: %w", err)
 	}
 	cmd.Stderr = os.Stderr
-	if len(env) > 0 {
-		cmd.Env = os.Environ()
-		for k, v := range env {
-			cmd.Env = append(cmd.Env, k+"="+v)
+	// env 组装与 acp 同语义（config.MergeEnv）：同名 key 以配置为准，直接 append
+	// 的重复 key 会让覆盖对 node 系子进程静默失效。包管理器拉起器（npx 等）注入
+	// 数据目录 npm-cache/（261110 清 ~/.npm 打瘫 agent 的事故后收编），配置里
+	// 显式给的 npm_config_cache 仍可覆盖注入值。
+	extra := make(map[string]string, len(env)+1)
+	if config.IsPackageLauncher(command) {
+		if dir, err := config.NpmCacheDir(); err == nil {
+			extra[config.NpmCacheEnvKey] = dir
+		} else {
+			log.Printf("[mcp] 服务器 %s 未注入数据目录 npm 缓存: %v", name, err)
 		}
 	}
+	for k, v := range env {
+		extra[k] = v
+	}
+	cmd.Env = config.MergeEnv(os.Environ(), extra)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("启动 MCP 服务器 %q: %w", command, err)
