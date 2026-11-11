@@ -1562,9 +1562,12 @@ html[data-theme="dark"] .qbar-head .ib-btn.sm[aria-pressed="true"] { color: #FBB
 .ag-full { flex: none; }
 .ag-head-txt b { font-size: 14px; }
 .ag-head-txt .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ag-perm { font: inherit; font-size: 11.5px; color: var(--muted-fg); margin-left: 2px;
+/* 内置会话头部的全局权限档位：头部空间小，用紧凑形态的下拉框（自绘，样式可控）。 */
+.ag-perm-box { margin-left: 2px; }
+.ag-perm-box .selbox-trigger { font: inherit; font-size: 11.5px; color: var(--muted-fg);
            background: rgba(127, 127, 127, .1); border: 1px solid var(--border);
-           border-radius: 999px; padding: 1px 6px; cursor: pointer; }
+           border-radius: 999px; padding: 1px 6px; cursor: pointer; gap: 4px; }
+.ag-perm-box .selbox-chev { width: 11px; height: 11px; }
 .ag-hint { margin: 10px 22px 0; padding: 8px 12px; border-radius: 10px;
            background: rgba(245, 158, 11, .1); font-size: 12px; }
 .ag-scroller { flex: 1; overflow-y: auto; padding: 20px 18px 8px; }

@@ -1621,7 +1621,7 @@ describe('工作区清单里的内置 Friday', () => {
     await pickSession('内置这条')
     expect(headMeta()).toContain('friday（内置）')
     // 内置没有会话级 capabilities，但权限这一项在头部直接可切（全局档）
-    expect(wrapper.get('[aria-label="全局权限模式"]').element.value).toBe('acceptEdits')
+    expect(wrapper.get('[aria-label="全局权限模式"]').text()).toContain('免审编辑')
     expect(headMeta()).not.toContain('undefined')
   })
 
@@ -1630,9 +1630,10 @@ describe('工作区清单里的内置 Friday', () => {
     data.threads = [{ ...copy(thread), id: 'thB', agent: 'friday', title: '内置这条' }]
     await show()
     await pickSession('内置这条')
-    const sel = wrapper.get('[aria-label="全局权限模式"]')
-    expect(sel.element.value).toBe('acceptEdits')
-    await sel.setValue('confirm')
+    const box = wrapper.findAllComponents(SelectBox).find(c => c.props('ariaLabel') === '全局权限模式')
+    expect(box).toBeTruthy()
+    expect(box.get('.selbox-label').text()).toContain('免审编辑')
+    await box.vm.$emit('update:modelValue', 'confirm')
     await flushPromises()
     const post = api.mock.calls.find(([m, u]) => m === 'POST' && u === '/api/permissions')
     expect(post[2]).toEqual({ mode: 'confirm' })

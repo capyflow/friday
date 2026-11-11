@@ -317,6 +317,14 @@ const permModes = [
   { id: 'fullAccess', name: '全放行', hint: '全部免审批（毁灭性命令黑名单仍拦截）' },
 ]
 const permMode = ref('')
+// 下拉框选项：SelectBox 只认 {value, label}；每档的说明（hint）挪到触发按钮的
+// title 上——原生 <option title> 在自绘下拉里没有对应位置。全站唯一下拉框的
+// 约定见 SelectBox.vue。
+const permOptions = computed(() => permModes.map(m => ({ value: m.id, label: m.name })))
+const permTitle = computed(() => {
+  const cur = permModes.find(m => m.id === permMode.value)
+  return '全局生效：主对话与所有内置 Friday 会话共用一档' + (cur ? '（' + cur.hint + '）' : '')
+})
 async function loadPermMode() {
   if (permMode.value) return
   try { permMode.value = (await api('GET', '/api/permissions')).mode || 'confirm' }
@@ -1393,11 +1401,9 @@ function previewImages(urls, at = 0) {
               <template v-if="current.cacheHit"> · <span title="缓存读 ÷（缓存读 + 缓存写 + 输入），只统计 agent 上报过缓存的轮次">缓存命中 {{ (current.cacheHit * 100).toFixed(1) }}%</span></template>
               <!-- 内置 Friday 没有会话级能力项：权限是全局的那一份，这里直接给档位选择，
                    切换即 POST /api/permissions（与「设置 → 权限」同一入口、同样全局生效）。 -->
-              <template v-if="isBuiltinThread && permMode"> · <select class="ag-perm" :value="permMode"
-                      aria-label="全局权限模式" title="全局生效：主对话与所有内置 Friday 会话共用一档"
-                      @change="setPermMode($event.target.value)">
-                <option v-for="m in permModes" :key="m.id" :value="m.id" :title="m.hint">{{ m.name }}</option>
-              </select></template>
+              <template v-if="isBuiltinThread && permMode"> · <SelectBox class="ag-perm-box" compact
+                      :model-value="permMode" :options="permOptions" aria-label="全局权限模式"
+                      :title="permTitle" @update:model-value="setPermMode" /></template>
               <template v-if="current.degraded"> · 会话恢复不可靠</template>
               <template v-if="current.policyFallback"> · <span class="ag-policy" :title="current.policyNote">审批档位实际是 {{ current.policyValueName || current.policyValue }}</span></template>
               <template v-else-if="current.policyNote"> · <span class="ag-policy" :title="current.policyNote">审批档位未下发</span></template>
