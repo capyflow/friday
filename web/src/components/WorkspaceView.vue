@@ -95,7 +95,6 @@ function isUnread(t) {
 const showAllWs = reactive(new Set()) // 展开了全部会话的工作区（再点一次「收起会话」移出）
 const SESSION_PREVIEW = 3             // 每组默认先露出最近 3 条会话
 const scroller = ref(null)
-const inputEl = ref(null)
 const creatingWs = ref(false)  // 新建工作区表单展开
 const wsForm = reactive({ name: '', dirs: [] })
 const sessionFor = ref('')     // 正在新建会话的工作区 id（'' = 没在建）
@@ -588,7 +587,6 @@ async function select(id) {
   }
   nextTick(() => {
     stick(true) // 打开会话默认落到最新一条（含切回实时进行中的那一轮）
-    if (inputEl.value) inputEl.value.style.height = 'auto' // 不沿用上一个会话撑起来的高度
   })
 }
 
@@ -971,7 +969,6 @@ function takePending(st) {
 function enqueue(st, text) {
   st.queue.push({ text, shots: takePending(st) })
   input.value = ''
-  if (inputEl.value) inputEl.value.style.height = 'auto'
   toast(st.queuePaused
     ? `已排入队列（共 ${st.queue.length} 条，队列当前是暂停的）`
     : `已排入队列（共 ${st.queue.length} 条，本轮跑完依次发出）`)
@@ -990,10 +987,7 @@ async function startTurn(owner, text, shots) {
   const shown = () => currentId.value === owner
   const scrollAfterRender = () => { if (shown()) nextTick(() => stick()) }
 
-  if (shown()) {
-    input.value = ''
-    if (inputEl.value) inputEl.value.style.height = 'auto'
-  }
+  if (shown()) input.value = ''
   const attachments = shots.map(s => s.id)
   // 气泡直接渲染原图：用服务端 URL（/api/upload/:id），刷新后历史重载也能显示
   const sentImgs = attachments.map(id => '/api/upload/' + id)

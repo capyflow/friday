@@ -61,3 +61,39 @@ describe('ChatComposer 键盘语义', () => {
     expect(wrapper.get('.kbd-hint').text()).toContain('Esc 停止')
   })
 })
+
+// 输入框高度是 JS 按 scrollHeight 写内联样式的，一旦被外部事件抹掉，只有再敲键才会恢复。
+// jsdom 不做布局，所以这里把量到的尺寸打桩，专门验"什么时候该重算一次"。
+describe('ChatComposer 自动增高', () => {
+  function stubMetrics(el, h) {
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: h })
+    el.getClientRects = () => [{ top: 0, left: 0, width: 300, height: 20 }]
+  }
+
+  it('外部回填长文本就撑开（发送后清空、取回队列项、切会话回草稿都走这条）', async () => {
+    const ta = show()
+    stubMetrics(ta.element, 120)
+    await wrapper.setProps({ modelValue: '第一行\n第二行\n第三行' })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(ta.element.style.height).toBe('120px')
+  })
+
+  it('窗口重新聚焦时按内容补算，不再停在 rows=1 的一行', () => {
+    const ta = show({ modelValue: '一段已经写了很多的草稿' })
+    stubMetrics(ta.element, 96)
+    ta.element.style.height = '' // 切走再回来，内联高度被丢掉
+    window.dispatchEvent(new window.Event('focus'))
+    expect(ta.element.style.height).toBe('96px')
+  })
+
+  it('自己不可见（量不到尺寸）时不动高度，别把框压成 0', () => {
+    const ta = show()
+    const el = ta.element
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: 0 })
+    el.getClientRects = () => []
+    el.style.height = '48px'
+    window.dispatchEvent(new window.Event('focus'))
+    expect(el.style.height).toBe('48px')
+  })
+})

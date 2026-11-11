@@ -23,13 +23,18 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'primary', 'pause', 'stop', 'paste'])
 
 const inputEl = ref(null)
+/* 高度按内容算：先归零成 auto 再读 scrollHeight（CSS max-height:160 兜住上限）。
+   不可见时（本页被 v-show 藏起来）量出来全是 0，照着写会把框压成 0 高，
+   所以量不到就跳过，等真正露面时由下面的 focus / visibility 补算。 */
 function autoGrow() {
   const el = inputEl.value
-  if (!el) return
+  if (!el || !el.getClientRects().length) return
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 160) + 'px'
 }
-watch(() => props.modelValue, v => { if (!v) nextTick(autoGrow) }) // 外部清空（发送后）回落一行
+/* 值从外面变也要重算：发送后清空回落一行、切会话回填草稿、把队列项取回编辑
+   都会走到这里——只盯"清空"的话，回填一段长文字仍旧只显示一行。 */
+watch(() => props.modelValue, () => nextTick(autoGrow))
 
 function onInput(e) {
   emit('update:modelValue', e.target.value)
@@ -96,6 +101,13 @@ function onBarWheel(e) {
   el.scrollLeft = next
 }
 onMounted(() => {
+  nextTick(autoGrow) // 带着草稿挂载（切页签回来）时按内容撑开
+  /* 切到别的窗口再切回来、从别的桌面/显示器回来、屏幕唤醒之后，WebKit 会重排这条
+     textarea，内联高度可能只剩 rows="1" 那一行——文字还在，看着却像被折叠了，得再
+     敲一个键才恢复。这类重排不会触发 input，只能在这些时机自己补算一次。 */
+  window.addEventListener('focus', autoGrow)
+  window.addEventListener('resize', autoGrow) // 宽度变了换行数也变
+  document.addEventListener('visibilitychange', autoGrow)
   syncBar()
   // 容器宽度变化（窗口缩放）与 chip 增减（能力清单异步到）都要重算两端提示
   if (typeof window.ResizeObserver !== 'undefined' && barEl.value) {
@@ -107,7 +119,12 @@ onMounted(() => {
     barMO.observe(barEl.value, { childList: true, subtree: true, characterData: true, attributes: true })
   }
 })
-onBeforeUnmount(() => { barRO && barRO.disconnect(); barMO && barMO.disconnect() })
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', autoGrow)
+  window.removeEventListener('resize', autoGrow)
+  document.removeEventListener('visibilitychange', autoGrow)
+  barRO && barRO.disconnect(); barMO && barMO.disconnect()
+})
 </script>
 
 <template>
