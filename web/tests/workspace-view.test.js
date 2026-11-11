@@ -11,8 +11,8 @@ vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 vi.mock('../src/anim.js', () => ({ popIn: vi.fn() }))
 vi.mock('../src/store.js', async importOriginal => ({ ...(await importOriginal()), toast: vi.fn() }))
 
-// 内嵌终端的替身（与 workspace-terminal.test.js 同一套）：默认用例不打开终端面板
-// （组件是开过才挂载的），要验「面板跟会话走 / 分隔线拖拽」时才需要它们。
+// 内嵌终端的替身（与 workspace-terminal.test.js 同一套）：实例按会话挂载，
+// 但面板不自动起 shell（要验「面板跟会话走 / 分隔线拖拽」时才需要它们）。
 // xterm 在 jsdom 里量不出尺寸，WebSocket 也没有真内核可连。
 const termMocks = vi.hoisted(() => {
   const termInstances = []
@@ -1662,6 +1662,10 @@ describe('统一工具面板：窄图标条 / 展开 / 分栏拖拽', () => {
     await wrapper.get('.ag-tools-rail-btn[aria-label="' + label + '"]').trigger('click')
     await flushPromises()
   }
+  // 当前可见的那块终端面板（v-show 藏起来的实例也在 DOM 里，别抓错）
+  function activePanel() {
+    return wrapper.findAll('.wt-panel').find(p => !(p.attributes('style') || '').includes('display: none'))
+  }
 
   it('默认只有一条窄图标条，展开后工具面板在对话右边', async () => {
     await show()
@@ -1705,19 +1709,26 @@ describe('统一工具面板：窄图标条 / 展开 / 分栏拖拽', () => {
     await pickSession('第一件事')
     await openPanel()
     await pickTool('终端')
+    // 每条会话一份实例；从没开过终端的会话显示面板自己的空态，不自动起 shell
     expect(wrapper.findAll('.wt-panel')).toHaveLength(1)
+    expect(sockets).toHaveLength(0)
+    expect(wrapper.text()).toContain('按上方 + 新建一个终端')
+
+    // 按 + 才起终端，落在本会话的主目录
+    await activePanel().get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     expect(sockets).toHaveLength(1)
+    expect(sockets[0].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/proj' })
 
     await pickSession('第二件事')
-    // 还没看过这条会话的终端：实例没挂
-    expect(wrapper.findAll('.wt-panel')).toHaveLength(1)
+    // 切到另一条会话：它的实例也挂上了（空态），第一条的连接还在
+    expect(wrapper.findAll('.wt-panel')).toHaveLength(2)
     expect(sockets).toHaveLength(1)
 
-    await pickTool('终端')
-    expect(wrapper.findAll('.wt-panel')).toHaveLength(2)
+    await activePanel().get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     expect(sockets).toHaveLength(2)
     // 每条会话的终端落在各自的主目录
-    expect(sockets[0].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/proj' })
     expect(sockets[1].frames[0]).toMatchObject({ t: 'start', cwd: '/home/u/shared' })
 
     // 切回第一条：连接还在，不重开

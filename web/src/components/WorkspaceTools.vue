@@ -98,18 +98,7 @@ function startSplit(e) {
 
 // rail 上点图标：同一个标签再点一次就收回成窄条（VS Code 的行为）。
 function pickTab(id) {
-  // 终端标签：点开就是给「当前这条会话」开终端（每条会话各自一份实例）。
-  // 已经开着且当前会话还没终端时，点它不该把面板收起来，而是把终端开起来。
-  if (id === 'terminal' && props.thread && props.thread.id) {
-    const id2 = props.thread.id
-    if (!termOpened.value.has(id2)) {
-      termOpened.value = new Set(termOpened.value).add(id2)
-      tab.value = id
-      setPref(TAB_KEY, id)
-      if (view.value === 'rail') setView('panel')
-      return
-    }
-  }
+  // 终端标签不再特殊：实例一直挂着的，空态由终端面板自己说（按 + 新建）。
   if (tab.value === id && view.value !== 'rail') {
     setView('rail')
     return
@@ -157,11 +146,17 @@ const changeCount = computed(() => {
   return n
 })
 
-// 终端实例跟着会话走：每条会话自己的终端（cwd 也是各自的主目录），
-// 第一次打开该会话的终端才挂载；之后一律 v-show，连接与内容都留着。
-// 终端实例按会话挂载：每条会话自己的终端（cwd 也是各自的主目录），
-// 点过终端标签才挂这条会话的实例；之后一律 v-show——连接、缓冲与内容都留着。
+// 终端实例按会话挂载：每条会话自己的终端（cwd 也是各自的主目录）。
+// 访问过的会话都把实例挂上并留着（v-show）——切会话不打断里面的 shell。
+// 从没开过终端的会话，实例照挂：面板显示自己的空态（"按上方 + 新建一个终端。"），
+// 不再另插一个"还没开过终端"的中转页——那页过去还会在刷新后凭空冒出来。
 const termOpened = ref(new Set())
+
+// 切到哪条会话就把哪条登记进来：它的终端实例要挂上，之前那些也不卸（shell 还在跑）。
+watch(() => (props.thread && props.thread.id) || '', id => {
+  if (!id || termOpened.value.has(id)) return
+  termOpened.value = new Set(termOpened.value).add(id)
+}, { immediate: true })
 
 // 布局量报给父组件：focus 态要改左列宽度（左列在父组件里），
 // open 让父组件的入口按钮知道面板现在是开着还是收成图标条。
@@ -231,11 +226,9 @@ defineExpose({ open, openMemory, pickTab, setView, toggle })
                                :cwd="t.cwd || ''"
                                @close="setView('rail')" />
           </template>
-          <div v-if="!(thread && thread.id) || !termOpened.has(thread.id)" class="ag-tools-empty">
-            <p class="meta">这条会话还没开过终端。</p>
-            <button type="button" class="btn sm" @click="pickTab('terminal')">
-              在本会话主目录打开终端
-            </button>
+          <!-- 一条会话都没选：说清楚要先选会话，不摆个空面板 -->
+          <div v-if="!(thread && thread.id)" class="wt-off">
+            <p class="meta">先在左边选一条会话。</p>
           </div>
         </div>
 

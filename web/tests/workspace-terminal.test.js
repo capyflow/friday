@@ -102,8 +102,13 @@ afterEach(() => {
 function socket() { return FakeSocket.instances[FakeSocket.instances.length - 1] }
 
 describe('工作区内嵌终端面板', () => {
-  it('面板开着就绪一个终端，start 帧把会话主目录带给内核', async () => {
+  it('不自动起 shell：空态提示按 + 新建，点了 + 才在会话主目录起终端', async () => {
     await show()
+    // 面板开着但一个终端都没有：不自作主张起 shell，面板说清怎么开
+    expect(FakeSocket.instances).toHaveLength(0)
+    expect(wrapper.text()).toContain('按上方 + 新建一个终端')
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     expect(FakeSocket.instances).toHaveLength(1)
     expect(socket().frames[0]).toMatchObject({ t: 'start', cwd: '/w/proj' })
     expect(termInstances[0].opened).toBe(true)
@@ -113,6 +118,8 @@ describe('工作区内嵌终端面板', () => {
 
   it('收起面板不卸载：连接照常活着，展开不新建终端', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     const first = socket()
     await wrapper.setProps({ open: false })
     await flushPromises()
@@ -126,6 +133,8 @@ describe('工作区内嵌终端面板', () => {
 
   it('收起期间内核的输出照常进 xterm 缓冲', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     await wrapper.setProps({ open: false })
     await flushPromises()
     socket().pushData([104, 105]) // "hi"
@@ -134,10 +143,14 @@ describe('工作区内嵌终端面板', () => {
     expect(Array.from(termInstances[0].written[0])).toEqual([104, 105])
   })
 
-  it('开合切换（false→true）在状态已就绪时也会补开一个终端', async () => {
+  it('开合切换（false→true）也不补开终端：空态照旧，要开按 +', async () => {
     await show({ open: false, cwd: '' })
     expect(FakeSocket.instances).toHaveLength(0)
     await wrapper.setProps({ open: true })
+    await flushPromises()
+    expect(FakeSocket.instances).toHaveLength(0)
+    expect(wrapper.text()).toContain('按上方 + 新建一个终端')
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
     await flushPromises()
     expect(FakeSocket.instances).toHaveLength(1)
     // cwd 为空回落内核工作目录，协议层允许
@@ -150,12 +163,17 @@ describe('工作区内嵌终端面板', () => {
     await show()
     await wrapper.get('[aria-label="新建终端"]').trigger('click')
     await flushPromises()
-    expect(FakeSocket.instances).toHaveLength(1)
+    expect(FakeSocket.instances).toHaveLength(1) // 第一个终端开得起来
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
+    expect(FakeSocket.instances).toHaveLength(1) // 第二个超上限，不再开
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('上限 1'), true)
   })
 
   it('关闭标签发 close、断开连接并销毁终端', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[aria-label="新建终端"]').trigger('click')
     await flushPromises()
     const second = socket()
@@ -169,6 +187,8 @@ describe('工作区内嵌终端面板', () => {
 
   it('ready 之后头部说明用哪个 shell 与目录，退出在页面上说清结果', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     socket().push({ t: 'ready', id: 't1', shell: '/bin/zsh', cwd: '/w/proj' })
     await flushPromises()
     expect(wrapper.get('.wt-hint').text()).toContain('/bin/zsh · /w/proj')
@@ -179,6 +199,8 @@ describe('工作区内嵌终端面板', () => {
 
   it('出错帧 toast 一次', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     socket().push({ t: 'error', message: '内置终端只允许本机访问' })
     await flushPromises()
     expect(toast).toHaveBeenCalledWith('内置终端只允许本机访问', true)
@@ -198,6 +220,8 @@ describe('工作区内嵌终端面板', () => {
 
   it('卸载（登出/会话被删）把全部终端收掉', async () => {
     await show()
+    await wrapper.get('[aria-label="新建终端"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[aria-label="新建终端"]').trigger('click')
     await flushPromises()
     const first = FakeSocket.instances[0]

@@ -4,8 +4,10 @@
 //   1. 面板收起用 v-show，组件不卸载：WebSocket 与 xterm 实例都还活着，输出照常进
 //      缓冲，重新展开内容原样都在；只有卸载（登出、会话被删）或重启软件才会收掉。
 //   2. 新终端的起始目录由父组件传（cwd = 当前会话的主目录，即工作区主文件夹），
-//      开 tab 那一刻取值；之后换会话不影响已开的终端。
-//   3. 回滚行数写死在代码里（SCROLLBACK），不做成设置：超过这个行数最上面的输出
+//      按 + 新建那一刻取值；之后换会话不影响已开的终端。
+//   3. 面板不自动起 shell：一个终端都没有时显示空态（"按上方 + 新建一个终端。"），
+//      等人按 + 才开——开在哪、什么时候开由人决定。
+//   4. 回滚行数写死在代码里（SCROLLBACK），不做成设置：超过这个行数最上面的输出
 //      就被顶掉，跟日常终端一个做法。
 // xterm / WebSocket / ResizeObserver 实例一律放在响应式之外（engines 这张普通 Map）：
 // 它们是有内部状态的类实例，被 reactive 包一层代理后行为会变（focus、事件回调
@@ -73,11 +75,12 @@ function setPane(id, el) {
   }
 }
 
-// 面板开着就得有终端可用：一个都没有就开一个（落在传入的主目录），
-// 已有的只重量尺寸、归还焦点——收起再展开不能把人正在跑的东西弄丢。
+// 面板开着时：已有终端就重量尺寸、归还焦点——收起再展开不能把人正在跑的东西弄丢。
+// 一个终端都没有时不自作主张起 shell：面板显示空态（"按上方 + 新建一个终端。"），
+// 等人点了 + 才开（起始目录在 openTab 那一刻定格在 props.cwd 上，即会话主目录）。
 function ensureTab() {
   if (!info.value?.enabled) return // 不可用时面板里明说原因，不空连
-  if (!tabs.value.length) openTab()
+  if (!tabs.value.length) return   // 没有终端：空态提示，等用户按 +
   nextTick(refitActive)
 }
 
@@ -289,7 +292,7 @@ onBeforeUnmount(() => {
       <button class="btn sm" @click="retry">重新检查</button>
     </div>
     <p v-else-if="!info" class="meta wt-off">正在确认终端是否可用…</p>
-    <!-- 可用但一个终端都没有（全被手动关了）：留一句怎么开 -->
+    <!-- 可用但一个终端都没有（还没开过，或全被手动关了）：留一句怎么开 -->
     <div v-else class="wt-off"><p class="meta">按上方 + 新建一个终端。</p></div>
   </aside>
 </template>
