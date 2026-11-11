@@ -57,8 +57,9 @@
 //	GET    /api/acp/threads/:id      会话详情含投影消息与目录视图（需登录）
 //	POST   /api/acp/threads/:id      改会话标题 {"title"}（留空回到自动，需登录）
 //	DELETE /api/acp/threads/:id      删除会话（需登录）
-//	POST   /api/acp/threads/:id/chat 智能体对话（SSE 流式，帧协议同 /api/chat，需登录）
-//	POST   /api/acp/threads/:id/stop 取消进行中的一轮（需登录）
+//	POST   /api/acp/threads/:id/chat 提交一轮智能体对话（提交式：立刻返回 JSON，
+//	       {turnId,status,seq,session}；事件走 /api/events/stream，需登录）
+//	POST   /api/acp/threads/:id/stop 停止进行中的一轮 {"turnId"}（turnId 必填，需登录）
 //	GET    /api/acp/threads/:id/options 会话配置项（模型/模式/推理档位下拉，需登录）
 //	POST   /api/acp/threads/:id/options 切换配置项取值 {"id","value"}（需登录）
 //	GET    /api/acp/threads/:id/files   工作区文件树（?path=相对路径，需登录）
@@ -75,6 +76,7 @@
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
 //	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
 //	GET    /api/acp/facade    工具门面状态、调用记录与可勾选工具目录（需登录）
+//	GET    /api/events/stream 会话事件流（?session=web 或 acp:<threadID>，&since=<seq>，需登录）
 //	GET    /api/terminal      内置终端可用状态（enabled/上限/活跃数，需登录）
 //	GET    /api/terminal/ws   内置终端（WebSocket，一条连接一个 PTY；只接受本机回环，需登录）
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
@@ -149,6 +151,7 @@ import (
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/cost"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/notification"
@@ -231,6 +234,7 @@ type Server struct {
 	approver      *approval.Queue          // 危险操作审批队列（可为 nil）
 	mcp           *mcp.Manager             // MCP 服务器管理器（可为 nil）
 	acp           *acp.Manager             // 智能体（ACP）管理器（可为 nil）
+	bus           *eventbus.Bus            // 会话事件总线（可为 nil：未装配时不挂事件流）
 	terminal      *terminal.Manager        // 内置终端管理器（可为 nil：不挂载 /api/terminal*）
 	mcpUpdateMu   sync.Mutex
 	acpUpdateMu   sync.Mutex
@@ -304,6 +308,21 @@ type TLSOptions struct {
 // SetTLS 设置局域网 HTTPS 门参数（Start 之前调用；不调 = 不启用）。
 func (s *Server) SetTLS(o TLSOptions) { s.tls = &o }
 
+// SetBus 注入会话事件总线（Start 之前调用）。
+//
+// 为什么由主程序注入：主会话（session=web）与 ACP 会话（session=acp:<id>）
+// 必须共用**同一个**总线实例，前端一条 /api/events/stream 连接才能按 session
+// 收到两边的事件，序号也才连续。启动装配见 cmd/robot/main.go。
+//
+// 这里顺带把同一条总线交给 ACP 管理器：省得启动装配时两处各注一次、
+// 漏一处就出现"主会话有事件、ACP 没事件"的怪象。
+func (s *Server) SetBus(bus *eventbus.Bus) {
+	s.bus = bus
+	if s.acp != nil {
+		s.acp.SetBus(bus)
+	}
+}
+
 // New 创建管理后台。accounts 为账号仓库（默认 admin/admin，可通过启动配置预置）；
 // chat 为网页聊天服务（可为 nil）；cfg/registry/configPath 支撑模型热更新
 // （三者任一为零值则不挂载热更新接口）；approver/mcp 支撑审批卡片与 MCP 状态页（可为 nil）。
@@ -371,10 +390,15 @@ func (s *Server) Handler() http.Handler {
 	root.AddStaticRouter("/friday-ca.crt", s.handleCACert)
 	root.AddStaticRouter("/icon-192.png", s.handleWebdistAsset("icon-192.png", "image/png"))
 	root.AddStaticRouter("/icon-512.png", s.handleWebdistAsset("icon-512.png", "image/png"))
+	// 会话事件流：一条长连接收某个会话的全部 turn 事件（session=web 或
+	// acp:<threadID>）。用 wrapMedia 鉴权：EventSource 不能带自定义头，
+	// token 只能走查询参数（与通知长链接同一套）。
+	root.AddRouter([]string{http.MethodGet}, "/api/events/stream", s.wrapMedia(s.handleEventStream))
 	if s.chat != nil {
 		root.AddRouter([]string{http.MethodPost}, "/api/chat", s.wrap(s.chat.HandleSSE))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/stop", s.wrap(s.chat.HandleStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/chat/resume", s.wrap(s.chat.HandleResume))
+		root.AddRouter([]string{http.MethodGet}, "/api/chat/queue", s.wrap(s.chat.HandleQueue))
 		root.AddRouter([]string{http.MethodPost}, "/api/upload", s.wrap(s.chat.HandleUpload))
 		root.AddRouter([]string{http.MethodGet}, "/api/upload/:id", s.wrapMedia(s.handleUploadGet))
 		root.AddRouter([]string{http.MethodPost}, "/api/context/clear", s.wrap(s.handleClearContext))

@@ -4,7 +4,6 @@
 package admin
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,14 +12,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
 	"github.com/capyflow/friday/internal/acp"
-	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/trace"
 )
@@ -290,10 +288,22 @@ func (s *Server) handleAcpThreadDelete(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除该对话"})
 }
 
-// handleAcpStop 取消进行中的一轮（显式 session/cancel；上下文保留，可直接续聊）。
+// handleAcpStop 停止**正在跑**的那一轮：POST /api/acp/threads/:id/stop，
+// 请求体 {"turnId":"t1731..."}（turnId 必填）。
+//
+// 为什么必须带 turnId：以前按 thread 停，同一 thread 上任何一轮都可能被停掉
+// ——包括另一端刚发的那一轮（docs/MULTI-DEVICE-SYNC.md §2.3 缺陷 2）。
+// 现在按 turnId 精确指认，对不上就如实报错，不猜。
 func (s *Server) handleAcpStop(ctx *vhttp.Context) error {
-	if !s.acp.Stop(ctx.GinContext().Param("id")) {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有进行中的对话"})
+	var req struct {
+		TurnID string `json:"turnId"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || strings.TrimSpace(req.TurnID) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": `请求体须为 {"turnId": "t1731..."}（turnId 必填：停止必须指明停哪一轮）`})
+	}
+	if err := s.acp.StopTurn(ctx.GinContext().Param("id"), req.TurnID); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已发送停止指令"})
 }
@@ -599,6 +609,7 @@ func (s *Server) handleAcpThreadGitOpStop(ctx *vhttp.Context) error {
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已停止这次操作"})
 }
+
 // handleAcpThreadChecks 返回会话的验证命令记录与建议命令：
 // GET /api/acp/threads/:id/checks。记录是内存态（重启即清，不留假「在跑」），
 // 建议按主目录的标志文件推断（package.json scripts / go.mod / Makefile 等）。
@@ -733,13 +744,26 @@ func (s *Server) workspaceMemoryScope(workspaceID string) (string, error) {
 	return workspaceID, nil
 }
 
-// handleAcpChat 处理一次智能体对话：POST /api/acp/threads/:id/chat，
-// 请求体 {"message":"...", "attachments":["<上传id>", ...]}，响应为 SSE 流，
-// 帧协议与 /api/chat 一致（另有 {"status":"..."} 生命周期占位帧）。
+// handleAcpChat 提交一轮智能体对话：POST /api/acp/threads/:id/chat，
+// 请求体 {"message":"...", "attachments":["<上传id>"], "clientId":"c-xxx",
+// "device":"手机端"}。
+//
+// **语义变更**：本接口不再返回 SSE 流，而是立刻返回 JSON
+// {turnId, status, seq, session}（契约 docs/EVENTS-API.md §2.1）。这一轮在
+// 后台执行，增量/步骤/收尾全部经事件总线广播到 session=acp:<threadID>；
+// 两端都从 /api/events/stream?session=acp:<threadID> 读同一条流，不再是
+// "发起端独占"（以前只有发起请求的那条连接看得到）。
+//
+// 撞上正在跑的一轮时：这一轮**没有真正进入 agent**，后端不排队（队列在前端，
+// 见 web/src/components/WorkspaceView.vue 的 enqueue/pumpQueue——它支持编辑、
+// 删除、暂停队列，后端做不了也不该做两套），只回 202 + status=queued，
+// 让前端自己排队、稍后重发。
 func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 	var req struct {
 		Message     string   `json:"message"`
 		Attachments []string `json:"attachments"`
+		ClientID    string   `json:"clientId"`
+		Device      string   `json:"device"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil ||
 		(strings.TrimSpace(req.Message) == "" && len(req.Attachments) == 0) {
@@ -765,6 +789,72 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 		imgs = append(imgs, acp.Image{MIME: detectImageMIME(data), Data: data, ID: id})
 	}
 
+	question := strings.TrimSpace(req.Message)
+	rctx := logx.WithID(ctx.Context(), logx.NextID())
+	trace.Begin(logx.IDFrom(rctx), "agent", "acp:"+threadID, question)
+	defer trace.End(logx.IDFrom(rctx), "")
+	// 提交即返回：这一轮在后台继续跑。客户端断开也不影响它——"关页面 =
+	// 中止"的旧语义已废弃（docs/MULTI-DEVICE-SYNC.md §3.3），关页面只是
+	// 没人看着，结果照常广播给所有订阅者。
+	res, err := s.acp.SubmitTurn(rctx, threadID, question, imgs,
+		eventbus.Origin{ClientID: req.ClientID, Device: req.Device})
+	if err != nil {
+		logx.Printf(rctx, "[智能体] 提交失败: %v", err)
+		trace.Record(rctx, "acp", "提交失败: %v", err)
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	trace.Record(rctx, "acp", "已提交 turn=%s status=%s", res.TurnID, res.Status)
+	body := map[string]any{
+		"turnId":  res.TurnID,
+		"status":  res.Status,
+		"seq":     res.Seq,
+		"session": res.Session,
+	}
+	if res.Status == "queued" {
+		// 202：正忙，这一轮排到前端队列去了（契约 §2.1）。
+		// 不带 position：位次是**前端队列**里的位次，服务端不知道它排第几
+		//（这一轮压根没进服务端队列），前端自己算准。
+		return ctx.JsonResponse(vhttp.Code{Code: http.StatusAccepted, MsgKey: "accepted"}, body)
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, body)
+}
+
+// handleEventStream 订阅会话事件流：GET /api/events/stream?session=<key>&since=<seq>。
+//
+// session 取值：主会话 "web"、ACP 会话 "acp:<threadID>"——两种都支持，
+// 前端一套代码读两边的会话。事件源是会话事件总线（internal/eventbus），
+// 主会话与 ACP 共用同一个实例，所以两端读到的是同一串事件，不会出现"两份渲染"。
+//
+// 帧格式与契约 §2.4 一致：顶层平铺的 JSON，一帧一行
+// {"seq","type","turnId","clientId","device","session","at",...载荷}。
+//
+// since 是客户端已收到的最后一条 seq；缺省 0 = 只要新事件（契约 §2.4：
+// 首屏已经全量拉过历史，再补一遍旧增量只会让同一段话显示两遍）。
+func (s *Server) handleEventStream(ctx *vhttp.Context) error {
+	bus := s.bus
+	if bus == nil && s.acp != nil {
+		// 兜底：没显式装配总线时用 ACP 管理器那条（同一实例，见 SetBus）。
+		bus = s.acp.Bus()
+	}
+	if bus == nil {
+		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "事件总线未就绪"})
+	}
+	session := strings.TrimSpace(ctx.GinContext().Query("session"))
+	if session == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少参数 session"})
+	}
+	// ACP 会话要认一下 thread 存不存在：session 拼错时早点报错，
+	// 别让客户端干等一条永远不来的流。
+	if strings.HasPrefix(session, "acp:") && s.acp != nil {
+		threadID := strings.TrimPrefix(session, "acp:")
+		if _, ok := s.acp.Get(threadID); !ok {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "未找到该对话"})
+		}
+	}
+	since, _ := strconv.ParseInt(strings.TrimSpace(ctx.GinContext().Query("since")), 10, 64)
+	sub, backlog, needResync := bus.Subscribe(session, since)
+	defer sub.Close()
+
 	gin := ctx.GinContext()
 	gin.Header("Content-Type", "text/event-stream; charset=utf-8")
 	gin.Header("Cache-Control", "no-cache")
@@ -774,71 +864,84 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 	if !ok {
 		return ctx.JsonResponse(vhttp.Codes.InternalError, map[string]string{"error": "连接不支持流式响应"})
 	}
-	var wmu sync.Mutex
-	write := func(v any) bool {
-		b, err := json.Marshal(v)
+	write := func(frame map[string]any) bool {
+		b, err := json.Marshal(frame)
 		if err != nil {
 			return false
 		}
-		wmu.Lock()
-		defer wmu.Unlock()
 		if _, err := fmt.Fprintf(gin.Writer, "data: %s\n\n", b); err != nil {
 			return false
 		}
 		flusher.Flush()
 		return true
 	}
-
-	rctx, cancel := context.WithCancel(logx.WithID(ctx.Context(), logx.NextID()))
-	defer cancel()
-	question := strings.TrimSpace(req.Message)
-	trace.Begin(logx.IDFrom(rctx), "agent", "acp:"+threadID, question)
-	defer trace.End(logx.IDFrom(rctx), "")
-
-	res, err := s.acp.Send(rctx, threadID, question, imgs, acp.TurnHooks{
-		OnText: func(t string) {
-			if !write(map[string]string{"delta": t}) {
-				cancel() // 客户端已断开，中止对话
-			}
-		},
-		OnThought: func(t string) {
-			if !write(map[string]string{"thinking": t}) {
-				cancel()
-			}
-		},
-		OnStep: func(st agent.Step) {
-			if !write(map[string]any{"step": st}) {
-				cancel()
-			}
-		},
-		OnStatus: func(msg string) {
-			write(map[string]string{"status": msg})
-		},
-	})
-	if err != nil {
-		logx.Printf(rctx, "[智能体] 对话失败: %v", err)
-		trace.Record(rctx, "acp", "失败: %v", err)
-		write(map[string]any{"done": true, "error": err.Error()})
+	// 第一帧 hello：告诉客户端这条会话当前最新序号（契约 §2.4）。
+	if !write(eventFrame(eventbus.Event{Seq: sub.Current(), Type: eventbus.TypeHello, Session: session})) {
 		return nil
 	}
-	trace.Record(rctx, "acp", "stopReason=%s，token in=%d out=%d", res.StopReason, res.In, res.Out)
-	turn := map[string]any{"in": res.In, "out": res.Out, "ms": res.Ms}
-	if res.StopReason != "" && res.StopReason != "end_turn" {
-		turn["stopped"] = res.StopReason
-	}
-	payload := map[string]any{"done": true, "turn": turn}
-	if res.Changes != nil {
-		// 只带摘要：逐文件 diff 由 /changes?turn= 单独取，避免 SSE 单帧过大。
-		payload["changes"] = res.Changes.Summary()
-	}
-	if th, ok := s.acp.Get(threadID); ok && th.ContextSize > 0 {
-		// M-5：上下文水位（agent 自报，仅展示）。
-		payload["context"] = map[string]any{
-			"used": th.ContextUsed, "size": th.ContextSize, "cost": th.ContextCost,
+	if needResync {
+		// 缺口太大补不齐：明说"请全量重拉"（主会话 GET /api/chat/history，
+		// ACP GET /api/acp/threads/:id），不假装事件是连续的。seq 带上当前值，
+		// 客户端据此校准游标（否则下一条事件会被当成缺口，陷入反复重拉）。
+		if !write(eventFrame(eventbus.Event{Seq: sub.Current(), Type: eventbus.TypeResync, Session: session})) {
+			return nil
 		}
 	}
-	write(payload)
+	skip := 0
+	if since <= 0 {
+		skip = backlog // 只要新事件：缓冲里的旧增量跳过
+	}
+	for ev := range sub.Events() {
+		if skip > 0 {
+			skip--
+			continue
+		}
+		if !write(eventFrame(ev)) {
+			return nil // 客户端断开：退订即可，不影响这一轮的执行
+		}
+	}
 	return nil
+}
+
+// eventFrame 把总线事件摊平成契约里的顶层平铺帧。
+//
+// 为什么摊平而不是塞进 data 字段：前端的时间线渲染按 ev.delta / ev.step
+// 这样的顶层键取载荷（web/src/turnevents.js），摊平后与旧的 SSE 帧键名
+// 完全一致，前端改动最小（契约 §2.4）。
+func eventFrame(ev eventbus.Event) map[string]any {
+	frame := map[string]any{
+		"seq":     ev.Seq,
+		"type":    ev.Type,
+		"session": ev.Session,
+		"at":      ev.At,
+	}
+	if ev.TurnID != "" {
+		frame["turnId"] = ev.TurnID
+	}
+	if ev.ClientID != "" {
+		frame["clientId"] = ev.ClientID
+	}
+	if ev.Device != "" {
+		frame["device"] = ev.Device
+	}
+	// 载荷摊平到顶层。Data 可能是 map（ACP 侧就是这么发的），也可能是别的
+	// 发布方给的结构体——那就在这儿转成 map 再摊，别让某一端的载荷形状
+	// 悄悄不同（前端只认顶层键）。
+	if m, ok := ev.Data.(map[string]any); ok {
+		for k, v := range m {
+			frame[k] = v
+		}
+	} else if ev.Data != nil {
+		if b, err := json.Marshal(ev.Data); err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil {
+				for k, v := range m {
+					frame[k] = v
+				}
+			}
+		}
+	}
+	return frame
 }
 
 // handleUploadGet 回读一张已上传的图片（智能体对话历史回显原图用）：

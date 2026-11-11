@@ -22,6 +22,7 @@ import (
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/memory"
 )
 
@@ -1638,9 +1639,13 @@ func TestCapabilitiesEmptyWhenAgentOmits(t *testing.T) {
 	}
 }
 
-// 客户端断开（不是用户点停止）：停因记为 cancelled、注记写"连接已断开"，
-// 并且立刻回收进程（这一轮没人接收结果了）。
-func TestClientDisconnectCancelsTurn(t *testing.T) {
+// TestClientDisconnectDoesNotCancelTurn 语义变更：客户端断开**不再**中止这一轮。
+//
+// 以前 ctx 绑着 HTTP 请求，一断开就中止（"关页面 = 停生成"）。双端实时同步的
+// 前提是"发起端只是众多订阅者之一"：关页面只能让人看不见，不能让生成停下来
+// （docs/MULTI-DEVICE-SYNC.md §3.3）。所以断开后这一轮要跑完、结果照常落进
+// 投影，连接也留着（还要续聊）。中止只来自显式的停止。
+func TestClientDisconnectDoesNotCancelTurn(t *testing.T) {
 	f := &fakeAgent{}
 	started := make(chan struct{}, 1)
 	f.promptScript = func(*fakeConn, string) string {
@@ -1660,16 +1665,19 @@ func TestClientDisconnectCancelsTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("断开不应算失败: %v", err)
 	}
-	if res.StopReason != "cancelled" {
-		t.Fatalf("客户端断开的停因应为 cancelled（不是 timeout），实际 %q", res.StopReason)
+	if res.StopReason != "end_turn" {
+		t.Fatalf("断开不该中止这一轮，停因应为 end_turn，实际 %q", res.StopReason)
 	}
 	got, _ := m.Get(th.ID)
 	last := got.Messages[len(got.Messages)-1]
-	if !strings.Contains(last.Text, "连接已断开") {
-		t.Fatalf("注记应写明连接断开: %+v", last)
+	if last.Role != "assistant" {
+		t.Fatalf("断开后这一轮照常收尾，最后一条应是回答而不是注记: %+v", last)
 	}
-	if m.liveOf(th.ID) != nil {
-		t.Fatal("没人接收结果时应立刻回收进程")
+	if strings.Contains(last.Text, "连接已断开") {
+		t.Fatalf("不该再记\"连接已断开\"的注记: %+v", last)
+	}
+	if m.liveOf(th.ID) == nil {
+		t.Fatal("断开不该回收进程：这一轮正常跑完了，连接留着好续聊")
 	}
 }
 
@@ -2720,9 +2728,12 @@ func TestNoticeSkippedWhenUserStops(t *testing.T) {
 	}
 }
 
-// TestNoticeOnClientDisconnect 页面关闭/连接断掉这一类收尾要提示，并把已经改动的
-// 文件数带上——人回来时得知道盘上已经动了什么、结果没回到哪一条会话。
-func TestNoticeOnClientDisconnect(t *testing.T) {
+// TestNoticeOnTurnEndAfterClientDisconnect 客户端断开不再中止这一轮，所以收尾走
+// 的是"正常跑完"那条路：提示说的是"跑完了"，并把已经改动的文件数带上——
+// 人回来时得知道盘上已经动了什么。
+//
+// 语义变更见 TestClientDisconnectDoesNotCancelTurn（断开不再中止）。
+func TestNoticeOnTurnEndAfterClientDisconnect(t *testing.T) {
 	f := &fakeAgent{}
 	f.promptScript = func(fc *fakeConn, sid string) string {
 		fc.w.notify("session/update", update(sid, "agent_message_chunk",
@@ -2749,9 +2760,9 @@ func TestNoticeOnClientDisconnect(t *testing.T) {
 	cancel() // 客户端断开（不是用户按停止）
 	<-done
 
-	key, ok := notices.find("这一轮没跑完")
+	key, ok := notices.find("这一轮跑完了")
 	if !ok {
-		t.Fatalf("断开收尾应投一条提示: %+v", notices.texts)
+		t.Fatalf("断开后这一轮照常跑完，应投一条「跑完了」的提示: %+v", notices.texts)
 	}
 	if !strings.HasPrefix(key, "acp:"+th.ID+":t") || !strings.HasSuffix(key, ":done") {
 		t.Errorf("提示 key 应绑定这一轮，实际 %q", key)
@@ -3515,5 +3526,301 @@ func TestNewSessionDoesNotInheritOtherAgent(t *testing.T) {
 	}
 	if len(other.CapChoices) != 0 {
 		t.Fatalf("别台 agent 的选择不该搬过来: %+v", other.CapChoices)
+	}
+}
+
+// ---------- 双端同步：提交式 + 扇出 + 精确停止 ----------
+
+// eventCollector 收集总线上的事件（后台 goroutine 读，按类型/轮次查）。
+type eventCollector struct {
+	mu     sync.Mutex
+	events []eventbus.Event
+}
+
+// run 持续读订阅通道直到订阅关闭。
+func (c *eventCollector) run(sub *eventbus.Subscriber) {
+	for ev := range sub.Events() {
+		c.mu.Lock()
+		c.events = append(c.events, ev)
+		c.mu.Unlock()
+	}
+}
+
+// types 返回已收到的全部事件类型（按到达顺序）。
+func (c *eventCollector) types() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.events))
+	for _, ev := range c.events {
+		out = append(out, ev.Type)
+	}
+	return out
+}
+
+// withTurn 返回属于某一轮的事件。
+func (c *eventCollector) withTurn(turnID string) []eventbus.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []eventbus.Event
+	for _, ev := range c.events {
+		if ev.TurnID == turnID {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// sawEnd 某一轮是否已经收到收尾事件（turn.end 或 turn.error）。
+//
+// 用来等后台轮次真正走完：提交式之后轮次在后台跑，测试先结束的话，
+// 后台 goroutine 还会往临时目录里写（快照/投影），TempDir 清理会报
+// 「directory not empty」。
+func (c *eventCollector) sawEnd(turnID string) bool {
+	for _, ev := range c.withTurn(turnID) {
+		if ev.Type == eventbus.TypeTurnEnd || ev.Type == eventbus.TypeTurnError {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSubmitTurnRunsInBackground 提交式：接口立刻返回（running），这一轮在
+// 后台跑完；提问、开始、增量、收尾全部经事件总线广播到 acp:<threadID>——
+// 两端读同一条流，不会出现"两份渲染"（EVENTS-API.md §2.1/§2.4）。
+func TestSubmitTurnRunsInBackground(t *testing.T) {
+	f := &fakeAgent{promptScript: defaultScript}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	bus := eventbus.New(0, 0)
+	m.SetBus(bus)
+	sub, _, _ := bus.Subscribe("acp:"+th.ID, 0)
+	defer sub.Close()
+	col := &eventCollector{}
+	go col.run(sub)
+
+	res, err := m.SubmitTurn(context.Background(), th.ID, "打个招呼", nil,
+		eventbus.Origin{ClientID: "c-phone", Device: "手机端"})
+	if err != nil {
+		t.Fatalf("提交失败: %v", err)
+	}
+	if res.Status != "running" {
+		t.Fatalf("空闲时应立刻开跑，实际 %q", res.Status)
+	}
+	if res.Session != "acp:"+th.ID {
+		t.Fatalf("会话 key 应为 acp:<threadID>，实际 %q", res.Session)
+	}
+	if res.TurnID == "" || res.Seq == 0 {
+		t.Fatalf("应带回 turnId 与 seq: %+v", res)
+	}
+
+	waitFor(t, 3*time.Second, "轮次结束", func() bool {
+		got, _ := m.Get(th.ID)
+		return len(got.Messages) >= 2
+	})
+	waitFor(t, 3*time.Second, "turn.end 广播", func() bool {
+		return containsMethod(col.types(), eventbus.TypeTurnEnd)
+	})
+	types := col.types()
+	for _, want := range []string{
+		eventbus.TypeUserMessage, eventbus.TypeTurnStart,
+		eventbus.TypeDelta, eventbus.TypeTurnEnd,
+	} {
+		if !containsMethod(types, want) {
+			t.Errorf("应广播 %s 事件，实际 %v", want, types)
+		}
+	}
+	// 事件要带上发起端身份，另一端才能标「来自手机端」。
+	evs := col.withTurn(res.TurnID)
+	if len(evs) == 0 {
+		t.Fatal("这一轮应有事件")
+	}
+	for _, ev := range evs {
+		if ev.ClientID != "c-phone" || ev.Device != "手机端" {
+			t.Errorf("事件应带发起端身份: %+v", ev)
+			break
+		}
+	}
+}
+
+// TestSubmitTurnBusyDoesNotEnterAgent 撞上正在跑的一轮：这一轮**没有真正进入
+// agent**（不发任何事件），只回 queued，让前端自己的队列接手
+// （web/src/components/WorkspaceView.vue 的 enqueue/pumpQueue）。
+func TestSubmitTurnBusyDoesNotEnterAgent(t *testing.T) {
+	f := &fakeAgent{}
+	release := make(chan struct{})
+	var once sync.Once
+	releaseFn := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseFn)
+	f.promptScript = func(*fakeConn, string) string {
+		<-release
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+	bus := eventbus.New(0, 0)
+	m.SetBus(bus)
+	sub, _, _ := bus.Subscribe("acp:"+th.ID, 0)
+	defer sub.Close()
+	col := &eventCollector{}
+	go col.run(sub)
+
+	first, err := m.SubmitTurn(context.Background(), th.ID, "先跑这个", nil, eventbus.Origin{})
+	if err != nil {
+		t.Fatalf("提交失败: %v", err)
+	}
+	waitFor(t, 3*time.Second, "第一轮开跑", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		lv := m.live[th.ID]
+		return lv != nil && lv.turnID == first.TurnID
+	})
+
+	second, err := m.SubmitTurn(context.Background(), th.ID, "排队的", nil, eventbus.Origin{})
+	if err != nil {
+		t.Fatalf("撞忙不应算失败: %v", err)
+	}
+	if second.Status != "queued" {
+		t.Fatalf("撞忙时应回 queued，实际 %q", second.Status)
+	}
+	if second.TurnID == "" || second.TurnID == first.TurnID {
+		t.Fatalf("撞忙的那一轮应有自己的 turnId（占位）: %+v", second)
+	}
+	if second.Session != "acp:"+th.ID {
+		t.Fatalf("会话 key 应为 acp:<threadID>，实际 %q", second.Session)
+	}
+	// 撞忙的这一轮没进 agent：不该有任何事件挂在它身上。
+	time.Sleep(200 * time.Millisecond)
+	if evs := col.withTurn(second.TurnID); len(evs) != 0 {
+		t.Fatalf("撞忙的这一轮不应发事件: %+v", evs)
+	}
+
+	// 前一轮跑完后，这一轮就能开跑了（前端队列的 pumpQueue 就是这么做的）。
+	// 注意要重试：前一轮的串行锁是在 sendTurn 返回之后才释放的，"轮次结束"与
+	// "锁已释放"之间有个极窄的窗口——撞上了就再提交一次。
+	releaseFn()
+	var third SubmitResult
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		third, err = m.SubmitTurn(context.Background(), th.ID, "接着跑", nil, eventbus.Origin{})
+		if err != nil {
+			t.Fatalf("提交失败: %v", err)
+		}
+		if third.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("前一轮结束后应能开跑，实际 %q", third.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if third.Session != "acp:"+th.ID {
+		t.Fatalf("会话 key 应为 acp:<threadID>，实际 %q", third.Session)
+	}
+	// 等第三轮真正收尾再退出：提交式之后轮次在后台跑，测试先结束的话，
+	// 后台 goroutine 还会往临时目录里写（快照/投影），TempDir 清理就会
+	// 报「directory not empty」。等它的 turn.end 事件最准——那才是轮次真正走完。
+	waitFor(t, 10*time.Second, "第三轮收尾", func() bool {
+		return len(col.withTurn(third.TurnID)) > 0 && col.sawEnd(third.TurnID)
+	})
+}
+
+// TestFanOutDeliversTrailingTextToEverySink 同一轮可以有多个接收器（扇出）：
+// 执行器与旁观者都要收到同样的增量，**包括最后一段文本**——收尾结界
+// （settleTurn）必须把每个接收器都收尾，否则某个客户端会漏掉结尾
+// （docs/MULTI-DEVICE-SYNC.md §5 风险 4）。
+func TestFanOutDeliversTrailingTextToEverySink(t *testing.T) {
+	f := &fakeAgent{}
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("前半段…")}))
+		time.Sleep(300 * time.Millisecond) // 给测试挂旁观者的时间
+		fc.w.notify("session/update", update(sid, "agent_message_chunk",
+			map[string]any{"content": textBlock("结尾这句")}))
+		return "end_turn"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	done := make(chan struct{})
+	var res TurnResult
+	var sendErr error
+	go func() {
+		defer close(done)
+		res, sendErr = m.Send(context.Background(), th.ID, "看着点", nil, TurnHooks{})
+	}()
+	waitFor(t, 3*time.Second, "turn 启动", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.live[th.ID] != nil
+	})
+
+	var mu sync.Mutex
+	var seen strings.Builder
+	stop, ok := m.Observe(th.ID, TurnHooks{
+		OnText: func(t string) {
+			mu.Lock()
+			seen.WriteString(t)
+			mu.Unlock()
+		},
+	})
+	if !ok {
+		t.Fatal("旁观者应能挂上正在跑的这一轮")
+	}
+	<-done
+	stop()
+	if sendErr != nil {
+		t.Fatalf("这一轮不该失败: %v", sendErr)
+	}
+	if !strings.Contains(res.Answer, "结尾这句") {
+		t.Fatalf("执行器应收到结尾文本，实际 %q", res.Answer)
+	}
+	mu.Lock()
+	got := seen.String()
+	mu.Unlock()
+	if !strings.Contains(got, "结尾这句") {
+		t.Fatalf("旁观者也应收到结尾文本（收尾要收尾所有接收器），实际 %q", got)
+	}
+}
+
+// TestStopTurnRequiresMatchingTurnID 停止必须指明停哪一轮：turnId 对不上就
+// 如实报错，别停错对象（docs/MULTI-DEVICE-SYNC.md §2.3 缺陷 2）。
+func TestStopTurnRequiresMatchingTurnID(t *testing.T) {
+	f := &fakeAgent{}
+	f.cancelSeen = make(chan struct{}, 1)
+	f.promptScript = func(fc *fakeConn, sid string) string {
+		<-f.cancelSeen
+		return "cancelled"
+	}
+	m := newTestManager(t, nil, nil, f)
+	th := mustThread(t, m)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = m.SubmitTurn(context.Background(), th.ID, "长任务", nil, eventbus.Origin{})
+	}()
+	waitFor(t, 3*time.Second, "turn 启动", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		lv := m.live[th.ID]
+		return lv != nil && lv.turnID != ""
+	})
+	m.mu.Lock()
+	cur := ""
+	if lv := m.live[th.ID]; lv != nil {
+		cur = lv.turnID
+	}
+	m.mu.Unlock()
+
+	if err := m.StopTurn(th.ID, "t-not-mine"); err == nil {
+		t.Fatal("turnId 对不上应当报错，不能停错对象")
+	}
+	if err := m.StopTurn(th.ID, cur); err != nil {
+		t.Fatalf("按当前 turnId 停止应成功: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("停止后这一轮应收尾")
 	}
 }

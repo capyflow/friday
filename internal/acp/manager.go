@@ -29,8 +29,10 @@ import (
 	vxagent "github.com/capyflow/vortexagent/agent"
 	acp "github.com/coder/acp-go-sdk"
 
+	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/approval"
 	"github.com/capyflow/friday/internal/config"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/memory"
 	"github.com/capyflow/friday/internal/usage"
 )
@@ -204,8 +206,14 @@ type live struct {
 	models    *acp.SessionModelState
 	modeState *acp.SessionModeState
 
-	sinkMu    sync.Mutex
-	sink      *turnSink     // 进行中那一轮的事件接收器；nil = 没有轮次，事件丢弃
+	sinkMu sync.Mutex
+	// sinks 是进行中那一轮的**全部**事件接收器；空 = 没有轮次，事件丢弃。
+	// 为什么是集合而不是单值：以前一个 thread 同一时刻只有一个接收器，
+	// 于是外部 agent 的增量只有发起端能看到，另一端连"正在跑"都看不见
+	// （docs/MULTI-DEVICE-SYNC.md §3.4）。现在同一轮允许多个接收器旁观，
+	// routeEvent 向全部扇出——每个接收器有自己的缓冲，互不干扰。
+	sinks     map[*turnSink]struct{}
+	turnID    string        // 当前正在跑的那一轮（停止/取消按它精确指认）
 	turnDone  chan struct{} // 当前 turn 的结束信号（关闭后挂着的权限审批自动撤卡）
 	stopTimer *time.Timer   // 用户停止后的强杀兜底
 	stopping  atomic.Bool   // 用户已请求停止（强杀收尾时按 cancelled 记账）
@@ -276,16 +284,62 @@ func (lv *live) setCurrent(configID, value string) {
 	}
 }
 
-func (lv *live) setSink(sink *turnSink) {
+// addSink 挂一个事件接收器（同一轮可以有多个：执行器 + 旁观者）。
+//
+// 重复挂同一个接收器是幂等的：集合按指针去重，busy 自愈重挂接收器
+// （manager.go 里 Prompt 失败后重新发起的那次）不会把它算成两个。
+func (lv *live) addSink(sink *turnSink) {
+	if sink == nil {
+		return
+	}
 	lv.sinkMu.Lock()
-	lv.sink = sink
+	if lv.sinks == nil {
+		lv.sinks = map[*turnSink]struct{}{}
+	}
+	lv.sinks[sink] = struct{}{}
 	lv.sinkMu.Unlock()
 }
 
+// takeSink 返回当前任一接收器（没有则 nil）。
+//
+// 保留它是为了 changes.go:827 的"这一轮在跑吗"判定：那里只关心有没有
+// 接收器，不关心有几个。
 func (lv *live) takeSink() *turnSink {
 	lv.sinkMu.Lock()
 	defer lv.sinkMu.Unlock()
-	return lv.sink
+	for s := range lv.sinks {
+		return s
+	}
+	return nil
+}
+
+// takeSinks 返回当前全部接收器（扇出用）。
+//
+// 返回快照而不是持锁遍历：接收器的回调会去发事件、可能回调回管理器，
+// 持锁调用容易锁倒挂。
+func (lv *live) takeSinks() []*turnSink {
+	lv.sinkMu.Lock()
+	defer lv.sinkMu.Unlock()
+	out := make([]*turnSink, 0, len(lv.sinks))
+	for s := range lv.sinks {
+		out = append(out, s)
+	}
+	return out
+}
+
+// finishSinks 收尾全部接收器并清空集合。
+//
+// 这是改成 fan-out 之后最容易漏的一步：以前只有一个接收器，Send 收尾时
+// 调一次 sink.finish() 冲刷残余缓冲就够了；现在有多个接收器，**每一个**
+// 都必须冲刷——否则某个客户端会漏掉最后一段文本（结尾文本还压在缓冲里，
+// 没 flush 就随接收器一起被丢掉）。
+func (lv *live) finishSinks() {
+	for _, s := range lv.takeSinks() {
+		s.finish()
+	}
+	lv.sinkMu.Lock()
+	lv.sinks = nil
+	lv.sinkMu.Unlock()
 }
 
 // procState 是一条 agent 连接（一个进程）与它承载的会话。复用键 = agent 名 + 主目录：
@@ -395,11 +449,21 @@ type Manager struct {
 	procs      map[string]*procState // agent+cwd → 一条连接（承载多个会话）
 	spawnMu    sync.Mutex            // 进程创建串行（同一 key 不并发拉两个）
 	locks      map[string]*sync.Mutex
-	lastCfg    config.AcpConfig // Reload 的差异比较基准
-	path       string           // acp-threads.json（工作区与会话同一份投影）
-	cfgFn      func() config.AcpConfig
-	approver   *approval.Queue
-	memory     *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	// bus 是会话事件总线：一轮对话的增量/步骤/收尾都经它广播给所有订阅者
+	// （桌面端 ⇄ 手机端各读各的那条流）。默认自带一条（见 NewManager），
+	// 启动装配时用 SetBus 换成全局那一条，主会话与 ACP 才共用一个序号空间。
+	bus *eventbus.Bus
+	// seqs 记每条会话最近一次广播出去的事件序号：提交接口回给前端当
+	// "我从哪一条之后开始收"的游标（契约 §2.1 的 seq）。
+	seqs map[string]int64
+	// turnCancels 是在跑轮次的取消句柄（threadID → cancel）：内核关闭时
+	// 统一中止，不留悬挂的 goroutine。
+	turnCancels map[string]context.CancelFunc
+	lastCfg     config.AcpConfig // Reload 的差异比较基准
+	path        string           // acp-threads.json（工作区与会话同一份投影）
+	cfgFn       func() config.AcpConfig
+	approver    *approval.Queue
+	memory      *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 	// notifier 是系统提示桥（key 幂等，见 notification.Center.PostOnce）：只在
 	// "人不在这一页上也得知道"的两个时刻用——审批卡入队、一轮结束。未注入时
 	// 静默跳过（测试、或没装配通知中心的运行形态）。
@@ -799,15 +863,21 @@ func (m *Manager) Delete(id string) bool {
 // cfgFn 提供运行时配置快照；approver 为全局审批队列（可为 nil：权限请求自动允许）。
 func NewManager(cfgFn func() config.AcpConfig, approver *approval.Queue, path string) *Manager {
 	m := &Manager{
-		threads:    map[string]*Thread{},
-		workspaces: map[string]*Workspace{},
-		live:       map[string]*live{},
-		procs:      map[string]*procState{},
-		locks:      map[string]*sync.Mutex{},
-		path:       path,
-		cfgFn:      cfgFn,
-		approver:   approver,
+		threads:     map[string]*Thread{},
+		workspaces:  map[string]*Workspace{},
+		live:        map[string]*live{},
+		procs:       map[string]*procState{},
+		locks:       map[string]*sync.Mutex{},
+		seqs:        map[string]int64{},
+		turnCancels: map[string]context.CancelFunc{},
+		path:        path,
+		cfgFn:       cfgFn,
+		approver:    approver,
 	}
+	// 自带一条事件总线：没装配全局总线时，ACP 侧的事件仍然有地方去
+	// （订阅端点照常工作）。启动装配时用 SetBus 换成全局那一条，
+	// 主会话与 ACP 才共用同一个序号空间（前端一条连接收全部）。
+	m.bus = eventbus.New(0, 0)
 	if base, err := acpBaseDirFn(); err == nil {
 		m.registryBase = base
 		m.registryPath = filepath.Join(base, "registry-cache.json")
@@ -1037,14 +1107,21 @@ func (m *Manager) routeEvent(ps *procState, ev acp.SessionNotification) {
 	if ev.Update.CurrentModeUpdate != nil {
 		lv.setCurrentMode(string(ev.Update.CurrentModeUpdate.CurrentModeId))
 	}
-	if sink := lv.takeSink(); sink != nil {
+	// 向**全部**接收器扇出：多端旁观同一轮时，每端都要看到同样的增量
+	// （单值接收器的时代只有发起端看得到，docs/MULTI-DEVICE-SYNC.md §3.4）。
+	for _, sink := range lv.takeSinks() {
 		sink.handle(ev)
 	}
 }
 
 // settleTurn 是轮次收尾的"结界"：让事件泵暂停，把已经入队、还没分发的本轮事件
-// 全部处理掉，然后摘掉接收器并恢复泵。Prompt 返回只保证通知已入队（watermark），
+// 全部处理掉，然后收尾全部接收器并恢复泵。Prompt 返回只保证通知已入队（watermark），
 // 不保证我们的泵已经分发——少了这一步，结尾的文本与用量会随机丢失。
+//
+// fan-out 之后这里多了一条纪律：接收器是**多个**，必须**每一个**都收尾
+// （finishSinks 会逐个冲刷残余缓冲）。以前"只有一个 sink"本身就是收尾的
+// 保证——文本只可能丢在一个地方；现在如果只收尾其中一个，另一个客户端就会
+// 漏掉最后一段文本（docs/MULTI-DEVICE-SYNC.md §5 风险 4）。
 func (m *Manager) settleTurn(lv *live) {
 	ps := lv.ps
 	ps.pause <- struct{}{}
@@ -1053,13 +1130,13 @@ func (m *Manager) settleTurn(lv *live) {
 		select {
 		case ev, ok := <-ps.proc.events:
 			if !ok {
-				lv.setSink(nil)
+				lv.finishSinks()
 				ps.resume <- struct{}{}
 				return
 			}
 			m.routeEvent(ps, ev)
 		default:
-			lv.setSink(nil)
+			lv.finishSinks()
 			ps.resume <- struct{}{}
 			return
 		}
@@ -1486,6 +1563,161 @@ func (m *Manager) SetNotifier(notify func(key, text, threadID string)) {
 	m.mu.Unlock()
 }
 
+// SetBus 注入会话事件总线（启动装配时调用一次）。
+//
+// 为什么要注入而不是各建各的：主会话（session=web）与 ACP 会话
+// （session=acp:<threadID>）必须共用**同一个**总线实例，前端一条
+// /api/events/stream 连接就能按 session 收到两边的事件，序号也才连续。
+// 不调用时 Manager 自带一条（见 NewManager），ACP 侧单独可用。
+func (m *Manager) SetBus(bus *eventbus.Bus) {
+	if bus == nil {
+		return
+	}
+	m.mu.Lock()
+	m.bus = bus
+	m.mu.Unlock()
+}
+
+// Bus 返回当前的事件总线（供订阅端点使用；不会为 nil）。
+func (m *Manager) Bus() *eventbus.Bus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bus
+}
+
+// publish 往会话事件总线投一条事件，返回它的序号。
+//
+// 没装配总线时静默跳过（返回 0）：事件总线是可选的同步通道，不该让它
+// 阻断一轮对话本身。
+func (m *Manager) publish(session, typ, turnID string, origin eventbus.Origin, data any) int64 {
+	m.mu.Lock()
+	bus := m.bus
+	m.mu.Unlock()
+	if bus == nil {
+		return 0
+	}
+	seq := bus.Publish(session, typ, turnID, origin, data)
+	m.mu.Lock()
+	m.seqs[session] = seq
+	m.mu.Unlock()
+	return seq
+}
+
+// currentSeq 返回这条会话最近一次广播出去的事件序号（没有则 0）。
+//
+// 提交接口把它回给前端当订阅游标：前端拿这个 seq 去订阅，正好从下一条
+// 开始收，不会漏也不会重（契约 §2.1）。
+func (m *Manager) currentSeq(session string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.seqs[session]
+}
+
+// acpSession 返回 ACP 会话的会话 key：acp:<threadID>。
+//
+// 与 usage 记账里的写法一致（manager.go 的 usage.Record 用 "acp:"+id），
+// 也与主会话的 "web" 区分得开——事件总线按 key 路由，两边互不串扰。
+func acpSession(threadID string) string { return "acp:" + threadID }
+
+// newTurnID 生成一轮的 id：时间戳纳秒 + 线程内唯一。
+//
+// 它是"精确指认一轮"的凭据：停止（POST .../stop，带 turnId）按它来，
+// 避免停错对象。
+func newTurnID() string { return fmt.Sprintf("t%d", time.Now().UnixNano()) }
+
+// turnHooks 把一轮的事件接到事件总线上，同时保留调用方自己的旁路钩子。
+//
+// 为什么在这儿接：轮次执行器（sendTurn）是唯一知道"这一轮发生了什么"的地方，
+// 事件从这儿出去，订阅端点（GET /api/events/stream?session=acp:<threadID>）
+// 才拿得到增量。两端读的是同一条流（同一 session key），所以不会出现"两份渲染"
+// （EVENTS-API.md §五）。
+func (m *Manager) turnHooks(hooks TurnHooks, session, turnID string, origin eventbus.Origin) TurnHooks {
+	return TurnHooks{
+		OnText: func(t string) {
+			m.publish(session, eventbus.TypeDelta, turnID, origin, map[string]any{"delta": t})
+			if hooks.OnText != nil {
+				hooks.OnText(t)
+			}
+		},
+		OnThought: func(t string) {
+			m.publish(session, eventbus.TypeThinking, turnID, origin, map[string]any{"thinking": t})
+			if hooks.OnThought != nil {
+				hooks.OnThought(t)
+			}
+		},
+		OnStep: func(st agent.Step) {
+			m.publish(session, eventbus.TypeStep, turnID, origin, map[string]any{"step": st})
+			if hooks.OnStep != nil {
+				hooks.OnStep(st)
+			}
+		},
+		OnStatus: func(msg string) {
+			m.publish(session, eventbus.TypeStatus, turnID, origin, map[string]any{"status": msg})
+			if hooks.OnStatus != nil {
+				hooks.OnStatus(msg)
+			}
+		},
+	}
+}
+
+// Observe 给**正在跑**的这一轮挂一个额外的观察者，返回解除挂载的函数。
+//
+// 为什么需要它：一个 thread 同一时刻可以有多个接收器（fan-out，见 live.sinks
+// 与 docs/MULTI-DEVICE-SYNC.md §3.4），routeEvent 向全部扇出。执行器是其中
+// 一个（它把增量投到事件总线）；观察者是进程内的旁路消费者，与执行器互不
+// 干扰——每个接收器有自己的缓冲与钩子，一个客户端慢不会拖累另一个。
+//
+// 轮还没开始或已经结束时返回 ok=false：没有可挂的接收器。
+func (m *Manager) Observe(threadID string, hooks TurnHooks) (func(), bool) {
+	m.mu.Lock()
+	lv := m.live[threadID]
+	m.mu.Unlock()
+	if lv == nil {
+		return nil, false
+	}
+	sink := newTurnSink(hooks, "")
+	lv.addSink(sink)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			lv.sinkMu.Lock()
+			delete(lv.sinks, sink)
+			lv.sinkMu.Unlock()
+			sink.finish()
+		})
+	}, true
+}
+
+// StopTurn 精确停止某一轮：turnId 必须与当前正在跑的那一轮一致。
+//
+// 为什么必须带 turnId：ACP 侧同一 thread 同时只有一轮在跑（threadLock），
+// 但"停哪一轮"仍要说清楚——前端可能拿着一个已经结束的 turnId 来点停止，
+// 那样会停错对象（docs/MULTI-DEVICE-SYNC.md §2.3 缺陷 2）。校验不过就
+// 如实报错，不猜。
+func (m *Manager) StopTurn(id, turnID string) error {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return errors.New("缺少 turnId：停止必须指明停哪一轮")
+	}
+	m.mu.Lock()
+	lv := m.live[id]
+	cur := ""
+	if lv != nil {
+		cur = lv.turnID
+	}
+	m.mu.Unlock()
+	if cur == "" {
+		return errors.New("这个会话现在没有正在跑的轮次")
+	}
+	if cur != turnID {
+		return fmt.Errorf("正在跑的不是这一轮（当前是 %s），别停错对象", cur)
+	}
+	if !m.Stop(id) {
+		return errors.New("停止指令没有送达 agent")
+	}
+	return nil
+}
+
 // SetRegistry 注入工具注册表（启动时调用一次）：工具门面据此把 Friday 的
 // 只读工具以 MCP server 形态挂给外部 agent（见 facade.go）。
 func (m *Manager) SetRegistry(fn func() *vxagent.Registry) {
@@ -1680,9 +1912,102 @@ func zhDuration(d time.Duration) string {
 }
 
 // Send 发送一条消息并跑完一轮对话（同一 thread 串行，C3）。
-// hooks 的回调在独立 pump goroutine 上调用（SSE 写出方保证并发安全）；
-// ctx 取消（客户端断开/服务关闭）会中止本轮并向 agent 发显式取消（C8）。
+// hooks 的回调在独立 pump goroutine 上调用（回调方保证并发安全）。
+//
+// 语义变更（docs/MULTI-DEVICE-SYNC.md §3.3）：**调用方的 ctx 取消不再中止
+// 这一轮**。以前 ctx 绑着 HTTP 请求，客户端一断开请求 ctx 就被取消，
+// 生成随之夭折——"手机上问一句、切走页面"就只剩半截回答。双端实时同步的
+// 前提是"发起端只是众多订阅者之一"，所以关页面/断网只能让人看不见，
+// 不能让这一轮停下来；中止只来自显式的停止（StopTurn）。
 func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks TurnHooks) (TurnResult, error) {
+	mu := m.threadLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+	return m.sendTurn(ctx, id, newTurnID(), text, imgs, hooks, eventbus.Origin{})
+}
+
+// SubmitResult 是提交一轮的结果（提交接口的响应体）。
+type SubmitResult struct {
+	// TurnID 是这一轮的 id。Status=queued 时它只是占位：真正开跑的那次
+	// 提交会拿到另一个 turnId，前端要用后者。
+	TurnID string `json:"turnId"`
+	// Status 是 "running"（已经开跑）或 "queued"（正忙，交给前端排队）。
+	Status string `json:"status"`
+	// Seq 是这条会话当前的最新事件序号：前端拿它当订阅游标（契约 §2.1）。
+	Seq int64 `json:"seq"`
+	// Session 是会话 key：acp:<threadID>。
+	Session string `json:"session"`
+}
+
+// SubmitTurn 提交一轮对话（提交式）：会话空闲就起后台 goroutine 跑这一轮、
+// 立刻返回；正忙则**不**进入 agent，返回 Status=queued，让调用方（前端队列）
+// 稍后重发。
+//
+// 为什么忙的时候不在后端排队：队列在前端（web/src/components/WorkspaceView.vue
+// 的 enqueue/pumpQueue）——它支持编辑、删除、暂停队列这些交互，后端做不了，
+// 也不该留两套队列。后端只回答"此刻能不能开跑"，不能开跑就说清楚。
+//
+// busy 时这一轮**没有真正进入 agent**：不发 turn.start、不发任何事件，
+// 前端排队后重新 POST 会拿到一个新的 turnId。
+//
+// ctx 只用来带 trace 之类的值：断线/关页面不会中止这一轮（理由见 Send）。
+func (m *Manager) SubmitTurn(ctx context.Context, id, text string, imgs []Image, origin eventbus.Origin) (SubmitResult, error) {
+	c := m.cfgFn().Normalized()
+	if !c.Enabled {
+		return SubmitResult{}, errors.New("智能体功能未开启（设置 → 智能体）")
+	}
+	if strings.TrimSpace(text) == "" && len(imgs) == 0 {
+		return SubmitResult{}, errors.New("消息为空")
+	}
+	m.mu.Lock()
+	th, ok := m.threads[id]
+	m.mu.Unlock()
+	if !ok {
+		return SubmitResult{}, fmt.Errorf("未找到 thread %s", id)
+	}
+	if _, avail := c.Agent(th.Agent); !avail {
+		return SubmitResult{}, fmt.Errorf("thread 绑定的智能体 %q 已删除或停用", th.Agent)
+	}
+	turnID := newTurnID()
+	session := acpSession(id)
+	// 撞忙？用 TryLock 试一下：拿不到锁说明这一轮正在跑。
+	// 不能阻塞等待——等下去的话手机端提问会像以前那样"一直思考中"，
+	// 既不知道在等什么也等不到结果（docs/MULTI-DEVICE-SYNC.md §2.3 缺陷 1）。
+	mu := m.threadLock(id)
+	if !mu.TryLock() {
+		return SubmitResult{
+			TurnID: turnID, Status: "queued",
+			Seq: m.currentSeq(session), Session: session,
+		}, nil
+	}
+	// 拿到锁：这一轮归我们跑。提问本身先广播——另一端得看到"手机端刚问了
+	// 个什么"，否则那边只会莫名其妙多出一段回答（契约 §2.4 的 user.message）。
+	seq := m.publish(session, eventbus.TypeUserMessage, turnID, origin, map[string]any{
+		"text":   text,
+		"images": len(imgs),
+	})
+	// 后台跑：HTTP 请求不等这一轮结束（提交式）。
+	go func() {
+		defer mu.Unlock()
+		if _, err := m.sendTurn(ctx, id, turnID, text, imgs, TurnHooks{}, origin); err != nil {
+			log.Printf("[智能体] thread %s 这一轮失败: %v", id, err)
+		}
+	}()
+	return SubmitResult{TurnID: turnID, Status: "running", Seq: seq, Session: session}, nil
+}
+
+// sendTurn 是 Send 的实现：轮次 id 与发起端身份由调用方给。
+//
+// **调用方须持有该会话的串行锁**（m.threadLock）：同一 thread 同时只有一轮
+// 在跑是既有语义（C3），锁由调用方拿（Send 阻塞拿，SubmitTurn 试拿）。
+// 放在调用方是因为 SubmitTurn 要用 TryLock 判忙——拿不到锁时它根本不该
+// 走进这一轮。
+//
+// turnID 必须由调用方定：提交式接口在提交时就把 id 发给前端了，执行时
+// 用的必须还是同一个 id（停止按它精确指认，见 EVENTS-API.md §2.2）。
+// origin 用来给广播出去的事件带上发起端身份（clientId / device），
+// 让另一端能标"来自手机端"。
+func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []Image, hooks TurnHooks, origin eventbus.Origin) (TurnResult, error) {
 	c := m.cfgFn().Normalized()
 	if !c.Enabled {
 		return TurnResult{}, errors.New("智能体功能未开启（设置 → 智能体）")
@@ -1691,9 +2016,20 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		return TurnResult{}, errors.New("消息为空")
 	}
 
-	mu := m.threadLock(id)
-	mu.Lock()
-	defer mu.Unlock()
+	// 摘掉调用方 ctx 的取消信号：断线不再中止这一轮（理由见 Send 的说明）。
+	// WithoutCancel 只保留 ctx 上的值（trace id 等），取消与截止时间都去掉。
+	// 真正能中止这一轮的只剩两处：内核关闭（下面把 cancel 注册进
+	// m.turnCancels）与用户按停止（StopTurn → conn.Cancel）。
+	tctx, tcancel := context.WithCancel(context.WithoutCancel(ctx))
+	m.mu.Lock()
+	m.turnCancels[id] = tcancel
+	m.mu.Unlock()
+	defer func() {
+		tcancel()
+		m.mu.Lock()
+		delete(m.turnCancels, id)
+		m.mu.Unlock()
+	}()
 
 	m.mu.Lock()
 	th, ok := m.threads[id]
@@ -1716,7 +2052,6 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	// 轮前快照：git 仓库用无侵入基线，非 git 目录退化为副本。快照失败不阻塞
 	// 本轮，只把“为什么不能还原”写进改动摘要（UI 明说，不假装成功）。
-	turnID := fmt.Sprintf("t%d", time.Now().UnixNano())
 	snap, snapErr := beginTurnSnapshot(th.Cwd, m.snapshotBase(), id, turnID)
 	if snapErr != nil {
 		log.Printf("[智能体] thread %s 轮前快照失败: %v", id, snapErr)
@@ -1729,6 +2064,9 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	turnDone := make(chan struct{})
 	m.mu.Lock()
 	lv.turnDone = turnDone
+	// 记下当前正在跑的轮次：停止（POST .../stop）按 turnId 精确指认，
+	// 传错 id 时要能说清"正在跑的不是这一轮"（EVENTS-API.md §2.2）。
+	lv.turnID = turnID
 	lv.stopping.Store(false)
 	if lv.stopTimer != nil {
 		lv.stopTimer.Stop()
@@ -1767,8 +2105,18 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 
 	// 事件由进程级常驻泵按 sessionId 分发（M-6）：这里只登记本轮接收器，
 	// Prompt 返回后立刻摘掉——之后迟到的通知没有接收方，泵会丢弃。
-	sink := newTurnSink(hooks, th.Agent)
-	lv.setSink(sink)
+	//
+	// 接收器的钩子在这里接上事件总线：一轮的增量/思考/步骤全部经总线广播，
+	// 桌面端与手机端各读各的那条流（同一 session key），渲染出的时间线
+	// 必然一致（EVENTS-API.md §2.4）。hooks 是调用方自己的旁路钩子
+	// （进程内消费者），与总线互不影响。
+	sink := newTurnSink(m.turnHooks(hooks, acpSession(id), turnID, origin), th.Agent)
+	lv.addSink(sink)
+
+	// 这一轮真的开始了：广播 turn.start，订阅端据此把"排队中"的气泡切到
+	// "正在回答"。广播放在 Prompt 之前——排队中的那一轮与正在跑的这一轮
+	// 在前端是两条不同的状态，边界要清楚。
+	m.publish(acpSession(id), eventbus.TypeTurnStart, turnID, origin, nil)
 
 	// 静默看门狗：agent 收下这一轮却迟迟不吐任何 update（opencode 实测会卡在
 	// 自己的模型调用上，最后既不报错也不出字）时，先给一条"没回音"的状态帧——
@@ -1792,7 +2140,8 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 			th.Agent, int(turnSilenceNotice/time.Second), th.Agent))
 	})
 	started := time.Now()
-	res, promptErr := lv.proc.conn.Prompt(ctx, acp.PromptRequest{
+	// 用 tctx（摘掉了调用方取消信号的）而不是 ctx：断线不该中止这一轮。
+	res, promptErr := lv.proc.conn.Prompt(tctx, acp.PromptRequest{
 		SessionId: lv.sessionID, Prompt: blocks,
 	})
 	silenceTimer.Stop()
@@ -1802,15 +2151,15 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	// 从此再也说不上话。识别到这类 busy：先 session/cancel 掐掉 agent 侧的孤儿轮
 	// （它的产出已经收不回来了，但落盘的文件还在），稍候把这条消息原样重发一次；
 	// 仍被拒就把错误如实交回，并说明已自救过。
-	if promptErr != nil && activeTurnBusy(promptErr) && ctx.Err() == nil && !lv.stopping.Load() {
+	if promptErr != nil && activeTurnBusy(promptErr) && tctx.Err() == nil && !lv.stopping.Load() {
 		log.Printf("[智能体] %s 报会话忙（agent 侧仍有活跃轮）：先取消它再重发一次", th.Agent)
 		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
 		select {
-		case <-ctx.Done():
+		case <-tctx.Done():
 		case <-time.After(busyRetryDelay):
 		}
-		if ctx.Err() == nil && lv.proc.alive() {
-			res, promptErr = lv.proc.conn.Prompt(ctx, acp.PromptRequest{
+		if tctx.Err() == nil && lv.proc.alive() {
+			res, promptErr = lv.proc.conn.Prompt(tctx, acp.PromptRequest{
 				SessionId: lv.sessionID, Prompt: blocks,
 			})
 			if promptErr == nil {
@@ -1821,10 +2170,10 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		// session/cancel）只能整条连接重建：杀掉进程、重新拉起并按 session/load
 		// 重接这条会话，把用户从"从此再也说不上话"里捞出来。重建后同一份消息
 		// 再发一次，其他会话下一轮会自动重接，不受影响。
-		if promptErr != nil && activeTurnBusy(promptErr) && ctx.Err() == nil && !lv.stopping.Load() {
+		if promptErr != nil && activeTurnBusy(promptErr) && tctx.Err() == nil && !lv.stopping.Load() {
 			log.Printf("[智能体] %s 取消后仍报会话忙，重建连接再试一次", th.Agent)
 			m.killLive(id, "agent 侧轮次卡死，重建连接")
-			newLv, _, lerr := m.ensureLive(ctx, th, agentCfg, hooks)
+			newLv, _, lerr := m.ensureLive(tctx, th, agentCfg, hooks)
 			switch {
 			case lerr != nil:
 				promptErr = fmt.Errorf("agent 侧轮次卡死，重建连接失败: %v（原错误: %w）", lerr, promptErr)
@@ -1836,8 +2185,8 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 				lv.turnDone = turnDone
 				lv.stopping.Store(false)
 				m.mu.Unlock()
-				lv.setSink(sink)
-				res, promptErr = lv.proc.conn.Prompt(ctx, acp.PromptRequest{
+				lv.addSink(sink)
+				res, promptErr = lv.proc.conn.Prompt(tctx, acp.PromptRequest{
 					SessionId: lv.sessionID, Prompt: blocks,
 				})
 				if promptErr == nil {
@@ -1892,13 +2241,15 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		m.mu.Unlock()
 	}
 
-	// 单轮不设时限：ctx 只会被取消（用户停止走 Stop 的 session/cancel；客户端
-	// 断开时请求上下文跟着取消）。取消后没人接收结果，立刻回收这条连接。
-	aborted := ctx.Err() != nil
+	// 单轮不设时限：能中止这一轮的只有两处——用户按停止（Stop 的
+	// session/cancel）与内核关闭（tctx 被 cancel）。**客户端断开不再算中止**
+	//（语义变更见 Send 的说明）：关页面只是没人看着，生成照跑、结果照常
+	// 广播给所有订阅者。
+	aborted := tctx.Err() != nil
 	stopped := lv.stopping.Load()
 	if aborted && promptErr != nil {
 		_ = lv.proc.conn.Cancel(context.Background(), acp.CancelNotification{SessionId: lv.sessionID})
-		m.killLive(id, "本轮被中止，回收进程") // 客户端已放弃这一轮，没人接收结果
+		m.killLive(id, "本轮被中止，回收进程") // 内核要收了，这一轮没人接收结果
 	}
 	interrupted := aborted || (stopped && promptErr != nil)
 	abortNote := ""
@@ -1916,7 +2267,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 	case stopped:
 		abortNote = "被用户停止"
 	default:
-		abortNote = "连接已断开（页面关闭或网络中断），本轮结果不会回到本对话"
+		abortNote = "内核关闭，本轮中止"
 	}
 	abortNote += abortNoteTail
 
@@ -1926,6 +2277,7 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		lv.stopTimer = nil
 	}
 	lv.turnDone = nil
+	lv.turnID = ""                 // 这一轮结束了：停止接口据此判断"没有正在跑的轮次"
 	current, keep := m.threads[id] // turn 进行中被删除则不再写投影
 	if keep {
 		current.State = StateIdle
@@ -2026,6 +2378,22 @@ func (m *Manager) Send(ctx context.Context, id, text string, imgs []Image, hooks
 		reason: result.StopReason, elapsed: elapsed, changes: turnChanges,
 		userStopped: stopped, note: abortNote, errText: errText})
 	m.armIdle(lv.ps.key)
+
+	// 收尾广播：这一轮的最后一个事件。两端都靠它把"正在回答"的气泡收尾
+	//（挂上 token 汇总、结束打字机）。放在最后：前面所有增量都已经投出去了。
+	turn := map[string]any{"in": result.In, "out": result.Out, "ms": result.Ms}
+	if result.StopReason != "" && result.StopReason != "end_turn" {
+		turn["stopped"] = result.StopReason
+	}
+	if runErr != nil {
+		m.publish(acpSession(id), eventbus.TypeTurnError, turnID, origin, map[string]any{
+			"error": errText,
+		})
+	} else {
+		m.publish(acpSession(id), eventbus.TypeTurnEnd, turnID, origin, map[string]any{
+			"turn": turn,
+		})
+	}
 	return result, runErr
 }
 
@@ -2652,7 +3020,17 @@ func (m *Manager) Close() {
 	for _, ps := range m.procs {
 		all = append(all, ps)
 	}
+	// 在跑的轮次一并中止：内核要收了，没人接收结果（客户端断开不再中止
+	// 这一轮，但内核退出必须收干净，别留悬挂的 goroutine）。
+	cancels := make([]context.CancelFunc, 0, len(m.turnCancels))
+	for _, c := range m.turnCancels {
+		cancels = append(cancels, c)
+	}
+	m.turnCancels = map[string]context.CancelFunc{}
 	m.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
 	for _, ps := range all {
 		m.releaseProc(ps, "服务关闭")
 	}

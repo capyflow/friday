@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +25,7 @@ import (
 	vhttp "github.com/capyflow/vortexv3/server/http"
 
 	"github.com/capyflow/friday/internal/agent"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/plan"
 	"github.com/capyflow/friday/internal/task"
@@ -51,9 +54,24 @@ type Chat struct {
 	goalEng  *task.Engine          // 目标模式：聊天里"目标"直接建一条即时目标任务
 	goalGate func() (bool, string) // 超预算时不接新目标（nil = 不做预算拦截）
 
-	mu     sync.Mutex
-	runs   map[string]*chatRun    // 会话 key → 进行中的对话（可暂停）
-	paused map[string]*PausedTurn // 会话 key → 被暂停的问答（落盘，刷新/重启后仍可继续）
+	// bus 是会话事件总线：一轮对话的增量/思考/步骤/收尾都经它广播，
+	// 桌面端与手机端从同一条 /api/events/stream 收（契约 docs/EVENTS-API.md）。
+	// nil = 不装配（不广播，提交式接口仍可用，只是没有跨端同步）。
+	bus *eventbus.Bus
+
+	mu sync.Mutex
+	// runs 是进行中的对话：会话 key → 轮次 id → 执行句柄。
+	// 两级而不是一级，是因为一级会让并发请求互相覆盖——后发的顶掉先发的，
+	// 先发的收尾时又把后发的登记删掉，于是「停止」可能停错一轮
+	// （见 docs/MULTI-DEVICE-SYNC.md §2.3 缺陷 2）。
+	runs map[string]map[string]*chatRun
+	// queues 是排队中的轮次：会话 key → 队列。主会话同一时刻只跑一轮，
+	// 后到的排队等着（不再像以前那样静默阻塞）。
+	queues map[string]*turnQueue
+	// dispatching 标记某条会话的 dispatcher 是否在跑：队列空了它就退出，
+	// 有新请求再起一个——不能每个会话常驻一个 goroutine。
+	dispatching map[string]bool
+	paused      map[string]*PausedTurn // 会话 key → 被暂停的问答（落盘，刷新/重启后仍可继续）
 }
 
 // EnablePlans 打开计划模式（规划轮 + 步骤执行器）。
@@ -86,11 +104,13 @@ type chatRun struct {
 // pausedFile 为暂停现场落盘路径（空则仅内存）。
 func New(brain *agent.Brain, uploadsDir, pausedFile string) *Chat {
 	c := &Chat{
-		brain:      brain,
-		uploadsDir: uploadsDir,
-		pausedFile: pausedFile,
-		runs:       map[string]*chatRun{},
-		paused:     map[string]*PausedTurn{},
+		brain:       brain,
+		uploadsDir:  uploadsDir,
+		pausedFile:  pausedFile,
+		runs:        map[string]map[string]*chatRun{},
+		queues:      map[string]*turnQueue{},
+		dispatching: map[string]bool{},
+		paused:      map[string]*PausedTurn{},
 	}
 	c.sweepUploads()
 	c.loadPaused()
@@ -194,6 +214,16 @@ func (c *Chat) ResolveUpload(id string) (string, bool) {
 	return filepath.Join(c.uploadsDir, id), true
 }
 
+// SetBus 注入会话事件总线（Start 之前调用）。
+//
+// 主会话与 ACP 必须共用**同一个**总线实例：前端一条 /api/events/stream 连接
+// 按 session 路由，序号才连续，两端读到的才是同一串事件。
+func (c *Chat) SetBus(bus *eventbus.Bus) {
+	c.mu.Lock()
+	c.bus = bus
+	c.mu.Unlock()
+}
+
 // Brain 返回对话大脑（热更新时替换其内部 Agent；会话池经其获取）。
 func (c *Chat) Brain() *agent.Brain { return c.brain }
 
@@ -249,20 +279,35 @@ func (c *Chat) HandleUpload(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"id": name})
 }
 
-// HandleSSE 处理一次对话：请求体 {"message":"...", "attachments":["<上传id>", ...],
-// "session":"<可选会话key，默认 web>"}，响应为 SSE 流。由 admin 包挂载到
-// POST /api/chat（需登录）；LLM 增量与思考过程在回调里同步写出并 flush，
-// 客户端断开或用户暂停（POST /api/chat/stop）时取消 ctx 中止对话。
+// turnSeq 是轮次 id 的自增部分。
 //
-// SSE 帧协议（data: JSON）：
+// 为什么不用纯时间戳：UnixNano 在并发下可能撞（两台客户端同一微秒提交），
+// 而 turnId 是「停止」精确指认那一轮的唯一依据——撞了就停错对象。
+// 时间戳保留在前面，人读起来仍能看出先后。
+var turnSeq atomic.Uint64
+
+// newTurnID 生成一个进程内唯一的轮次 id。
+func newTurnID() string {
+	return "t" + strconv.FormatInt(time.Now().UnixNano(), 36) +
+		"-" + strconv.FormatUint(turnSeq.Add(1), 36)
+}
+
+// HandleSSE 提交一轮对话：POST /api/chat，请求体
+// {"message":"...", "attachments":["<上传id>", ...], "session":"<可选会话key，默认 web>",
+// "skill":"...", "mode":"plan|goal", "clientId":"c-xxx", "device":"手机端"}。
 //
-//	{"delta": "..."}                       回答文本增量
-//	{"thinking": "..."}                    思考内容增量（思考型模型）
-//	{"step": {kind,name,detail,status}}    思考过程事件（轮次/工具调用）
-//	{"paused": true, "partial": "..."}     对话被用户暂停（部分回答已保存可继续）
-//	{"done": true} / {"done": true, "error": "..."}
-//	                                      本轮结束，附 turn={in,out,ms} 本轮 token 汇总
-//	                                      （轨迹里没有这一请求时为 null，前端按缺省处理）
+// **语义变更（2026-11-11）**：本接口不再返回 SSE 流，而是立刻返回 JSON
+// {turnId, status, seq, session}（契约 docs/EVENTS-API.md §2.1）。这一轮在后台
+// 执行，增量/思考/步骤/收尾全部经事件总线广播到 session=web；桌面端与手机端
+// 都从 /api/events/stream 读同一条流——以前只有发起请求的那条连接看得到，
+// 所以"移动端问完、桌面端纹丝不动"。
+//
+// 撞上正在跑的一轮时：这一轮进 FIFO 队列（先进先出），返回 202 + status=queued
+// 与排队位次。排队期间发起端断开也不影响——执行发生在 dispatcher 里，与客户端
+// 已解绑，结果照常广播给所有订阅者。
+//
+// **页面关闭/断网不再中止生成**：只有显式 POST /api/chat/stop 才停。
+// 这是移动端后台化与桌面端切窗口的前提（docs/MULTI-DEVICE-SYNC.md §3.3）。
 func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 	var req struct {
 		Message     string   `json:"message"`
@@ -270,6 +315,8 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 		Session     string   `json:"session"`
 		Skill       string   `json:"skill"`
 		Mode        string   `json:"mode"`
+		ClientID    string   `json:"clientId"`
+		Device      string   `json:"device"`
 	}
 	if err := ctx.UnmarshalBody(&req); err != nil ||
 		(strings.TrimSpace(req.Message) == "" && len(req.Attachments) == 0) {
@@ -300,71 +347,144 @@ func (c *Chat) HandleSSE(ctx *vhttp.Context) error {
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
+
 	// 暂停期间发新问题 = 中止被暂停的对话、开启下一段（用户"及时止损"）。
 	c.clearPaused(key)
 
-	question := strings.TrimSpace(req.Message)
-	sink := &agent.SkillSink{}
-	opts := []agent.CallOpt{}
-	if skillName := strings.TrimSpace(req.Skill); skillName != "" {
-		opts = append(opts, agent.WithSkillName(skillName))
-	}
-	result := &resultSink{}
+	origin := eventbus.Origin{ClientID: req.ClientID, Device: req.Device}
+	turnID := newTurnID()
 
-	// 目标模式：把这句话登记成一个即时目标（不占用本次连接做长轮推进，
-	// 结论到了通知页/聊天里由通知中心送达），零模型调用因此也就零成本。
-	if mode := strings.TrimSpace(req.Mode); mode == "goal" {
-		if c.goalEng == nil {
-			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "目标模式未启用"})
-		}
-		if c.goalGate != nil {
-			if ok, reason := c.goalGate(); !ok {
-				return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": reason + "（目标未登记，可在运行状态页恢复）"})
-			}
-		}
-		return c.stream(ctx, key, question, nil, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
-			logx.Printf(rctx, "[网页] 登记目标: %s", logx.Truncate(question, 80))
-			t, err := agent.LaunchGoal(c.goalEng, question)
-			if err != nil {
-				return "", err
-			}
-			trace.Begin(logx.IDFrom(rctx), "web", key, question)
-			trace.Record(rctx, "goal_run", "已登记目标 #%s，将在后台多轮推进，结论送达通知页", t.ID)
-			return fmt.Sprintf("好，把「%s」当作目标开始处理，办完或卡住都会告诉你（也可在「自动化」页看进展）。",
-				logx.Truncate(question, 40)), nil
-		})
-	}
-
-	// 计划模式：先跑规划轮产出可审阅的步骤清单，确认与执行都在服务端计划仓库里推进。
-	if mode := strings.TrimSpace(req.Mode); mode == "plan" {
-		if c.planner == nil {
-			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "计划模式未启用"})
-		}
-		if len(imgs) > 0 {
-			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "计划模式暂不支持图片，请先普通对话发图再制定计划"})
-		}
-		return c.stream(ctx, key, question, nil, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
-			logx.Printf(rctx, "[网页] 制定计划: %s", logx.Truncate(question, 80))
-			p, fallback, err := c.planner.Draft(rctx, question, "web", strings.TrimSpace(req.Skill))
-			if err != nil {
-				return "", err
-			}
-			if p == nil {
-				// 规划没产出清单：模型的话已按普通回答返回，不留下无法执行的空计划。
-				return fallback, nil
-			}
-			result.setPlan(p)
-			return "先把要做的事拆成了 " + fmt.Sprint(len(p.Steps)) + " 步，确认后我按顺序做（也可以先改再确认）。", nil
-		})
-	}
-
-	return c.stream(ctx, key, question, imgs, "", sink, result, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
-		logx.Printf(rctx, "[网页] 输入: %s（图片 %d 张，会话 %s）", question, len(imgs), key)
-		return c.brain.AskWith(rctx, question, imgs, onDelta, opts...)
+	// 入队：队列空就立刻开跑，否则排队等位次。
+	status, position, err := c.enqueue(key, &queuedTurn{
+		id: turnID, question: strings.TrimSpace(req.Message), origin: origin,
+		enqueuedAt: time.Now(),
 	})
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+
+	body := map[string]any{
+		"turnId":  turnID,
+		"status":  status,
+		"seq":     c.currentSeq(key),
+		"session": key,
+	}
+	if status == statusQueued {
+		// 202：正忙，这一轮排到队尾了。前端据此显示「排队中 · 第 N 位」。
+		body["position"] = position
+		return ctx.JsonResponse(vhttp.Code{Code: http.StatusAccepted, MsgKey: "accepted"}, body)
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, body)
 }
 
-// resultSink 让一次 SSE 请求在执行完成后能额外带出结构化结果（目前是计划）。
+// 轮次状态：queued 排队中 / running 正在跑。
+const (
+	statusQueued  = "queued"
+	statusRunning = "running"
+)
+
+// enqueue 把一轮放进会话队列：队列空就立刻开跑（statusRunning），
+// 否则排队等着（statusQueued + 位次）。
+//
+// 队列满（queueMax）时返回错误，让用户知道要等前面的跑完——而不是无限期
+// 攒下去，最后一次性全放出来打他一个措手不及。
+func (c *Chat) enqueue(key string, t *queuedTurn) (string, int, error) {
+	c.mu.Lock()
+	q := c.queues[key]
+	if q == nil {
+		q = &turnQueue{}
+		c.queues[key] = q
+	}
+	if q.len() >= queueMax {
+		c.mu.Unlock()
+		return "", 0, fmt.Errorf("排队太长了（最多 %d 条），先等前面的跑完", queueMax)
+	}
+	position := q.push(t)
+	busy := c.isBusyLocked(key)
+	if !busy && !c.dispatching[key] {
+		c.dispatching[key] = true
+		c.mu.Unlock()
+		go c.dispatch(key)
+		return statusRunning, 1, nil
+	}
+	c.mu.Unlock()
+	// 排队：广播出去，另一端也看得见「手机端在排队」。
+	c.publish(key, eventbus.TypeTurnQueued, t.id, t.origin, map[string]any{
+		"position": position, "text": t.question,
+	})
+	return statusQueued, position, nil
+}
+
+// isBusyLocked 判定某会话是否有正在跑的一轮（调用方持 c.mu）。
+func (c *Chat) isBusyLocked(key string) bool {
+	for _, run := range c.runs[key] {
+		if run != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatch 是这条会话的队列执行者：串行取队首，一轮跑完再跑下一轮。
+//
+// 队列空了它就退出（不留常驻 goroutine）；下次有请求再起一个。
+func (c *Chat) dispatch(key string) {
+	for {
+		c.mu.Lock()
+		q := c.queues[key]
+		if q == nil {
+			delete(c.dispatching, key)
+			c.mu.Unlock()
+			return
+		}
+		// 队首超时：丢掉（超过十分钟还没轮到，不该突然开跑）。
+		t := q.peek()
+		if t == nil {
+			delete(c.dispatching, key)
+			c.mu.Unlock()
+			return
+		}
+		if time.Since(t.enqueuedAt) > queueTTL {
+			q.pop()
+			c.mu.Unlock()
+			c.publish(key, eventbus.TypeTurnCanceled, t.id, t.origin, map[string]any{
+				"reason": "等太久了，已取消",
+			})
+			continue
+		}
+		q.pop()
+		c.mu.Unlock()
+
+		c.runTurn(key, t)
+	}
+}
+
+// publish 往事件总线投一条事件（总线未装配时静默跳过：它是可选的同步通道，
+// 不该让它阻断一轮对话本身）。
+func (c *Chat) publish(key, typ, turnID string, origin eventbus.Origin, data map[string]any) {
+	c.mu.Lock()
+	bus := c.bus
+	c.mu.Unlock()
+	if bus == nil {
+		return
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	bus.Publish(key, typ, turnID, origin, data)
+}
+
+// currentSeq 返回这条会话最近广播出去的事件序号（提交响应带回给前端当订阅游标）。
+func (c *Chat) currentSeq(key string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bus == nil {
+		return 0
+	}
+	return c.bus.CurrentSeq(key)
+}
+
+// resultSink 让一轮对话在执行完成后能额外带出结构化结果（目前是计划）。
 type resultSink struct {
 	mu   sync.Mutex
 	plan *plan.Plan
@@ -385,14 +505,181 @@ func (r *resultSink) Plan() *plan.Plan {
 	return r.plan
 }
 
-// HandleResume 继续被暂停的对话（POST /api/chat/resume，SSE 流式，协议同 /api/chat）：
-// 把原问题与已生成的部分回答重新注入会话后让模型接着完成。
+// runTurn 在后台真正跑一轮：产出全部经事件总线广播，不写任何 HTTP 响应。
+//
+// 为什么这样拆：以前一轮对话的字节流直接写进发起请求的那条连接，
+// 发起端独占——另一端什么也看不到。现在「提交」与「消费」分开：这一轮跑在
+// 后台 goroutine 里，事件进总线，谁订阅谁收，两端看到的内容完全一致。
+//
+// 上下文由 rctx 持有：它不随 HTTP 请求取消，所以客户端断开不会中止这一轮
+// （只有显式 stop 会）。
+func (c *Chat) runTurn(key string, t *queuedTurn) {
+	question := t.question
+	origin := t.origin
+
+	// 提问本身先广播：另一端得看到「手机端刚问了什么」，否则那边只会莫名其妙
+	// 多出一段回答。
+	c.publish(key, eventbus.TypeUserMessage, t.id, origin, map[string]any{
+		"text": question,
+	})
+
+	rctx, cancel := context.WithCancel(logx.WithID(context.Background(), logx.NextID()))
+	defer cancel()
+	rctx = agent.WithSessionKey(rctx, key)
+	rctx = agent.WithOrigin(rctx, agent.OriginWeb)
+
+	// 登记进行中的对话：暂停接口按 turnId 精确定位要停哪一轮。
+	run := &chatRun{cancel: cancel}
+	c.mu.Lock()
+	if c.runs[key] == nil {
+		c.runs[key] = map[string]*chatRun{}
+	}
+	c.runs[key][t.id] = run
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if m := c.runs[key]; m != nil {
+			delete(m, t.id)
+			if len(m) == 0 {
+				delete(c.runs, key)
+			}
+		}
+		c.mu.Unlock()
+	}()
+
+	c.publish(key, eventbus.TypeTurnStart, t.id, origin, nil)
+
+	sink := &agent.SkillSink{}
+	opts := []agent.CallOpt{}
+	result := &resultSink{}
+
+	// 思考过程事件泵：订阅本轮的过程事件转发给总线。
+	steps, stopSteps := agent.SubscribeSteps(logx.IDFrom(rctx))
+	defer stopSteps()
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		for {
+			select {
+			case <-rctx.Done():
+				// 对话已结束：把通道里积压的过程事件抽干写完再退，
+				// 否则轮末的 tool ok/fail 会留在通道里，前端的工具块永远转圈。
+				for {
+					select {
+					case st, ok := <-steps:
+						if !ok {
+							return
+						}
+						c.publish(key, eventbus.TypeStep, t.id, origin, map[string]any{
+							"step": st,
+						})
+					default:
+						return
+					}
+				}
+			case st, ok := <-steps:
+				if !ok {
+					return
+				}
+				c.publish(key, eventbus.TypeStep, t.id, origin, map[string]any{
+					"step": st,
+				})
+			}
+		}
+	}()
+
+	streamed := ""
+	answer, err := c.ask(rctx, key, question, origin, t.id, sink, result, opts, t.partial, t.skill, func(d llm.Delta) {
+		if d.Thinking != "" {
+			c.publish(key, eventbus.TypeThinking, t.id, origin, map[string]any{
+				"thinking": d.Thinking,
+			})
+		}
+		if d.Text == "" {
+			return
+		}
+		streamed += d.Text
+		c.publish(key, eventbus.TypeDelta, t.id, origin, map[string]any{
+			"delta": d.Text,
+		})
+	})
+	cancel() // 对话已结束（完成或中止）：停掉事件泵再等它退出，避免正常路径死锁
+	<-pumpDone
+
+	if err != nil {
+		c.mu.Lock()
+		pausing := run.pausing
+		if pausing {
+			c.paused[key] = &PausedTurn{Question: question, Partial: streamed, Skill: sink.Name()}
+			c.savePausedLocked()
+		}
+		c.mu.Unlock()
+		if pausing {
+			c.publish(key, eventbus.TypePaused, t.id, origin, map[string]any{
+				"partial": streamed,
+			})
+			c.publish(key, eventbus.TypeTurnEnd, t.id, origin, map[string]any{
+				"turn": turnUsage(logx.IDFrom(rctx)),
+			})
+			return
+		}
+		c.publish(key, eventbus.TypeTurnError, t.id, origin, map[string]any{
+			"error": chatErrorMessage(err),
+		})
+		c.publish(key, eventbus.TypeTurnEnd, t.id, origin, map[string]any{
+			"turn": turnUsage(logx.IDFrom(rctx)),
+		})
+		return
+	}
+
+	// 增量为空但拿到了完整回答（非流式路径）：补发一次，保证页面有内容。
+	if strings.TrimSpace(streamed) == "" && strings.TrimSpace(answer) != "" {
+		c.publish(key, eventbus.TypeDelta, t.id, origin, map[string]any{
+			"delta": answer,
+		})
+	}
+	// 规划轮产出了计划：清单结构发给前端渲染计划卡。
+	if p := result.Plan(); p != nil {
+		c.publish(key, eventbus.TypePlan, t.id, origin, map[string]any{
+			"plan": map[string]any{
+				"id": p.ID, "title": p.Title, "summary": p.Summary,
+				"state": p.State, "goal": p.Goal, "skill": p.Skill, "steps": p.Steps,
+			},
+		})
+	}
+	c.publish(key, eventbus.TypeTurnEnd, t.id, origin, map[string]any{
+		"turn": turnUsage(logx.IDFrom(rctx)),
+	})
+}
+
+// ask 执行这一轮对话：普通对话 / 计划模式 / 目标模式都从这里走。
+//
+// 三种模式的差别只在「这一轮怎么算完」，事件出口是同一个——所以前端
+// 不必为每种模式各写一套渲染。
+func (c *Chat) ask(rctx context.Context, key, question string, origin eventbus.Origin, turnID string,
+	sink *agent.SkillSink, result *resultSink, opts []agent.CallOpt,
+	partial, skill string, onDelta func(llm.Delta)) (string, error) {
+	logx.Printf(rctx, "[网页] 输入: %s（会话 %s）", question, key)
+	if partial != "" {
+		// 继续被暂停的对话：原问题与已生成的部分回答重新注入会话后接着完成。
+		// 带上暂停现场记录的技能：技能限定了工具面与模型，继续时换一套会静默改变行为。
+		opts = append(opts, agent.WithSkillName(skill))
+		return c.brain.Resume(rctx, key, question, partial, onDelta, opts...)
+	}
+	return c.brain.AskWith(rctx, question, nil, onDelta, opts...)
+}
+
+// HandleResume 继续被暂停的对话：POST /api/chat/resume，body {"session":"<key>", "clientId":"...", "device":"..."}。
+//
+// 与 HandleSSE 一样是提交式：立刻返回 {turnId,status,seq,session}，这一轮在后台跑，
+// 增量与收尾经事件总线广播（契约 docs/EVENTS-API.md §2.1）。
+//
 // 继续过程同样可暂停（部分回答在原有基础上累加）。
-// body {"session":"<key>"} 可选，缺省继续主会话——暂停现场按会话各存一份，
-// 在 A 会话暂停的，不能在 B 会话点继续。
 func (c *Chat) HandleResume(ctx *vhttp.Context) error {
 	var req struct {
-		Session string `json:"session"`
+		Session  string `json:"session"`
+		ClientID string `json:"clientId"`
+		Device   string `json:"device"`
 	}
 	_ = ctx.UnmarshalBody(&req) // 空 body 视为继续主会话
 	key, err := resolveSessionKey(req.Session)
@@ -404,37 +691,88 @@ func (c *Chat) HandleResume(ctx *vhttp.Context) error {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有可继续的暂停对话"})
 	}
 	logx.Printf(logx.WithID(ctx.Context(), logx.NextID()), "[网页] 继续被暂停的对话: %s", logx.Truncate(turn.Question, 80))
-	sink := &agent.SkillSink{}
-	return c.stream(ctx, key, turn.Question, nil, turn.Partial, sink, &resultSink{}, func(rctx context.Context, onDelta func(llm.Delta)) (string, error) {
-		// 带上暂停现场记录的技能：技能限定了工具面与模型，继续时换一套会静默改变行为。
-		return c.brain.Resume(rctx, key, turn.Question, turn.Partial, onDelta,
-			agent.WithSkillName(turn.Skill))
+
+	origin := eventbus.Origin{ClientID: req.ClientID, Device: req.Device}
+	turnID := newTurnID()
+	status, position, err := c.enqueue(key, &queuedTurn{
+		id: turnID, question: turn.Question, origin: origin,
+		enqueuedAt: time.Now(), partial: turn.Partial, skill: turn.Skill,
+	})
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+
+	body := map[string]any{
+		"turnId":  turnID,
+		"status":  status,
+		"seq":     c.currentSeq(key),
+		"session": key,
+	}
+	if status == statusQueued {
+		body["position"] = position
+		return ctx.JsonResponse(vhttp.Code{Code: http.StatusAccepted, MsgKey: "accepted"}, body)
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, body)
+}
+
+// HandleQueue 返回该会话的排队快照：GET /api/chat/queue?session=web。
+//
+// 前端用它渲染「排队中 · 第 N 位」——位次是队列里的位置，
+// 另一端排队时也能看到（配合 turn.queued 事件）。
+func (c *Chat) HandleQueue(ctx *vhttp.Context) error {
+	key, err := resolveSessionKey(ctx.GinContext().Query("session"))
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	c.mu.Lock()
+	q := c.queues[key]
+	c.mu.Unlock()
+	items := []queueItem{}
+	if q != nil {
+		items = q.snapshot()
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"session": key,
+		"items":   items,
 	})
 }
 
-// HandleStop 暂停当前进行中的对话（POST /api/chat/stop，body 可带 {"session":"<key>"}，
-// 缺省停主会话）：取消后端生成（token 即刻停止），已生成的部分回答保存为暂停现场，
-// 可 POST /api/chat/resume 继续。
+// HandleStop 暂停当前进行中的对话：POST /api/chat/stop，body {"session":"<key>", "turnId":"t..."}。
+//
+// **turnId 必填**：以前按会话停，同一会话上任何一轮都可能被停掉——而两端同时
+// 在用时，「停止」很容易停到对方那一轮上。现在按轮次精确指认，对不上就如实报错。
+//
+// 被停的这一轮，已生成的部分回答保存为暂停现场，可 POST /api/chat/resume 继续。
 func (c *Chat) HandleStop(ctx *vhttp.Context) error {
 	var req struct {
 		Session string `json:"session"`
+		TurnID  string `json:"turnId"`
 	}
 	_ = ctx.UnmarshalBody(&req) // 空 body 视为停主会话
 	key, err := resolveSessionKey(req.Session)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
 	}
+	if strings.TrimSpace(req.TurnID) == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{
+			"error": "请求体须为 '{turnId: t...}'（turnId 必填：停止必须指明停哪一轮，否则可能停到另一端正在跑的那轮）",
+		})
+	}
 	c.mu.Lock()
-	run := c.runs[key]
+	run := c.runs[key][req.TurnID]
 	if run != nil {
 		run.pausing = true // 先标记再取消：Ask 返回时据此保存暂停现场
 	}
 	c.mu.Unlock()
 	if run == nil {
-		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "没有进行中的对话"})
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{
+			"error": "这一轮已经结束了（或不存在），没有可停的对话",
+		})
 	}
 	run.cancel()
-	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已暂停，可点击继续接着完成，或直接输入新问题开启新对话"})
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{
+		"message": "已暂停，可点击继续接着完成，或直接输入新问题开启新对话",
+	})
 }
 
 // PausedTurn 返回会话的暂停现场（无则 nil），供历史接口与页面恢复展示。
@@ -514,162 +852,12 @@ func chatErrorMessage(err error) string {
 	case strings.Contains(cause, "轮数上限"):
 		return "这一轮的工具调用轮数到了上限（可在「设置 → 运行上限」把「单轮工具调用上限」调大），" +
 			"后半截活儿没做完；已完成的工具操作都保留着，调大后重试即可。"
-	case strings.Contains(low, "timeout") || strings.Contains(low, "dial tcp") ||
+	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(low, "timeout") ||
+		strings.Contains(low, "dial tcp") ||
 		strings.Contains(low, "connection refused") || strings.Contains(low, "no such host") ||
 		strings.Contains(low, "eof"):
 		return "连不上模型服务（" + logx.Truncate(cause, 120) + "）。检查「设置 → 模型服务」里的 API 地址与本机网络后重试。"
 	default:
 		return "这轮回复失败了：" + logx.Truncate(cause, 200)
 	}
-}
-
-// stream 是 /api/chat 与 /api/chat/resume 共用的 SSE 骨架：搭建流式连接、
-// 订阅思考过程事件、桥接暂停，ask 在独立上下文中执行对话并返回完整回答。
-// partialBase 为继续场景下已有一部分回答的前缀（再次暂停时累加保存）；
-// sink 用于记下本轮实际启用的技能，暂停现场要带上它才能在下一次继续时复用；
-// result 用于在执行完成后额外带出结构化结果（计划模式的步骤清单）。
-func (c *Chat) stream(ctx *vhttp.Context, key, question string, imgs []llm.Content, partialBase string,
-	sink *agent.SkillSink, result *resultSink,
-	ask func(rctx context.Context, onDelta func(llm.Delta)) (string, error)) error {
-	gin := ctx.GinContext()
-	gin.Header("Content-Type", "text/event-stream; charset=utf-8")
-	gin.Header("Cache-Control", "no-cache")
-	gin.Header("X-Accel-Buffering", "no")
-	gin.Writer.WriteHeader(http.StatusOK)
-	flusher, ok := gin.Writer.(http.Flusher)
-	if !ok {
-		return ctx.JsonResponse(vhttp.Codes.InternalError,
-			map[string]string{"error": "连接不支持流式响应"})
-	}
-
-	var wmu sync.Mutex // delta 回调与事件泵并发写流
-	// 写失败 = 浏览器那侧的连接已经没了。用它（而不是 rctx.Err()）区分
-	// "客户端断开"与"模型出错"：rctx 在对话结束时被我们主动 cancel，判不出来源。
-	var writeFailed atomic.Bool
-	write := func(v any) error {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		wmu.Lock()
-		defer wmu.Unlock()
-		if _, err := fmt.Fprintf(gin.Writer, "data: %s\n\n", b); err != nil {
-			writeFailed.Store(true)
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
-
-	rctx, cancel := context.WithCancel(logx.WithID(ctx.Context(), logx.NextID()))
-	defer cancel()
-	rctx = agent.WithSessionKey(rctx, key)
-	rctx = agent.WithOrigin(rctx, agent.OriginWeb)
-	rctx = agent.WithSkillSink(rctx, sink)
-	trace.Begin(logx.IDFrom(rctx), "web", key, question)
-
-	// 登记进行中的对话（暂停接口按会话 key 取消），退出时注销。
-	run := &chatRun{cancel: cancel}
-	c.mu.Lock()
-	c.runs[key] = run
-	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		delete(c.runs, key)
-		c.mu.Unlock()
-	}()
-
-	// 思考过程事件泵：订阅本请求的过程事件转发给前端；连接结束即停。
-	steps, stopSteps := agent.SubscribeSteps(logx.IDFrom(rctx))
-	defer stopSteps()
-	pumpDone := make(chan struct{})
-	go func() {
-		defer close(pumpDone)
-		for {
-			select {
-			case <-rctx.Done():
-				// 对话已结束、不再有新事件发布：把通道里积压的过程事件抽干
-				// 写完再退。select 在两侧同时就绪时随机挑一个，直接 return
-				// 会把轮末的 tool ok/fail 留在通道里，前端的工具块永远停在
-				// 运行中（转圈）。
-				for {
-					select {
-					case s, ok := <-steps:
-						if !ok {
-							return
-						}
-						_ = write(map[string]any{"step": s})
-					default:
-						return
-					}
-				}
-			case s, ok := <-steps:
-				if !ok {
-					return
-				}
-				_ = write(map[string]any{"step": s})
-			}
-		}
-	}()
-
-	streamed := ""
-	answer, err := ask(rctx, func(d llm.Delta) {
-		if d.Thinking != "" {
-			if werr := write(map[string]string{"thinking": d.Thinking}); werr != nil {
-				cancel() // 客户端已断开，中止对话
-				return
-			}
-		}
-		if d.Text == "" {
-			return
-		}
-		streamed += d.Text
-		if werr := write(map[string]string{"delta": d.Text}); werr != nil {
-			cancel() // 客户端已断开，中止对话
-		}
-	})
-	cancel() // 对话已结束（完成或中止）：停掉事件泵再等它退出，避免正常路径死锁
-	<-pumpDone
-
-	if err != nil {
-		c.mu.Lock()
-		pausing := run.pausing
-		if pausing {
-			c.paused[key] = &PausedTurn{Question: question, Partial: partialBase + streamed,
-				Skill: sink.Name()}
-			c.savePausedLocked()
-		}
-		c.mu.Unlock()
-		switch {
-		case pausing:
-			logx.Printf(rctx, "[网页] 对话被暂停（已生成 %d 字，可继续）", len([]rune(streamed)))
-			trace.Record(rctx, "pause", "对话被用户暂停，已生成 %d 字可继续", len([]rune(streamed)))
-			_ = write(map[string]any{"paused": true, "partial": streamed})
-			_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
-			return nil
-		case writeFailed.Load():
-			// 浏览器已断开：没有连接可发错误帧，记一条日志收尾即可。
-			logx.Printf(rctx, "[网页] 连接已断开，本轮对话中止: %v", err)
-			trace.End(logx.IDFrom(rctx), err.Error())
-			return nil
-		}
-		logx.Printf(rctx, "agent 出错: %v", err)
-		trace.End(logx.IDFrom(rctx), err.Error())
-		_ = write(map[string]any{"done": true, "error": chatErrorMessage(err), "turn": turnUsage(logx.IDFrom(rctx))})
-		return nil
-	}
-	// 增量为空但拿到了完整回答（非流式路径）：补发一次，保证页面有内容。
-	if strings.TrimSpace(streamed) == "" && strings.TrimSpace(answer) != "" {
-		_ = write(map[string]string{"delta": answer})
-	}
-	trace.End(logx.IDFrom(rctx), "")
-	// 规划轮产出了计划：把清单结构发给前端渲染计划卡（确认/改步骤/取消都在卡片里做）。
-	if p := result.Plan(); p != nil {
-		_ = write(map[string]any{"plan": map[string]any{
-			"id": p.ID, "title": p.Title, "summary": p.Summary, "state": p.State,
-			"goal": p.Goal, "skill": p.Skill, "steps": p.Steps,
-		}})
-	}
-	_ = write(map[string]any{"done": true, "turn": turnUsage(logx.IDFrom(rctx))})
-	return nil
 }

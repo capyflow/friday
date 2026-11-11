@@ -59,6 +59,7 @@ import (
 	feishu "github.com/capyflow/friday/internal/channel/feishu"
 	"github.com/capyflow/friday/internal/config"
 	"github.com/capyflow/friday/internal/cost"
+	"github.com/capyflow/friday/internal/eventbus"
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/mcp"
 	"github.com/capyflow/friday/internal/memory"
@@ -655,7 +656,11 @@ func main() {
 			}
 			log.Printf("[管理后台] 已按启动配置设置管理员账号 %s（每次启动以配置/环境变量为准）", user)
 		}
+		// 会话事件总线：主会话（session=web）与 ACP 会话（session=acp:<id>）共用同一个实例，
+		// 前端一条 /api/events/stream 连接就能按 session 收到两边的事件（契约 docs/EVENTS-API.md）。
+		bus := eventbus.New(0, 0)
 		chat := web.New(brain, "uploads", cfg.PausedFile)
+		chat.SetBus(bus)
 		chat.EnablePlans(planPlanner, planRunner)
 		chat.EnableGoals(eng, func() (bool, string) { return guard.ProactiveAllowed("目标运行") })
 		current := cfg.Snapshot()
@@ -685,6 +690,8 @@ func main() {
 			PlanRunner:    planRunner,
 			GoalRunner:    goalRunner,
 		})
+		// 事件总线注入管理后台：/api/events/stream 从这里读事件。
+		adminServer.SetBus(bus)
 		// TLS 局域网门（手机直连）：启用时证书落数据目录 tls/，监听 0.0.0.0:<tlsPort>。
 		if cfg.Admin.TLS.IsEnabled() {
 			adminServer.SetTLS(admin.TLSOptions{Port: cfg.Admin.TLS.Port, Dir: filepath.Join("tls")})

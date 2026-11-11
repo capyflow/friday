@@ -27,11 +27,11 @@ import (
 )
 
 const (
-	gitLogDefaultLimit = 30   // 历史默认条数
-	gitLogMaxLimit     = 200  // 再多前端也读不完，且回包会肥
+	gitLogDefaultLimit = 30  // 历史默认条数
+	gitLogMaxLimit     = 200 // 再多前端也读不完，且回包会肥
 	gitOpMaxOutput     = 32 * 1024
-	gitOpApprovalWait = 5 * time.Minute
-	gitOpHistoryKeep  = 20
+	gitOpApprovalWait  = 5 * time.Minute
+	gitOpHistoryKeep   = 20
 )
 
 // Git 操作的生命周期状态。
@@ -53,19 +53,19 @@ type GitFileStatus struct {
 
 // GitStatus 是仓库当前状态。
 type GitStatus struct {
-	IsRepo    bool            `json:"isRepo"`
-	Branch    string          `json:"branch"`
-	Detached  bool            `json:"detached"`
-	Upstream  string          `json:"upstream"`
-	Ahead     int             `json:"ahead"`
-	Behind    int             `json:"behind"`
-	Staged    int             `json:"staged"`
-	Modified  int             `json:"modified"`
-	Untracked int             `json:"untracked"`
-	Deleted   int             `json:"deleted"`
-	Conflicted int            `json:"conflicted"`
-	Files     []GitFileStatus `json:"files"`
-	Note      string          `json:"note,omitempty"`
+	IsRepo     bool            `json:"isRepo"`
+	Branch     string          `json:"branch"`
+	Detached   bool            `json:"detached"`
+	Upstream   string          `json:"upstream"`
+	Ahead      int             `json:"ahead"`
+	Behind     int             `json:"behind"`
+	Staged     int             `json:"staged"`
+	Modified   int             `json:"modified"`
+	Untracked  int             `json:"untracked"`
+	Deleted    int             `json:"deleted"`
+	Conflicted int             `json:"conflicted"`
+	Files      []GitFileStatus `json:"files"`
+	Note       string          `json:"note,omitempty"`
 }
 
 // GitCommit 是一条历史。
@@ -261,7 +261,7 @@ func (m *Manager) StartGitOp(threadID string, req GitOpRequest) (*GitOp, error) 
 		pend = m.approver.RequestCard(approval.Card{
 			Tool:    "Git 操作",
 			Summary: fmt.Sprintf("在 %s 执行：%s（git %s）", filepath.Base(cwd), gitOpLabel(op), strings.Join(args, " ")),
-			Detail: fmt.Sprintf("操作：%s\n目录：%s\n命令：git %s", gitOpLabel(op), cwd, strings.Join(args, " ")),
+			Detail:  fmt.Sprintf("操作：%s\n目录：%s\n命令：git %s", gitOpLabel(op), cwd, strings.Join(args, " ")),
 			Origin:  m.ThreadOrigin(threadID, ""),
 		}, gitOpApprovalWait)
 		reg.mu.Lock()
@@ -690,5 +690,3 @@ func gitRunContext(ctx context.Context, dir string, args ...string) (string, err
 	}
 	return out, nil
 }
-
-
