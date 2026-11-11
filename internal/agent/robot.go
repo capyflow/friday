@@ -250,6 +250,9 @@ type Deps struct {
 	// Search 返回联网搜索的当前供应商与密钥（设置页保存即生效，工具每次调用读取；
 	// nil 时按默认 bing 免密钥处理）。
 	Search func() (provider, apiKey string)
+	// Delegate 是子任务派发工具（delegate_task）。可为 nil：没接上时该工具不注册，
+	// 模型看不见它，也就不会去调一个调不通的工具。
+	Delegate *DelegateTool
 }
 
 // RegisterTools 把管家全部业务工具注册进 Registry。
@@ -293,6 +296,17 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 		&tools_pkg.ListFilesTool{FileTools: fileTools},
 		&tools_pkg.WriteFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.EditFileTool{FileTools: fileTools, Approver: approver},
+		// 编码面（内置 agent 自己就能改代码，不依赖外部 coding agent）：
+		// 检索（search_code/find_files）、只读 git 三件套、批量精确编辑（edit_files）。
+		&tools_pkg.SearchCodeTool{FileTools: fileTools},
+		&tools_pkg.FindFilesTool{FileTools: fileTools},
+		&tools_pkg.GitStatusTool{FileTools: fileTools},
+		&tools_pkg.GitDiffTool{FileTools: fileTools},
+		&tools_pkg.GitLogTool{FileTools: fileTools},
+		&tools_pkg.EditFilesTool{FileTools: fileTools, Approver: approver},
+		// 文件生命周期：改名/移动（move_file）与删除（delete_file，不硬删，移入回收站可恢复）。
+		&tools_pkg.MoveFileTool{FileTools: fileTools, Approver: approver},
+		&tools_pkg.DeleteFileTool{FileTools: fileTools, Approver: approver},
 		&tools_pkg.McpEditTool{Manager: d.Mcp, Config: d.Config, ConfigPath: d.ConfigPath, Approver: approver},
 		// 技能正文超过注入预算时只给概览，模型靠它取全文与 references/。
 		&tools_pkg.ReadSkillTool{Store: d.Skills},
@@ -303,6 +317,10 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 			&tools_pkg.DisplayNowTool{Displayer: d.Displayer},
 			&tools_pkg.PlayAudioTool{Player: d.Player},
 			&tools_pkg.PlayEffectTool{Player: d.Player})
+	}
+	// 子任务派发（delegate_task）：接线在 Brain 建好之后才补，这里只是把工具挂上。
+	if d.Delegate != nil {
+		tools = append(tools, d.Delegate)
 	}
 	for _, t := range tools {
 		if err := r.Add(t); err != nil {
@@ -383,8 +401,12 @@ func systemPrompt(cfg *config.Config) string {
 【文件与命令】
 1. 读文件用 read_file（可分段续读），列目录用 list_files；写文件用 write_file（原文件自动备份为 .bak）；精确修改用 edit_file（old 必须唯一匹配，防止误改）。
 2. write_file/edit_file/exec_command 属于受控操作：confirm 审批模式下需用户在管理后台批准后才会执行，请把要做什么说清楚；收到"用户未批准"或"被权限系统拒绝"时不要反复重试同一操作。
-3. 执行 shell 命令用 exec_command（默认 30 秒超时，可通过 timeout 参数最长调到 10 分钟）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。
-4. 写脚本、跑中间产物一律走系统临时目录（macOS/Linux 是 /tmp，Windows 是 %TEMP%），不要写进数据目录、工作目录或用户家目录——那些地方是长期资产，脚本和中间产物留在里面会越积越多：
+3. 执行 shell 命令用 exec_command（默认 30 秒超时，可通过 timeout 参数最长调到 10 分钟）：只用于轻量、安全的命令，rm -rf 等毁灭性命令会被强制拦截。命令默认在本次会话的工作目录里执行（工作模式下就是那个项目目录），要用别处传 cwd。
+4. 在项目目录里找代码用 search_code（按内容搜，正则或字面量）与 find_files（按文件名 glob 找）；看仓库现状用 git_status / git_diff / git_log（只读，不会改动仓库）；一次改多处或多个文件用 edit_files（old 须唯一匹配，整批要么全改要么不改）。
+5. 改名/移动文件用 move_file（目标已存在默认拒绝，覆盖传 overwrite=true，旧目标会备份成 .bak）；删文件用 delete_file（不硬删，移入回收站可恢复；目录要先用 move_file 移走）。
+6. 活儿能拆就拆：互相独立的调查（摸清某块代码、同时查几处）用 delegate_task 派子任务并行去做，指令要写自足（子任务看不到主对话），自己只收结论；改文件仍然自己动手。
+7. 多步的活儿（要改好几处、每处都得验证）用 create_plan 先列步骤再按步执行：每步一条独立轨迹，中途断了能接上，进度在「自动化 → 计划」页看得见、也随时能停。步骤之间不要一次说完。
+8. 写脚本、跑中间产物一律走系统临时目录（macOS/Linux 是 /tmp，Windows 是 %TEMP%），不要写进数据目录、工作目录或用户家目录——那些地方是长期资产，脚本和中间产物留在里面会越积越多：
    - 需要写脚本时，先在临时目录下造一个本次专用的子目录（macOS/Linux 用 mktemp -d，如 /tmp/tmp.XXXX；Windows 在 %TEMP% 下新建一个目录），脚本放进去并用绝对路径引用；不要在数据目录或工作目录根下直接建 .py/.sh 文件。
    - 脚本跑完自己删掉（连同那个临时子目录一起 rm），别把垃圾留在那儿。
    - 生成的产物（报告、导出、转换结果、中间数据）用户没指定去处时也放临时目录，并把完整路径告诉用户；临时目录里的旧文件会被系统定期清掉，用户要长期留的，就按他指定的位置另存一份。

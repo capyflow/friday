@@ -44,8 +44,12 @@ var passThroughTools = []string{
 	"web_search", "web_fetch",
 	"remember", "recall", "forget", "get_time",
 	"speak_now", "display_now", "play_audio", "play_effect",
-	"read_file", "list_files", "write_file", "edit_file",
+	"read_file", "list_files", "write_file", "edit_file", "edit_files",
+	"move_file", "delete_file",
+	"search_code", "find_files",
+	"git_status", "git_diff", "git_log",
 	"read_skill",
+	"delegate_task",
 	"mcp_edit",
 }
 

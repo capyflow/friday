@@ -104,9 +104,15 @@ func (b *Brain) projectDirFor(ctx context.Context) string {
 }
 
 // projectWarmup 生成会话开始时注入的项目上下文（工作目录下的 AGENTS.md 全文 +
-// README.md 摘要）。没有这两个文件时返回空串，不注入。
+// README.md 摘要）。
+//
+// 会话自带目录（工作模式/工作区会话）时，额外注入编码守则；只有进程级默认目录
+// 时维持旧行为（项目上下文，不加守则）——生活模式不该平白多出编码纪律。
 func (b *Brain) projectWarmup(ctx context.Context) string {
-	return projectContext(b.projectDirFor(ctx))
+	if dir := workdir.From(ctx); dir != "" {
+		return sessionProjectContext(dir)
+	}
+	return projectContext(b.projectDir)
 }
 
 // SetSkills 注入技能仓库与自动匹配配置（启动时调用一次）。技能是按次生效的，

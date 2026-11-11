@@ -56,6 +56,33 @@ func readBrief(path string, max int) (text string, total int, err error) {
 	return string([]rune(text)[:max]), total, nil
 }
 
+// codingRules 编码场景下的工作守则。
+//
+// 为什么单独一段而不是塞进全局人设提示词：这段只在"这条会话绑定了某个项目目录"时
+// 注入（见 sessionProjectContext），生活模式的日常对话不会平白多出几百字；而且
+// 内容是干代码的纪律——先定位再动手、改完要验证——这些正是内置 agent 从"管家"
+// 变成"能自己把活干完"时最缺的行为约束。
+const codingRules = `【在这个目录里干活的规矩】
+1. 先定位再动手：不知道代码在哪，先用 search_code 搜内容、find_files 找文件名，别凭猜测改文件。
+2. 改之前先读：用 read_file 看清楚要改的那一段（可带 offset 续读），别凭记忆改。
+3. 改动要小而准：优先 edit_files（一次改多处、多个文件）或 edit_file（单处精确替换）；只有整份重写才用 write_file。
+4. 动手前先看清现状：git_status 看当前分支与未提交改动，git_diff 看已有差异，别覆盖别人的改动。
+5. 改完要验证：用 exec_command 在这个目录里跑相关测试或构建，把真实结果（通过/失败/报错）如实说出来，别只说"改好了"。
+6. 活儿大可以拆开并行：互相独立的调查（摸清某块代码、同时查几处）用 delegate_task 派子任务去做，自己只收结论；要分步推进的活儿（改好几处、每处都得验证）用 create_plan 列步骤再按步执行。`
+
+// sessionProjectContext 生成"带项目目录的会话"的项目上下文：项目约定（AGENTS.md
+// / README.md）+ 编码守则。目录里没有这两个文件时也要给守则——那恰恰是最需要
+// 行为约束的项目（没人写过 AGENTS.md 的仓库）。
+func sessionProjectContext(dir string) string {
+	var b strings.Builder
+	if pc := projectContext(dir); pc != "" {
+		b.WriteString(pc)
+		b.WriteString("\n\n")
+	}
+	b.WriteString(codingRules)
+	return b.String()
+}
+
 // projectContext 生成会话开始时注入的项目上下文系统消息；无事可说时返回空串。
 func projectContext(dir string) string {
 	dir = strings.TrimSpace(dir)

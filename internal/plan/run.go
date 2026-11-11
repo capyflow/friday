@@ -15,6 +15,7 @@ import (
 	"github.com/capyflow/friday/internal/logx"
 	"github.com/capyflow/friday/internal/trace"
 	"github.com/capyflow/friday/internal/usage"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 // Runner 执行计划。零值不可用，请用 NewRunner。
@@ -246,6 +247,11 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, st Step) {
 	sctx = agent.WithSessionKey(sctx, p.Session)
 	sctx = agent.WithOrigin(sctx, agent.OriginPlan)
 	sctx = agent.WithRun(sctx, "plan:"+p.ID)
+	// 步骤要落在计划自己的工作目录里：文件工具的允许根、项目上下文注入（AGENTS.md）、
+	// exec 的工作目录都按它来。空=沿用默认目录（网页发起的计划就是这样）。
+	if p.Dir != "" {
+		sctx = workdir.With(sctx, p.Dir)
+	}
 	prompt := r.stepPrompt(p, st)
 	trace.Begin(logx.IDFrom(sctx), "plan", p.Session, prompt)
 	trace.Record(sctx, "plan_step", "开始第 %d/%d 步：%s", st.N, len(p.Steps), st.Title)

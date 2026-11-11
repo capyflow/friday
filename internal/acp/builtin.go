@@ -467,11 +467,12 @@ func builtinToolKind(name string) acp.ToolKind {
 	switch name {
 	case "read_file", "list_files":
 		return acp.ToolKindRead
-	case "write_file", "edit_file":
+	case "write_file", "edit_file", "edit_files":
 		return acp.ToolKindEdit
 	case "exec", "run_command":
 		return acp.ToolKindExecute
-	case "grep", "glob", "search", "web_search":
+	case "grep", "glob", "search", "web_search", "search_code", "find_files",
+		"git_status", "git_diff", "git_log":
 		return acp.ToolKindSearch
 	case "web_fetch":
 		return acp.ToolKindFetch

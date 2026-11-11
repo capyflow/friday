@@ -55,6 +55,29 @@ func TestProjectContextAgentsFullAndReadmeBrief(t *testing.T) {
 	}
 }
 
+// TestSessionProjectContextAddsCodingRules 带目录的会话（工作区/工作模式）必须注入编码守则：
+// 这是内置 agent 从"管家"变成"能自己把活干完"的关键行为约束。
+func TestSessionProjectContextAddsCodingRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := sessionProjectContext(dir)
+	for _, want := range []string{"search_code", "find_files", "edit_files", "git_status", "exec_command"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("编码守则里应提到 %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestProjectContextWithoutRulesForDefaultDir 进程级默认目录不该注入编码守则：
+// 生活模式的日常对话不该平白多出编码纪律。
+func TestProjectContextWithoutRulesForDefaultDir(t *testing.T) {
+	if strings.Contains(projectContext(""), "search_code") {
+		t.Fatal("空目录的项目上下文不该含编码守则")
+	}
+}
+
 // TestProjectContextTruncationIsHonest AGENTS.md 超长时必须写明"还剩多少、去哪看"，
 // 且按 rune 截断不能切坏中文。
 func TestProjectContextTruncationIsHonest(t *testing.T) {

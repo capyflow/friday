@@ -16,6 +16,7 @@ import (
 
 	"github.com/capyflow/friday/internal/agent"
 	"github.com/capyflow/friday/internal/usage"
+	"github.com/capyflow/friday/internal/workdir"
 )
 
 // fakeAsker 记录每次提问的文本与归属，按脚本返回回答或报错。
@@ -24,6 +25,7 @@ type fakeAsker struct {
 	prompts  []string
 	sessions []string
 	runs     []string
+	dirs     []string // 每次提问时的工作目录（步骤应落在计划自己的目录里）
 	replies  []string
 	err      error
 	errFor   func(n int) error // 按第几次调用决定报错（模拟单步失败）
@@ -35,6 +37,7 @@ func (f *fakeAsker) AskWith(ctx context.Context, text string, _ []llm.Content, _
 	f.prompts = append(f.prompts, text)
 	f.sessions = append(f.sessions, agent.SessionKeyFrom(ctx))
 	f.runs = append(f.runs, agent.RunFrom(ctx))
+	f.dirs = append(f.dirs, workdir.From(ctx))
 	n := len(f.prompts)
 	if f.errFor != nil {
 		if err := f.errFor(n); err != nil {
@@ -76,6 +79,15 @@ func (f *fakeAsker) sessionAt(n int) string {
 		return ""
 	}
 	return f.sessions[n]
+}
+
+func (f *fakeAsker) dirAt(n int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n < 0 || n >= len(f.dirs) {
+		return ""
+	}
+	return f.dirs[n]
 }
 
 func (f *fakeAsker) runAt(n int) string {

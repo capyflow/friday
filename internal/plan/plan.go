@@ -68,9 +68,12 @@ type Plan struct {
 	Goal    string `json:"goal"` // 用户原话（规划轮的输入）
 	Origin  string `json:"origin"`
 	Session string `json:"session"` // 独立会话 key：plan-<id>
-	Skill   string `json:"skill,omitempty"`
-	State   State  `json:"state"`
-	Steps   []Step `json:"steps"`
+	// Dir 是步骤执行时的工作目录（空=用默认目录）。工作区里发起的计划要记住
+	// 那个项目目录——否则每一步的文件读写与命令都会落到别处，等于在错地方干活。
+	Dir   string `json:"dir,omitempty"`
+	Skill string `json:"skill,omitempty"`
+	State State  `json:"state"`
+	Steps []Step `json:"steps"`
 
 	CreatedAt   time.Time  `json:"createdAt"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
@@ -142,6 +145,7 @@ func (p *Plan) Normalize(now time.Time) {
 	if p.Session == "" {
 		p.Session = "plan-" + p.ID
 	}
+	p.Dir = strings.TrimSpace(p.Dir)
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = now
 	}

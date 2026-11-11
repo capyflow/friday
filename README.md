@@ -96,6 +96,16 @@
   任务到点触发同样留痕。数据落盘 `traces.json`（最近 200 条）
 - **文件能力**：`read_file` / `list_files` 工具（目录白名单内读文本文件、按行分段、PDF 按页抽取），
   聊天可发送图片（`/api/upload`，多模态消息，需模型支持视觉）
+- **编码能力（内置 agent 自己就能干活）**：`search_code`（按正则/字面量搜内容，带行号）/
+  `find_files`（按 glob 找文件）/ `git_status` / `git_diff` / `git_log`（只读 git 三件套）/
+  `edit_files`（一次改多处、多个文件；old 须唯一匹配，整批要么全改要么不改）/
+  `move_file`（改名/移动，覆盖前自动备份 .bak）/ `delete_file`（**不硬删**，移入回收站可恢复）/
+  `delegate_task`（派子任务到隔离子会话并行调查，默认只读）/ `create_plan`（列步骤并按步执行，
+  每步一条独立轨迹，进度可在「自动化 → 计划」页看与暂停）/
+  `exec_command` 工作目录改为**本次会话的工作目录**（带 `cwd` 参数可另指定），
+  长输出保留头尾并标注省略量（失败信息在末尾，不会被截掉）——内置 agent 因此能在项目里
+  定位代码、改代码、跑测试、看 diff，不依赖 codex/claude/opencode 也能把活干完；
+  带项目目录的会话还会自动注入一段编码守则（先搜再改 / 改完要验证 / 先看 git 现状）
 - **执行类工具 + 审批**：`write_file`（自动备份 .bak）/ `edit_file`（old 唯一匹配防误改）/
   `exec_command`（shell 执行，默认 30s 超时上限 10min、输出截断 100KB）；
   经 vortexagent 全局权限层把关，审批三模式（`tools.exec.mode`）：`auto`（白名单内直接执行）/
@@ -136,6 +146,11 @@
 │  │   get_weather（Open-Meteo 天气查询）             │
 │  │   remember / recall / forget（长期记忆）        │
 │  │   read_file / list_files / write_file / edit_file │
+│  │   search_code / find_files（检索）              │
+│  │   git_status / git_diff / git_log（只读 git）   │
+│  │   edit_files（批量精确编辑）                     │
+│  │   move_file / delete_file（改名移动/删除）       │
+│  │   delegate_task（派子任务）/ create_plan（计划） │
 │  │   exec_command（全局权限层：白名单/黑名单/审批）     │
 │  │   get_time；speak_now / display_now / play_audio / │
 │  │   play_effect（仅 hardware.enabled 时注册）         │

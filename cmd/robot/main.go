@@ -344,6 +344,14 @@ func main() {
 		skillStore = skill.NewStoreRoots(skillRoots(cfg.Skills.Dir, skill.UserScopeDir, workDir())...)
 	}
 
+	// 子任务派发工具：先建好挂进 deps（工具注册需要它），等 Brain 建好后再接上
+	// 真正的派发实现（Agent 必须先有注册表，Brain 又包着 Agent，顺序只能这样）。
+	delegateTool := robotagent.NewDelegateTool()
+
+	// 计划工具（create_plan）：agent 自己列步骤并按步执行。仓库与执行器在启动
+	// 装配的后段才有，同样先建好、后接线。
+	planTool := plan.NewCreatePlanTool()
+
 	deps := robotagent.Deps{
 		Skills:     skillStore,
 		Engine:     eng,
@@ -357,6 +365,7 @@ func main() {
 		Approver:   approver,
 		Mcp:        mcpMgr,
 		ConfigPath: *cfgPath,
+		Delegate:   delegateTool,
 		Search: func() (string, string) {
 			s := cfg.Snapshot().Tools.Search
 			return s.ProviderOrDefault(), s.APIKey
@@ -376,6 +385,11 @@ func main() {
 				localDeps.Config = next
 				if err := robotagent.RegisterTools(reg, localDeps); err != nil {
 					return nil, err
+				}
+				if next.Plan.EnabledOrDefault() {
+					if err := reg.Add(planTool); err != nil {
+						return nil, err
+					}
 				}
 				if mcpMgr != nil {
 					if err := mcpMgr.RegisterTools(reg); err != nil {
@@ -414,11 +428,17 @@ func main() {
 	if err := robotagent.RegisterTools(registry, deps); err != nil {
 		log.Fatalf("注册工具失败: %v", err)
 	}
+	if cfg.Plan.EnabledOrDefault() {
+		if err := registry.Add(planTool); err != nil {
+			log.Fatalf("注册 create_plan 工具失败: %v", err)
+		}
+	}
 	ag, err := robotagent.Build(cfg, registry, pool, approver, ctxMgr.Current())
 	if err != nil {
 		log.Fatalf("创建 agent 失败: %v", err)
 	}
 	brain = robotagent.NewBrain(ag, pool, ctxMgr)
+	delegateTool.SetRunner(brain)        // delegate_task 现在能真派活了
 	brain.SetMemory(memStore)            // 会话开始时注入长期记忆速览（清上下文后仍有"印象"）
 	brain.SetProjectDir(workDir())       // 会话开始时注入项目上下文（工作目录下的 AGENTS.md / README.md）
 	brain.SetCustom(cfg.Custom.Commands) // 自定义指令：触发词 → 提示词展开
@@ -555,6 +575,13 @@ func main() {
 		planRunner.PerPlanTokens = cfg.Cost.Budget.PerPlanTokens
 		log.Printf("[计划] 已启用（清单 %s，单步轮数上限 %d，计划 token 预算 %d）",
 			cfg.PlanFile, cfg.Plan.MaxIterations, cfg.Cost.Budget.PerPlanTokens)
+	}
+	// create_plan 工具接上仓库与执行器：agent 现在能自己列步骤并按步执行了。
+	if planStore != nil {
+		planTool.SetStore(planStore)
+		if planRunner != nil {
+			planTool.SetStarter(planRunner.Start)
+		}
 	}
 
 	// 智能任务运行器：到点把指令（心跳任务附 HEARTBEAT.md 清单）交给 agent 决策，
