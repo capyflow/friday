@@ -80,7 +80,7 @@ func TestProviderDiagnosticClassifiesSafeErrors(t *testing.T) {
 		{"model_not_found", 404, "secret-test-key", "not_found"},
 		{"rate_limit", 429, "secret-test-key", "rate_limit"},
 		{"service_failure", 503, "secret-test-key", "service"},
-		{"incompatible", 400, "secret-test-key", "incompatible"},
+		{"rejected", 400, "secret-test-key", "rejected"},
 		{"invalid_json", 200, "secret-test-key", "invalid_response"},
 		{"error_object", 200, `{"error":{"message":"secret-test-key"}}`, "invalid_response"},
 		{"empty_response", 200, `{"choices":[{"message":{"content":""}}]}`, "incompatible"},
@@ -101,6 +101,53 @@ func TestProviderDiagnosticClassifiesSafeErrors(t *testing.T) {
 				t.Fatalf("诊断泄露密钥: %s", data)
 			}
 		})
+	}
+}
+
+// 服务商自己说的原因要透给用户（否则一律说「不兼容」，用户碰不到真因），
+// 但密钥不能跟着透出去。
+func TestProviderDiagnosticSurfacesProviderReason(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"error_object_message", `{"error":{"message":"you have no active step plan subscription"}}`,
+			"you have no active step plan subscription"},
+		{"error_string", `{"error":"model quota exhausted"}`, "model quota exhausted"},
+		{"top_level_message", `{"message":"invalid model name"}`, "invalid model name"},
+		{"detail_field", `{"detail":"upstream busy"}`, "upstream busy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			result := testProvider(context.Background(),
+				providerTestRequest{BaseURL: srv.URL, Model: "model", APIKey: "secret-test-key", CheckVision: true})
+			if result.OK || !strings.Contains(result.Text.Message, tc.want) {
+				t.Fatalf("应透出服务商原因 %q，实际 %+v", tc.want, result.Text)
+			}
+			if strings.Contains(result.Text.Message, "secret-test-key") {
+				t.Fatalf("诊断泄露密钥: %s", result.Text.Message)
+			}
+		})
+	}
+}
+
+// 服务商把密钥原样回显在报错里时，透出的原因要先抹掉密钥。
+func TestProviderDiagnosticRedactsSecretFromReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid key secret-test-key"}}`))
+	}))
+	defer srv.Close()
+	result := testProvider(context.Background(),
+		providerTestRequest{BaseURL: srv.URL, Model: "model", APIKey: "secret-test-key", CheckVision: true})
+	if strings.Contains(result.Text.Message, "secret-test-key") {
+		t.Fatalf("服务商回显的密钥必须抹掉: %s", result.Text.Message)
+	}
+	if !strings.Contains(result.Text.Message, "***") {
+		t.Fatalf("抹掉密钥后应留痕: %s", result.Text.Message)
 	}
 }
 
@@ -298,4 +345,3 @@ func TestProviderDiagnosticGemini(t *testing.T) {
 		t.Fatalf("图片诊断应通过: %+v", result.Vision)
 	}
 }
-

@@ -72,8 +72,12 @@ function addRow() {
     name: '', protocol: 'openai', baseURL: '', model: '', apiKey: '', window: '', maxTokens: String(DEFAULT_MAX_TOKENS),
     image: true, keySet: false, testing: false, testMsg: null, _open: true,
   })
-  // 第一个模型默认就是生效项，填完直接保存，省一次点 radio。
-  if (activeIdx.value < 0 || activeIdx.value >= idx) activeIdx.value = idx
+  // 新加的模型默认设为生效项：用户加它就是要用它。
+  //
+  // 以前只在「一个模型都没有」时才选中新行，于是加第二个模型时生效位仍挂在
+  // 旧条目上——「保存并生效」把旧模型继续留在生效位，看着像保存了，实际还在
+  // 用旧模型（用户反馈的「无法保存」正是这个）。
+  activeIdx.value = idx
 }
 function hostOf(x) {
   try { return new URL(x.baseURL).host } catch { return ''
@@ -183,6 +187,12 @@ onMounted(load)
           <svg class="pm-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
+        <!-- 测试结果放在折叠区之外：测试按钮在摘要行上，结果若藏在展开区里，
+             行收起时点了测试就毫无反馈（用户只会以为「测试没反应」）。 -->
+        <div v-if="x.testMsg" class="pm-test meta" :class="{ err: !x.testMsg.ok }" role="status">
+          {{ x.testMsg.text }}
+          <span v-if="x.testMsg.vision" :class="{ err: x.testMsg.visionBad }">；{{ x.testMsg.vision }}</span>
+        </div>
         <!-- 编辑区：展开才可见 -->
         <div v-show="x._open" class="pm-body">
           <div class="pm-grid pm-proto">
@@ -220,10 +230,6 @@ onMounted(load)
             <label class="pm-check self-center" title="支持图片输入时聊天页才开放图片上传">
               <input v-model="x.image" type="checkbox" @change="x.testMsg = null"> 支持图片输入
             </label>
-          </div>
-          <div v-if="x.testMsg" class="pm-test meta" :class="{ err: !x.testMsg.ok }" role="status">
-            {{ x.testMsg.text }}
-            <span v-if="x.testMsg.vision" :class="{ err: x.testMsg.visionBad }">；{{ x.testMsg.vision }}</span>
           </div>
         </div>
       </div>
@@ -278,6 +284,6 @@ html[data-theme="dark"] .pm-head:hover { background: rgba(255,255,255,.05); }
 .pm-check.self-center { align-self: center; }
 .pm-foot { margin-top: 14px; }
 .pm-foot .btn.primary { margin-left: auto; }
-.pm-test { padding: 0; }
+.pm-test { padding: 0 0 6px; }
 .pm-test.err, .pm-test .err { color: var(--danger); }
 </style>

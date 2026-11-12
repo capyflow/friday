@@ -195,7 +195,7 @@ const (
 
 // providerPost 发一次 JSON 探测请求。失败时返回 nil 与给前端的诊断结果。
 func providerPost(ctx context.Context, client *http.Client, endpoint string, body []byte,
-	setHeaders func(*http.Request), vision bool) ([]byte, *providerCheck) {
+	setHeaders func(*http.Request), vision bool, secret string) ([]byte, *providerCheck) {
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, &providerCheck{Status: "unknown", Code: "invalid_request", Message: "无法创建模型请求"}
@@ -219,16 +219,23 @@ func providerPost(ctx context.Context, client *http.Client, endpoint string, bod
 		return nil, &providerCheck{Status: "unknown", Code: "response_size", Message: "模型响应过大或无法读取"}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		failure := providerHTTPFailure(response.StatusCode, data, vision)
+		failure := providerHTTPFailure(response.StatusCode, data, vision, secret)
 		return nil, &failure
 	}
 	return data, nil
 }
 
 // providerHTTPFailure 把非 2xx 响应翻译成给用户看的诊断（三协议共用）。
-func providerHTTPFailure(status int, data []byte, vision bool) providerCheck {
+//
+// 文案之外还会带上服务商自己说的原因（providerErrorMessage）：只说「不兼容」
+// 是把真话藏起来——比如阶跃星辰返回的 "you have no active step plan
+// subscription"（账户套餐没生效）会被说成「检查 API 地址、模型名与协议」，
+// 用户只能反复改地址与协议，永远碰不到真正的原因。
+func providerHTTPFailure(status int, data []byte, vision bool, secret string) providerCheck {
 	code, message := "incompatible", "服务响应不兼容，请检查 API 地址、模型名与协议"
 	switch {
+	case status == 400:
+		code, message = "rejected", "请求被模型服务拒绝，请检查模型名、账号权限与额度"
 	case status == 401 || status == 403:
 		code, message = "authentication", "鉴权失败，请检查 API Key 和访问权限"
 	case status == 404:
@@ -242,7 +249,65 @@ func providerHTTPFailure(status int, data []byte, vision bool) providerCheck {
 	if vision && (status == 400 || status == 415 || status == 422) && rejectedImageInput(data) {
 		statusText, code, message = "unsupported", "vision_unsupported", "模型未接受图片输入，请使用支持图片的模型"
 	}
+	// 服务商自己说的原因附在后面（取不到就不加）。
+	//
+	// secret 是本次用的 API Key：服务商的报错里常把它原样回显（"invalid key
+	// sk-xxx"），透给用户前必须抹掉——诊断信息会进前端提示，不能带密钥。
+	if reason := redactSecret(providerErrorMessage(data), secret); reason != "" {
+		message = message + "（服务商提示：" + reason + "）"
+	}
 	return providerCheck{Status: statusText, Code: code, Message: message}
+}
+
+// redactSecret 把密钥从服务商给的提示里抹掉（出现即替换成 ***）。
+// 没有密钥（secret 为空）就原样返回。
+func redactSecret(s, secret string) string {
+	s = strings.TrimSpace(s)
+	secret = strings.TrimSpace(secret)
+	if s == "" || secret == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "***")
+}
+
+// providerErrorMessage 从服务商响应体里取出它自己说的错误原因。
+//
+// 兼容几种常见形状：{"error":{"message":"..."}}、{"error":"..."}、
+// {"message":"..."}、{"detail":"..."}。取不到就返回空串（不猜）。
+func providerErrorMessage(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Detail  string          `json:"detail"`
+	}
+	if json.Unmarshal(data, &body) != nil {
+		return ""
+	}
+	// error 是字符串：直接用。
+	if len(body.Error) > 0 {
+		var s string
+		if json.Unmarshal(body.Error, &s) == nil {
+			if t := strings.TrimSpace(s); t != "" {
+				return t
+			}
+		}
+		// error 是对象：取它的 message（服务商最常用的说法）。
+		var obj struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body.Error, &obj) == nil {
+			if t := strings.TrimSpace(obj.Message); t != "" {
+				return t
+			}
+		}
+	}
+	if t := strings.TrimSpace(body.Message); t != "" {
+		return t
+	}
+	return strings.TrimSpace(body.Detail)
 }
 
 // probeOpenAI 走 OpenAI 兼容的 /chat/completions。
@@ -256,7 +321,7 @@ func probeOpenAI(ctx context.Context, client *http.Client, req providerTestReque
 	body, _ := json.Marshal(map[string]any{"model": req.Model, "messages": []map[string]any{{"role": "user", "content": content}}, "max_tokens": 512, "stream": false})
 	data, failure := providerPost(ctx, client, req.BaseURL+"/chat/completions", body, func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+req.APIKey)
-	}, vision)
+	}, vision, req.APIKey)
 	if failure != nil {
 		return *failure
 	}
@@ -305,7 +370,7 @@ func probeAnthropic(ctx context.Context, client *http.Client, req providerTestRe
 		if !strings.EqualFold(r.URL.Hostname(), "api.anthropic.com") {
 			r.Header.Set("Authorization", "Bearer "+req.APIKey)
 		}
-	}, vision)
+	}, vision, req.APIKey)
 	if failure != nil {
 		return *failure
 	}
@@ -337,7 +402,7 @@ func probeGemini(ctx context.Context, client *http.Client, req providerTestReque
 	body, _ := json.Marshal(map[string]any{"contents": []map[string]any{{"parts": parts}}})
 	endpoint := req.BaseURL + "/v1beta/models/" + url.PathEscape(req.Model) +
 		":generateContent?key=" + url.QueryEscape(req.APIKey)
-	data, failure := providerPost(ctx, client, endpoint, body, nil, vision)
+	data, failure := providerPost(ctx, client, endpoint, body, nil, vision, req.APIKey)
 	if failure != nil {
 		return *failure
 	}

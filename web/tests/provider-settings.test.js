@@ -147,6 +147,30 @@ describe('模型库设置', () => {
     expect(wrapper.text()).not.toContain('文本连接测试通过')
   })
 
+  // 测试按钮在摘要行上，结果若藏在展开区里，行收起时点了测试就毫无反馈——
+  // 用户只会以为「测试没反应」（真实反馈：连点 9 次仍看不到结果）。
+  it('测试结果在行收起时也看得见', async () => {
+    await show()
+    const row = rows()[1]
+    expect(inRow(row, '.pm-body').isVisible()).toBe(false) // 默认收起
+    await clickIn(row, '测试')
+    expect(wrapper.text()).toContain('文本连接测试通过')
+    expect(inRow(row, '.pm-body .pm-test').exists()).toBe(false) // 结果不在折叠区里
+    expect(inRow(row, '.pm-test').exists()).toBe(true)
+  })
+
+  // 新加的模型默认设为生效项：否则「保存并生效」把旧模型继续留在生效位，
+  // 看着像保存了，实际还在用旧模型。
+  it('新加的模型自动设为生效项', async () => {
+    await show()
+    expect(inRow(rows()[0], 'input[type="radio"]').element.checked).toBe(true)
+    await wrapper.findAll('button').find(b => b.text() === '＋ 添加模型').trigger('click')
+    await flushPromises()
+    expect(rows()).toHaveLength(3)
+    expect(inRow(rows()[2], 'input[type="radio"]').element.checked).toBe(true)
+    expect(inRow(rows()[0], 'input[type="radio"]').element.checked).toBe(false)
+  })
+
   it('保存失败保留输入与重试能力，不发 saved', async () => {
     api.mockImplementation((method, url) => {
       if (method === 'GET' && url === '/api/provider/models') return Promise.resolve(LIB)
