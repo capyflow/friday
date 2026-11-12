@@ -778,6 +778,10 @@ html[data-theme="dark"] .tool-head:hover:not(:disabled) { background: rgba(255,2
 /* 连续多次工具调用收成一叠：收起只报「执行工具 N 次」，点开逐条列出。
    展开区跟 .tool-body / .think-body 一样缩进 21px，让子行跟前导图标对齐。 */
 .tool-stack { border-radius: 10px; }
+/* 过程行：中间没有正文隔开的连续思考/工具行收成一条摘要（「N 次思考 · M 次工具
+   调用」，圆点分隔），容器直接挂 .tool-stack 类借用开合箭头与失败配色；展开后的
+   成员行整体缩进一级，缩进量与叠内条目（21px）同底。 */
+.proc-in { margin-left: 21px; }
 .tool-stack-body { margin: 2px 0 0 21px; display: flex; flex-direction: column; gap: 2px; }
 .tool-body { margin: 2px 0 4px 21px; display: flex; flex-direction: column; gap: 5px; }
 .tool-call { display: flex; align-items: baseline; gap: 7px; min-width: 0; }

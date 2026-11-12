@@ -5,7 +5,8 @@ import TimelineBlocks from '../src/components/TimelineBlocks.vue'
 // 时间线的工具行按来源分两种口径：ChatView（Friday 自己的 agent）传 own-tools 走展示目录，
 // ACP 会话页不传、照直显示外部 agent 给的工具名。这几条守的是 prop 有没有一路接到
 // 每一行（含叠里的）；目录本身对不对由 tool-catalog.test.js 管。
-const tool = (id, name) => ({ kind: 'tool', id, name, text: 'arg', out: 'result', status: 'ok', open: false, round: 0 })
+const tool = (id, name, status = 'ok') => ({ kind: 'tool', id, name, text: 'arg', out: 'result', status, open: false, round: 0 })
+const think = (text, meta = '') => ({ kind: 'think', text, meta, open: false, round: 0 })
 
 function mountRows(blocks, props = {}) {
   return mount(TimelineBlocks, { props: { blocks, ...props }, global: { stubs: { teleport: true } } })
@@ -34,6 +35,69 @@ describe('时间线工具行的来源口径', () => {
     expect(rowLabels(mountRows(many, { ownTools: true }))).toEqual(['读取文件', '联网搜索'])
     expect(rowLabels(mountRows(many))).toEqual(['read_file', 'web_search'])
     expect(mountRows(many).get('.tool-stack > .tool-head').text()).toBe('执行工具 2 次')
+  })
+})
+
+describe('连续的思考与工具行并成一个过程行', () => {
+  // 挂在 body 上：v-show 切换后 isVisible 才可信
+  function mountAttached(blocks, props = {}) {
+    return mount(TimelineBlocks, { props: { blocks, ...props }, attachTo: document.body })
+  }
+
+  it('收起只报次数（圆点分隔），失败数说在前面，成员行只是藏起不是摘除', () => {
+    const w = mountAttached([
+      think('先想一步', '耗时 1.0s'),
+      tool('c1', 'read_file'),
+      think('再想一步'),
+      tool('c2', 'web_search'),
+      tool('c3', 'edit_file', 'fail'),
+    ])
+    expect(w.get('.proc > .tool-head .step-name').text()).toBe('2 次思考 · 3 次工具调用 · 1 次出错')
+    expect(w.get('.proc').classes()).toContain('is-fail')
+    // 成员行仍挂载在摘要之后，收起时不可见
+    expect(w.findAll('.think')).toHaveLength(2)
+    expect(w.findAll('.tool')).toHaveLength(3)
+    expect(w.get('.think-head').isVisible()).toBe(false)
+    w.unmount()
+  })
+
+  it('点摘要展开全程：思考行可看，工具叠可再展开；再点一次收起', async () => {
+    const w = mountAttached([think('先想一步', '耗时 1.0s'), tool('c1', 'read_file'),
+      think('再想一步'), tool('c2', 'web_search'), tool('c3', 'web_search')])
+    await w.get('.proc > .tool-head').trigger('click')
+    expect(w.get('.think-head').isVisible()).toBe(true)
+    // 叠的口径在过程行里照旧：连续工具仍是「执行工具 N 次」
+    expect(w.get('.tool-stack.proc-in > .tool-head').text()).toContain('执行工具 2 次')
+    await w.get('.proc > .tool-head').trigger('click')
+    expect(w.get('.think-head').isVisible()).toBe(false)
+    w.unmount()
+  })
+
+  it('只有一行的过程维持原样：单条思考、纯工具序列都不多套一层折叠', () => {
+    expect(mountRows([think('只有一句')]).find('.proc').exists()).toBe(false)
+    const pair = [tool('c1', 'read_file'), tool('c2', 'web_search')]
+    expect(mountRows(pair).find('.proc').exists()).toBe(false)
+    expect(mountRows(pair).get('.tool-stack > .tool-head').text()).toBe('执行工具 2 次')
+  })
+
+  it('正文打断后另起一个过程行：下一轮的思考不再并进上一段', () => {
+    const w = mountAttached([think('第一轮'), tool('c1', 'read_file'),
+      { kind: 'text', text: '先做一步' }, think('第二轮')])
+    expect(w.findAll('.proc')).toHaveLength(1)
+    // 正文之后的思考只剩一行，保持裸行可见
+    expect(w.findAll('.think-head')[1].isVisible()).toBe(true)
+    w.unmount()
+  })
+
+  it('纯思考的连续行也收（多轮思考无工具）', () => {
+    const w = mountRows([think('一', '耗时 1.0s'), think('二', '耗时 2.0s')])
+    expect(w.get('.proc > .tool-head .step-name').text()).toBe('2 次思考')
+  })
+
+  it('流式期间收着的摘要标题实时跟随思考预览，灯泡呼吸', () => {
+    const w = mountRows([think('先想想用户要什么'), tool('c1', 'read_file')], { streaming: true, round: 0 })
+    expect(w.get('.proc > .tool-head .step-name').text()).toBe('先想想用户要什么')
+    expect(w.get('.proc .step-ico').classes()).toContain('live')
   })
 })
 

@@ -4,7 +4,8 @@
 // 外部 ACP agent 的工具名我们改不动，照直显示 + 默认扳手。
 // 纯展示：块对象归父组件（TimelineBlocks 的 reactive 数组）所有，这里只读它、
 // 点击时发 toggle 事件让父组件改写 open。
-// 单独出现时直接摆一行，连续多次时被收进「执行工具 N 次」那一叠里。
+// 单独出现时直接摆一行，连续多次时被收进「执行工具 N 次」那一叠里；和思考连在一起
+// 时也可能被并进「N 次思考 · M 次工具调用」的过程行，点摘要才逐条列出。
 import { computed } from 'vue'
 import { toolDisplay } from '../tool-catalog.js'
 

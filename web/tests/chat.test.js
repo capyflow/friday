@@ -322,55 +322,49 @@ describe('聊天发送和失败恢复', () => {
     expect(api).toHaveBeenCalledWith('POST', '/api/plans/p2/steps/1/skip', {})
   })
 
-  it('时间线：思考一行实时预览、工具调用一行成块，各自点击展开', async () => {
+  it('时间线：思考实时预览；工具一到就连同思考收成过程行，展开逐条可看', async () => {
     // 挂在 body 上：jsdom 仅对已挂载元素失效样式缓存，v-show 切换后 isVisible 才可信
     wrapper = mount(ChatView, { attachTo: document.body })
     await flushPromises()
     await send('查天气')
-    // 思考块默认收起：标题实时展示最新一行，正文不可见
+    // 思考块默认收起：标题实时展示最新一行，正文不可见（还没工具时仍是一行裸思考）
     await push({ type: 'thinking', thinking: '先看用户想要什么' })
     expect(wrapper.get('.think-title').text()).toBe('先看用户想要什么')
     expect(wrapper.get('.think-body').isVisible()).toBe(false)
     // 前导是灯泡图标（不再是圆点），流式期间带 live 呼吸态
     expect(wrapper.get('.think .step-ico svg').exists()).toBe(true)
     expect(wrapper.get('.think .step-ico').classes()).toContain('live')
-    // 新一行思考到来后，这一行随之更新
-    await push({ type: 'thinking', thinking: '\n再查天气数据' })
-    expect(wrapper.get('.think-title').text()).toBe('再查天气数据')
     // 单行展示取最新行尾部，超长时省略头部
     await push({ type: 'thinking', thinking: '\n长文' + '甲'.repeat(200) + '收尾' })
     expect(wrapper.get('.think-title').text().startsWith('…')).toBe(true)
     expect(wrapper.get('.think-title').text().endsWith('收尾')).toBe(true)
-    // 点击展开：能看到全部思考内容；再点击收起
-    await wrapper.get('.think-head').trigger('click')
-    expect(wrapper.get('.think-body').isVisible()).toBe(true)
-    expect(wrapper.get('.think-text').text()).toBe('先看用户想要什么\n再查天气数据\n长文' + '甲'.repeat(200) + '收尾')
-    await wrapper.get('.think-head').trigger('click')
-    expect(wrapper.get('.think-body').isVisible()).toBe(false)
     // 轮次结束：标题变为耗时摘要（token 不再摊在每一行思考上，见轮末汇总用例）
     await push({ type: 'step', step: { kind: 'round', detail: '耗时 1.2s' } })
     expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
     expect(wrapper.get('.think .step-ico').classes()).not.toContain('live')
-    // 工具调用：收起就把「是哪个工具」说清（目录里没有的照直显示原始名），
-    // 参数与结果仍要点开才给
+    // 工具调用一到：思考行与工具行并成一个过程行，收起只报次数（圆点分隔）
     await push({ type: 'step', step: { kind: 'tool', name: 'weather', detail: '上海', status: 'run' } })
-    expect(wrapper.get('.tool .step-ico .spin').exists()).toBe(true)
+    const head = wrapper.get('.proc > .tool-head')
+    expect(head.get('.step-name').text()).toBe('1 次思考 · 1 次工具调用')
+    expect(head.get('.step-ico .spin').exists()).toBe(true)   // 工具在跑，前导转环
+    expect(wrapper.get('.think-head').isVisible()).toBe(false)
     await push({ type: 'step', step: { kind: 'tool', name: 'weather', detail: '晴 22℃', status: 'ok' } })
+    expect(wrapper.get('.proc > .tool-head .step-name').text()).toBe('1 次思考 · 1 次工具调用')
+    expect(wrapper.find('.proc > .tool-head .step-ico .spin').exists()).toBe(false)
+    // 展开过程行：思考行、工具行原样在内，各自还能再展开看参数与结果
+    await wrapper.get('.proc > .tool-head').trigger('click')
+    expect(wrapper.get('.think-title').text()).toBe('思考 · 耗时 1.2s')
     const tool = wrapper.get('.tool')
     expect(tool.get('.tool-head .step-name').text()).toBe('weather')
     expect(tool.get('.tool-head').text()).not.toContain('上海')
-    expect(tool.get('.tool-head').text()).not.toContain('晴 22℃')
     expect(tool.get('.tool-call').isVisible()).toBe(false)
-    expect(tool.get('.tool-out').isVisible()).toBe(false)
-    // 成功不再打勾：前导恒为扳手，状态只靠类名表达（✓/✕ 字符已退出模板）
-    expect(tool.find('.step-ico').classes()).toContain('ok')
-    expect(tool.get('.step-ico svg').exists()).toBe(true)
-    expect(tool.get('.step-ico').text()).toBe('')
-    expect(tool.find('.step-ico .spin').exists()).toBe(false)
     await tool.get('.tool-head').trigger('click')
     expect(tool.get('.tool-call .step-name').text()).toBe('weather')
     expect(tool.get('.tool-call .step-detail').text()).toBe('上海')
     expect(wrapper.get('.tool-out').text()).toBe('晴 22℃')
+    // 再点摘要头，整段收起
+    await wrapper.get('.proc > .tool-head').trigger('click')
+    expect(wrapper.get('.think-head').isVisible()).toBe(false)
     // 正文另起一块，流式结束后光标消失
     await push({ type: 'delta', delta: '今天晴' })
     await push({ type: 'turn.end' })
@@ -516,7 +510,8 @@ describe('聊天发送和失败恢复', () => {
       { type: 'turn.end' },
     ])
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
-    expect(rows).toEqual(['think', 'tool', 'think', 'turn-text', 'turn-foot'])
+    // 思考+工具+思考被并成一个过程行：摘要在前（tool-stack proc），成员行跟随其后
+    expect(rows).toEqual(['tool-stack', 'think', 'tool-row', 'think', 'turn-text', 'turn-foot'])
     expect(wrapper.findAll('.think-text').map(b => b.text())).toEqual(['要查天气', '拿到结果了'])
   })
 
