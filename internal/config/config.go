@@ -50,6 +50,10 @@ type Config struct {
 	// Agent 内置管家的运行参数（对话轮数上限）。
 	Agent        AgentConfig `yaml:"agent"`
 	SystemPrompt string      `yaml:"systemPrompt"`
+	// Language 是小五回复用的语言（写进系统提示词）。内置 agent 与 ACP 外部
+	// agent 都按它回复；空 = 默认中文（DefaultLanguage）。
+	// 设置页「回复语言」可改，写回 config.yaml 并热生效。
+	Language string `yaml:"language" json:"language"`
 	// TaskFile 定时任务持久化 JSON 文件路径（默认 tasks.json，重启自动恢复）。
 	TaskFile string `yaml:"taskFile"`
 	// TodoFile 待办清单持久化 JSON 文件路径（默认 todos.json，重启自动恢复）。
@@ -1183,6 +1187,59 @@ func UpdateToolsSearch(path string, s SearchConfig) error {
 	}
 	setMappingKey(search, "provider", s.Provider)
 	setMappingKey(search, "apiKey", s.APIKey)
+
+	out, err := marshalNode(&doc)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// DefaultLanguage 是回复语言的默认值：配置里没写 language 时用中文。
+const DefaultLanguage = "中文"
+
+// EffectiveLanguage 返回小五回复用的语言名（配置为空时回落中文）。
+//
+// 为什么要有这一层：语言既进内置 agent 的系统提示词，也进 ACP 外部 agent 的
+// prompt 前置块，两边必须取同一个值，否则内置会话与外部 agent 会说两种语言。
+func (c *Config) EffectiveLanguage() string {
+	if c == nil {
+		return DefaultLanguage
+	}
+	l := strings.TrimSpace(c.Language)
+	if l == "" {
+		return DefaultLanguage
+	}
+	return l
+}
+
+// UpdateLanguage 热更新 config.yaml 里的顶层 language 字段：
+// 以 yaml.Node 方式编辑（保留文件其余部分的注释与结构），临时文件 + rename
+// 原子写回。空字符串写回即表示「用默认中文」。
+func UpdateLanguage(path, language string) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("解析配置失败: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("配置文件为空")
+	}
+	root := doc.Content[0]
+	language = strings.TrimSpace(language)
+	if language == "" {
+		language = DefaultLanguage
+	}
+	setMappingKey(root, "language", language)
 
 	out, err := marshalNode(&doc)
 	if err != nil {

@@ -54,10 +54,15 @@ func TestSystemPromptPersona(t *testing.T) {
 		t.Fatal("激活全新自定义人设应生效")
 	}
 
-	// 5. cfg.SystemPrompt 最高优先级（整体替换，不含人设段拼装）。
+	// 5. cfg.SystemPrompt 最高优先级（整体替换默认提示词，不含人设段拼装）；
+	//    但回复语言的约定仍然追加——否则设置里的语言在自定义提示词下会静默失效。
 	cfg.SystemPrompt = "完全自定义的系统提示词"
-	if got := systemPrompt(cfg); got != "完全自定义的系统提示词" {
+	got := systemPrompt(cfg)
+	if !strings.HasPrefix(got, "完全自定义的系统提示词") {
 		t.Fatalf("cfg.SystemPrompt 应整体优先: %q", got[:50])
+	}
+	if !strings.Contains(got, "【回复语言】") {
+		t.Fatal("自定义系统提示词也要带上回复语言规则")
 	}
 }
 

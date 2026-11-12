@@ -59,6 +59,9 @@ func (c *Config) Apply(fn func(next *Config) error) error {
 		return err
 	}
 	c.Provider = next.Provider
+	// Language 也要跟着发布：设置页改完语言立刻生效（提示词与外部 agent 的
+	// prompt 前置块都读这里的值），不发的话只有 config.yaml 变了、内存里还是旧的。
+	c.Language = next.Language
 	c.Persona = next.Persona
 	c.Permissions = next.Permissions
 	c.Agent = next.Agent

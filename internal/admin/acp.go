@@ -819,6 +819,12 @@ func (s *Server) handleAcpChat(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, body)
 }
 
+// sseIdleTimeout 是事件流连接的空闲上限：这么久一个事件都没有就主动断开，
+// 好让服务端回收那些客户端已经忘了的「僵尸订阅」（见 handleEventStream 里的说明）。
+//
+// 做成变量而不是常量：测试要把它调小，才能验证「空闲到上限真的会被断开」。
+var sseIdleTimeout = 15 * time.Minute
+
 // handleEventStream 订阅会话事件流：GET /api/events/stream?session=<key>&since=<seq>。
 //
 // session 取值：主会话 "web"、ACP 会话 "acp:<threadID>"——两种都支持，
@@ -891,16 +897,47 @@ func (s *Server) handleEventStream(ctx *vhttp.Context) error {
 	if since <= 0 {
 		skip = backlog // 只要新事件：缓冲里的旧增量跳过
 	}
-	for ev := range sub.Events() {
-		if skip > 0 {
-			skip--
-			continue
-		}
-		if !write(eventFrame(ev)) {
-			return nil // 客户端断开：退订即可，不影响这一轮的执行
+	events := sub.Events()
+	idle := time.NewTimer(sseIdleTimeout)
+	defer idle.Stop()
+	// 客户端断开时请求上下文会被取消。盯着它，才能在客户端一走就退订——
+	// 否则这条订阅会一直挂在内核里（每次刷新页面就多一条），而浏览器那边的
+	// 连接位早就还回去了。
+	reqDone := ctx.GinContext().Request.Context().Done()
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			if !write(eventFrame(ev)) {
+				return nil // 客户端断开：退订即可，不影响这一轮的执行
+			}
+			// 有事件就重置空闲计时：这条连接还在被用着。
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(sseIdleTimeout)
+		case <-reqDone:
+			return nil // 客户端断开：立刻退订，别把订阅留在内核里
+		case <-idle.C:
+			// 空闲太久：主动断开这条连接。
+			//
+			// 为什么需要：客户端漏关的旧连接（僵尸）在服务端看仍是「活着的订阅」，
+			// 浏览器那边却早把它忘了——它一直占着浏览器的同源连接池（上限 6 条），
+			// 池子满了之后新连接建不起来，页面就再也收不到事件，只能刷新。
+			// 断开后客户端会带 since 重连（退避 1s 起），内容从环形缓冲补齐：
+			// 空闲窗口里本来就没有新事件，所以不会丢内容。
+			return nil
 		}
 	}
-	return nil
 }
 
 // eventFrame 把总线事件摊平成契约里的顶层平铺帧。

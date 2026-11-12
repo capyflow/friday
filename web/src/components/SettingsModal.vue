@@ -5,6 +5,7 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref } from 'vu
 import { store } from '../store.js'
 import ModelSection from './settings/ModelSection.vue'
 import PersonaSection from './settings/PersonaSection.vue'
+import LanguageSection from './settings/LanguageSection.vue'
 import McpSection from './settings/McpSection.vue'
 import AcpSection from './settings/AcpSection.vue'
 import SkillsSection from './settings/SkillsSection.vue'
@@ -29,6 +30,7 @@ const GROUPS = [
   { label: '模型与人格', items: [
     { id: 'model', icon: 'i-model', label: '模型服务', comp: markRaw(ModelSection) },
     { id: 'persona', icon: 'i-persona', label: '人设提示词', comp: markRaw(PersonaSection) },
+    { id: 'language', icon: 'i-globe', label: '回复语言', comp: markRaw(LanguageSection) },
   ]},
   { label: '扩展', items: [
     { id: 'tools', icon: 'i-plug', label: '工具', comp: markRaw(ToolsSection) },

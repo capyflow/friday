@@ -716,6 +716,46 @@ func (s *Server) handleSetPersona(ctx *vhttp.Context) error {
 	})
 }
 
+// handleGetLanguage 读取回复语言设置（设置页「回复语言」）。
+//
+// 为什么单独一个接口而不是挂在人设接口上：语言是全局设置（顶层 language
+// 字段），人设接口管的是人设预设与当前选中项，两者生命周期不同——换语言
+// 不该动人设。
+func (s *Server) handleGetLanguage(ctx *vhttp.Context) error {
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"language": s.cfg.Snapshot().EffectiveLanguage(),
+	})
+}
+
+// handleSetLanguage 保存回复语言设置：body {"language":"中文"}。
+// 热生效（重建系统提示词）并写回 config.yaml。
+func (s *Server) handleSetLanguage(ctx *vhttp.Context) error {
+	var req struct {
+		Language string `json:"language"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	if s.chat == nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "聊天服务未启用，回复语言无法热生效"})
+	}
+	lang := strings.TrimSpace(req.Language)
+	if lang == "" {
+		lang = config.DefaultLanguage
+	}
+	// 上限防止有人塞一整段提示词进来：这是语言名，不是自由文本。
+	if len([]rune(lang)) > 40 {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "语言名太长了"})
+	}
+	if err := agent.ReloadLanguage(s.cfg, s.configPath, s.regFn(), s.chat.Brain(), s.approver, lang); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+		"message":  "回复语言已改为「" + lang + "」，已热生效",
+		"language": lang,
+	})
+}
+
 // handleGetHeartbeat 读取心跳检查清单内容。
 func (s *Server) handleGetHeartbeat(ctx *vhttp.Context) error {
 	content, err := os.ReadFile(s.heartbeatFile)

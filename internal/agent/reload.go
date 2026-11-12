@@ -12,6 +12,36 @@ import (
 	"github.com/capyflow/friday/internal/config"
 )
 
+// ReloadLanguage 热更新回复语言（config.yaml 顶层 language 字段）：
+// 在串行配置事务里换快照并重建 Agent（系统提示词随之重写），成功后写回
+// config.yaml 并发布；写回失败保留原运行状态。
+//
+// 为什么必须重建 Agent：语言规则是拼进系统提示词的，不重建就还用旧提示词。
+// 重建沿用 ReloadPersona 的做法——上下文引擎带着走，对话上下文不丢。
+func ReloadLanguage(cfg *config.Config, configPath string, registry *vxagent.Registry, brain *Brain, approver *approval.Queue, language string) error {
+	language = strings.TrimSpace(language)
+	if language == "" {
+		language = config.DefaultLanguage
+	}
+	return cfg.Apply(func(next *config.Config) error {
+		next.Language = language
+		return brain.Reconfigure(func() (*vxagent.Agent, error) {
+			var engine *ctxengine.Engine
+			if mgr := brain.CtxMgr(); mgr != nil {
+				engine = mgr.Current()
+			}
+			newAg, err := Build(next, registry, brain.Pool(), approver, engine)
+			if err != nil {
+				return nil, err
+			}
+			if err := config.UpdateLanguage(configPath, language); err != nil {
+				return nil, err
+			}
+			return newAg, nil
+		})
+	})
+}
+
 // ReloadProvider 热更新 LLM 供应商配置（baseURL/model/apiKey）：
 //  1. 在串行配置事务中构建独立快照与新 Agent；
 //  2. 等待在途请求结束，先写回 config.yaml（保留注释）；

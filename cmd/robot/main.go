@@ -508,6 +508,10 @@ func main() {
 		return approval.Origin{Source: approval.SourceACP}
 	})
 	acpMgr.SetMemory(memStore) // 工作区首轮说明附带项目记忆速览
+	// 回复语言：外部 agent 没有 Friday 的系统提示词，语言规则得随 prompt 块
+	// 发过去（内置 agent 走同一个 Brain，规则已在系统提示词里）。注入取值函数
+	// 而不是值——设置页改语言后不必重启内核。
+	acpMgr.SetLanguage(func() string { return cfg.Snapshot().EffectiveLanguage() })
 	// 系统提示桥：审批卡入队、一轮结束这两个时刻，人通常已经切到别的窗口，
 	// 页面里的卡片和气泡等于没发生。走通知中心的 PostOnce（按 key 幂等，同一
 	// 事件不重复打扰），桌面弹原生通知、浏览器走网页通知，内容都留在通知中心。

@@ -415,6 +415,9 @@ func (s *Server) Handler() http.Handler {
 			root.AddRouter([]string{http.MethodPost}, "/api/provider/activate", s.wrap(s.handleProviderActivate))
 			root.AddRouter([]string{http.MethodGet}, "/api/persona", s.wrap(s.handleGetPersona))
 			root.AddRouter([]string{http.MethodPost}, "/api/persona", s.wrap(s.handleSetPersona))
+			// 回复语言：内置 agent 与 ACP 外部 agent 共用的那一个值（默认中文）。
+			root.AddRouter([]string{http.MethodGet}, "/api/language", s.wrap(s.handleGetLanguage))
+			root.AddRouter([]string{http.MethodPost}, "/api/language", s.wrap(s.handleSetLanguage))
 			root.AddRouter([]string{http.MethodGet}, "/api/permissions", s.wrap(s.handleGetPermissions))
 			root.AddRouter([]string{http.MethodPost}, "/api/permissions", s.wrap(s.handleSetPermissions))
 			// 运行上限（设置 → 能力与行为 → 运行上限）：单轮工具调用轮数。

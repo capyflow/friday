@@ -462,8 +462,11 @@ type Manager struct {
 	lastCfg     config.AcpConfig // Reload 的差异比较基准
 	path        string           // acp-threads.json（工作区与会话同一份投影）
 	cfgFn       func() config.AcpConfig
-	approver    *approval.Queue
-	memory      *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
+	// langFn 取 app 设置的回复语言（内置 agent 与外部 agent 共用同一个值）。
+	// 未注入时按默认中文处理——语言规则永远要发，不能因为没装配就少一条。
+	langFn   func() string
+	approver *approval.Queue
+	memory   *memory.WikiStore // 工作区项目记忆（可为 nil：不注入项目速览）
 	// notifier 是系统提示桥（key 幂等，见 notification.Center.PostOnce）：只在
 	// "人不在这一页上也得知道"的两个时刻用——审批卡入队、一轮结束。未注入时
 	// 静默跳过（测试、或没装配通知中心的运行形态）。
@@ -1558,6 +1561,31 @@ func (m *Manager) SetMemory(store *memory.WikiStore) {
 	m.mu.Unlock()
 }
 
+// SetLanguage 注入回复语言的取值函数（启动时调用一次）。
+//
+// 为什么单独一个注入点：ACP 这边拿得到的是 AcpConfig（智能体段），而语言是全局
+// 设置（顶层 language 字段）。注入取值函数而不是值，语言改了不必重启内核。
+func (m *Manager) SetLanguage(fn func() string) {
+	m.mu.Lock()
+	m.langFn = fn
+	m.mu.Unlock()
+}
+
+// language 取 app 设置的回复语言（空 = 默认中文）。
+func (m *Manager) language() string {
+	m.mu.Lock()
+	fn := m.langFn
+	m.mu.Unlock()
+	if fn == nil {
+		return config.DefaultLanguage
+	}
+	lang := strings.TrimSpace(fn())
+	if lang == "" {
+		return config.DefaultLanguage
+	}
+	return lang
+}
+
 // SetNotifier 注入系统提示桥（启动时调用一次）。key 由调用方保证身份稳定，
 // 重复触发不会二次打扰——见 notification.Center.PostOnce。
 func (m *Manager) SetNotifier(notify func(key, text, threadID string)) {
@@ -2103,6 +2131,13 @@ func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []
 	}
 	if handoff != "" {
 		blocks = append([]acp.ContentBlock{acp.TextBlock(handoff)}, blocks...)
+	}
+	// 回复语言：外部 agent 没有 Friday 的系统提示词，规则得随 prompt 块带过去，
+	// 否则外部 agent 会按它自己的默认语言回答。内置 agent 走的是同一个 Brain
+	// （规则已在系统提示词里），不重复注入——否则它的提问正文里会多出一段
+	// 本该是规则的东西。
+	if !agentCfg.Builtin {
+		blocks = append([]acp.ContentBlock{acp.TextBlock(agent.LanguageRule(m.language()))}, blocks...)
 	}
 	briefSession := th.SessionID
 

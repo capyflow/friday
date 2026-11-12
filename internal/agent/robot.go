@@ -394,12 +394,32 @@ func RegisterTools(r *vxagent.Registry, d Deps) error {
 	return nil
 }
 
+// LanguageRule 返回「回复语言」规则段的文字：让小五按 app 设置的语言回复用户。
+//
+// 为什么做成导出的函数：内置 agent 把它写进系统提示词，ACP 外部 agent 没有
+// Friday 的系统提示词、只能靠 prompt 前置块带过去（见 internal/acp/manager.go）。
+// 两边共用同一段文字，规则才不会走样。
+//
+// 为什么进系统提示词而不是用户消息：规则得对每一轮都生效；塞进用户消息的话，
+// agent 可能只回一句「好的」——它把规则当成了提问的一部分。
+func LanguageRule(language string) string {
+	language = strings.TrimSpace(language)
+	if language == "" {
+		language = config.DefaultLanguage
+	}
+	return "\n【回复语言】\n" +
+		"始终使用「" + language + "」回复用户（用户明确要求换语言时，按用户要求回答）。\n" +
+		"代码、命令、文件路径、报错信息与专有名词保持原样，不要翻译。\n"
+}
+
 // systemPrompt 生成管家系统提示词：身份定位 + 人设段（persona.active 选择，
 // 见 persona.go）+ 人文关怀与工具使用规则（所有人设共用）。
 // 硬件输出工具仅在 hardware.enabled 时写入提示词（与 RegisterTools 的注册保持一致）。
 func systemPrompt(cfg *config.Config) string {
 	if cfg.SystemPrompt != "" {
-		return cfg.SystemPrompt
+		// 自定义系统提示词：整段替换默认提示词，但回复语言的约定仍然生效——
+		// 否则「设置里的回复语言」在自定义提示词下会静默失效。
+		return cfg.SystemPrompt + "\n" + LanguageRule(cfg.EffectiveLanguage())
 	}
 	var b strings.Builder
 	b.WriteString(personaIdentity)
@@ -408,6 +428,8 @@ func systemPrompt(cfg *config.Config) string {
 	b.WriteString("\n\n")
 	b.WriteString(personaCare)
 	b.WriteString("\n")
+	// 回复语言紧跟人设之后：它是「怎么说话」的约定，不该埋在后面的工具规则里。
+	b.WriteString(LanguageRule(cfg.EffectiveLanguage()))
 	b.WriteString(`
 	【闪念：笔记与待办】（网页"闪念"页 = 笔记和待办的统一清单）
 1. 随手想法、灵感、资料片段，用户说"记一下/记个笔记/存起来"：调用 add_note，文本里可用 #标签 归类（如 "#工作 周报思路"）。明确要做的事（有完成动作、可能有截止时间）用 add_todo，不要记成笔记。

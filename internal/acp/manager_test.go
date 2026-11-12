@@ -1891,10 +1891,14 @@ func TestWorkspaceBriefInjectedPerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks := f.promptBlocks()
-	if len(blocks) != 1 || len(blocks[0]) != 2 {
-		t.Fatalf("首轮应是 [工作区说明, 用户消息] 两个文本块，实际 %+v", blocks)
+	// 第一块恒是回复语言规则（外部 agent 没有 Friday 的系统提示词，规则随 prompt 带过去）。
+	if len(blocks) != 1 || len(blocks[0]) != 3 {
+		t.Fatalf("首轮应是 [回复语言, 工作区说明, 用户消息] 三个文本块，实际 %+v", blocks)
 	}
-	brief := blocks[0][0]
+	if !strings.Contains(blocks[0][0], "【回复语言】") {
+		t.Fatalf("首块应是回复语言规则，实际: %s", blocks[0][0])
+	}
+	brief := blocks[0][1]
 	for _, want := range []string{"工作区「", dirA, "主目录", dirB, "扩展目录"} {
 		if !strings.Contains(brief, want) {
 			t.Fatalf("说明里应包含 %q，实际: %s", want, brief)
@@ -1908,7 +1912,7 @@ func TestWorkspaceBriefInjectedPerSession(t *testing.T) {
 	if _, err := m.Send(context.Background(), th.ID, "第二句", nil, TurnHooks{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.promptBlocks(); len(got) != 2 || len(got[1]) != 1 || got[1][0] != "第二句" {
+	if got := f.promptBlocks(); len(got) != 2 || len(got[1]) != 2 || got[1][1] != "第二句" {
 		t.Fatalf("同会话后续轮次不该再带说明，实际 %+v", got)
 	}
 
@@ -1923,7 +1927,7 @@ func TestWorkspaceBriefInjectedPerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := f.promptBlocks()
-	if len(got) != 3 || len(got[2]) != 2 {
+	if len(got) != 3 || len(got[2]) != 3 {
 		t.Fatalf("重开后首轮应重新带说明，实际 %+v", got)
 	}
 }
@@ -1946,11 +1950,11 @@ func TestWorkspaceBriefRefreshOnFolderChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks := f.promptBlocks()
-	if len(blocks) != 2 || len(blocks[1]) != 2 {
+	if len(blocks) != 2 || len(blocks[1]) != 3 {
 		t.Fatalf("目录变化后应重新交代，实际 %+v", blocks)
 	}
-	if !strings.Contains(blocks[1][0], dirB) {
-		t.Fatalf("重新交代应包含新目录，实际: %s", blocks[1][0])
+	if !strings.Contains(blocks[1][1], dirB) {
+		t.Fatalf("重新交代应包含新目录，实际: %s", blocks[1][1])
 	}
 }
 
@@ -1963,7 +1967,7 @@ func TestWorkspaceBriefNotesUnsupportedMultiDir(t *testing.T) {
 	if _, err := m.Send(context.Background(), th.ID, "开始", nil, TurnHooks{}); err != nil {
 		t.Fatal(err)
 	}
-	brief := f.promptBlocks()[0][0]
+	brief := f.promptBlocks()[0][1]
 	if !strings.Contains(brief, "未下发") || !strings.Contains(brief, "不要尝试访问") {
 		t.Fatalf("不支持多目录时说明应写明未下发，实际: %s", brief)
 	}
