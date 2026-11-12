@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	vxagent "github.com/capyflow/vortexagent/agent"
@@ -71,8 +72,21 @@ func newProvider(cfg *config.Config) (llm.Provider, error) {
 	cfg = cfg.Snapshot()
 	apiKey := cfg.ProviderAPIKey()
 	temp := cfg.Provider.Temperature
+	protocol := cfg.Provider.EffectiveProtocol()
+	if protocol == config.ProtocolAnthropic {
+		// Anthropic Messages 协议：官方用 x-api-key，而 MiniMax / 智谱等兼容
+		// 网关用 Authorization: Bearer。底层 provider 只发 x-api-key，这里用
+		// 自定义 transport 给非官方主机补一个 Bearer 头，两边都能用。
+		return llm.NewAnthropicProvider(apiKey,
+			llm.WithBaseURL(cfg.Provider.BaseURL),
+			llm.WithModel(cfg.Provider.Model),
+			llm.WithMaxTokens(cfg.Provider.MaxTokens),
+			llm.WithTemperature(temp),
+			llm.WithHTTPClient(anthropicHTTPClient(apiKey)),
+		), nil
+	}
 	return llm.NewProvider(llm.ProviderConfig{
-		Name:        "openai",
+		Name:        protocol,
 		APIKey:      apiKey,
 		BaseURL:     cfg.Provider.BaseURL,
 		Model:       cfg.Provider.Model,
@@ -80,6 +94,37 @@ func newProvider(cfg *config.Config) (llm.Provider, error) {
 		Temperature: &temp,
 		StreamUsage: cfg.Provider.StreamUsage,
 	})
+}
+
+// anthropicOfficialHost 是 Anthropic 官方 API 主机：只认 x-api-key，不需要
+// 额外的 Authorization（同时带上可能触发鉴权冲突）。
+const anthropicOfficialHost = "api.anthropic.com"
+
+// anthropicHTTPClient 返回给 Anthropic provider 用的 HTTP 客户端：对第三方
+// Anthropic 兼容网关追加 Authorization: Bearer <key>，官方主机保持原样。
+func anthropicHTTPClient(apiKey string) *http.Client {
+	if apiKey == "" {
+		return http.DefaultClient
+	}
+	return &http.Client{Transport: bearerTransport{apiKey: apiKey, base: http.DefaultTransport}}
+}
+
+// bearerTransport 在请求发往非官方 Anthropic 主机时补 Bearer 鉴权头。
+type bearerTransport struct {
+	apiKey string
+	base   http.RoundTripper
+}
+
+func (t bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL != nil && !strings.EqualFold(req.URL.Hostname(), anthropicOfficialHost) {
+		req = req.Clone(req.Context())
+		req.Header.Set("Authorization", "Bearer "+t.apiKey)
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
 
 // buildHooks 配置生命周期钩子：按请求 ID 记录完整调用链——LLM 每轮调用（轮次/

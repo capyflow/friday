@@ -749,6 +749,7 @@ type modelView struct {
 	Name          string   `json:"name"`
 	BaseURL       string   `json:"baseURL"`
 	Model         string   `json:"model"`
+	Protocol      string   `json:"protocol"`
 	KeySet        bool     `json:"keySet"`
 	ContextWindow int      `json:"contextWindow"`
 	MaxTokens     int      `json:"maxTokens"`
@@ -758,8 +759,8 @@ type modelView struct {
 // newModelView 组装条目视图。激活条目的密钥可来自全局扁平字段（库内条目省写、
 // 沿用现状的形态），故并上 globalKeySet；输出预算同理——条目未填时激活条目显示
 // 扁平值（那才是真正生效的预算），非激活条目按默认值展示，避免保存时把用户手写的
-// provider.maxTokens 悄悄打成 4096。
-func newModelView(m config.ModelProfile, active, globalKeySet bool, flatMaxTokens int) modelView {
+// provider.maxTokens 悄悄打成 4096。协议同理：条目未声明时，激活条目显示扁平值。
+func newModelView(m config.ModelProfile, active, globalKeySet bool, flatMaxTokens int, flatProtocol string) modelView {
 	inputs := m.EffectiveInputs()
 	keySet := m.APIKey != "" || m.APIKeyEnv != ""
 	if active && globalKeySet {
@@ -773,8 +774,12 @@ func newModelView(m config.ModelProfile, active, globalKeySet bool, flatMaxToken
 			maxTokens = config.DefaultMaxTokens
 		}
 	}
+	protocol := m.ProtocolOrDefault()
+	if active && m.Protocol == "" && flatProtocol != "" {
+		protocol = flatProtocol
+	}
 	return modelView{
-		Name: m.Name, BaseURL: m.BaseURL, Model: m.Model,
+		Name: m.Name, BaseURL: m.BaseURL, Model: m.Model, Protocol: protocol,
 		KeySet: keySet, ContextWindow: m.ContextWindow, MaxTokens: maxTokens, Inputs: inputs,
 	}
 }
@@ -807,8 +812,9 @@ func (s *Server) handleProviderModelsGet(ctx *vhttp.Context) error {
 	active, models := effectiveProviderModels(cfg.Provider)
 	globalKeySet := cfg.ProviderAPIKey() != ""
 	views := make([]modelView, 0, len(models))
+	flatProtocol := cfg.Provider.EffectiveProtocol()
 	for _, m := range models {
-		views = append(views, newModelView(m, m.Name == active, globalKeySet, cfg.Provider.MaxTokens))
+		views = append(views, newModelView(m, m.Name == active, globalKeySet, cfg.Provider.MaxTokens, flatProtocol))
 	}
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
 		"active": active, "models": views,

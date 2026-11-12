@@ -3,6 +3,7 @@
 // radio 选激活，全量保存即热生效。密钥不回显——留空表示保留该条目已存密钥。
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
+import SelectBox from './SelectBox.vue'
 
 // 最大输出 token 的兜底值：留空即按它提交（与后端 config.DefaultMaxTokens 同口径）。
 // 推理模型的思考也计入这份预算，给小了会出现「只有思考、没有正文」。
@@ -21,9 +22,29 @@ function show(t, ok) {
   clearTimeout(msgTimer); msgTimer = setTimeout(() => { msg.text = '' }, 4000)
 }
 
+/** 模型服务协议（与后端 config.NormalizeProtocol 的三值一致）。 */
+const PROTOCOL_OPTIONS = [
+  { value: 'openai', label: 'OpenAI 兼容' },
+  { value: 'anthropic', label: 'Anthropic 兼容' },
+  { value: 'gemini', label: 'Gemini' },
+]
+const PROTOCOL_BADGE = { anthropic: 'Anthropic', gemini: 'Gemini' }
+const URL_HINT = {
+  openai: 'https://api.example.com/v1',
+  anthropic: 'https://api.anthropic.com（MiniMax 等填 …/anthropic）',
+  gemini: 'https://generativelanguage.googleapis.com',
+}
+function urlHint(protocol) { return URL_HINT[protocol] || URL_HINT.openai }
+function protocolBadge(protocol) { return PROTOCOL_BADGE[protocol] || '' }
+function pickProtocol(x, value) {
+  x.protocol = value
+  x.testMsg = null
+}
+
 function toRow(x) {
   return {
     name: x.name || '',
+    protocol: x.protocol || 'openai',
     baseURL: x.baseURL || '',
     model: x.model || '',
     apiKey: '',
@@ -48,7 +69,7 @@ async function load() {
 function addRow() {
   const idx = models.length
   models.push({
-    name: '', baseURL: '', model: '', apiKey: '', window: '', maxTokens: String(DEFAULT_MAX_TOKENS),
+    name: '', protocol: 'openai', baseURL: '', model: '', apiKey: '', window: '', maxTokens: String(DEFAULT_MAX_TOKENS),
     image: true, keySet: false, testing: false, testMsg: null, _open: true,
   })
   // 第一个模型默认就是生效项，填完直接保存，省一次点 radio。
@@ -71,6 +92,7 @@ function intOf(v) {
 function collect() {
   return models.map(r => ({
     name: r.name.trim(),
+    protocol: r.protocol || 'openai',
     baseURL: r.baseURL.trim(),
     model: r.model.trim(),
     apiKey: r.apiKey.trim(),
@@ -117,7 +139,7 @@ async function test(x) {
   x.testing = true
   try {
     const r = await api('POST', '/api/provider/test', {
-      baseURL, model, apiKey: x.apiKey.trim(), checkVision: x.image,
+      baseURL, model, protocol: x.protocol || 'openai', apiKey: x.apiKey.trim(), checkVision: x.image,
     })
     x.testMsg = {
       ok: !!r.ok,
@@ -149,6 +171,7 @@ onMounted(load)
           <span class="pm-name" :class="{ faint: !x.name }">{{ x.name || '未命名' }}</span>
           <span class="pm-meta mono">{{ x.model || '模型名未填' }}<template v-if="hostOf(x)"> · {{ hostOf(x) }}</template></span>
           <span class="pm-badges">
+            <span v-if="protocolBadge(x.protocol)" class="pm-badge">{{ protocolBadge(x.protocol) }}</span>
             <span v-if="x.image" class="pm-badge">图片</span>
             <span v-if="x.keySet" class="pm-badge">密钥</span>
           </span>
@@ -162,9 +185,15 @@ onMounted(load)
         </div>
         <!-- 编辑区：展开才可见 -->
         <div v-show="x._open" class="pm-body">
-          <label class="mr-field"><span>API 地址</span>
-            <input v-model="x.baseURL" type="url" autocomplete="url" @input="x.testMsg = null" placeholder="https://api.example.com/v1">
-          </label>
+          <div class="pm-grid pm-proto">
+            <label class="mr-field"><span>协议</span>
+              <SelectBox :model-value="x.protocol" :options="PROTOCOL_OPTIONS" aria-label="模型协议"
+                         @update:model-value="pickProtocol(x, $event)" />
+            </label>
+            <label class="mr-field"><span>API 地址</span>
+              <input v-model="x.baseURL" type="url" autocomplete="url" @input="x.testMsg = null" :placeholder="urlHint(x.protocol)">
+            </label>
+          </div>
           <div class="pm-grid">
             <label class="mr-field"><span>显示名</span>
               <input v-model="x.name" @input="x.testMsg = null" placeholder="如：日常对话" aria-label="模型显示名">
@@ -241,6 +270,8 @@ html[data-theme="dark"] .pm-head:hover { background: rgba(255,255,255,.05); }
 .pm-row.open .pm-chev { transform: rotate(180deg); }
 .pm-body { padding: 6px 2px 10px; display: grid; gap: 10px; }
 .pm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* 协议窄、地址宽：协议名很短，地址需要完整显示 */
+.pm-proto { grid-template-columns: 150px 1fr; }
 @media (max-width: 640px) { .pm-grid { grid-template-columns: 1fr; } }
 .pm-check { display: flex !important; align-items: center; gap: 8px; font-size: 13px;
   color: var(--muted-fg); cursor: pointer; }

@@ -588,6 +588,26 @@ const (
 	InputImage = "image"
 )
 
+// 模型服务协议（provider.name 与 provider.models[*].protocol）。
+// 底层 vortexagent 已实现这三种，Friday 的配置层只负责把它们暴露出来。
+const (
+	ProtocolOpenAI    = "openai"    // OpenAI Chat Completions 兼容（DeepSeek/Qwen/智谱/MiniMax 等）
+	ProtocolAnthropic = "anthropic" // Anthropic Messages 兼容（Claude、MiniMax /anthropic 等）
+	ProtocolGemini    = "gemini"    // Google Gemini generateContent
+)
+
+// NormalizeProtocol 规范化协议名：空串 = 默认 OpenAI 兼容，未知值报错。
+func NormalizeProtocol(s string) (string, error) {
+	switch p := strings.ToLower(strings.TrimSpace(s)); p {
+	case "", ProtocolOpenAI:
+		return ProtocolOpenAI, nil
+	case ProtocolAnthropic, ProtocolGemini:
+		return p, nil
+	default:
+		return "", fmt.Errorf("不支持的协议 %q（支持 openai / anthropic / gemini）", s)
+	}
+}
+
 // DefaultMaxTokens 是未填「最大输出 token」时的单次输出预算。
 //
 // 曾经是 1024，但推理模型（如 step-5-preview）的思考与正文共用这份预算，
@@ -619,6 +639,9 @@ type ModelProfile struct {
 	BaseURL string `yaml:"baseURL" json:"baseURL"`
 	// Model 服务商的模型名。
 	Model string `yaml:"model" json:"model"`
+	// Protocol 模型服务协议：openai（默认）/ anthropic / gemini。空串沿用
+	// 扁平 provider.name（老配置零迁移）。激活时投影到 provider.name。
+	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 	// APIKeyEnv 环境变量名（可选），运行时从该变量读密钥（不落盘值）。
 	APIKeyEnv string `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
 	// APIKey 直接配置的密钥（可选，优先于环境变量；数据目录用户私有）。
@@ -631,6 +654,15 @@ type ModelProfile struct {
 	// Inputs 支持的输入格式（text/image；text 恒隐含）。空 = 全支持——兼容
 	// 未声明能力的老配置，不因升级突然禁掉图片入口。
 	Inputs []string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+}
+
+// ProtocolOrDefault 返回条目的协议名：空串按 openai 处理。非法值原样返回，
+// 由保存路径的校验拦截（展示层不该因为脏配置报错）。
+func (m ModelProfile) ProtocolOrDefault() string {
+	if p, err := NormalizeProtocol(m.Protocol); err == nil {
+		return p
+	}
+	return m.Protocol
 }
 
 // EffectiveMaxTokens 返回该条目的输出预算：未填（0 或负）按 DefaultMaxTokens 处理，
@@ -686,10 +718,11 @@ func (p ProviderConfig) ActiveModel() (ModelProfile, bool) {
 
 // ProviderConfig 描述 LLM 供应商。
 type ProviderConfig struct {
-	// Name 固定为 "openai"（vortexagent 的 OpenAI 兼容层，DeepSeek/Qwen/智谱等通用）。
+	// Name 模型服务协议：openai（默认，OpenAI 兼容）/ anthropic（Anthropic
+	// Messages 兼容）/ gemini（Google Gemini）。由模型库激活条目的 protocol 投影。
 	Name string `yaml:"name"`
-	// BaseURL OpenAI 兼容服务地址，如 https://api.deepseek.com/v1。
-	// 运行事实源：模型库激活条目在切换时投影到这里。
+	// BaseURL 服务地址，随协议而异（OpenAI 兼容通常以 /v1 结尾，Anthropic 兼容
+	// 以 /anthropic 结尾）。运行事实源：模型库激活条目在切换时投影到这里。
 	BaseURL string `yaml:"baseURL"`
 	// Model 模型名，如 deepseek-chat。同上，激活条目的投影。
 	Model string `yaml:"model"`
@@ -718,6 +751,15 @@ type ProviderConfig struct {
 	// 扁平字段并热重建。空列表 = 旧式单模型配置，行为与引入模型库前完全一致。
 	// omitempty：yaml.v3 会把 nil 切片渲染成 `models: []`，污染 Marshal 出的配置。
 	Models []ModelProfile `yaml:"models,omitempty"`
+}
+
+// EffectiveProtocol 返回扁平字段的协议（空 = openai）。非法值原样返回，
+// 由 Load/Validate 与保存路径拦截。
+func (p ProviderConfig) EffectiveProtocol() string {
+	if proto, err := NormalizeProtocol(p.Name); err == nil {
+		return proto
+	}
+	return p.Name
 }
 
 // AudioConfig 描述麦克风/喇叭设备。
@@ -858,6 +900,7 @@ func UpdateProviderModels(path string, p ProviderConfig) error {
 		return fmt.Errorf("配置文件中未找到 provider 段")
 	}
 
+	setMappingKey(prov, "name", p.EffectiveProtocol())
 	setMappingKey(prov, "baseURL", p.BaseURL)
 	setMappingKey(prov, "model", p.Model)
 	// 整数键不能用 setMappingKey（它打 !!str 标签，回读 int 会失败）。
@@ -885,6 +928,9 @@ func UpdateProviderModels(path string, p ProviderConfig) error {
 				&yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!str"})
 		}
 		strPair("name", m.Name)
+		if m.Protocol != "" {
+			strPair("protocol", m.Protocol)
+		}
 		strPair("baseURL", m.BaseURL)
 		strPair("model", m.Model)
 		if m.APIKey != "" {
@@ -1478,8 +1524,8 @@ func (c *Config) Validate() error {
 	if c.Provider.Model == "" {
 		return fmt.Errorf("config: provider.model 不能为空（如 deepseek-chat）")
 	}
-	if c.Provider.Name != "openai" {
-		return fmt.Errorf("config: provider.name 仅支持 openai（OpenAI 兼容层），当前为 %q", c.Provider.Name)
+	if _, err := NormalizeProtocol(c.Provider.Name); err != nil {
+		return fmt.Errorf("config: provider.name %w", err)
 	}
 	// 模型库：条目完备性 + active 命中。空库 = 纯扁平配置，不受这些约束。
 	seen := map[string]bool{}
@@ -1496,6 +1542,9 @@ func (c *Config) Validate() error {
 		}
 		if m.Model == "" {
 			return fmt.Errorf("config: provider.models[%s].model 不能为空", m.Name)
+		}
+		if _, err := NormalizeProtocol(m.Protocol); err != nil {
+			return fmt.Errorf("config: provider.models[%s].protocol %w", m.Name, err)
 		}
 		if m.ContextWindow < 0 {
 			return fmt.Errorf("config: provider.models[%s].contextWindow 不能为负", m.Name)

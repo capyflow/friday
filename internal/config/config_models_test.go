@@ -137,6 +137,7 @@ func TestValidateModels(t *testing.T) {
 		{"缺 baseURL", func(p *ProviderConfig) { p.Models[0].BaseURL = "" }, "baseURL"},
 		{"缺 model", func(p *ProviderConfig) { p.Models[1].Model = "" }, "model"},
 		{"未知输入格式", func(p *ProviderConfig) { p.Models[0].Inputs = []string{"audio"} }, "未知格式"},
+		{"未知协议", func(p *ProviderConfig) { p.Models[0].Protocol = "responses" }, "协议"},
 		{"负窗口", func(p *ProviderConfig) { p.Models[0].ContextWindow = -1 }, "不能为负"},
 		{"active 未命中", func(p *ProviderConfig) { p.Active = "nope" }, "未命中"},
 	}
@@ -257,5 +258,79 @@ func TestUpdateProviderModelsWritesMaxTokens(t *testing.T) {
 	// 扁平 provider.maxTokens 同步为投影后的运行值（重启读的是这里）。
 	if back.Provider.MaxTokens != DefaultMaxTokens {
 		t.Fatalf("扁平 maxTokens 应落运行值 %d，实际 %d:\n%s", DefaultMaxTokens, back.Provider.MaxTokens, data)
+	}
+}
+
+// TestNormalizeProtocol 协议规范化：空 = openai（老配置零迁移），大小写与空白
+// 不敏感，未知值报错并列出支持项。
+func TestNormalizeProtocol(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ProtocolOpenAI},
+		{"   ", ProtocolOpenAI},
+		{"openai", ProtocolOpenAI},
+		{"Anthropic", ProtocolAnthropic},
+		{" GEMINI ", ProtocolGemini},
+	} {
+		got, err := NormalizeProtocol(tc.in)
+		if err != nil || got != tc.want {
+			t.Fatalf("NormalizeProtocol(%q) = %q, %v；期望 %q", tc.in, got, err, tc.want)
+		}
+	}
+	if _, err := NormalizeProtocol("responses"); err == nil || !strings.Contains(err.Error(), "openai") {
+		t.Fatalf("未知协议应报错并列出支持项: %v", err)
+	}
+}
+
+// TestUpdateProviderModelsWritesProtocol 协议要能落盘并回读：扁平 provider.name
+// 写激活条目的协议，条目带 protocol 键；未声明协议的条目保持干净。
+func TestUpdateProviderModelsWritesProtocol(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("provider:\n  name: openai\n  baseURL: https://a.example.com/v1\n  model: m-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := ProviderConfig{
+		Name: ProtocolAnthropic, BaseURL: "https://api.minimaxi.com/anthropic", Model: "MiniMax-M3.1-Flash",
+		Active: "minimax",
+		Models: []ModelProfile{
+			{Name: "minimax", Protocol: ProtocolAnthropic, BaseURL: "https://api.minimaxi.com/anthropic", Model: "MiniMax-M3.1-Flash"},
+			{Name: "step", BaseURL: "https://api.stepfun.com/step_plan/v1", Model: "step-5-preview"},
+		},
+	}
+	if err := UpdateProviderModels(path, p); err != nil {
+		t.Fatalf("UpdateProviderModels: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := yaml.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Provider.Name != ProtocolAnthropic {
+		t.Fatalf("扁平 provider.name 应落激活条目的协议，实际 %q:\n%s", back.Provider.Name, data)
+	}
+	if back.Provider.Models[0].Protocol != ProtocolAnthropic {
+		t.Fatalf("条目 protocol 应落盘回读: %+v", back.Provider.Models[0])
+	}
+	if back.Provider.Models[1].Protocol != "" {
+		t.Fatalf("未声明协议的条目不该冒出 protocol: %+v", back.Provider.Models[1])
+	}
+}
+
+// TestProviderEffectiveProtocol 扁平协议：空 = openai，显式值原样，非法值原样
+// 返回（由 Validate / 保存路径拦截，展示层不报错）。
+func TestProviderEffectiveProtocol(t *testing.T) {
+	if got := (ProviderConfig{}).EffectiveProtocol(); got != ProtocolOpenAI {
+		t.Fatalf("空协议应为 openai: %q", got)
+	}
+	if got := (ProviderConfig{Name: "anthropic"}).EffectiveProtocol(); got != ProtocolAnthropic {
+		t.Fatalf("显式协议应保留: %q", got)
+	}
+	if got := (ProviderConfig{Name: "bogus"}).EffectiveProtocol(); got != "bogus" {
+		t.Fatalf("非法协议应原样返回: %q", got)
+	}
+	if got := (ModelProfile{}).ProtocolOrDefault(); got != ProtocolOpenAI {
+		t.Fatalf("条目空协议应为 openai: %q", got)
 	}
 }

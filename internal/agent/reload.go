@@ -90,6 +90,14 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 			m.Model = strings.TrimSpace(m.Model)
 			m.APIKey = strings.TrimSpace(m.APIKey)
 			m.APIKeyEnv = strings.TrimSpace(m.APIKeyEnv)
+			// 协议留空 = 沿用扁平 provider.name（老模型库条目零迁移）；显式值才校验。
+			if strings.TrimSpace(m.Protocol) != "" {
+				protocol, err := config.NormalizeProtocol(m.Protocol)
+				if err != nil {
+					return fmt.Errorf("模型 %s：%w", m.Name, err)
+				}
+				m.Protocol = protocol
+			}
 			if m.Name == "" || m.BaseURL == "" || m.Model == "" {
 				return fmt.Errorf("模型条目的名称、API 地址与模型名都不能为空")
 			}
@@ -147,6 +155,10 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 		projected.BaseURL = entry.BaseURL
 		projected.Model = entry.Model
 		projected.ContextWindow = entry.ContextWindow
+		// 协议：条目显式声明才覆盖，留空沿用扁平现状（老条目零迁移）。
+		if entry.Protocol != "" {
+			projected.Name = entry.Protocol
+		}
 		// 输出预算：条目填了才覆盖扁平值——条目留空时沿用现状（现状缺省即
 		// config.DefaultMaxTokens），避免保存模型库把用户手写的 provider.maxTokens 打回默认。
 		if entry.MaxTokens > 0 {
@@ -162,7 +174,8 @@ func ReloadProviderModels(cfg *config.Config, configPath string, registry *vxage
 		}
 		projected.Models = cleaned
 
-		rebuild := strings.TrimRight(projected.BaseURL, "/") != strings.TrimRight(prev.BaseURL, "/") ||
+		rebuild := projected.EffectiveProtocol() != prev.EffectiveProtocol() ||
+			strings.TrimRight(projected.BaseURL, "/") != strings.TrimRight(prev.BaseURL, "/") ||
 			projected.Model != prev.Model ||
 			projected.ResolveAPIKey() != prev.ResolveAPIKey() ||
 			projected.ContextWindow != prev.ContextWindow ||

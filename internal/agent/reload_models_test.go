@@ -233,3 +233,41 @@ func TestReloadProviderModelsMaxTokens(t *testing.T) {
 		t.Fatalf("重启后应仍是 8192，实际 %d", got)
 	}
 }
+
+// TestReloadProviderModelsProtocol 协议热切换：条目声明 anthropic 时投影到扁平
+// provider.name 并重建引擎，落盘带 protocol；切回 openai 同样重建。
+func TestReloadProviderModelsProtocol(t *testing.T) {
+	cfg, path, registry, brain, approver := reloadModelsHarness(t)
+	engineBefore := brain.CtxMgr().Current()
+
+	models := append([]config.ModelProfile{}, cfg.Snapshot().Provider.Models...)
+	models[0].Protocol = config.ProtocolAnthropic
+	models[0].BaseURL = "https://api.minimaxi.com/anthropic"
+	if err := ReloadProviderModels(cfg, path, registry, brain, approver, "a", models); err != nil {
+		t.Fatalf("切到 anthropic: %v", err)
+	}
+	if got := cfg.Snapshot().Provider.Name; got != config.ProtocolAnthropic {
+		t.Fatalf("扁平 name 应投影为 anthropic: %q", got)
+	}
+	if brain.CtxMgr().Current() == engineBefore {
+		t.Fatal("协议变化应重建引擎")
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "protocol: anthropic") || !strings.Contains(string(data), "name: anthropic") {
+		t.Fatalf("协议应落盘:\n%s", data)
+	}
+
+	// 切回 openai：显式值落盘，运行态跟着回退。
+	engineBefore = brain.CtxMgr().Current()
+	models = append([]config.ModelProfile{}, cfg.Snapshot().Provider.Models...)
+	models[0].Protocol = config.ProtocolOpenAI
+	if err := ReloadProviderModels(cfg, path, registry, brain, approver, "a", models); err != nil {
+		t.Fatalf("切回 openai: %v", err)
+	}
+	if got := cfg.Snapshot().Provider.Name; got != config.ProtocolOpenAI {
+		t.Fatalf("扁平 name 应回到 openai: %q", got)
+	}
+	if brain.CtxMgr().Current() == engineBefore {
+		t.Fatal("协议回切也应重建引擎")
+	}
+}

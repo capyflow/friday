@@ -59,3 +59,17 @@ func TestEffectiveProviderModelsHidesBootstrapPlaceholder(t *testing.T) {
 		})
 	}
 }
+
+// TestNewModelViewProtocol 协议展示：条目显式协议优先；未声明时激活条目显示
+// 扁平协议，非激活条目按 openai 显示。
+func TestNewModelViewProtocol(t *testing.T) {
+	if got := newModelView(config.ModelProfile{Name: "a"}, true, false, 4096, "anthropic").Protocol; got != "anthropic" {
+		t.Fatalf("激活条目未声明协议应显示扁平值: %q", got)
+	}
+	if got := newModelView(config.ModelProfile{Name: "a"}, false, false, 4096, "anthropic").Protocol; got != "openai" {
+		t.Fatalf("非激活条目未声明协议应为 openai: %q", got)
+	}
+	if got := newModelView(config.ModelProfile{Name: "a", Protocol: "gemini"}, false, false, 4096, "openai").Protocol; got != "gemini" {
+		t.Fatalf("显式协议应优先: %q", got)
+	}
+}

@@ -138,7 +138,8 @@ describe('模型库设置', () => {
     await show()
     await clickIn(rows()[0], '测试')
     expect(api).toHaveBeenCalledWith('POST', '/api/provider/test', {
-      baseURL: 'https://api.stepfun.com/step_plan/v1', model: 'step-5-preview', apiKey: '', checkVision: true,
+      baseURL: 'https://api.stepfun.com/step_plan/v1', model: 'step-5-preview',
+      protocol: 'openai', apiKey: '', checkVision: true,
     })
     expect(wrapper.text()).toContain('文本连接测试通过')
     expect(wrapper.text()).toContain('模型未接受图片输入')

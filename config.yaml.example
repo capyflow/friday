@@ -1,10 +1,15 @@
 # 复制为 config.yaml 并修改
 provider:
-  name: openai                 # 固定 openai（vortexagent OpenAI 兼容层）
-  baseURL: https://api.example.com/v1   # 占位值，换成你的服务商 OpenAI 兼容地址
-  # baseURL: https://api.deepseek.com/v1            # DeepSeek 示例
-  # baseURL: https://api.stepfun.com/step_plan/v1   # 阶跃星辰 StepFun 示例
-  model: 请填模型名          # 占位值，填服务商给的模型名（如 deepseek-chat / step-3.7-flash）
+  name: openai                 # 协议：openai（OpenAI 兼容，默认）/ anthropic / gemini
+  baseURL: https://api.example.com/v1   # 占位值，换成你的服务商地址（协议不同地址不同）
+  # baseURL: https://api.deepseek.com/v1            # DeepSeek 示例（OpenAI 兼容）
+  # baseURL: https://api.stepfun.com/step_plan/v1   # 阶跃星辰 StepFun 示例（OpenAI 兼容）
+  # baseURL: https://api.minimaxi.com/v1            # MiniMax M Plan（OpenAI 兼容，国内站）
+  # baseURL: https://api.minimaxi.com/anthropic     # MiniMax M Plan（Anthropic 兼容，官方推荐）
+  #   上面两条 MiniMax 地址都要配 name: anthropic（anthropic 那条）或保持 openai（/v1 那条），
+  #   模型名填 MiniMax-M3.1-Flash，密钥填 M Plan 的 Subscription Key（sk-cp-…）；
+  #   国内站用 api.minimaxi.com，国际站换成 api.minimax.io，密钥要与站点对应。
+  model: 请填模型名          # 占位值，填服务商给的模型名（如 deepseek-chat / step-3.7-flash / MiniMax-M3.1-Flash）
   apiKeyEnv: FRIDAY_API_KEY    # 从该环境变量读密钥（通用命名，任意服务商可用；
                                # 未设置时兼容回退旧名 DEEPSEEK_API_KEY）。
                                # 也可以不配环境变量：打开软件在「设置」页直接填密钥
@@ -22,12 +27,20 @@ provider:
   # active: step-5-preview     # 当前激活条目的 name（须命中下方列表）
   # models:
   #   - name: step-5-preview
+  #     protocol: openai         # 可选：openai（默认）/ anthropic / gemini；留空沿用 provider.name
   #     baseURL: https://api.stepfun.com/step_plan/v1
   #     model: step-5-preview
   #     apiKey: sk-...           # 或 apiKeyEnv: STEP_API_KEY；后台保存时留空 = 保留已存密钥
   #     contextWindow: 128000    # 留空 = 按模型名查表（未知型号按 128k）
   #     maxTokens: 8192          # 该模型的输出预算；留空 = 按 4096（推理模型建议给大些）
   #     inputs: [text, image]    # 留空 = 全支持；只声明 text 则聊天页禁用图片入口
+  #   - name: minimax-m3
+  #     protocol: anthropic      # MiniMax M Plan 官方推荐走 Anthropic 兼容
+  #     baseURL: https://api.minimaxi.com/anthropic
+  #     model: MiniMax-M3.1-Flash
+  #     apiKey: sk-cp-...        # M Plan 的 Subscription Key
+  #     contextWindow: 1000000
+  #     maxTokens: 8192
   #   - name: deepseek-chat
   #     baseURL: https://api.deepseek.com/v1
   #     model: deepseek-chat

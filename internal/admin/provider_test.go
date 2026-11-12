@@ -191,3 +191,111 @@ func TestProviderDiagnosticAuthorizationAndStoredKeyTarget(t *testing.T) {
 		t.Fatal("诊断修改了生效配置")
 	}
 }
+
+// TestProviderDiagnosticAnthropic Anthropic 兼容协议：走 {base}/v1/messages，
+// 带 x-api-key 与第三方网关需要的 Authorization: Bearer，图片按 image/source 块发。
+func TestProviderDiagnosticAnthropic(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/anthropic/v1/messages" {
+			t.Errorf("Anthropic 请求路径不符: %s", r.URL.Path)
+		}
+		if r.Header.Get("x-api-key") != "sk-cp-test" || r.Header.Get("Authorization") != "Bearer sk-cp-test" {
+			t.Errorf("鉴权头不符: x-api-key=%q authorization=%q", r.Header.Get("x-api-key"), r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("anthropic-version") == "" {
+			t.Error("缺少 anthropic-version")
+		}
+		var req struct {
+			Model     string `json:"model"`
+			MaxTokens int    `json:"max_tokens"`
+			Messages  []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		if req.Model != "MiniMax-M3.1-Flash" || req.MaxTokens != 512 {
+			t.Errorf("请求体不符: %+v", req)
+		}
+		if calls.Add(1) == 2 {
+			var blocks []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			}
+			if err := json.Unmarshal(req.Messages[0].Content, &blocks); err != nil || len(blocks) != 2 ||
+				blocks[1].Type != "image" || blocks[1].Source.Type != "base64" ||
+				blocks[1].Source.MediaType != "image/png" || blocks[1].Source.Data == "" {
+				t.Errorf("图片诊断须发 Anthropic image 块，err=%v got=%+v", err, blocks)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
+	}))
+	defer srv.Close()
+
+	result := testProvider(context.Background(), providerTestRequest{
+		BaseURL: srv.URL + "/anthropic", Model: "MiniMax-M3.1-Flash", APIKey: "sk-cp-test",
+		Protocol: config.ProtocolAnthropic, CheckVision: true,
+	})
+	if !result.OK || result.Text.Status != "supported" {
+		t.Fatalf("文本诊断应通过: %+v", result.Text)
+	}
+	if result.Vision.Status != "supported" {
+		t.Fatalf("图片诊断应通过: %+v", result.Vision)
+	}
+}
+
+// TestProviderDiagnosticGemini Gemini 协议：走 {base}/v1beta/models/{model}:generateContent，
+// key 在查询参数里，图片按 inlineData 发。
+func TestProviderDiagnosticGemini(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/gemini-test:generateContent" {
+			t.Errorf("Gemini 请求路径不符: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("key") != "gk-test" {
+			t.Errorf("key 查询参数不符: %s", r.URL.RawQuery)
+		}
+		var req struct {
+			Contents []struct {
+				Parts []struct {
+					Text       string `json:"text"`
+					InlineData struct {
+						MimeType string `json:"mimeType"`
+						Data     string `json:"data"`
+					} `json:"inlineData"`
+				} `json:"parts"`
+			} `json:"contents"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		if calls.Add(1) == 2 {
+			parts := req.Contents[0].Parts
+			if len(parts) != 2 || parts[1].InlineData.MimeType != "image/png" || parts[1].InlineData.Data == "" {
+				t.Errorf("图片诊断须发 Gemini inlineData，got=%+v", parts)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	result := testProvider(context.Background(), providerTestRequest{
+		BaseURL: srv.URL, Model: "gemini-test", APIKey: "gk-test",
+		Protocol: config.ProtocolGemini, CheckVision: true,
+	})
+	if !result.OK || result.Text.Status != "supported" {
+		t.Fatalf("文本诊断应通过: %+v", result.Text)
+	}
+	if result.Vision.Status != "supported" {
+		t.Fatalf("图片诊断应通过: %+v", result.Vision)
+	}
+}
+
