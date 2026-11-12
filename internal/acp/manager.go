@@ -1176,7 +1176,10 @@ func (m *Manager) releaseProc(ps *procState, reason string) {
 func (m *Manager) onProcExit(key string) {
 	m.mu.Lock()
 	ps := m.procs[key]
-	if ps != nil {
+	// 只有登记在册的这条连接真的死了才清理：旧进程退出的回调可能比新进程
+	// 注册得慢（重试要重建连接，而 agent+目录 是同一个 key），这时清理会把
+	// 刚拉起来的新连接一起带走——它的会话从此收不到任何事件。
+	if ps != nil && !ps.proc.alive() {
 		for thID, lv := range m.live {
 			if lv.ps == ps {
 				delete(m.live, thID)
@@ -2110,7 +2113,9 @@ func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []
 	// 桌面端与手机端各读各的那条流（同一 session key），渲染出的时间线
 	// 必然一致（EVENTS-API.md §2.4）。hooks 是调用方自己的旁路钩子
 	// （进程内消费者），与总线互不影响。
-	sink := newTurnSink(m.turnHooks(hooks, acpSession(id), turnID, origin), th.Agent)
+	// 广播用的钩子：重试这类生命周期消息要走总线，别的端也得看见。
+	turnHooks := m.turnHooks(hooks, acpSession(id), turnID, origin)
+	sink := newTurnSink(turnHooks, th.Agent)
 	lv.addSink(sink)
 
 	// 这一轮真的开始了：广播 turn.start，订阅端据此把"排队中"的气泡切到
@@ -2196,6 +2201,13 @@ func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []
 				}
 			}
 		}
+	}
+	// 链路故障的重试：agent 进程崩了 / 对端把管道掐了时，这一轮其实没开始
+	// （用户要的只是把这句话发出去）。额度用完之类的错误不重试——判据见 retry.go。
+	var retries int
+	if promptErr != nil {
+		res, lv, promptErr, degraded, retries = m.retryPrompt(tctx, id, th, agentCfg, turnHooks,
+			lv, turnID, turnDone, sink, blocks, res, promptErr, degraded)
 	}
 	m.settleTurn(lv) // 先把已入队的事件排空，再摘接收器（否则结尾文本会丢）
 	close(turnDone)
@@ -2326,12 +2338,16 @@ func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []
 		// 附一个空的 stderr 只会让人去查根本没存在过的日志。外部 agent 同理——
 		// stderr 为空时不写这段，免得报错里出现"（stderr: ）"。
 		tail := firstLine(lv.proc.stderrTail(4))
+		retryNote := ""
+		if retries > 0 {
+			retryNote = fmt.Sprintf("（已重试 %d 次仍失败）", retries)
+		}
 		if agentCfg.Builtin {
-			runErr = fmt.Errorf("内置 %s 这一轮失败: %v", th.Agent, promptErr)
+			runErr = fmt.Errorf("内置 %s 这一轮失败: %v%s", th.Agent, promptErr, retryNote)
 		} else if tail == "" {
-			runErr = fmt.Errorf("agent 连接中断: %v", promptErr)
+			runErr = fmt.Errorf("agent 连接中断: %v%s", promptErr, retryNote)
 		} else {
-			runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）", promptErr, tail)
+			runErr = fmt.Errorf("agent 连接中断: %v（stderr: %s）%s", promptErr, tail, retryNote)
 		}
 		result.StopReason = "error"
 		errText = runErr.Error()
