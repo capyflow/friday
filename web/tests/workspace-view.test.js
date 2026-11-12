@@ -430,11 +430,17 @@ async function startTurn(text, tid = 'th1') {
   await pushText(text)
   const rec = turnLog[before] || { tid, turnId: '' }
   const turnId = rec.turnId
+  // 真实服务端在提交时就把 thread 标成 running（manager.SubmitTurn），轮末才回
+  // idle/interrupted——前端切回会话时据此判断能不能用投影覆盖本机缓冲。
+  const th = data.threads.find(t => t.id === rec.tid)
+  if (th) th.state = 'running'
+  const end = () => { if (th) th.state = 'idle' }
   return {
     tid: rec.tid,
     turnId,
     push(ev) { pushTurn(rec.tid, turnId, ev) },
-    close() { pushTurn(rec.tid, turnId, { type: 'turn.end' }) },
+    close() { pushTurn(rec.tid, turnId, { type: 'turn.end' }); end() },
+    error(text2) { pushTurn(rec.tid, turnId, { type: 'turn.error', error: text2 }); end() },
   }
 }
 
@@ -1176,6 +1182,69 @@ describe('一轮进行中切换会话', () => {
     expect(store.fullscreen).toBe(true)
     turn.close()
     store.fullscreen = false
+  })
+
+  it('停止用「当前会话正在跑的那一轮」：在 A 发完去 B 发，回 A 点停止不带 B 的 turnId', async () => {
+    data.threads = [copy(thread), copy(second)]
+    await show()
+    const turnA = await startTurn('第一件事在跑', 'th1')
+    await pickSession('第二件事')
+    const turnB = await startTurn('第二件事在跑', 'th2')
+    await pickSession('第一件事')
+    api.mockClear()
+    await wrapper.get('[aria-label="停止本轮"]').trigger('click')
+    await flushPromises()
+    // 回归：turnId 曾做在组件级的单一变量里，被后一次提交覆盖，回 A 停就传了 B 的
+    // turnId，后端如实拒绝（"正在跑的不是这一轮，别停错对象"）。
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', { turnId: turnA.turnId })
+    turnA.close(); turnB.close()
+  })
+
+  it('提交到首字之间的「输入中」动画：turn.start 之后仍在，首个增量才撤', async () => {
+    await show()
+    const before = turnLog.length
+    await pushText('等首字')
+    const rec = turnLog[before]
+    // 提交接口立刻返回了 turnId，但 agent 还在冷启动：这一步不能把动画收掉
+    expect(wrapper.find('.typing').exists()).toBe(true)
+    pushTurn(rec.tid, rec.turnId, { type: 'turn.start' })
+    await flushPromises()
+    expect(wrapper.find('.typing').exists()).toBe(true)
+    pushTurn(rec.tid, rec.turnId, { type: 'delta', delta: '第一句' })
+    await flushPromises()
+    expect(wrapper.find('.typing').exists()).toBe(false)
+    pushTurn(rec.tid, rec.turnId, { type: 'turn.end' })
+  })
+
+  it('切回会话以服务端为准：别处中断的那一轮，投影里的中断说明要看得见', async () => {
+    data.threads = [copy(thread), copy(second)]
+    await show()
+    await startTurn('跑着跑着断了', 'th1')
+    await pickSession('第二件事')
+    // 这一轮在别处收尾失败：服务端把 note 写进投影、state 回 idle
+    const t = data.threads.find(x => x.id === 'th1')
+    t.state = 'idle'
+    t.messages.push({ role: 'user', text: '跑着跑着断了' },
+      { role: 'assistant', text: '（本轮没有产出文本）', stopped: 'error' },
+      { role: 'note', text: '本轮失败：agent 连接中断' })
+    await pickSession('第一件事')
+    expect(timeline()).toContain('本轮失败：agent 连接中断')
+    // 不再假装还在跑：停止键收起，输入框不再是排队态
+    expect(wrapper.find('[aria-label="停止本轮"]').exists()).toBe(false)
+    expect(wrapper.get('[aria-label="智能体输入"]').attributes('placeholder')).not.toContain('正在回答')
+  })
+
+  it('另一端点发起的一轮：本端靠事件流进入回答态，停止用事件里的 turnId', async () => {
+    await show()
+    pushTurn('th1', 'remote-1', { type: 'turn.start' })
+    pushTurn('th1', 'remote-1', { type: 'delta', delta: '手机上让它跑的' })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="智能体输入"]').attributes('placeholder')).toContain('正在回答')
+    api.mockClear()
+    await wrapper.get('[aria-label="停止本轮"]').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/th1/stop', { turnId: 'remote-1' })
+    pushTurn('th1', 'remote-1', { type: 'turn.end' })
   })
 
   it('切过去后可以再派一个会话的活（两轮各自发到自己的 thread）', async () => {

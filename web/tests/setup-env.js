@@ -33,6 +33,9 @@ class MockEventSource {
     this.onmessage = null
     this.onerror = null
     this.closed = false
+    // readyState 对齐真实 EventSource：CONNECTING=0 OPEN=1 CLOSED=2。
+    // 前端靠它判断「连接还活着吗」——活着就不该重开一条（会占满连接池）。
+    this.readyState = 1
     this.seq = 0            // 事件帧自带 seq（服务端递增），这里自动补
     MockEventSource.instances.push(this)
   }
@@ -47,6 +50,7 @@ class MockEventSource {
 
   close() {
     this.closed = true
+    this.readyState = 2
   }
 }
 MockEventSource.instances = []

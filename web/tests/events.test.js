@@ -98,3 +98,85 @@ describe('事件订阅', () => {
     sub.stop()
   })
 })
+
+// 下面这组用例盯的是**连接生命周期**：EventSource 不会因为「被换下」就自己断开，
+// 漏关的旧连接会一直占着浏览器的同源连接池（上限 6 条）。池子满了之后新连接
+// 建不起来，页面就再也收不到事件——只能刷新。症状是「对话拿不到响应」，
+// 根因却在连接管理上，所以这里逐条钉死。
+describe('事件订阅的连接生命周期', () => {
+  it('断线重连时旧连接会被关掉，不留僵尸连接', () => {
+    vi.useFakeTimers()
+    try {
+      const sub = subscribe('web', 0, {})
+      const first = globalThis.__esLast()
+      first.onerror()                        // 当前连接出错
+      vi.advanceTimersByTime(1000)           // 退避 1s 后重连
+      const all = globalThis.__esAll()
+      expect(all.length).toBe(2)             // 确实重连了
+      expect(first.closed).toBe(true)        // 但旧的那条必须已经关掉
+      expect(all.filter(s => !s.closed).length).toBe(1) // 只剩一条活连接
+      sub.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('僵尸连接（已被换下的旧连接）出错不会再触发重连', () => {
+    vi.useFakeTimers()
+    try {
+      const sub = subscribe('web', 0, {})
+      const first = globalThis.__esLast()
+      first.onerror()
+      vi.advanceTimersByTime(1000)
+      const second = globalThis.__esLast()
+      expect(second).not.toBe(first)
+      // 僵尸再报一次错：不该再开新连接（否则每错一次就多泄漏一条）
+      first.onerror()
+      vi.advanceTimersByTime(1000)
+      expect(globalThis.__esAll().length).toBe(2)
+      expect(globalThis.__esLast()).toBe(second)
+      sub.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('回到前台时连接还活着就不重开（重开既占连接位又丢帧）', () => {
+    const sub = subscribe('web', 0, {})
+    expect(document.visibilityState).toBe('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(globalThis.__esAll().length).toBe(1)
+    sub.stop()
+  })
+
+  it('连接断了（不是僵尸）时回前台会补连', () => {
+    vi.useFakeTimers()
+    try {
+      const sub = subscribe('web', 0, {})
+      const first = globalThis.__esLast()
+      first.close()                         // 连接没了，但还没触发 onerror
+      document.dispatchEvent(new Event('visibilitychange'))
+      expect(globalThis.__esAll().length).toBe(2)
+      sub.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stop() 关掉这次订阅建过的所有连接，不只是当前那条', () => {
+    vi.useFakeTimers()
+    try {
+      const sub = subscribe('web', 0, {})
+      const first = globalThis.__esLast()
+      first.onerror()
+      vi.advanceTimersByTime(1000)
+      const second = globalThis.__esLast()
+      sub.stop()
+      expect(first.closed).toBe(true)
+      expect(second.closed).toBe(true)
+      expect(globalThis.__esAll().every(s => s.closed)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

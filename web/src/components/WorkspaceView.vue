@@ -126,7 +126,9 @@ const inflight = new Map()     // thread id -> AbortController
 const threadSubs = new Map() // thread id -> 事件订阅句柄
 const threadSeqs = new Map()   // thread id -> 最后收到的事件序号（重连时续传）
 const turnTotals = new Map()  // thread id -> 本轮 token 汇总（事件流带回）
-let myTurnId = ''             // 本端最近一次提交的 turnId：停止时按它精确操作
+// 停止要停「这个会话」正在跑的那一轮：turnId 按会话存，不能做成全局变量——
+// 在 A 会话发完消息再去 B 会话发一条，全局值会被 B 覆盖，回到 A 点停止就会
+// 拿 B 的 turnId 去停 A，后端如实拒绝（"正在跑的不是这一轮"）。
 const device = deviceLabel()  // 设备标签：另一端看到消息时标「来自手机端」
 
 // 正在显示的会话同步到全局：审批卡据此判断卡片是否属于当前对话（不属于就收进
@@ -137,16 +139,18 @@ function stateOf(id) {
   if (!id) return null
   if (!states[id]) {
     states[id] = {
-      loaded: false,    // 历史投影是否已取回（取回过就用本机缓冲，不再盖）
       fetching: false,  // 取历史在路上（连点列表不重复发 GET）
       messages: [],
       phase: 'idle',    // idle | streaming —— 这一会话自己的一轮
+      turnId: '',       // 本端最近一次提交的 turnId
+      runningTurnId: '', // 事件流确认正在跑的 turnId（另一端点发起时也能停）
       caps: null, capsLoading: false, capBusy: false,
       ctx: null,        // { used, size }；null = 该 agent 未上报
       session: null,    // { cwd, dirs, extra, known, additionalDirectories } —— 目录生效情况
       draft: '', pending: [], // 输入草稿与待发的图片也按会话分开
       queue: [],        // 回答进行中排队的消息：{ text, shots:[{id,url}] }，本轮跑完依次发出
       queuePaused: false, // 暂停后本轮结束也不会继续放队列上路
+      typing: null,     // 「输入中」占位气泡：从提交一直挂到这一轮回第一个字
 
     }
   }
@@ -357,6 +361,11 @@ const currentWs = computed(() => workspaces.value.find(w => w.id === currentWsId
 const enabled = computed(() => !!(acp.value && acp.value.enabled))
 const canSend = computed(() => !!input.value.trim() || pendingImages.value.length > 0)
 const stateLabel = { idle: '空闲', running: '对话中', interrupted: '已中断', orphaned: 'agent 已删除' }
+// 轮次结束原因：agent 给的是协议里的英文枚举，直接摊在轮末脚注上没人看得懂，
+// 中文是对用户唯一有意义的说法（「已中断」比 "cancelled" 一眼就知道发生了什么）。
+const STOP_LABEL = { cancelled: '已中断', max_tokens: '达到输出上限',
+  refusal: '模型拒绝回答', error: '本轮失败', paused: '已暂停' }
+function stopText(s) { return STOP_LABEL[s] || s }
 
 // 工作区 → 会话的两级栏。排序按主流 agent 工具的项目栏习惯：置顶优先，其余按
 // 组内最近活动（会话的最新 updatedAt，没有会话就用工作区自身时间）倒序；
@@ -574,7 +583,17 @@ async function loadThreadMessages(tid) {
   try {
     const r = await api('GET', '/api/acp/threads/' + tid)
     if (states[tid] !== st) return
-    if (st.phase !== 'streaming') applyThreadMessages(st, r.thread.messages || [])
+    // 同样以服务端为准：只有「本地说在跑、服务端也说在跑」才保留本机缓冲。
+    const serverRunning = r.thread.state === 'running' || r.thread.state === 'queued'
+    if (!(st.phase === 'streaming' && serverRunning)) {
+      applyThreadMessages(st, r.thread.messages || [])
+      if (!serverRunning) {
+        st.phase = 'idle'
+        st.runningTurnId = ''
+        st.turnId = ''
+        dropTyping(st)
+      }
+    }
     syncCtx(tid, r.thread.contextUsed, r.thread.contextSize)
   } catch (e) {
     // 重拉失败不打断对话：事件流仍会继续推，缺口那几条用户可能看不到，
@@ -599,19 +618,27 @@ async function select(id) {
   const st = stateOf(id)
   // 打开即订阅该会话的事件流：手机端问的东西，这里要能实时看见。
   subscribeThread(id)
-  if (!st.loaded) {
-    if (st.fetching) return // 同一次拉取已在飞（连点列表），别发第二个 GET
+  // 每次打开都对齐一次服务端投影：切走时会退订，那一轮若在别处收尾（用户停止、
+  // 连接中断、另一端点跑完），收尾事件收不到，本地就会永远停在「正在回答」，
+  // 中断原因（服务端写进投影的 note）也永远看不到。
+  if (!st.fetching) {
     st.fetching = true
     try {
       const r = await api('GET', '/api/acp/threads/' + id)
       // 等回包期间用户可能已经发了一条出去：那一轮的内容只在本机缓冲里（服务端
       // 要到轮末才落投影），此时不能用历史投影盖掉它。
-      if (st.phase !== 'streaming') {
+      const serverRunning = r.thread.state === 'running' || r.thread.state === 'queued'
+      if (!(st.phase === 'streaming' && serverRunning)) {
         applyThreadMessages(st, r.thread.messages || [])
+        if (!serverRunning) {
+          st.phase = 'idle'
+          st.runningTurnId = ''
+          st.turnId = ''
+          dropTyping(st)
+        }
       }
       syncCtx(id, r.thread.contextUsed, r.thread.contextSize)
       if (r.session) st.session = r.session
-      st.loaded = true
     } catch (e) {
       dropState(id) // 半成品缓冲会让下次重试更难判断，删掉重来
       if (currentId.value === id) {
@@ -1042,10 +1069,27 @@ function ownerId() { return currentId.value }
 // 卸载组件时全部退掉——留着连接会在内核里积一条没人读的连接。
 function threadEventKey(tid) { return 'acp:' + tid }
 
+// dropTyping 收掉「输入中」占位气泡。调用时机是**这一轮真的吐出东西**（首个
+// 增量/思考/工具步骤）或这一轮收尾——不能在提交的 HTTP 返回时就收：提交接口是
+// 「立刻回 turnId」，agent 冷启动到首字常常要好几秒，那段时间界面上什么都没有，
+// 看起来就像消息丢了。
+function dropTyping(st) {
+  const t = st.typing
+  if (!t) return
+  st.typing = null
+  const i = st.messages.indexOf(t)
+  if (i >= 0) st.messages.splice(i, 1)
+}
+
 // onThreadEvent 把事件交给共享翻译层：与聊天页、手机端同一条渲染路径。
 function onThreadEvent(tid, ev) {
   const st = states[tid]
   if (!st) return
+  // 有内容落地就撤掉占位气泡；turn.start 只是「agent 接活了」，这之后才是
+  // 等首字的空窗，占位还得留着。
+  if (ev && ['delta', 'thinking', 'step', 'plan', 'paused', 'turn.end', 'turn.error', 'turn.canceled'].includes(ev.type)) {
+    dropTyping(st)
+  }
   applyEvent(ev, {
     messages: st.messages,
     mine: clientId,
@@ -1059,8 +1103,16 @@ function onThreadEvent(tid, ev) {
     },
     onThinking: () => scrollAfterRender(),
     onStep: () => scrollAfterRender(),
+    // turn.start 是「这一轮真的在跑」的唯一权威来源：另一端点发起的轮本端没
+    // 提交过，只有它能把 runningTurnId 与 busy 状态补上（否则本端既显示不出
+    // 正在回答，点停止也拿不到可用的 turnId）。
+    onStart: (bot, ev2) => {
+      st.runningTurnId = ev2.turnId || ''
+      st.phase = 'streaming'
+    },
     onEnd: (bot, ev2) => {
       st.phase = 'idle'
+      st.runningTurnId = ''
       if (ev2 && ev2.turn) turnTotals.set(tid, ev2.turn)
       // 本轮了结：把队列里下一条放出去。不调的话排队消息永远卡住，
       // 只能手动去点「暂停/继续发送队列」。
@@ -1069,6 +1121,7 @@ function onThreadEvent(tid, ev) {
     },
     onError: (text, bot) => {
       st.phase = 'idle'
+      st.runningTurnId = ''
       if (bot) {
         bot.streaming = false
         if (!bot.text) bot.text = text
@@ -1076,7 +1129,15 @@ function onThreadEvent(tid, ev) {
       }
       scrollAfterRender()
     },
-    onStatus: text => { if (text) st.statusLine = text },
+    onCanceled: turnId => {
+      // 被取消的若是正在跑的那一轮，状态就地归位（排队轮的取消与此无关）。
+      if (!turnId || st.runningTurnId === turnId) {
+        st.runningTurnId = ''
+        st.phase = 'idle'
+      }
+    },
+    // 状态行就长在「输入中」气泡里（启动 agent / 重接会话 / 连接中断重试）。
+    onStatus: text => { if (text && st.typing) st.typing.label = text },
     onRemoteUser: () => scrollAfterRender(),
   })
 }
@@ -1119,6 +1180,7 @@ async function startTurn(owner, text, shots) {
   const typing = reactive({ role: 'typing', label: '' })
   st.messages.push(userMsg)
   st.messages.push(typing)
+  st.typing = typing // 占位气泡由事件流收（首字/收尾），不跟着提交请求走
   // 预览即时清空（气泡已接手展示，对象 URL 用完即释放）
   for (const s of shots) URL.revokeObjectURL(s.url)
   st.phase = 'streaming'
@@ -1126,9 +1188,9 @@ async function startTurn(owner, text, shots) {
 
   const controller = new AbortController()
   inflight.set(owner, controller)
-  const removeTyping = () => { const i = st.messages.indexOf(typing); if (i >= 0) st.messages.splice(i, 1) }
   // bot 气泡由事件流创建（turnevents 的 botFor 按 turnId 归属），
   // 这里不再自己造——否则同一条回答会分裂成两个气泡。
+  let submitted = false
   try {
     const res = await fetch(`/api/acp/threads/${owner}/chat`, {
       method: 'POST',
@@ -1145,25 +1207,38 @@ async function startTurn(owner, text, shots) {
     }
     // 提交成功：这一轮的内容从事件流来（会话 key = acp:<threadID>）。
     const r = (data && data.body) || {}
-    myTurnId = r.turnId || ''
+    submitted = true
+    st.turnId = r.turnId || ''
     if (r.status === 'queued') {
-      // 会话忙（另一端正在生成）：这一轮进了 FIFO 队列。
+      // 会话忙（另一端正在生成）：这一轮没有真的进 agent，让它在本地队列里
+      // 等这一轮结束后重发（后端只回 202，不排队，见 handleAcpChat 注释）。
       st.phase = 'idle'
-      toast('小五正在回答（来自另一端），你的问题排在第 ' + (r.position || 1) + ' 位')
+      st.turnId = ''
+      dropTyping(st)
+      st.queue.unshift({ text, shots })
+      const ui = st.messages.indexOf(userMsg)
+      if (ui >= 0) st.messages.splice(ui, 1) // 重发时由 startTurn 重建气泡，别留两份
+      toast('这一轮正在跑，你的问题已排到队首（本轮结束自动发出）')
     }
   } catch (e) {
     if (e.name !== 'AbortError') toast('发送失败：' + e.message, true)
   } finally {
     if (inflight.get(owner) === controller) inflight.delete(owner)
-    // 回复内容由事件流补齐；这里只把状态行让位，busy 由事件收尾时归位。
-    if (!myTurnId) st.phase = 'idle'
-    removeTyping()
+    // 回复内容由事件流补齐；提交没成功就别留着 streaming——否则界面一直
+    // 卡在「正在回答」，点停止还会拿着上一次提交的旧 turnId 去停（被后端拒绝）。
+    if (!submitted) { st.phase = 'idle'; st.turnId = ''; dropTyping(st) }
   }
 }
 
 async function stop() {
-  if (!currentId.value) return
-  try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, { turnId: myTurnId }) } catch (e) { toast('停止失败：' + e.message, true) }
+  const st = cur.value
+  if (!currentId.value || !st) return
+  // 优先用事件流确认的「正在跑的那一轮」：另一端点发起的轮本端没提交过，
+  // 只有它知道 turnId；本端刚提交、turn.start 还没到时退回本端提交的 turnId。
+  const turnId = st.runningTurnId || st.turnId
+  if (!turnId) { toast('这个会话现在没有正在跑的轮次', true); return }
+  try { await api('POST', `/api/acp/threads/${currentId.value}/stop`, { turnId }) }
+  catch (e) { toast('停止失败：' + e.message, true) }
 }
 
 /* ---------- 图片附件（复用聊天页上传链路，单张 ≤5MB；按钮选图与粘贴共用） ---------- */
@@ -1504,7 +1579,7 @@ function previewImages(urls, at = 0) {
                   </button>
                   <div v-if="m.turn || (!m.streaming && answerText(m.blocks))" class="turn-foot">
                     <div v-if="m.turn" class="turn-total">
-                      {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ m.turn.stopped }}</template>
+                      {{ turnTotalText(m.turn) }}<template v-if="m.turn.stopped && m.turn.stopped !== 'end_turn'"> · {{ stopText(m.turn.stopped) }}</template>
                     </div>
                     <div v-if="!m.streaming" class="msg-acts">
                       <button class="copy-btn" type="button" title="记到项目记忆"
