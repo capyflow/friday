@@ -5,6 +5,8 @@
 // Esc 或点遮罩关闭；open(path) 由父组件经 ref 调用。
 import { onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api.js'
+import { getToken } from '../auth.js'
+import { toast } from '../store.js'
 import { renderMD, localFileHref, joinFilePath } from '../md.js'
 
 const openState = ref(false)
@@ -12,7 +14,7 @@ const loading = ref(false)
 const error = ref('')
 const file = reactive({
   path: '', name: '', size: 0, modTime: '', kind: '', mime: '',
-  content: '', dataUrl: '', truncated: false, message: '',
+  content: '', dataUrl: '', truncated: false, message: '', canOpen: false,
 })
 
 const isMD = () => /\.(md|markdown)$/i.test(file.name)
@@ -30,7 +32,7 @@ async function open(path) {
   openState.value = true
   loading.value = true
   error.value = ''
-  Object.assign(file, { path: '', name: '', size: 0, modTime: '', kind: '', mime: '', content: '', dataUrl: '', truncated: false, message: '' })
+  Object.assign(file, { path: '', name: '', size: 0, modTime: '', kind: '', mime: '', content: '', dataUrl: '', truncated: false, message: '', canOpen: false })
   document.addEventListener('keydown', onKey)
   try {
     Object.assign(file, await api('GET', '/api/files/preview?path=' + encodeURIComponent(path)))
@@ -44,6 +46,25 @@ async function open(path) {
 function close() {
   openState.value = false
   document.removeEventListener('keydown', onKey)
+}
+
+// 下载到本地：/api/files/download 的鉴权走查询参数（浏览器 <a download> 带不了
+// 自定义头），所以这里把 token 拼进 URL。
+function downloadURL() {
+  return '/api/files/download?path=' + encodeURIComponent(file.path) +
+    '&token=' + encodeURIComponent(getToken() || '')
+}
+
+// 用系统默认应用打开：预览不了的类型（zip、pdf、二进制）交给系统。
+// 只有本机访问才行——远程访问时 open 打开的是服务器上的文件，对远端没意义，
+// 那边给「下载到本地」就够（canOpen 由后端按回环判定给出）。
+async function openExternally() {
+  try {
+    const r = await api('POST', '/api/files/open', { path: file.path })
+    toast(r.message || '已用系统默认应用打开')
+  } catch (e) {
+    toast(e.message || '用系统默认应用打开失败', true)
+  }
 }
 
 // 抽屉里预览 markdown 时命中的文件路径 chip 同样可点开；预览正文里的文件链接
@@ -90,7 +111,17 @@ defineExpose({ open, close })
         <div v-if="isMD()" class="fp-md chat-md" @click="onBodyClick" v-html="renderMD(file.content, { fileChips: true })"></div>
         <pre v-else class="fp-code">{{ file.content }}</pre>
       </div>
-      <div v-else class="fp-status">{{ file.message || '暂不支持预览' }}</div>
+      <!-- 预览不了的类型：给两条出路——本机用系统默认应用打开，远程就下载到本地 -->
+      <div v-else class="fp-status fp-unsupported">
+        <p class="fp-unsupported-txt">{{ file.message || '暂不支持预览' }}</p>
+        <div class="fp-acts">
+          <button v-if="file.canOpen" class="btn sm primary" type="button" @click="openExternally">
+            用默认应用打开</button>
+          <a class="btn sm" :href="downloadURL()" :download="file.name">下载到本地</a>
+        </div>
+        <p class="meta fp-unsupported-hint">
+          {{ file.canOpen ? '也可以下载到本地再打开' : '远程访问：下载到本地后用系统默认应用打开' }}</p>
+      </div>
     </aside>
   </div>
 </template>

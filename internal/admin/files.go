@@ -8,12 +8,15 @@ package admin
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -79,6 +82,9 @@ func (s *Server) handleFilePreview(ctx *vhttp.Context) error {
 		"name":    filepath.Base(abs),
 		"size":    info.Size(),
 		"modTime": info.ModTime().Format(time.RFC3339),
+		// canOpen：能否用系统默认应用打开（只有本机回环请求才行——远程访问
+		// 在服务器上打开文件对远端用户没意义，那边给「下载到本地」）。
+		"canOpen": localRequest(ctx.GinContext().Request),
 	}
 	// 类型判定：先嗅探 magic number 识别图片；其余看内容里有没有 NUL 字节——
 	// 有即二进制（UTF-16 等个别文本会误判成 binary，宁可不渲染也不乱渲染）。
@@ -139,6 +145,58 @@ func mimeLabel(ext, sniff string) string {
 		}
 	}
 	return sniff
+}
+
+// handleFileOpen 用系统默认应用打开一个本机文件（预览不了的那类：zip、pdf、
+// 二进制…）。POST /api/files/open {"path":"…"}
+//
+// 只允许本机回环请求：远程访问时「在服务器上打开文件」对远端用户没有意义，
+// 反而等于给远端开了个「在本机执行程序」的入口——那边给「下载到本地」就够。
+func (s *Server) handleFileOpen(ctx *vhttp.Context) error {
+	if !localRequest(ctx.GinContext().Request) {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{
+			"error": "远程访问不能在本机打开文件，请改用「下载到本地」",
+		})
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	abs, errMsg := resolveFilePath(req.Path)
+	if errMsg != "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": errMsg})
+	}
+	if err := openWithDefaultApp(abs); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": "用系统默认应用打开失败: " + err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success,
+		map[string]string{"message": "已用系统默认应用打开 " + filepath.Base(abs)})
+}
+
+// openWithDefaultApp 把文件交给系统默认应用（macOS 的 open / Linux 的
+// xdg-open / Windows 的 start）。不经 shell，路径原样传参。
+// 做成变量：测试里替换掉，免得真去打开一个应用。
+var openWithDefaultApp = func(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "linux":
+		cmd = exec.Command("xdg-open", path)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", path)
+	default:
+		return fmt.Errorf("当前系统不支持用默认应用打开")
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// 不等它退出：有的应用会一直开着（编辑器、播放器），等下去等于挂住。
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // handleFileDownload 流式下载一个本机文件（手机端文件面板把文件拉到手机用）：

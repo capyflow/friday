@@ -82,6 +82,7 @@
 //	GET    /api/terminal      内置终端可用状态（enabled/上限/活跃数，需登录）
 //	GET    /api/terminal/ws   内置终端（WebSocket，一条连接一个 PTY；只接受本机回环，需登录）
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
+//	POST   /api/files/open    用系统默认应用打开本机文件 {"path"}（仅本机回环，需登录）
 //	GET    /api/files/download 流式下载本机文件（?path=，token 走查询参数，手机端用）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
@@ -455,6 +456,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	// 文件预览：时间线里输出的本机文件路径点开侧边预览（只读，需登录）。
 	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
+	root.AddRouter([]string{http.MethodPost}, "/api/files/open", s.wrap(s.handleFileOpen))
 	root.AddRouter([]string{http.MethodGet}, "/api/files/download", s.wrapMedia(s.handleFileDownload))
 	// 智能体（ACP）工作区与对话：工作区 CRUD、会话 CRUD、SSE 对话流、停止、
 	// 配置与握手诊断。

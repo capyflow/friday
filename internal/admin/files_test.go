@@ -197,3 +197,71 @@ func TestFileDownloadRejectsBadPathsAndAuth(t *testing.T) {
 		t.Fatalf("未登录应 403，实际 %d", code)
 	}
 }
+
+// 「用默认应用打开」：本机请求放行，远程请求拒（那边给下载就够）。
+func TestFileOpenEndpoint(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	handler := s.Handler()
+
+	old := openWithDefaultApp
+	var opened string
+	openWithDefaultApp = func(path string) error { opened = path; return nil }
+	t.Cleanup(func() { openWithDefaultApp = old })
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "photos-release.zip")
+	if err := os.WriteFile(file, []byte("PK\x03\x04"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 本机：放行并把路径交出去
+	body := []byte(`{"path":"` + file + `"}`)
+	rec := setupTestRequest(handler, http.MethodPost, "/api/files/open", body, "127.0.0.1:1234", "localhost", "", token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("本机打开应成功: %d %s", rec.Code, rec.Body.String())
+	}
+	if opened != file {
+		t.Fatalf("应把 %q 交给默认应用，实际 %q", file, opened)
+	}
+
+	// 远程：拒绝并指向下载
+	rec = setupTestRequest(handler, http.MethodPost, "/api/files/open", body, "203.0.113.9:52233", "example.com", "", token)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("远程请求不应放行: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "下载到本地") {
+		t.Fatalf("错误应指向「下载到本地」: %s", rec.Body.String())
+	}
+}
+
+// 预览响应要带上 canOpen：界面据此决定给不给「用默认应用打开」。
+func TestFilePreviewReportsCanOpen(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	handler := s.Handler()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(file, []byte{0x00, 0x01, 0x02}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, body := previewBody(t, handler, token, "path="+url.QueryEscape(file))
+	if body["canOpen"] != true {
+		t.Fatalf("本机请求应给出 canOpen=true: %v", body)
+	}
+
+	// 远程请求：canOpen 为 false（界面只给下载）
+	rec := setupTestRequest(handler, http.MethodGet,
+		"/api/files/preview?path="+url.QueryEscape(file), nil, "203.0.113.9:52233", "example.com", "", token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Body map[string]any `json:"body"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Body["canOpen"] != false {
+		t.Fatalf("远程请求应给出 canOpen=false: %v", envelope.Body)
+	}
+}

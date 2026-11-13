@@ -1678,6 +1678,11 @@ html[data-theme="dark"] .fp-panel { background: #181818;
 .fp-status { flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--muted-fg); font-size: 13.5px; padding: 24px; text-align: center; }
 .fp-status.is-error { color: #DC2626; }
+/* 预览不了时的出路：本机用系统默认应用打开 / 一律可下载到本地。 */
+.fp-unsupported { flex-direction: column; gap: 14px; }
+.fp-unsupported-txt { margin: 0; }
+.fp-acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.fp-unsupported-hint { margin: 0; font-size: 12px; }
 html[data-theme="dark"] .fp-status.is-error { color: #F87171; }
 .fp-notice { font-size: 12px; color: var(--muted-fg); background: var(--bg-subtle);
   border: 1px solid var(--border); border-radius: var(--radius-sm, 8px);
