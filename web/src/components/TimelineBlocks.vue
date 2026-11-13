@@ -3,7 +3,8 @@
 // 样式在全局 style.css）：思考块（可折叠，流式一行预览）、工具调用块与正文块
 // 按到达顺序排列。连续多次工具调用会归成一叠（「执行工具 N 次」）；中间没有正文
 // 隔开的连续思考/工具行再并成一个过程行，收起只报「N 次思考 · M 次工具调用」，
-// 点开才列全程。块对象是父组件的 reactive 数组元素，这里的开合切换直接改写它们。
+// 点开在限高滚动的展开区里列全程。块对象是父组件的 reactive 数组元素，这里的
+// 开合切换直接改写它们。
 import { computed } from 'vue'
 import { renderMD, localFileHref, joinFilePath } from '../md.js'
 import { copyText } from '../clipboard.js'
@@ -61,10 +62,10 @@ function onTextClick(e) {
 }
 
 // 相邻的工具调用并成一叠；只有一次的退回普通行（多套一层折叠只会让人多点一下）。
-// 连续的思考/工具行（中间没有正文隔开）再并成一个过程行：长任务跑下来「思考、
-// Bash、思考、执行工具 N 次……」不再平铺十几行，收起只报次数摘要。只有一行的
-// 过程不收（一行内容不值得多套一层折叠），原样摆出。叠与过程行的开合都记在各自
-// 第一块（gopen）上，后续到达的块不会把它们挤掉。
+// 连续的思考/工具行（中间没有正文隔开）再并成一个过程行：摘要一条 + 限高滚动的
+// 展开容器，大批量思考/工具全展开也不会把回答顶出一屏。只有一行的过程不收
+// （一行内容不值得多套一层折叠），原样摆出。叠与过程行的开合都记在各自第一块
+// （gopen）上，后续到达的块不会把它们挤掉。
 const rows = computed(() => {
   const flat = []
   props.blocks.forEach((b, bi) => {
@@ -83,7 +84,6 @@ const rows = computed(() => {
       const first = run[0]
       const head = first.stack ? first.items[0] : first.b
       out.push({ proc: true, head, rows: run })
-      run.forEach(r => out.push({ ...r, inProc: true, procHead: head }))
     } else {
       out.push(run[0])
     }
@@ -171,25 +171,65 @@ function cursorOn(bi) {
 
 <template>
   <template v-for="(r, ri) in rows" :key="ri">
-    <!-- 过程行摘要：连续的思考/工具行收成一条，点开才见全程。开合箭头与失败
-         配色直接借用 .tool-stack 的样式；流式期间标题实时跟随思考预览。 -->
-    <div v-if="r.proc" class="tool-stack proc" :class="{ open: r.head.gopen, 'is-fail': procCounts(r).f > 0 }">
-      <button class="tool-head" type="button" :aria-expanded="r.head.gopen ? 'true' : 'false'"
-              :title="procTitle(r)" @click="r.head.gopen = !r.head.gopen">
-        <span class="step-ico think-ico" :class="{ live: procState(r) === 'live', fail: procState(r) === 'fail' }" aria-hidden="true">
-          <i v-if="procState(r) === 'run'" class="spin step-ring"></i>
-          <svg v-else-if="procState(r) === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
-        </span>
-        <span class="step-name">{{ procLabel(r) }}</span>
-        <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-    </div>
+    <!-- 过程行：摘要一条（开合箭头与失败配色借用 .tool-stack），点开才见全程。
+         成员行收进下面的 .proc-body 限高滚动容器；流式期间标题实时跟随思考预览。 -->
+    <template v-if="r.proc">
+      <div class="tool-stack proc" :class="{ open: r.head.gopen, 'is-fail': procCounts(r).f > 0 }">
+        <button class="tool-head" type="button" :aria-expanded="r.head.gopen ? 'true' : 'false'"
+                :title="procTitle(r)" @click="r.head.gopen = !r.head.gopen">
+          <span class="step-ico think-ico" :class="{ live: procState(r) === 'live', fail: procState(r) === 'fail' }" aria-hidden="true">
+            <i v-if="procState(r) === 'run'" class="spin step-ring"></i>
+            <svg v-else-if="procState(r) === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
+          </span>
+          <span class="step-name">{{ procLabel(r) }}</span>
+          <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </div>
+      <!-- 展开容器：与 .think-body / .tool-out 一样靠自身滚动兜住高度，
+           成员行的展开状态记在各自块上，跟着摘要头整开整收。 -->
+      <div v-show="r.head.gopen" class="proc-body">
+        <template v-for="(sr, si) in r.rows" :key="si">
+          <!-- 成员思考行：与顶层思考行同款，展开状态记在块上 -->
+          <div v-if="!sr.stack && sr.b.kind === 'think'" class="think" :class="{ open: sr.b.open }">
+            <button class="think-head" type="button" :title="sr.b.open ? '收起思考' : '展开思考'"
+                    @click="sr.b.open = !sr.b.open">
+              <span class="step-ico think-ico" :class="{ live: liveThink(sr.bi, sr.b) }" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.4 1.1-1 2.5-2.4 2.5-4.6A6 6 0 0 0 6 7c0 2 1.4 3.4 2.5 4.6.8.7 1.3 1.4 1.5 2.4"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
+              </span>
+              <span class="think-title">{{ thinkTitle(sr.b, sr.bi) }}</span>
+              <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div v-show="sr.b.open" class="think-body">
+              <div class="think-text">{{ sr.b.text }}</div>
+            </div>
+          </div>
 
-    <!-- 思考块：收起时一行实时预览（流式）或轮次摘要，点击展开全文。
-         过程行的成员行不摘除、只藏起（v-show），行内的展开状态不丢。 -->
-    <div v-else-if="!r.stack && r.b.kind === 'think'" class="think" :class="{ open: r.b.open, 'proc-in': r.inProc }"
-         v-show="!r.inProc || r.procHead.gopen">
+          <!-- 成员工具叠：连续的调用在过程行里仍归成一叠，逐条可再展开 -->
+          <div v-else-if="sr.stack" class="tool-stack" :class="{ open: sr.items[0].gopen, 'is-fail': stackFails(sr.items) }">
+            <button class="tool-head" type="button" :aria-expanded="sr.items[0].gopen ? 'true' : 'false'"
+                    :title="stackTitle(sr.items[0], sr.items)" @click="sr.items[0].gopen = !sr.items[0].gopen">
+              <span class="step-ico" :class="stackState(sr.items)" aria-hidden="true">
+                <i v-if="stackState(sr.items) === 'run'" class="spin step-ring"></i>
+                <svg v-else-if="stackState(sr.items) === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+              </span>
+              <span class="step-name">{{ stackLabel(sr.items) }}</span>
+              <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div v-show="sr.items[0].gopen" class="tool-stack-body">
+              <ToolStep v-for="(b, k) in sr.items" :key="sr.keys[k]" :b="b" :own="ownTools" @toggle="b.open = !b.open" />
+            </div>
+          </div>
+
+          <!-- 成员单次工具调用：容器已是包裹层，直接摆一行 -->
+          <ToolStep v-else-if="sr.b.kind === 'tool'" :b="sr.b" :own="ownTools" @toggle="sr.b.open = !sr.b.open" />
+        </template>
+      </div>
+    </template>
+
+    <!-- 思考块：收起时一行实时预览（流式）或轮次摘要，点击展开全文 -->
+    <div v-else-if="!r.stack && r.b.kind === 'think'" class="think" :class="{ open: r.b.open }">
       <button class="think-head" type="button" :title="r.b.open ? '收起思考' : '展开思考'"
               @click="r.b.open = !r.b.open">
         <span class="step-ico think-ico" :class="{ live: liveThink(r.bi, r.b) }" aria-hidden="true">
@@ -204,8 +244,7 @@ function cursorOn(bi) {
     </div>
 
     <!-- 一叠工具调用：收起只报次数，点开逐条列出（每条还能再展开看参数与结果） -->
-    <div v-else-if="r.stack" class="tool-stack" :class="{ open: r.items[0].gopen, 'is-fail': stackFails(r.items), 'proc-in': r.inProc }"
-         v-show="!r.inProc || r.procHead.gopen">
+    <div v-else-if="r.stack" class="tool-stack" :class="{ open: r.items[0].gopen, 'is-fail': stackFails(r.items) }">
       <button class="tool-head" type="button" :aria-expanded="r.items[0].gopen ? 'true' : 'false'"
               :title="stackTitle(r.items[0], r.items)" @click="r.items[0].gopen = !r.items[0].gopen">
         <span class="step-ico" :class="stackState(r.items)" aria-hidden="true">
@@ -221,11 +260,8 @@ function cursorOn(bi) {
       </div>
     </div>
 
-    <!-- 单次工具调用：不套折叠壳，直接摆一行（包一层只是为了过程行里能跟随
-         摘要头开合；顶层无类无样式，只是 .turn 弹性列里的一个普通块） -->
-    <div v-else-if="r.b.kind === 'tool'" class="tool-row" :class="{ 'proc-in': r.inProc }" v-show="!r.inProc || r.procHead.gopen">
-      <ToolStep :b="r.b" :own="ownTools" @toggle="r.b.open = !r.b.open" />
-    </div>
+    <!-- 单次工具调用：不套折叠壳，直接摆一行 -->
+    <ToolStep v-else-if="r.b.kind === 'tool'" :b="r.b" :own="ownTools" @toggle="r.b.open = !r.b.open" />
 
     <!-- 正文块（fileChips：行内代码里的本机文件路径渲染成可点预览 chip） -->
     <div v-else class="turn-text chat-md" @click="onTextClick"><span v-html="renderMD(r.b.text, { fileChips: true, codeCopy: true })"></span><span v-if="cursorOn(r.bi)" class="cursor"></span><span v-if="cursorOn(r.bi) && rate > 0" class="tok-rate">↑{{ fmtRate(rate) }} tok/s</span></div>

@@ -67,7 +67,7 @@ describe('连续的思考与工具行并成一个过程行', () => {
     await w.get('.proc > .tool-head').trigger('click')
     expect(w.get('.think-head').isVisible()).toBe(true)
     // 叠的口径在过程行里照旧：连续工具仍是「执行工具 N 次」
-    expect(w.get('.tool-stack.proc-in > .tool-head').text()).toContain('执行工具 2 次')
+    expect(w.get('.proc-body .tool-stack > .tool-head').text()).toContain('执行工具 2 次')
     await w.get('.proc > .tool-head').trigger('click')
     expect(w.get('.think-head').isVisible()).toBe(false)
     w.unmount()

@@ -510,8 +510,8 @@ describe('聊天发送和失败恢复', () => {
       { type: 'turn.end' },
     ])
     const rows = wrapper.findAll('.turn > div').map(row => row.classes()[0])
-    // 思考+工具+思考被并成一个过程行：摘要在前（tool-stack proc），成员行跟随其后
-    expect(rows).toEqual(['tool-stack', 'think', 'tool-row', 'think', 'turn-text', 'turn-foot'])
+    // 思考+工具+思考被并成一个过程行：摘要 + 限高滚动的展开容器，成员收在里面
+    expect(rows).toEqual(['tool-stack', 'proc-body', 'turn-text', 'turn-foot'])
     expect(wrapper.findAll('.think-text').map(b => b.text())).toEqual(['要查天气', '拿到结果了'])
   })
 
