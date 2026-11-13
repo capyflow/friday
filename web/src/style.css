@@ -1648,8 +1648,9 @@ html[data-theme="dark"] .ag-term.active { background: rgba(255,255,255,.09); col
   appearance: none; border: 1px solid var(--border); background: var(--bg-subtle);
   padding: 1px 7px; border-radius: 6px; font-size: 13px; cursor: pointer;
   font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--fg-2);
-  display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; vertical-align: bottom; text-align: left; }
+  /* 路径不截断：省略号会把最要紧的文件名吃掉，照抄不回去。宁可折行。 */
+  display: inline-block; max-width: 100%; overflow: visible; text-overflow: clip;
+  white-space: normal; overflow-wrap: anywhere; vertical-align: bottom; text-align: left; }
 .chat-md .file-chip:hover, .fp-md .file-chip:hover {
   border-color: var(--accent); color: var(--accent); background: var(--accent-subtle); }
 html[data-theme="dark"] .chat-md .file-chip, html[data-theme="dark"] .fp-md .file-chip {
@@ -1670,7 +1671,8 @@ html[data-theme="dark"] .fp-panel { background: #181818;
 .fp-meta { font-size: 11.5px; color: var(--faint-fg); font-variant-numeric: tabular-nums; }
 .fp-path { padding: 0 16px 10px; font-size: 11.5px; color: var(--muted-fg);
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* 同 file-chip：路径折行显示，不省略 */
+  overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere;
   border-bottom: 1px solid var(--border); }
 .fp-body { flex: 1; overflow: auto; padding: 14px 16px; }
 .fp-status { flex: 1; display: flex; align-items: center; justify-content: center;

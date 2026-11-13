@@ -117,7 +117,8 @@ function linkifyFileChips(html) {
     chip.type = 'button'
     chip.className = 'file-chip'
     chip.dataset.path = path
-    chip.title = '预览文件'
+    // 悬停显示完整路径（路径可能很长，但省略号吃掉的文件名最要紧）
+    chip.title = path
     chip.textContent = path
     code.replaceWith(chip)
     changed = true

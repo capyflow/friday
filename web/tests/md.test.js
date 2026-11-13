@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { joinFilePath, localFileHref, looksLikeFilePath, renderMD } from '../src/md.js'
 
 function render(source) {
@@ -105,6 +106,25 @@ describe('文件路径 chip', () => {
     const chip = quoted.querySelector('.file-chip')
     expect(chip.dataset.path).toBe('/tmp/" onclick="x".md')
     expectSafe(quoted)
+  })
+
+  // 超长路径必须完整可见：省略号吃掉的往往正是文件名，用户没法照抄。
+  it('超长路径完整显示，悬停提示也是全路径', () => {
+    const long = '/Users/aaron/com.yuni/distribution-worktrees/encryption-keystore/build/photos-release.zip'
+    const container = render('\u0060' + long + '\u0060', true)
+    const chip = container.querySelector('.file-chip')
+    expect(chip.textContent).toBe(long)
+    expect(chip.textContent).not.toContain('…')
+    expect(chip.title).toBe(long)
+  })
+
+  // 样式层守卫：路径 chip 一旦又设回 ellipsis/nowrap，路径就被截掉了。
+  it('file-chip 样式不再省略路径（折行显示）', () => {
+    const css = readFileSync('src/style.css', 'utf8')
+    const rule = css.match(/\.chat-md \.file-chip, \.fp-md \.file-chip \{[^}]*\}/)
+    expect(rule).not.toBeNull()
+    expect(rule[0]).not.toContain('text-overflow: ellipsis')
+    expect(rule[0]).not.toContain('white-space: nowrap')
   })
 
   function render(source, fileChips) {
