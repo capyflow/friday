@@ -1073,26 +1073,48 @@ describe('一轮进行中切换会话', () => {
     expect(timeline()).toContain('写到一半')
 
     await pickSession('第二件事')
-    // 切走：旧会话的订阅退订（连接关闭），但那一轮还在后台跑
-    expect(sock.closed).toBe(true)
+    // 切走：旧会话还有一轮在跑，订阅**保留**——收尾事件收不到的话，
+    // phase 永远停在 streaming，列表的「生成中」就再也不熄。
+    expect(sock.closed).toBe(false)
     expect(wrapper.get('.ag-item.active').text()).toContain('第二件事')
     expect(timeline()).toContain('另一个回答')
     expect(wrapper.find('.ag-gen').exists()).toBe(true) // 后台那轮在列表上标出来
 
-    // 后台增量只进它自己的缓冲，不串到当前会话的时间线
+    // 后台增量从原来那条连接进来，只进它自己的缓冲，不串到当前会话的时间线
+    sock.push({ turnId: turn.turnId, type: 'delta', delta: '继续写' })
+    await flushPromises()
     expect(timeline()).not.toContain('继续写')
 
     await pickSession('第一件事')
-    // 切回来重新订阅（新的一条连接）：服务端按 since 补发断线期间的事件
-    const again = esFor('th1')
-    expect(again).not.toBe(sock)
-    again.push({ turnId: turn.turnId, type: 'delta', delta: '继续写' })
-    await flushPromises()
+    // 切回来不需要重开连接：订阅一直没断，后台期间的增量已经在缓冲里
+    expect(esFor('th1')).toBe(sock)
     expect(timeline()).toContain('写到一半')
     expect(timeline()).toContain('继续写')
     expect(wrapper.get('[aria-label="停止本轮"]').exists()).toBe(true) // 仍是进行中
     expect(wrapper.find('.ag-gen').exists()).toBe(false) // 正在看的这个不占标记
     turn.close()
+  })
+
+  it('后台那一轮收尾后：「生成中」熄掉，替它保留的订阅也退掉', async () => {
+    await show()
+    const turn = await startTurn('跑着别停', 'th1')
+    const sock = esFor('th1')
+    turn.push({ type: 'turn.start' })
+    await flushPromises()
+    await pickSession('第二件事')
+    expect(sock.closed).toBe(false) // 在跑，订阅保留
+
+    // 后台收尾：turn.end 到达 → phase 归位、徽标熄掉；th1 不是当前会话，订阅退掉
+    // 服务端顺序是先把 state 归位再广播收尾帧（manager.sendTurn），照抄这个时序
+    data.threads.find(t => t.id === 'th1').state = 'idle'
+    turn.push({ type: 'turn.end', turn: { in: 10, out: 5 } })
+    await flushPromises()
+    expect(wrapper.find('.ag-gen').exists()).toBe(false)
+    expect(sock.closed).toBe(true)
+
+    // 切回去：已归位，不再显示进行中
+    await pickSession('第一件事')
+    expect(wrapper.find('[aria-label="停止本轮"]').exists()).toBe(false)
   })
 
   it('折叠的工作区也显示里面有几个会话在生成', async () => {

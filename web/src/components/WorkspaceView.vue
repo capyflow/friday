@@ -157,7 +157,7 @@ function stateOf(id) {
   return states[id]
 }
 function dropState(id) {  // 会话没了，事件流也要收掉——留着连接会在内核里积一条没人读的连接。
-  unsubscribeThread(id)
+  unsubscribeThread(id, true) // 状态要销毁了，别管还在不在生成，订阅必须退
   const st = states[id]
   if (!st) return
   // 缓冲里的对象 URL 用完即释放（含排着没发的图片）
@@ -198,8 +198,16 @@ const input = computed({
   get: () => (cur.value ? cur.value.draft : ''),
   set: v => { if (cur.value) cur.value.draft = v },
 })
-// 后台正在生成的会话（列表据此标"生成中"，不依赖只在轮末刷新的服务端状态）
-function generating(id) { return !!states[id] && states[id].phase === 'streaming' }
+// 后台正在生成的会话（列表据此标"生成中"）。本地 phase 是权威（事件流驱动、
+// 轮末精确归位）；服务端 state 是补充——手机端发起的轮本端没提交过也没订阅过，
+// 本地 phase 一直是 idle，不看服务端就会"明明还在跑却没有任何生成中标记"。
+// 服务端值只在 load() 时刷新，恰好每次轮末都会刷，够新。
+function generating(id) {
+  const st = states[id]
+  if (st && st.phase === 'streaming') return true
+  const t = threads.value.find(x => x.id === id)
+  return !!t && (t.state === 'running' || t.state === 'queued')
+}
 
 /* 会话能力（统一清单）：后端把 configOptions 与协议原生 models/modes 归一成
    Capability 列表（kind=model/thought_level/approval_mode/other），切换按
@@ -537,6 +545,21 @@ async function load() {
     // 别拿上一轮的旧值盖掉实时进度。
     for (const t of threads.value) {
       if (states[t.id] && states[t.id].phase !== 'streaming') syncCtx(t.id, t.contextUsed, t.contextSize)
+    }
+    // 状态对账：本地认为还在生成、服务端说已经不在跑的会话（轮末收尾事件彻底
+    // 丢了、内核重启把跑着的轮次吞了等），就地归位，免得「生成中」永远挂着、
+    // 点停止还拿着早已作废的 turnId。当前正看着的会话不对账——它的流还挂着，
+    // 归位交给它自己的收尾事件；而且刚提交的轮有几百毫秒的服务端状态窗口，
+    // 这时对账会把正在跑的轮误判成已结束。
+    for (const [tid, st] of Object.entries(states)) {
+      if (tid === currentId.value || st.phase !== 'streaming') continue
+      const t = threads.value.find(x => x.id === tid)
+      if (t && (t.state === 'running' || t.state === 'queued')) continue
+      st.phase = 'idle'
+      st.runningTurnId = ''
+      st.turnId = ''
+      dropTyping(st)
+      unsubscribeThread(tid, true)
     }
     if (!currentId.value && threads.value.length) select(threads.value[0].id)
     // 一个会话都没有时也要摊开一个工作区：否则左栏全是折叠行，"新建会话"没有落点
@@ -1120,6 +1143,14 @@ function scrollAfterRender() {
 // ownerId 当前查看的会话 id（事件回调里用它判断要不要滚）。
 function ownerId() { return currentId.value }
 
+// refreshThreadList 轮末重拉会话列表：标题是首轮开始时在服务端派生的，
+// 状态与更新时间也只存在服务端投影里——提交式改造后事件流只管时间线，
+// 不刷的话侧栏那条会一直停留在提交时的「新会话」。正看着的那条顺手
+// 记成已读，免得刚跑完的一轮给自己挂个未读点。
+function refreshThreadList(owner) {
+  load().then(() => { if (currentId.value === owner) markSeen(owner) })
+}
+
 /* ---------- 事件订阅（双端同步） ---------- */
 // 每个会话一条订阅（会话 key = acp:<threadID>）。打开会话时订阅，切走时退订，
 // 卸载组件时全部退掉——留着连接会在内核里积一条没人读的连接。
@@ -1165,6 +1196,9 @@ function onThreadEvent(tid, ev) {
     onStart: (bot, ev2) => {
       st.runningTurnId = ev2.turnId || ''
       st.phase = 'streaming'
+      // 轮一开始就刷一次列表：标题是服务端在轮开始时派生的，状态也要翻成
+      // running——手机端发起的轮，桌面侧栏这时才能标出「生成中」与新标题。
+      refreshThreadList(tid)
     },
     onEnd: (bot, ev2) => {
       st.phase = 'idle'
@@ -1173,6 +1207,9 @@ function onThreadEvent(tid, ev) {
       // 本轮了结：把队列里下一条放出去。不调的话排队消息永远卡住，
       // 只能手动去点「暂停/继续发送队列」。
       pumpQueue(tid)
+      refreshThreadList(tid)
+      // 后台会话的订阅只为等这一轮收尾：收到了就退掉，连接位还回去。
+      if (tid !== currentId.value) unsubscribeThread(tid)
       scrollAfterRender()
     },
     onError: (text, bot) => {
@@ -1183,6 +1220,8 @@ function onThreadEvent(tid, ev) {
         if (!bot.text) bot.text = text
         else bot.text += String.fromCharCode(10, 10) + text
       }
+      refreshThreadList(tid)
+      if (tid !== currentId.value) unsubscribeThread(tid)
       scrollAfterRender()
     },
     onCanceled: turnId => {
@@ -1191,6 +1230,8 @@ function onThreadEvent(tid, ev) {
         st.runningTurnId = ''
         st.phase = 'idle'
       }
+      refreshThreadList(tid)
+      if (tid !== currentId.value) unsubscribeThread(tid)
     },
     // 状态行就长在「输入中」气泡里（启动 agent / 重接会话 / 连接中断重试）。
     onStatus: text => { if (text && st.typing) st.typing.label = text },
@@ -1216,9 +1257,15 @@ function subscribeThread(tid) {
 }
 
 // unsubscribeThread 退订某会话的事件流。
-function unsubscribeThread(tid) {
+// 这一会话还有一轮在跑（phase=streaming）时**不退**：切走就退订的话，收尾
+// 事件收不到，st.phase 永远停在 streaming——侧栏的「生成中」就再也不熄。
+// 退订推迟到这一轮的收尾事件里做（onEnd/onError/onCanceled）；dropState 等
+// 销毁场景传 force 直接退。后台流最多也就并发生成的会话数那几条，不会压爆
+// 浏览器同源连接池。
+function unsubscribeThread(tid, force = false) {
   const sub = threadSubs.get(tid)
   if (!sub) return
+  if (!force && states[tid] && states[tid].phase === 'streaming') return
   sub.stop()
   threadSubs.delete(tid)
 }
