@@ -205,22 +205,12 @@ function cursorOn(bi) {
             </div>
           </div>
 
-          <!-- 成员工具叠：连续的调用在过程行里仍归成一叠，逐条可再展开 -->
-          <div v-else-if="sr.stack" class="tool-stack" :class="{ open: sr.items[0].gopen, 'is-fail': stackFails(sr.items) }">
-            <button class="tool-head" type="button" :aria-expanded="sr.items[0].gopen ? 'true' : 'false'"
-                    :title="stackTitle(sr.items[0], sr.items)" @click="sr.items[0].gopen = !sr.items[0].gopen">
-              <span class="step-ico" :class="stackState(sr.items)" aria-hidden="true">
-                <i v-if="stackState(sr.items) === 'run'" class="spin step-ring"></i>
-                <svg v-else-if="stackState(sr.items) === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/></svg>
-              </span>
-              <span class="step-name">{{ stackLabel(sr.items) }}</span>
-              <svg class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-            </button>
-            <div v-show="sr.items[0].gopen" class="tool-stack-body">
-              <ToolStep v-for="(b, k) in sr.items" :key="sr.keys[k]" :b="b" :own="ownTools" @toggle="b.open = !b.open" />
-            </div>
-          </div>
+          <!-- 成员工具调用：过程行外面已经汇总过「N 次工具调用」，里面不再
+               套一层「执行工具 N 次」的折叠——重复折叠两层，点开还是得再点一次。
+               每条调用平铺一行，逐条可再展开看参数与结果。 -->
+          <template v-else-if="sr.stack">
+            <ToolStep v-for="(b, k) in sr.items" :key="sr.keys[k]" :b="b" :own="ownTools" @toggle="b.open = !b.open" />
+          </template>
 
           <!-- 成员单次工具调用：容器已是包裹层，直接摆一行 -->
           <ToolStep v-else-if="sr.b.kind === 'tool'" :b="sr.b" :own="ownTools" @toggle="sr.b.open = !sr.b.open" />

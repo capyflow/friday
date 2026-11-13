@@ -61,13 +61,15 @@ describe('连续的思考与工具行并成一个过程行', () => {
     w.unmount()
   })
 
-  it('点摘要展开全程：思考行可看，工具叠可再展开；再点一次收起', async () => {
+  it('点摘要展开全程：思考行可看，工具调用逐条平铺；再点一次收起', async () => {
     const w = mountAttached([think('先想一步', '耗时 1.0s'), tool('c1', 'read_file'),
       think('再想一步'), tool('c2', 'web_search'), tool('c3', 'web_search')])
     await w.get('.proc > .tool-head').trigger('click')
     expect(w.get('.think-head').isVisible()).toBe(true)
-    // 叠的口径在过程行里照旧：连续工具仍是「执行工具 N 次」
-    expect(w.get('.proc-body .tool-stack > .tool-head').text()).toContain('执行工具 2 次')
+    // 过程行外面已经汇总过「N 次工具调用」，里面不再套一层折叠：
+    // 每条调用一行，逐条可再展开看参数与结果
+    expect(w.findAll('.proc-body .tool')).toHaveLength(3)
+    expect(w.find('.proc-body .tool-stack').exists()).toBe(false)
     await w.get('.proc > .tool-head').trigger('click')
     expect(w.get('.think-head').isVisible()).toBe(false)
     w.unmount()
