@@ -157,3 +157,38 @@ func TestTemplateWithPath(t *testing.T) {
 		t.Fatalf("未探测到路径且解析失败时应保留模板命令，实际 %q", got.Command)
 	}
 }
+
+// scoped 包不能直接 npx <包名>：npx 会去找一个名字带斜杠的命令，报
+// "sh: @scope/name: No such file or directory"。目录里凡是 scoped 的 npx 条目，
+// 都必须用 npx -p <包> <bin> 显式点名包里的 bin。
+func TestCatalogScopedNpxEntriesUseBinForm(t *testing.T) {
+	for _, e := range catalog {
+		if e.Template.Command != "npx" {
+			continue
+		}
+		args := e.Template.Args
+		scoped := ""
+		for _, a := range args {
+			if strings.HasPrefix(a, "@") {
+				scoped = a
+				break
+			}
+		}
+		if scoped == "" {
+			continue // 非 scoped 包（claude-code-acp 那种）不受这条约束
+		}
+		hasP := false
+		for _, a := range args {
+			if a == "-p" || a == "--package" {
+				hasP = true
+			}
+		}
+		if !hasP {
+			t.Fatalf("%s 用的是 scoped 包 %s，必须写成 npx -p <包> <bin>：%v", e.ID, scoped, args)
+		}
+		last := args[len(args)-1]
+		if strings.HasPrefix(last, "@") || strings.HasPrefix(last, "-") {
+			t.Fatalf("%s 的最后一段应是包里的 bin 名，实际 %q：%v", e.ID, last, args)
+		}
+	}
+}

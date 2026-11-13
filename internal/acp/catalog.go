@@ -54,8 +54,12 @@ var catalog = []CatalogEntry{
 		Check:       "codex",
 		InstallCmd:  "npm install -g @openai/codex @agentclientprotocol/codex-acp",
 		DocURL:      "https://github.com/openai/codex",
+		// 启动命令用 npx -p <包> <bin>：scoped 包不能直接 npx <包名>——
+		// 那样 npx 会去找一个名字带斜杠的命令（sh: @agentclientprotocol/codex-acp:
+		// No such file or directory），必须显式点名包里的 bin（codex-acp）。
 		Template: config.AcpAgentConfig{
-			Name: "codex", Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp"},
+			Name: "codex", Command: "npx",
+			Args: []string{"-y", "-p", "@agentclientprotocol/codex-acp", "codex-acp"},
 		},
 	},
 	{
@@ -76,8 +80,10 @@ var catalog = []CatalogEntry{
 		Check:       "claude",
 		InstallCmd:  "npm install -g @anthropic-ai/claude-code @zed-industries/claude-code-acp",
 		DocURL:      "https://github.com/anthropics/claude-code",
+		// 同 codex：scoped 包要用 npx -p <包> <bin> 显式点名 bin。
 		Template: config.AcpAgentConfig{
-			Name: "claude", Command: "npx", Args: []string{"-y", "@zed-industries/claude-code-acp"},
+			Name: "claude", Command: "npx",
+			Args: []string{"-y", "-p", "@zed-industries/claude-code-acp", "claude-code-acp"},
 		},
 	},
 	{
