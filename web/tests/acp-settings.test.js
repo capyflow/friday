@@ -297,6 +297,37 @@ describe('设置 → 智能体 → 认证', () => {
     })
   })
 
+  // codebuddy 这类 agent 不声明 env_var 认证方式，只认环境变量/CLI 登录：
+  // 面板必须给出推荐变量的输入框，否则人根本没有地方填凭据。
+  it('推荐的环境变量能直接填进这台 agent（codebuddy 这类）', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: false, agents: [
+        { name: 'codebuddy-code', command: 'npx' },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url.startsWith('/api/acp/auth?agent=')) return { status: {
+        agent: 'codebuddy-code', state: 'unknown', message: 'agent 没有回应认证请求',
+        hint: '网页端登录不算 CLI 的凭据', command: 'codebuddy',
+        suggestedVars: ['CODEBUDDY_API_KEY', 'CODEBUDDY_AUTH_TOKEN'],
+        methods: [],
+      } }
+      if (method === 'POST' && url === '/api/acp/auth') return { result: { state: 'logged_in', message: '凭据已保存' } }
+      return { message: '已保存' }
+    })
+    await show()
+    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    await flushPromises()
+    const inputs = wrapper.findAll('.acp-auth-vars input')
+    expect(inputs).toHaveLength(2)
+    await inputs[0].setValue('cb-xxxx')
+    await wrapper.findAll('.acp-auth-acts button').find(b => b.text() === '保存凭据').trigger('click')
+    await flushPromises()
+    const call = api.mock.calls.find(([m, u]) => m === 'POST' && u === '/api/acp/auth')
+    expect(call[2]).toMatchObject({
+      name: 'codebuddy-code', methodId: '', vars: { CODEBUDDY_API_KEY: 'cb-xxxx' },
+    })
+  })
+
   it('「在终端里登录」把命令交给终端页去跑', async () => {
     const panel = await openAuthPanel()
     await panel.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')

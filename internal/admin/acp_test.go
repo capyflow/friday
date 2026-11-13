@@ -762,4 +762,20 @@ func TestAcpAuthEndpoints(t *testing.T) {
 	if !strings.Contains(string(saved), "OPENAI_API_KEY") || !strings.Contains(string(saved), "sk-test") {
 		t.Fatalf("密钥应落进 config.yaml:\n%s", saved)
 	}
+
+	// 只存凭据不做认证（agent 没声明认证方式时，人自己填环境变量就够了）：
+	// methodId 传空 → 不调 authenticate，只落盘。
+	code, body = acpCall(t, handler, token, http.MethodPost, "/api/acp/auth", map[string]any{
+		"name": "fake", "methodId": "", "vars": map[string]string{"CODEBUDDY_API_KEY": "cb-only"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("只存凭据应成功: %d %v", code, body)
+	}
+	saved, err = os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "cb-only") {
+		t.Fatalf("凭据应落进 config.yaml:\n%s", saved)
+	}
 }

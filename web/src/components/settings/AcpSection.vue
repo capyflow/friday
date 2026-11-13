@@ -274,6 +274,28 @@ async function probeAuth(a) {
   } finally { p.loading = false }
 }
 
+// saveVars 只把填好的环境变量交给后端落进 config.yaml（不做认证动作）：
+// agent 没声明 env_var 认证方式时（如 codebuddy），这是唯一能落地的入口——
+// 它的凭据只认环境变量或 CLI 交互登录。
+async function saveVars(a) {
+  const p = authOf(a.name)
+  const vars = {}
+  for (const [k, v] of Object.entries(p.vars || {})) {
+    if (String(v || '').trim()) vars[k] = String(v).trim()
+  }
+  if (!Object.keys(vars).length) { p.err = '先填一个值再保存'; return }
+  p.busy = '__vars__'
+  p.err = ''
+  try {
+    const r = await api('POST', '/api/acp/auth', { name: a.name, methodId: '', vars })
+    p.message = (r.result && r.result.message) || '凭据已保存'
+    const st = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name))
+    p.status = st.status || null
+  } catch (e) {
+    p.err = e.message
+  } finally { p.busy = '' }
+}
+
 // runAuth 执行一次认证。env_var 型先把用户填的变量交给后端落进 config.yaml
 // （填完不落盘 = 下次拉起进程时凭据不在，等于没填）。
 async function runAuth(a, m) {
@@ -564,6 +586,19 @@ onMounted(load)
           </div>
           <p v-if="authOf(a.name).status?.creds?.length" class="meta">
             凭据文件：{{ authOf(a.name).status.creds.join('、') }}</p>
+          <!-- 推荐的环境变量：agent 不声明 env_var 认证方式时（如 codebuddy），
+               这是唯一能落地的入口——填进去落到该 agent 的环境变量里。 -->
+          <div v-if="authOf(a.name).status?.suggestedVars?.length" class="acp-auth-vars">
+            <label v-for="v in authOf(a.name).status.suggestedVars" :key="v">
+              <span>{{ v }}</span>
+              <input v-model="authOf(a.name).vars[v]" type="password" :placeholder="v" autocomplete="off">
+            </label>
+            <div class="acp-auth-acts">
+              <button class="btn sm primary" type="button" :disabled="authOf(a.name).busy === '__vars__'"
+                      @click="saveVars(a)">
+                {{ authOf(a.name).busy === '__vars__' ? '保存中…' : '保存凭据' }}</button>
+            </div>
+          </div>
           <div v-for="m in authOf(a.name).status?.methods || []" :key="m.id" class="acp-auth-method">
             <div class="acp-auth-method-head">
               <b>{{ m.name }}</b>

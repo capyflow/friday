@@ -1110,6 +1110,13 @@ func (s *Server) handleAcpAuth(ctx *vhttp.Context) error {
 		// 凭据变了：回收该 agent 的存活进程（配置变了就该重起），下次拉起带新环境变量。
 		s.acp.Reload(s.cfg.Snapshot().Acp)
 	}
+	// methodId 为空 = 只存凭据不做认证（agent 没声明认证方式时，人自己填
+	// 环境变量就够了，不必再调一次 authenticate）。
+	if strings.TrimSpace(req.MethodID) == "" {
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{
+			"result": acp.AuthResult{State: acp.AuthStateLoggedIn, Message: "凭据已保存到该 agent 的环境变量（下次拉起进程时生效）"},
+		})
+	}
 	res, err := s.acp.Authenticate(ctx.Context(), name, strings.TrimSpace(req.MethodID), req.Vars)
 	if err != nil {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})

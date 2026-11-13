@@ -351,7 +351,51 @@ func TestLoginGuideForCodebuddy(t *testing.T) {
 	if g.command != "codebuddy" {
 		t.Fatalf("codebuddy 的登录命令应是 codebuddy，实际 %q", g.command)
 	}
-	if !strings.Contains(g.hint, "iOA") {
-		t.Fatalf("指引里应说明有哪几种登录方式，实际 %q", g.hint)
+	if !strings.Contains(g.hint, "网页端登录") {
+		t.Fatalf("指引里应点明网页端登录不等于 CLI 凭据，实际 %q", g.hint)
+	}
+	if len(g.vars) == 0 || g.vars[0] != "CODEBUDDY_API_KEY" {
+		t.Fatalf("应推荐 CODEBUDDY_API_KEY 作为凭据入口，实际 %+v", g.vars)
+	}
+}
+
+// agent 不声明 env_var 认证方式时，推荐的环境变量就是唯一能落地的入口：
+// 填进该 agent 的环境变量就算配好了（codebuddy 只认这个）。
+func TestAuthStatusSuggestedVarsFilledMeansConfigured(t *testing.T) {
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codebuddy-code", Command: "npx", Env: map[string]string{
+			"CODEBUDDY_API_KEY": "cb-xxxx",
+		}},
+	}}
+	f := &fakeAgent{}
+	m := newTestManager(t, &cfg, nil, f)
+	st, err := m.AuthStatus(context.Background(), "codebuddy-code")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	if st.State != AuthStateLoggedIn {
+		t.Fatalf("配了推荐变量应判为已登录，实际 %q（%s）", st.State, st.Message)
+	}
+	if !strings.Contains(st.Message, "CODEBUDDY_API_KEY") {
+		t.Fatalf("应说明配了哪个变量，实际 %q", st.Message)
+	}
+	if len(st.SuggestedVars) == 0 || st.SuggestedVars[0] != "CODEBUDDY_API_KEY" {
+		t.Fatalf("应把推荐变量回给界面，实际 %+v", st.SuggestedVars)
+	}
+}
+
+// 没填推荐变量时不能凭空说已登录。
+func TestAuthStatusSuggestedVarsEmptyStaysUnknown(t *testing.T) {
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codebuddy-code", Command: "npx"},
+	}}
+	f := &fakeAgent{}
+	m := newTestManager(t, &cfg, nil, f)
+	st, err := m.AuthStatus(context.Background(), "codebuddy-code")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	if st.State == AuthStateLoggedIn {
+		t.Fatalf("没填凭据不该判为已登录，实际 %q（%s）", st.State, st.Message)
 	}
 }

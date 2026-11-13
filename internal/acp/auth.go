@@ -86,6 +86,9 @@ type AuthStatus struct {
 	Hint    string           `json:"hint,omitempty"`
 	Command string           `json:"command,omitempty"`
 	Creds   []string         `json:"creds,omitempty"`
+	// SuggestedVars 是这台 agent 推荐的环境变量名（agent 没声明 env_var
+	// 认证方式时的兜底入口：填进去落到 acp.agents[].env，随进程注入）。
+	SuggestedVars []string `json:"suggestedVars,omitempty"`
 }
 
 // AuthResult 是一次认证动作的结果。
@@ -94,25 +97,32 @@ type AuthResult struct {
 	Message string `json:"message"`
 }
 
-// loginGuide 是某个 agent 的登录指引：一句人话 + 一条可直接执行的命令。
+// loginGuide 是某个 agent 的登录指引：一句人话 + 一条可直接执行的命令 +
+// 推荐的环境变量名。
 type loginGuide struct {
 	hint    string
 	command string
+	// vars 是这台 agent 认的环境变量名（agent 没声明 env_var 认证方式时的
+	// 兜底入口：填进去落到 acp.agents[].env，随进程注入）。
+	vars []string
 }
 
 // loginGuides 是按 agent 名的登录指引（命令优先用配置名，其次用命令基名兜底）。
 // 凭据都在 HOME 下（C13），无 TTY 的服务端最容易断在这里。
 var loginGuides = map[string]loginGuide{
-	"codex":    {"在终端运行 `codex login` 完成 ChatGPT 登录", "codex login"},
-	"claude":   {"在终端运行 `claude` 并执行 /login，或在环境变量里配 ANTHROPIC_API_KEY", "claude"},
-	"gemini":   {"在终端运行一次 `gemini` 完成 Google 登录，或在环境变量里配 GEMINI_API_KEY", "gemini"},
-	"opencode": {"在终端运行 `opencode auth login` 配置模型渠道", "opencode auth login"},
-	"zcode":    {"复用 ~/.zcode 登录态；缺失时在终端运行 `zcode` 登录一次", "zcode"},
+	"codex":    {hint: "在终端运行 `codex login` 完成 ChatGPT 登录", command: "codex login"},
+	"claude":   {hint: "在终端运行 `claude` 并执行 /login，或在环境变量里配 ANTHROPIC_API_KEY", command: "claude", vars: []string{"ANTHROPIC_API_KEY"}},
+	"gemini":   {hint: "在终端运行一次 `gemini` 完成 Google 登录，或在环境变量里配 GEMINI_API_KEY", command: "gemini", vars: []string{"GEMINI_API_KEY"}},
+	"opencode": {hint: "在终端运行 `opencode auth login` 配置模型渠道", command: "opencode auth login"},
+	"zcode":    {hint: "复用 ~/.zcode 登录态；缺失时在终端运行 `zcode` 登录一次", command: "zcode"},
 	// codebuddy 声明了四种登录方式（iOA / Google-Github / 微信 / 企业域），
-	// 由 agent 自己的 authenticate 处理；凭据不在文件里（大概在钥匙串），
-	// 所以本地探测不出登录态，只能问它。
-	"codebuddy":      {"用面板里的认证方式登录（iOA / Google-Github / 微信 / 企业域），或在终端运行 `codebuddy` 后按提示登录", "codebuddy"},
-	"codebuddy-code": {"用面板里的认证方式登录（iOA / Google-Github / 微信 / 企业域），或在终端运行 `codebuddy` 后按提示登录", "codebuddy"},
+	// 由 agent 自己的 authenticate 处理；但它只认三种凭据：环境变量里的
+	// CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN、settings.json 里的
+	// apiKeyHelper，或 CLI 交互登录（凭据进 macOS 钥匙串）。**网页端登录它
+	// 读不到**——网页的登录态不是 CLI 的凭据。所以这里把两种环境变量直接
+	// 推荐出来，让人填进 agent 的环境变量里。
+	"codebuddy":      {hint: "网页端登录不算 CLI 的凭据：给这台 agent 配一个 API Key（下面填），或在终端运行 `codebuddy` 按提示登录（凭据存进 macOS 钥匙串）", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}},
+	"codebuddy-code": {hint: "网页端登录不算 CLI 的凭据：给这台 agent 配一个 API Key（下面填），或在终端运行 `codebuddy` 按提示登录（凭据存进 macOS 钥匙串）", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}},
 }
 
 // loginGuideFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
@@ -176,11 +186,12 @@ func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, erro
 	guide := loginGuideFor(agentCfg)
 	st.Hint = guide.hint
 	st.Command = guide.command
+	st.SuggestedVars = guide.vars
 	st.Creds = probeCredFiles(agentCfg)
 
 	err := m.withProbe(agentCfg, func(proc *agentProc) error {
 		st.Methods = authMethodViews(proc.authMethods)
-		st.State, st.Message = probeLoginState(ctx, proc, agentCfg, st.Creds)
+		st.State, st.Message = probeLoginState(ctx, proc, agentCfg, st.Creds, guide.vars)
 		return nil
 	})
 	if err != nil {
@@ -228,7 +239,7 @@ func (m *Manager) withProbe(agentCfg config.AcpAgentConfig, fn func(*agentProc) 
 // 可能阻塞（等浏览器里点确认）甚至当场拉起登录流程，探测阶段不该有副作用；
 // 而且声明了多个方式的 agent（codebuddy 有 iOA / Google / 微信 / 企业域四个）
 // 逐个调一遍既慢又多半失败。最后才用 authenticate 兜底判定。
-func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAgentConfig, creds []string) (string, string) {
+func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAgentConfig, creds []string, suggested []string) (string, string) {
 	methods := normalizeAuthMethods(proc.authMethods)
 	// 环境变量型：配置里已经填了这些变量就算配好了。
 	for _, am := range methods {
@@ -238,6 +249,10 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 		if len(missingEnvVars(agentCfg, am.raw.EnvVar.Vars)) == 0 {
 			return AuthStateLoggedIn, "已配置 " + envVarNames(am.raw.EnvVar.Vars)
 		}
+	}
+	// 推荐的环境变量填了就算配好了（codebuddy 这类只认环境变量的 agent）。
+	if names := filledEnvVars(agentCfg, suggested); len(names) > 0 {
+		return AuthStateLoggedIn, "已配置 " + strings.Join(names, "、")
 	}
 	// 没声明认证方式的老 CLI：凭据落在 HOME 下（ACP 不管凭据这件事）。
 	if len(creds) > 0 {
@@ -474,6 +489,17 @@ func envVarNames(vars []acp.AuthEnvVar) string {
 		names = append(names, v.Name)
 	}
 	return strings.Join(names, "、")
+}
+
+// filledEnvVars 列出这些环境变量里已经填了值的（空的当没填）。
+func filledEnvVars(cfg config.AcpAgentConfig, names []string) []string {
+	var out []string
+	for _, n := range names {
+		if strings.TrimSpace(cfg.Env[n]) != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // configuredKeyVars 列出配置里已填的密钥类环境变量（结尾是 _API_KEY / _TOKEN）。
