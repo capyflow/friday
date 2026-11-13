@@ -579,6 +579,8 @@ onMounted(load)
           <p v-if="authOf(a.name).err" class="acp-auth-err">{{ authOf(a.name).err }}</p>
           <p v-if="authOf(a.name).message" class="acp-auth-msg">{{ authOf(a.name).message }}</p>
           <p v-if="authOf(a.name).status?.hint" class="meta acp-auth-hint">{{ authOf(a.name).status.hint }}</p>
+          <a v-if="authOf(a.name).status?.link" class="acp-auth-link"
+             :href="authOf(a.name).status.link" target="_blank" rel="noreferrer">去获取凭据（API Key）↗</a>
           <div v-if="authOf(a.name).status?.command" class="acp-auth-cmd">
             <code class="mono">{{ authOf(a.name).status.command }}</code>
             <button class="btn sm" type="button" @click="copyCmd(authOf(a.name).status.command)">复制</button>
@@ -742,6 +744,8 @@ onMounted(load)
 .acp-auth-err { margin: 0; font-size: 12px; color: #D97706; }
 .acp-auth-msg { margin: 0; font-size: 12px; color: var(--fg); }
 .acp-auth-hint { margin: 0; }
+.acp-auth-link { align-self: flex-start; font-size: 12px; color: var(--accent, #2563eb); text-decoration: none; }
+.acp-auth-link:hover { text-decoration: underline; }
 .acp-auth-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .acp-auth-cmd code { font-size: 12px; padding: 3px 8px; border-radius: 6px;
                      border: 1px solid var(--border); background: var(--bg); }

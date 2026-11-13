@@ -101,6 +101,8 @@ type fakeAgent struct {
 	// authSilent 是「哪些 methodId 的 authenticate 不回应」——模拟 agent 收下请求
 	// 却不吭声（codebuddy 就是这样，它在等人完成登录）。
 	authSilent map[string]bool
+	// authRequired=true 时 session/new 回 "Authentication required"（未登录）。
+	authRequired bool
 	// authCalls 记录收到的 authenticate methodId。
 	authCalls []string
 
@@ -331,6 +333,10 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			}
 		case "session/new":
 			f.record(&f.newReq, msg.Params)
+			if f.authRequired {
+				fc.w.respondErr(msg.ID, "Authentication required")
+				break
+			}
 			if f.newSessionHang > 0 {
 				time.Sleep(f.newSessionHang) // 模拟 opencode 首启列 skill 表那种慢
 			}

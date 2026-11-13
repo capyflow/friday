@@ -46,6 +46,8 @@ const (
 	// maxAuthProbeMethods 是探测时最多试几个认证方式。声明了多个方式的 agent
 	// （codebuddy 有四个）逐个试一遍既慢又多半失败，试前几个够定性了。
 	maxAuthProbeMethods = 3
+	// sessionProbeTimeout 是「建一次会话」试探的等待上限。
+	sessionProbeTimeout = 25 * time.Second
 	// authActionTimeout 是用户主动点「认证」时的等待上限。ACP 的 authenticate
 	// 通常是同步的（agent 自己开浏览器，URL 放在 _meta 里，客户端去开），
 	// 等更久没有意义——真要等用户操作的，agent 也不会吭声，那种情况留给
@@ -89,6 +91,8 @@ type AuthStatus struct {
 	// SuggestedVars 是这台 agent 推荐的环境变量名（agent 没声明 env_var
 	// 认证方式时的兜底入口：填进去落到 acp.agents[].env，随进程注入）。
 	SuggestedVars []string `json:"suggestedVars,omitempty"`
+	// Link 是取凭据的地址（API Key 管理页等），面板里给一个直达链接。
+	Link string `json:"link,omitempty"`
 }
 
 // AuthResult 是一次认证动作的结果。
@@ -105,14 +109,16 @@ type loginGuide struct {
 	// vars 是这台 agent 认的环境变量名（agent 没声明 env_var 认证方式时的
 	// 兜底入口：填进去落到 acp.agents[].env，随进程注入）。
 	vars []string
+	// link 是取凭据的地址（如 API Key 管理页），面板里给一个直达链接。
+	link string
 }
 
 // loginGuides 是按 agent 名的登录指引（命令优先用配置名，其次用命令基名兜底）。
 // 凭据都在 HOME 下（C13），无 TTY 的服务端最容易断在这里。
 var loginGuides = map[string]loginGuide{
-	"codex":    {hint: "在终端运行 `codex login` 完成 ChatGPT 登录", command: "codex login"},
-	"claude":   {hint: "在终端运行 `claude` 并执行 /login，或在环境变量里配 ANTHROPIC_API_KEY", command: "claude", vars: []string{"ANTHROPIC_API_KEY"}},
-	"gemini":   {hint: "在终端运行一次 `gemini` 完成 Google 登录，或在环境变量里配 GEMINI_API_KEY", command: "gemini", vars: []string{"GEMINI_API_KEY"}},
+	"codex":    {hint: "在终端运行 `codex login` 完成 ChatGPT 登录", command: "codex login", link: "https://chatgpt.com/codex/settings"},
+	"claude":   {hint: "在终端运行 `claude` 并执行 /login，或在环境变量里配 ANTHROPIC_API_KEY", command: "claude", vars: []string{"ANTHROPIC_API_KEY"}, link: "https://console.anthropic.com/settings/keys"},
+	"gemini":   {hint: "在终端运行一次 `gemini` 完成 Google 登录，或在环境变量里配 GEMINI_API_KEY", command: "gemini", vars: []string{"GEMINI_API_KEY"}, link: "https://aistudio.google.com/apikey"},
 	"opencode": {hint: "在终端运行 `opencode auth login` 配置模型渠道", command: "opencode auth login"},
 	"zcode":    {hint: "复用 ~/.zcode 登录态；缺失时在终端运行 `zcode` 登录一次", command: "zcode"},
 	// codebuddy 声明了四种登录方式（iOA / Google-Github / 微信 / 企业域），
@@ -121,8 +127,8 @@ var loginGuides = map[string]loginGuide{
 	// apiKeyHelper，或 CLI 交互登录（凭据进 macOS 钥匙串）。**网页端登录它
 	// 读不到**——网页的登录态不是 CLI 的凭据。所以这里把两种环境变量直接
 	// 推荐出来，让人填进 agent 的环境变量里。
-	"codebuddy":      {hint: "网页端登录不算 CLI 的凭据：给这台 agent 配一个 API Key（下面填），或在终端运行 `codebuddy` 按提示登录（凭据存进 macOS 钥匙串）", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}},
-	"codebuddy-code": {hint: "网页端登录不算 CLI 的凭据：给这台 agent 配一个 API Key（下面填），或在终端运行 `codebuddy` 按提示登录（凭据存进 macOS 钥匙串）", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}},
+	"codebuddy":      {hint: "网页端登录不算 CLI 的凭据：终端里跑 `codebuddy` 后用 /login 走浏览器授权（凭据进 macOS 钥匙串），或把 API Key 填在下面", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
+	"codebuddy-code": {hint: "网页端登录不算 CLI 的凭据：终端里跑 `codebuddy` 后用 /login 走浏览器授权（凭据进 macOS 钥匙串），或把 API Key 填在下面", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
 }
 
 // loginGuideFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
@@ -187,6 +193,7 @@ func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, erro
 	st.Hint = guide.hint
 	st.Command = guide.command
 	st.SuggestedVars = guide.vars
+	st.Link = guide.link
 	st.Creds = probeCredFiles(agentCfg)
 
 	err := m.withProbe(agentCfg, func(proc *agentProc) error {
@@ -289,6 +296,12 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 		}
 		lastErr = err.Error()
 	}
+	// authenticate 没给出结论，就用「建一次会话」再问一遍——这是最硬的证据：
+	// 能建出会话说明凭据真的可用。codebuddy 这类把凭据放钥匙串的 agent 读不到
+	// 文件，但建会话时它自己会用（实测未登录时它回 Authentication required）。
+	if state, msg, ok := probeSession(ctx, proc); ok {
+		return state, msg
+	}
 	if lastErr != "" {
 		return AuthStateLoggedOut, "未登录：" + lastErr
 	}
@@ -299,6 +312,27 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 		return AuthStateUnknown, "该 agent 没有声明认证方式，无法自动判定登录态（可按下方指引在终端里登录一次）"
 	}
 	return AuthStateLoggedOut, "尚未登录"
+}
+
+// probeSession 用「建一次会话」问 agent 自己登录态：能建出会话 = 凭据可用；
+// 报鉴权错 = 没登录；其它错误（建会话本身的问题）不算结论。
+//
+// 这是最可靠的一招：凭据放钥匙串里的 agent（codebuddy）读不到文件，但真要
+// 建会话它必须自己有凭据——所以 agent 的回答就是权威答案。
+func probeSession(ctx context.Context, proc *agentProc) (string, string, bool) {
+	sctx, cancel := context.WithTimeout(ctx, sessionProbeTimeout)
+	defer cancel()
+	_, err := proc.conn.NewSession(sctx, acp.NewSessionRequest{
+		Cwd:        os.TempDir(),
+		McpServers: []acp.McpServer{},
+	})
+	if err == nil {
+		return AuthStateLoggedIn, "已登录：agent 能正常建立会话（凭据可用）", true
+	}
+	if looksLikeAuthProblem(err.Error()) {
+		return AuthStateLoggedOut, "未登录：" + err.Error(), true
+	}
+	return "", "", false
 }
 
 // Authenticate 按 agent 声明的方式做一次认证。env 是本次注入的环境变量

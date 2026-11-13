@@ -255,7 +255,8 @@ func loginHintFor(cfg config.AcpAgentConfig) string {
 // authKeywords：stderr/错误文本命中即提示「疑似未登录」。
 var authKeywords = []string{
 	"login", "log in", "sign in", "signin", "401", "unauthorized", "unauthorised",
-	"api key", "apikey", "not authenticated", "not logged in", "认证", "未登录",
+	"api key", "apikey", "not authenticated", "not logged in", "authentication required",
+	"authentication", "认证", "未登录",
 }
 
 func looksLikeAuthProblem(texts ...string) bool {

@@ -45,6 +45,7 @@ func TestAuthStatusLoggedInWhenAuthenticateSucceeds(t *testing.T) {
 	}
 }
 
+// authenticate 失败但建会话能成 = 凭据其实可用，以建会话为准。
 func TestAuthStatusLoggedOutWhenAuthenticateFails(t *testing.T) {
 	f := &fakeAgent{
 		authMethods: []map[string]any{{"id": "login", "name": "登录", "type": "agent"}},
@@ -54,23 +55,36 @@ func TestAuthStatusLoggedOutWhenAuthenticateFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuthStatus 失败: %v", err)
 	}
-	if st.State != AuthStateLoggedOut {
-		t.Fatalf("应判为未登录，实际 %q（%s）", st.State, st.Message)
-	}
-	if !strings.Contains(st.Message, "未登录") {
-		t.Fatalf("应说明未登录，实际 %q", st.Message)
+	if st.State != AuthStateLoggedIn {
+		t.Fatalf("能建会话应判为已登录，实际 %q（%s）", st.State, st.Message)
 	}
 }
 
-func TestAuthStatusUnknownWhenAgentDeclaresNothing(t *testing.T) {
-	f := &fakeAgent{}
+// 建会话报 Authentication required —— agent 自己说没登录，这是权威答案。
+func TestAuthStatusLoggedOutWhenSessionNeedsAuth(t *testing.T) {
+	f := &fakeAgent{authRequired: true}
 	m := authTestManager(t, f)
 	st, err := m.AuthStatus(context.Background(), "fake")
 	if err != nil {
 		t.Fatalf("AuthStatus 失败: %v", err)
 	}
-	if st.State != AuthStateUnknown {
-		t.Fatalf("没声明认证方式时应判为未知，实际 %q", st.State)
+	if st.State != AuthStateLoggedOut {
+		t.Fatalf("建会话报鉴权错应判为未登录，实际 %q（%s）", st.State, st.Message)
+	}
+	if !strings.Contains(st.Message, "Authentication required") {
+		t.Fatalf("应把 agent 的原话带回来，实际 %q", st.Message)
+	}
+}
+
+func TestAuthStatusUnknownWhenAgentDeclaresNothing(t *testing.T) {
+	f := &fakeAgent{authRequired: true}
+	m := authTestManager(t, f)
+	st, err := m.AuthStatus(context.Background(), "fake")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	if st.State != AuthStateLoggedOut {
+		t.Fatalf("建会话报鉴权错应判为未登录，实际 %q（%s）", st.State, st.Message)
 	}
 }
 
@@ -313,8 +327,8 @@ func TestAuthStatusUnknownWhenAgentDoesNotAnswerAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuthStatus 失败: %v", err)
 	}
-	if st.State != AuthStateUnknown {
-		t.Fatalf("agent 不回应时应判为未知，实际 %q（%s）", st.State, st.Message)
+	if st.State != AuthStateLoggedIn {
+		t.Fatalf("能建会话应判为已登录，实际 %q（%s）", st.State, st.Message)
 	}
 }
 
@@ -389,7 +403,7 @@ func TestAuthStatusSuggestedVarsEmptyStaysUnknown(t *testing.T) {
 	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
 		{Name: "codebuddy-code", Command: "npx"},
 	}}
-	f := &fakeAgent{}
+	f := &fakeAgent{authRequired: true}
 	m := newTestManager(t, &cfg, nil, f)
 	st, err := m.AuthStatus(context.Background(), "codebuddy-code")
 	if err != nil {
