@@ -61,6 +61,11 @@ type turnSink struct {
 	toolInput  map[string]string // toolCallId → 最近参数（args；codebuddy 在进度 update 里才给）
 	toolOutput map[string]string // toolCallId → 最近输出（content/rawOutput，可能只在进度里给）
 
+	// 投影留档：这一轮的时间线块（思考/工具/正文）。实时时间线只经事件总线推给
+	// 前端，进程一重启就没了；留一份在投影里，重启后按它还原（见 blocks.go）。
+	blocksLog    []Block        // 按到达顺序的时间线块
+	toolBlockIdx map[string]int // toolCallId → blocksLog 下标（同 id 的收尾原地更新）
+
 	used         int     // 最近一次 usage_update：当前上下文占用（M-5）
 	size         int     // 窗口总量
 	costAmount   float64 // 会话累计花费（agent 自报，仅展示——C10 纪律：不进预算）
@@ -95,7 +100,7 @@ func (s *turnSink) context() (used, size int, costAmount float64, costCurrency s
 func newTurnSink(hooks TurnHooks, agent string) *turnSink {
 	s := &turnSink{hooks: hooks, startedAt: time.Now(), caps: usageCapsFor(agent),
 		toolTitles: map[string]string{}, toolStatus: map[string]string{}, toolDetail: map[string]string{},
-		toolInput: map[string]string{}, toolOutput: map[string]string{}}
+		toolInput: map[string]string{}, toolOutput: map[string]string{}, toolBlockIdx: map[string]int{}}
 	s.quiet.Store(true)
 	return s
 }
@@ -110,12 +115,12 @@ func (s *turnSink) handle(n acp.SessionNotification) {
 		if txt := blockText(u.AgentMessageChunk.Content); txt != "" {
 			s.all.WriteString(txt)
 			s.text.WriteString(txt)
-			s.maybeFlush(&s.text, &s.textAt, s.hooks.OnText)
+			s.maybeFlush(BlockText, &s.text, &s.textAt, s.hooks.OnText)
 		}
 	case u.AgentThoughtChunk != nil:
 		if txt := blockText(u.AgentThoughtChunk.Content); txt != "" {
 			s.thought.WriteString(txt)
-			s.maybeFlush(&s.thought, &s.thoughtAt, s.hooks.OnThought)
+			s.maybeFlush(BlockThink, &s.thought, &s.thoughtAt, s.hooks.OnThought)
 		}
 	case u.ToolCall != nil:
 		id := string(u.ToolCall.ToolCallId)
@@ -280,12 +285,12 @@ func metaInt(m map[string]any, keys ...string) int64 {
 func (s *turnSink) flushNow() {
 	now := time.Now()
 	if s.text.Len() > 0 {
-		s.emit(s.text.String(), s.hooks.OnText)
+		s.emit(BlockText, s.text.String(), s.hooks.OnText)
 		s.text.Reset()
 		s.textAt = now
 	}
 	if s.thought.Len() > 0 {
-		s.emit(s.thought.String(), s.hooks.OnThought)
+		s.emit(BlockThink, s.thought.String(), s.hooks.OnThought)
 		s.thought.Reset()
 		s.thoughtAt = now
 	}
@@ -308,9 +313,6 @@ func (s *turnSink) emitTool(id, title, kind, rawStatus, detail string) {
 }
 
 func (s *turnSink) emitStep(id, title, kind, status, detail string) {
-	if s.hooks.OnStep == nil {
-		return
-	}
 	// 详情优先用参数/结果；没有时退回工具类别（"other" 是 codebuddy 的占位，不展示）。
 	if detail == "" && kind != "" && kind != "other" {
 		detail = kind
@@ -320,6 +322,12 @@ func (s *turnSink) emitStep(id, title, kind, status, detail string) {
 	}
 	if len([]rune(title)) > 80 {
 		title = string([]rune(title)[:80]) + "…"
+	}
+	// 留档：这次调用进投影（重启后按它还原工具行）。放在钩子判空之前——
+	// 没有订阅端时也要留档，否则重启后照样丢过程。
+	s.appendToolBlock(id, title, detail, status)
+	if s.hooks.OnStep == nil {
+		return
 	}
 	// C11：kind/title 来自子 agent 自述，前端展示时带「文案来自子 agent」标注。
 	s.hooks.OnStep(agent.Step{Kind: "acp", ID: id, Name: title, Detail: detail, Status: status})
@@ -366,17 +374,28 @@ func summarizeToolContent(items []acp.ToolCallContent, limit int) string {
 	return truncateRunes(strings.Join(parts, "\n"), limit)
 }
 
-func (s *turnSink) maybeFlush(buf *strings.Builder, last *time.Time, emit func(string)) {
+func (s *turnSink) maybeFlush(kind string, buf *strings.Builder, last *time.Time, emit func(string)) {
 	now := time.Now()
 	if buf.Len() >= flushChars || now.Sub(*last) >= flushEvery {
-		s.emit(buf.String(), emit)
+		s.emit(kind, buf.String(), emit)
 		buf.Reset()
 		*last = now
 	}
 }
 
-func (s *turnSink) emit(text string, emit func(string)) {
-	if emit == nil || text == "" {
+// emit 投出一段文本/思考，并同步留进投影（那一轮的时间线块）。
+// kind 决定留档的是正文块还是思考块；留档与投出走同一个口径，回放出来的
+// 时间线与实时看到的一致。
+func (s *turnSink) emit(kind, text string, emit func(string)) {
+	if text == "" {
+		return
+	}
+	if kind == BlockThink {
+		s.appendThinkBlock(text)
+	} else {
+		s.appendTextBlock(text)
+	}
+	if emit == nil {
 		return
 	}
 	emit(text)

@@ -14,7 +14,7 @@ import { gsap, animate, bubbleIn, popIn } from '../anim.js'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { fmtTokens } from '../format.js'
-import { turnTotalText, answerText, pushText } from '../blocks.js'
+import { turnTotalText, answerText, pushText, histBlocks } from '../blocks.js'
 import { feedRate } from '../speed.js'
 import { subscribe, clientId, deviceLabel } from '../events.js'
 import { applyEvent } from '../turnevents.js'
@@ -164,18 +164,7 @@ watch(welcome, v => {
 })
 
 /* ---------- 历史 ---------- */
-// histBlocks 把历史接口的块结构转成时间线块（思考/工具默认收起）；
-// 旧格式（只有 text）兜底成单个正文块。块顺序由后端排好（先思考后正文），
-// 与实时时间线同构；一条历史消息就是一轮，轮次号统一记 0。
-function histBlocks(m) {
-  const src = (m.blocks && m.blocks.length) ? m.blocks : [{ kind: 'text', text: m.text }]
-  return src.map(b => b.kind === 'think'
-    ? { kind: 'think', text: b.text || '', meta: '', open: false, round: 0 }
-    : b.kind === 'tool'
-      ? { kind: 'tool', name: b.name || '', text: b.text || '', out: b.out || '',
-          status: b.status || 'ok', open: false, round: 0 }
-      : { kind: 'text', text: b.text || '', round: 0 })
-}
+// histBlocks（历史块 → 时间线块）在 blocks.js 里，主对话与工作区会话共用。
 
 async function loadHistory() {
   const version = messagesVersion

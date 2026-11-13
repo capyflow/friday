@@ -33,6 +33,22 @@ export function thinkPreview(text) {
   return ''
 }
 
+// histBlocks 把服务端历史里的块结构转成时间线块（思考/工具默认收起）；
+// 旧格式（只有 text）兜底成单个正文块。块顺序由后端排好，与实时时间线同构；
+// 一条历史消息就是一轮，轮次号统一记 0。
+// 主对话（ChatView）与工作区会话（WorkspaceView）共用这一份映射——两边的
+// 历史块形状刻意一致（主聊天 internal/admin/ext.go 的 histBlock、工作区
+// internal/acp/blocks.go 的 Block）。
+export function histBlocks(m) {
+  const src = (m.blocks && m.blocks.length) ? m.blocks : [{ kind: 'text', text: m.text }]
+  return src.map(b => b.kind === 'think'
+    ? { kind: 'think', text: b.text || '', meta: '', open: false, round: 0 }
+    : b.kind === 'tool'
+      ? { kind: 'tool', name: b.name || '', text: b.text || '', out: b.out || '',
+          status: b.status || 'ok', open: false, round: 0 }
+      : { kind: 'text', text: b.text || '', round: 0 })
+}
+
 // 思考增量并入本轮的思考块；本轮还没有就新起一块，并插在正文块前面
 // （网关把思考分片发在正文之后，时间线上仍按"先思考后回答"读）。
 export function pushThinking(m, delta) {

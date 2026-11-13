@@ -19,7 +19,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
-import { turnTotalText, answerText } from '../blocks.js'
+import { turnTotalText, answerText, histBlocks } from '../blocks.js'
 import { feedRate, fmtRate } from '../speed.js'
 import { subscribe, clientId, deviceLabel } from '../events.js'
 import { applyEvent } from '../turnevents.js'
@@ -581,6 +581,9 @@ async function load() {
 // applyThreadMessages 用服务端投影覆盖本地消息缓冲。
 // 服务端投影是权威（每轮结束落盘），但正在跑的那一轮只在本机缓冲里，
 // 所以调用方要自己判断能不能盖（见 select 与 loadThreadMessages）。
+// 投影里的 blocks 是这一轮的时间线留档（思考/工具/正文）：有就按它还原过程
+// 行，没有（旧数据、留档之前的会话）才退回「只有正文」——别把旧会话也画成
+// 有过程的样子。
 function applyThreadMessages(st, list) {
   st.messages.length = 0
   for (const e of list) {
@@ -591,7 +594,7 @@ function applyThreadMessages(st, list) {
       st.messages.push({ role: 'note', text: e.text })
     } else {
       st.messages.push({ role: 'bot', text: e.text, streaming: false, paused: false,
-        blocks: [{ kind: 'text', text: e.text, round: 0 }],
+        blocks: histBlocks(e), round: 0,
         changes: e.changes || null,
         turn: (e.in || e.out || e.ms) ? { in: e.in, out: e.out, ms: e.ms, stopped: e.stopped } : null })
     }

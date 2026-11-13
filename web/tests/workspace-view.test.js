@@ -1054,6 +1054,38 @@ describe('会话：在工作区里创建与删除', () => {
     await pickSession('第一件事')
     expect(wrapper.findAll('.ag-item.active').some(i => i.text().includes('第一件事'))).toBe(true)
   })
+
+  // 重启后回放历史：投影里的时间线留档（思考/工具/正文）要还原成过程行与
+  // 工具行，不能只剩一段纯正文——那是没有留档时的形态。
+  it('历史回放：投影里的时间线留档渲染成过程行与工具行', async () => {
+    const t = copy(thread)
+    t.messages = [
+      { role: 'user', text: '帮我看下目录' },
+      { role: 'assistant', text: '看完了。', in: 10, out: 5, ms: 1200,
+        blocks: [
+          { kind: 'think', text: '思考：先看看目录' },
+          { kind: 'tool', name: '运行 ls', text: 'execute', status: 'ok' },
+          { kind: 'text', text: '看完了。' },
+        ] },
+    ]
+    data.threads = [t]
+    await show()
+    await pickSession('第一件事')
+    // 思考与工具被并成一个过程行，成员收在展开容器里
+    expect(wrapper.find('.proc').exists()).toBe(true)
+    expect(wrapper.get('.proc .tool-head').text()).toContain('思考')
+    expect(wrapper.find('.proc-body .think').exists()).toBe(true)
+    expect(wrapper.find('.proc-body .tool').exists()).toBe(true)
+    expect(timeline()).toContain('看完了。')
+  })
+
+  it('历史回放：没有留档的旧会话照旧只显示正文', async () => {
+    data.threads = [copy(thread)] // 这里的 assistant 消息没有 blocks 字段
+    await show()
+    await pickSession('第一件事')
+    expect(wrapper.find('.proc').exists()).toBe(false)
+    expect(timeline()).toContain('看完了。')
+  })
 })
 
 describe('一轮进行中切换会话', () => {

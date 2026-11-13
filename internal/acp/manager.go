@@ -92,6 +92,9 @@ type Entry struct {
 	Stopped    string `json:"stopped,omitempty"` // end_turn | cancelled | error…
 	// Changes 是这一轮的改动摘要（不含逐文件 diff；详情按 turnId 单独取）。
 	Changes *TurnChanges `json:"changes,omitempty"`
+	// Blocks 是这一轮的时间线留档（思考/工具调用/正文）。旧数据没有这个字段，
+	// 前端就退回「只有正文」——那是留档之前的形态，不是新数据缺失。
+	Blocks []Block `json:"blocks,omitempty"`
 }
 
 // Thread 是工作区里的一个会话（协议层叫 thread：一个 agent 会话 + 一条投影）。
@@ -191,6 +194,9 @@ type TurnResult struct {
 	Ms                    int64
 	StopReason            string
 	Changes               *TurnChanges
+	// Blocks 是这一轮的时间线留档（思考/工具调用/正文），轮末写进投影，
+	// 重启后按它还原过程行——只留正文的话回放出来是「纯结果」。
+	Blocks []Block
 }
 
 // live 是一个 thread 当前的会话与运行态。进程按「agent + 主目录」共享（procState）：
@@ -2336,6 +2342,7 @@ func (m *Manager) sendTurn(ctx context.Context, id, turnID, text string, imgs []
 	result := TurnResult{
 		Ms:      elapsed.Milliseconds(),
 		Changes: turnChanges.Summary(),
+		Blocks:  sink.blocks(),
 	}
 	if res.Usage != nil { // 错误路径下 res 为零值，Usage 为 nil
 		result.In = int64(res.Usage.InputTokens)
@@ -2460,7 +2467,7 @@ func (m *Manager) appendTurnLocked(th *Thread, question string, files []string, 
 	})
 	entry := Entry{Role: "assistant", Text: r.Answer, At: time.Now(),
 		In: r.In, Out: r.Out, Ms: r.Ms, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
-		Stopped: r.StopReason, Changes: r.Changes}
+		Stopped: r.StopReason, Changes: r.Changes, Blocks: r.Blocks}
 	if entry.Text == "" {
 		entry.Text = "（本轮没有产出文本）"
 	}
