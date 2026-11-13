@@ -1402,6 +1402,14 @@ html[data-theme="dark"] .selbox-pop {
                  background: transparent; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
 .ws-seg button:hover { color: var(--fg); }
 .ws-seg button.on { color: var(--fg); background: var(--card); border-color: var(--border-strong); font-weight: 550; }
+/* 多选删除：操作条挂在工作区组内，只作用于这一组的会话；行首勾选框只在多选模式渲染 */
+.ws-selbar { display: flex; align-items: center; gap: 8px; margin: 4px 8px 6px; padding: 2px 4px; }
+.ws-selbar .meta { flex: 1; min-width: 0; }
+.ag-check { display: flex; width: 16px; height: 16px; flex-shrink: 0;
+            align-items: center; justify-content: center;
+            border: 1.5px solid var(--border-strong); border-radius: 4px; color: transparent; }
+.ag-check.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ag-item.selected { background: var(--accent-subtle); }
 /* 工作区行：折叠标题（名字 + 目录数/会话数 + 生成中）与展开体（目录 + 会话 + 新建） */
 /* 每组是一张卡片：展开时抬起一层底色 + 描边；组头与子项之间靠缩进和一条
    竖向引导线分出层级，不靠字号堆叠 */

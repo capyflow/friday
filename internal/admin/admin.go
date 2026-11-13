@@ -461,6 +461,8 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/config", s.wrap(s.handleAcpConfigSet))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/threads", s.wrap(s.handleAcpThreads))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads", s.wrap(s.handleAcpThreadCreate))
+		// 批量删除：静态段注册在 :id 参数路由旁边（gin 静态段优先匹配），别挪进 :id 组里。
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/batch-delete", s.wrap(s.handleAcpThreadsBatchDelete))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces", s.wrap(s.handleAcpWorkspacesCreate))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspacesUpdate))
 		root.AddRouter([]string{http.MethodDelete}, "/api/acp/workspaces/:id", s.wrap(s.handleAcpWorkspaceDelete))

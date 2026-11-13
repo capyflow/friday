@@ -636,3 +636,67 @@ func TestAcpFacadeStatusEndpoint(t *testing.T) {
 		t.Fatalf("无 token 不应放行: %d", rec.Code)
 	}
 }
+
+// 批量删除：多选删除走的接口。只验 HTTP 层的组合行为——空列表拒绝、去重、
+// 部分命中如实报 missing、静态段 batch-delete 不被 :id 参数路由吞掉；
+// 单条删除的进程回收在 internal/acp 的 TestDeleteThread 里已有守护。
+func TestAcpThreadsBatchDelete(t *testing.T) {
+	s, _, token, _, _ := manageTestServer(t)
+	s.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(s.configPath, []byte("accounts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Acp = config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{{
+		Name: "codex", Command: "true",
+	}}}
+	m := acp.NewManager(func() config.AcpConfig { return s.cfg.Snapshot().Acp }, nil, filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	t.Cleanup(m.Close)
+
+	ws, err := m.CreateWorkspace("proj", []string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	th1, err := m.CreateSession("codex", ws.ID, "", "第一件事")
+	if err != nil {
+		t.Fatal(err)
+	}
+	th2, err := m.CreateSession("codex", ws.ID, "", "第二件事")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := s.Handler()
+	call := func(body string) (int, map[string]any) {
+		rec := setupTestRequest(handler, http.MethodPost, "/api/acp/threads/batch-delete",
+			[]byte(body), "127.0.0.1:1234", "localhost", "", token)
+		var envelope struct {
+			Body map[string]any `json:"body"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("解析响应 %s: %v", rec.Body.String(), err)
+		}
+		return rec.Code, envelope.Body
+	}
+
+	// 空列表直接拒绝，不装作成功
+	if code, _ := call(`{"ids":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("空 ids 应 400，得到 %d", code)
+	}
+	// 去重 + 部分命中：重复 id 只算一次，不存在的如实报进 missing
+	code, body := call(`{"ids":["` + th1.ID + `","` + th2.ID + `","nope","` + th1.ID + `"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("批量删除应 200，得到 %d %v", code, body)
+	}
+	if got := int(body["deleted"].(float64)); got != 2 {
+		t.Fatalf("实删数应为 2，得到 %v", body["deleted"])
+	}
+	missing := body["missing"].([]any)
+	if len(missing) != 1 || missing[0] != "nope" {
+		t.Fatalf("missing 应只含 nope，得到 %v", missing)
+	}
+	for _, th := range m.List() {
+		if th.ID == th1.ID || th.ID == th2.ID {
+			t.Fatalf("会话 %s 未被删除", th.ID)
+		}
+	}
+}

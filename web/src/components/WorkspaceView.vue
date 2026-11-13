@@ -939,6 +939,7 @@ async function confirmDelete() {
   if (!p) return
   pendingDelete.value = null
   if (p.kind === 'workspace') await doRemoveWorkspace(p.id)
+  else if (p.kind === 'threads') await doRemoveThreads(p.ids)
   else await doRemoveThread(p.id)
 }
 
@@ -952,6 +953,61 @@ async function doRemoveThread(id) {
     if (currentId.value === id) currentId.value = ''
     load()
     toast('已删除该会话')
+  } catch (e) { toast('删除失败：' + e.message, true) }
+}
+
+/* ---------- 多选删除：作用域是单个工作区——从该工作区的「…」菜单进入，
+   勾选、全选、删除都只作用于这组里的会话，别的工作区行照常打开 ---------- */
+const selMode = ref(false)
+const selWsId = ref('')            // 多选属于哪个工作区
+const selThreads = reactive(new Set())
+function enterSelMode(wsId) {
+  selMode.value = true
+  selWsId.value = wsId
+  selThreads.clear()
+  closeThreadMenu()
+  closeWsMenu()
+  // 组折叠着看不见行：进多选顺手展开这一组（不动 currentId，不抢正在看的对话）
+  if (currentWsId.value !== wsId) currentWsId.value = wsId
+}
+function exitSelMode() {
+  selMode.value = false
+  selWsId.value = ''
+  selThreads.clear()
+}
+// 多选行为只挂在所属工作区的行上
+function selActive(wsId) { return selMode.value && selWsId.value === wsId }
+function toggleSel(id) {
+  selThreads.has(id) ? selThreads.delete(id) : selThreads.add(id)
+}
+// 「全选」选这组的全部会话，包括被「显示更多」收起的溢出会话——删除确认弹窗
+// 会报总数，勾选框只影响可见行，这里按组全量算。
+function selectAllInWs() {
+  selThreads.clear()
+  for (const t of wsThreads(selWsId.value)) selThreads.add(t.id)
+}
+function askRemoveSelected() {
+  const ids = [...selThreads]
+  if (!ids.length) { toast('先勾选要删除的会话', true); return }
+  askDelete({ kind: 'threads', ids, count: ids.length, title: '' })
+}
+
+async function doRemoveThreads(ids) {
+  try {
+    const r = await api('POST', '/api/acp/threads/batch-delete', { ids })
+    // 服务端删除已回收进程：本机还在读的那条流没有落点，就地断开
+    for (const id of ids) {
+      inflight.get(id)?.abort()
+      inflight.delete(id)
+      dropState(id)
+      if (currentId.value === id) currentId.value = ''
+    }
+    exitSelMode()
+    load()
+    const n = r.deleted ?? ids.length
+    toast(r.missing?.length
+      ? `已删除 ${n} 条；${r.missing.length} 条没找到（可能已在别处删除）`
+      : `已删除 ${n} 条会话`)
   } catch (e) { toast('删除失败：' + e.message, true) }
 }
 
@@ -1406,6 +1462,11 @@ function previewImages(urls, at = 0) {
                          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5M9 3h6l1 7 2 2H6l2-2 1-7Z"/></svg>
                     {{ ws.pinned ? '取消置顶' : '置顶' }}
                   </button>
+                  <button role="menuitem" :aria-label="'多选删除 ' + ws.name + ' 的会话'" @click="enterSelMode(ws.id)">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8.5 12 2.5 2.5 5-5"/></svg>
+                    多选删除会话
+                  </button>
                   <button role="menuitem" class="danger" :aria-label="'删除工作区 ' + ws.name"
                           @click="askRemoveWorkspace(ws)">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
@@ -1418,11 +1479,26 @@ function previewImages(urls, at = 0) {
             </div>
 
             <div v-if="ws.id === currentWsId" class="ws-body">
+              <!-- 多选操作条只属于这一个工作区：勾选、全选、删除都只作用这组里的会话 -->
+              <div v-if="selActive(ws.id)" class="ws-selbar" role="toolbar"
+                   :aria-label="'批量删除 ' + ws.name + ' 的会话'">
+                <span class="meta">已选 {{ selThreads.size }} 条</span>
+                <button type="button" class="btn sm" aria-label="全选会话" @click="selectAllInWs">全选</button>
+                <button type="button" class="btn sm danger" aria-label="删除所选会话" :disabled="!selThreads.size" @click="askRemoveSelected">删除所选</button>
+                <button type="button" class="btn sm" aria-label="退出多选" @click="exitSelMode">取消</button>
+              </div>
               <!-- 展开体只列会话：源文件夹的查看与增删收进「…」→「编辑工作区」弹窗 -->
               <div class="ws-sec">
-                <div v-for="t in visibleSessions(ws)" :key="t.id" class="ag-item" role="button" tabindex="0"
-                     :class="{ active: t.id === currentId }"
-                     @click="select(t.id)" @keydown.enter.prevent="select(t.id)">
+                <div v-for="t in visibleSessions(ws)" :key="t.id" class="ag-item"
+                     :role="selActive(ws.id) ? 'checkbox' : 'button'" tabindex="0"
+                     :class="{ active: t.id === currentId, selected: selActive(ws.id) && selThreads.has(t.id) }"
+                     :aria-checked="selActive(ws.id) ? selThreads.has(t.id) : undefined"
+                     @click="selActive(ws.id) ? toggleSel(t.id) : select(t.id)"
+                     @keydown.enter.prevent="selActive(ws.id) ? toggleSel(t.id) : select(t.id)">
+                  <span v-if="selActive(ws.id)" class="ag-check" :class="{ on: selThreads.has(t.id) }" aria-hidden="true">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2"
+                         stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                  </span>
                   <span class="ag-item-main">
                     <span class="ag-title">
                       <span @dblclick.stop="startRenameThread(t)" :title="'双击改标题：' + (t.title || '新会话')">{{ t.title || '新会话' }}</span>
@@ -1435,7 +1511,7 @@ function previewImages(urls, at = 0) {
                   <span v-if="isUnread(t)" class="ws-unread" title="上次打开之后这条会话又有新动静">未读</span>
                   <span v-else-if="generating(t.id) && t.id !== currentId" class="ag-gen"
                         title="这一轮还在后台跑，切到别的会话不会打断它">生成中</span>
-                  <span class="ag-menu-wrap" @click.stop>
+                  <span v-if="!selActive(ws.id)" class="ag-menu-wrap" @click.stop>
                     <button class="ib-btn ws-icon" :class="{ active: threadMenu === t.id }"
                             :aria-label="(t.title || '会话') + ' 的更多操作'" aria-haspopup="menu"
                             :aria-expanded="threadMenu === t.id" title="更多" @click="toggleThreadMenu(t.id)">
@@ -1828,16 +1904,19 @@ function previewImages(urls, at = 0) {
   <Teleport to="body">
     <div v-if="pendingDelete" class="dlg-mask" @click.self="cancelDelete">
       <div ref="deleteDlg" class="dlg dlg-confirm" role="dialog" aria-modal="true" tabindex="-1"
-           :aria-label="pendingDelete.kind === 'workspace' ? '删除工作区确认' : '删除会话确认'"
+           :aria-label="pendingDelete.kind === 'workspace' ? '删除工作区确认'
+             : pendingDelete.kind === 'threads' ? '批量删除会话确认' : '删除会话确认'"
            @keydown.enter="onDeleteEnter" @keydown.esc="cancelDelete">
         <div class="dlg-form">
           <header class="dlg-head">
-            <h3 class="dlg-title">{{ pendingDelete.kind === 'workspace' ? '删除工作区？' : '删除会话？' }}</h3>
+            <h3 class="dlg-title">{{ pendingDelete.kind === 'workspace' ? '删除工作区？'
+              : pendingDelete.kind === 'threads' ? '删除所选会话？' : '删除会话？' }}</h3>
           </header>
           <div class="dlg-body">
             <p v-if="pendingDelete.kind === 'workspace'">
               「{{ pendingDelete.title }}」<template v-if="pendingDelete.count">及其 {{ pendingDelete.count }} 条会话记录</template>会从列表里删除；磁盘上的文件夹不动。
             </p>
+            <p v-else-if="pendingDelete.kind === 'threads'">{{ pendingDelete.count }} 条会话记录会从列表里删除；磁盘上的文件不动。</p>
             <p v-else>「{{ pendingDelete.title }}」的会话记录会从列表里删除；磁盘上的文件不动。</p>
           </div>
           <footer class="dlg-foot">

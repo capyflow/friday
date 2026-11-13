@@ -288,6 +288,34 @@ func (s *Server) handleAcpThreadDelete(ctx *vhttp.Context) error {
 	return ctx.JsonResponse(vhttp.Codes.Success, map[string]string{"message": "已删除该对话"})
 }
 
+// handleAcpThreadsBatchDelete 批量删除 thread（POST /api/acp/threads/batch-delete，
+// {"ids":["…"]}）。逐条走单删的同一套回收（投影记录与存活进程），返回实删数与
+// 没找到的 id：多选删除在多端并发改动下允许部分命中，不必整批失败。
+func (s *Server) handleAcpThreadsBatchDelete(ctx *vhttp.Context) error {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil || len(req.IDs) == 0 {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest,
+			map[string]string{"error": `请求体须为 {"ids": ["…"]}（至少一个会话 id）`})
+	}
+	deleted, missing := 0, make([]string, 0)
+	seen := make(map[string]bool, len(req.IDs))
+	for _, id := range req.IDs {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if s.acp.Delete(id) {
+			deleted++
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"deleted": deleted, "missing": missing})
+}
+
 // handleAcpStop 停止**正在跑**的那一轮：POST /api/acp/threads/:id/stop，
 // 请求体 {"turnId":"t1731..."}（turnId 必填）。
 //

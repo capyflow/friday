@@ -284,6 +284,14 @@ async function server(method, url, body) {
     data.threads.push(nt)
     return json({ thread: nt, message: '已新开续会话' })
   }
+  if (method === 'POST' && url === '/api/acp/threads/batch-delete') {
+    // 形状照 internal/admin/acp.go 的 handleAcpThreadsBatchDelete：去重、报实删数与没找到的。
+    // 挂在通用 :id（改名）匹配之前——后端靠 gin 静态段优先，替身这里靠先写先匹配。
+    const ids = [...new Set(body.ids.map(id => String(id).trim()).filter(Boolean))]
+    const hit = ids.filter(id => data.threads.some(t => t.id === id))
+    data.threads = data.threads.filter(t => !ids.includes(t.id))
+    return json({ deleted: hit.length, missing: ids.filter(id => !hit.includes(id)) })
+  }
   if (method === 'POST' && /^\/api\/acp\/threads\/[^/]+$/.test(url)) {
     const id = url.split('/').pop()
     const t = data.threads.find(x => x.id === id)
@@ -974,6 +982,77 @@ describe('会话：在工作区里创建与删除', () => {
     await wrapper.get('[aria-label="删除会话确认"]').trigger('keydown.enter')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('DELETE', '/api/acp/threads/th1')
+  })
+
+  it('多选删除：从工作区菜单进入，点行是勾选（不再切会话），确认后批量删并退出多选', async () => {
+    data.threads = [copy(thread), copy(second)]
+    await show()
+    // 入口在该工作区的「…」菜单里：多选只作用于这一组
+    const menu = await openMenu('proj-a')
+    await menu.get('[aria-label="多选删除 proj-a 的会话"]').trigger('click')
+    await flushPromises()
+    // 勾选两条：行点击是勾选，单删入口收起来防误触
+    for (const title of ['第一件事', '第二件事']) {
+      await wrapper.findAll('.ag-item').find(i => i.text().includes(title)).trigger('click')
+    }
+    await flushPromises()
+    expect(wrapper.get('[aria-label="批量删除 proj-a 的会话"]').text()).toContain('已选 2 条')
+    expect(wrapper.find('[aria-label="删除 第一件事"]').exists()).toBe(false)
+    // 确认弹窗说清影响几条，确认后带着全部 id 落后端
+    await wrapper.get('[aria-label="删除所选会话"]').trigger('click')
+    await flushPromises()
+    const dlg = wrapper.get('[aria-label="批量删除会话确认"]')
+    expect(dlg.text()).toContain('2 条会话记录')
+    await dlg.get('[aria-label="确认删除"]').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/api/acp/threads/batch-delete', { ids: ['th1', 'th2'] })
+    const left = wrapper.findAll('.ag-item').map(i => i.text()).join()
+    expect(left).not.toContain('第一件事')
+    expect(left).not.toContain('第二件事')
+    expect(wrapper.text()).toContain('这个工作区还没有会话')
+    // 删完自动退出多选，操作条消失
+    expect(wrapper.find('[aria-label="批量删除 proj-a 的会话"]').exists()).toBe(false)
+  })
+
+  it('多选删除只作用于所属工作区：全选不带上别组的会话', async () => {
+    data.workspaces = [copy(wsA), { id: 'ws2', name: 'proj-b', dirs: ['/home/u/b'] }]
+    data.threads = [copy(thread), copy(second), {
+      id: 'th3', workspaceId: 'ws2', agent: 'codex', title: '别组的会话',
+      state: 'idle', updatedAt: '2026-10-19T09:00:00Z', messages: [],
+    }]
+    await show()
+    const menu = await openMenu('proj-a')
+    await menu.get('[aria-label="多选删除 proj-a 的会话"]').trigger('click')
+    await flushPromises()
+    // 操作条只有 proj-a 那一条，别组不进多选态
+    expect(wrapper.findAll('.ws-selbar').length).toBe(1)
+    await wrapper.findAll('.ag-item').find(i => i.text().includes('第一件事')).trigger('click')
+    await flushPromises()
+    // 全选按组全量算：proj-a 有两条，别组的 th3 不在勾选里
+    await wrapper.get('[aria-label="全选会话"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="批量删除 proj-a 的会话"]').text()).toContain('已选 2 条')
+    await wrapper.get('[aria-label="退出多选"]').trigger('click')
+    await flushPromises()
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/batch-delete', expect.anything())
+  })
+
+  it('多选删除：全选勾上这一组的全部会话，取消退出并恢复行的打开行为', async () => {
+    data.threads = [copy(thread), copy(second)]
+    await show()
+    const menu = await openMenu('proj-a')
+    await menu.get('[aria-label="多选删除 proj-a 的会话"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="全选会话"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="批量删除 proj-a 的会话"]').text()).toContain('已选 2 条')
+    // 一条没删就退出：勾选清空，行点击恢复成打开会话
+    await wrapper.get('[aria-label="退出多选"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="批量删除 proj-a 的会话"]').exists()).toBe(false)
+    expect(api).not.toHaveBeenCalledWith('POST', '/api/acp/threads/batch-delete', expect.anything())
+    await pickSession('第一件事')
+    expect(wrapper.findAll('.ag-item.active').some(i => i.text().includes('第一件事'))).toBe(true)
   })
 })
 
