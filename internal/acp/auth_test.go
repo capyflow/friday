@@ -371,6 +371,11 @@ func TestLoginGuideForCodebuddy(t *testing.T) {
 	if len(g.vars) == 0 || g.vars[0] != "CODEBUDDY_API_KEY" {
 		t.Fatalf("应推荐 CODEBUDDY_API_KEY 作为凭据入口，实际 %+v", g.vars)
 	}
+	// codebuddy 的 /login 只在交互界面里认（参数形式 `codebuddy /login` 实测
+	// 仍报未登录），所以要带 follow，终端页起完界面再补敲这一行。
+	if len(g.follow) != 1 || g.follow[0] != "/login" {
+		t.Fatalf("应带上 /login 作为后续输入，实际 %+v", g.follow)
+	}
 }
 
 // agent 不声明 env_var 认证方式时，推荐的环境变量就是唯一能落地的入口：

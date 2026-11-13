@@ -172,6 +172,25 @@ describe('内置终端页', () => {
     expect(store.terminalCommand).toBe('')
   })
 
+  // 多行命令按行依次敲：codebuddy 起完交互界面才收得下 /login。
+  it('多行命令按行依次敲（间隔等前一个程序就绪）', async () => {
+    vi.useFakeTimers()
+    try {
+      await show()
+      store.terminalCommand = 'codebuddy\n/login'
+      await flushPromises()
+      const sock = socket()
+      sock.push({ t: 'ready', shell: '/bin/zsh', cwd: '/x' })
+      await flushPromises()
+      expect(sock.frames).toContainEqual({ t: 'input', d: 'codebuddy\n' })
+      vi.advanceTimersByTime(3500)
+      await flushPromises()
+      expect(sock.frames).toContainEqual({ t: 'input', d: '/login\n' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('新建与关闭标签：关闭会发 close 并断开连接', async () => {
     await show()
     await wrapper.get('[aria-label="新建终端"]').trigger('click')

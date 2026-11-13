@@ -329,10 +329,13 @@ function terminalCmd(a, m) {
 }
 
 // loginInTerminal 把登录命令交给内置终端：新开一条终端自动敲进去。
-// 终端只在本机可用（内核侧有回环硬闸），不可用时那边会自己说明原因。
-function loginInTerminal(cmd) {
+// follow 是启动命令之后还要补敲的行（如 codebuddy 的 /login——参数形式不认
+// 斜杠命令，得等交互界面起来再敲）。终端只在本机可用（内核侧有回环硬闸），
+// 不可用时那边会自己说明原因。
+function loginInTerminal(cmd, follow) {
   if (!cmd) return
-  store.terminalCommand = cmd
+  const lines = [cmd, ...(follow || [])].filter(Boolean)
+  store.terminalCommand = lines.join('\n')
   setMode('work')
   store.view = 'terminal'
   store.settingsOpen = false
@@ -584,7 +587,8 @@ onMounted(load)
           <div v-if="authOf(a.name).status?.command" class="acp-auth-cmd">
             <code class="mono">{{ authOf(a.name).status.command }}</code>
             <button class="btn sm" type="button" @click="copyCmd(authOf(a.name).status.command)">复制</button>
-            <button class="btn sm" type="button" @click="loginInTerminal(authOf(a.name).status.command)">在终端里登录</button>
+            <button class="btn sm" type="button"
+                    @click="loginInTerminal(authOf(a.name).status.command, authOf(a.name).status.follow)">在终端里登录</button>
           </div>
           <p v-if="authOf(a.name).status?.creds?.length" class="meta">
             凭据文件：{{ authOf(a.name).status.creds.join('、') }}</p>
@@ -619,7 +623,8 @@ onMounted(load)
               <button v-if="m.type !== 'terminal'" class="btn sm primary" type="button"
                       :disabled="authOf(a.name).busy === m.id" @click="runAuth(a, m)">
                 {{ authOf(a.name).busy === m.id ? '认证中…' : (m.type === 'env_var' ? '保存并认证' : '立即认证') }}</button>
-              <button v-else class="btn sm" type="button" @click="loginInTerminal(terminalCmd(a, m))">在终端里登录</button>
+              <button v-else class="btn sm" type="button"
+                      @click="loginInTerminal(terminalCmd(a, m))">在终端里登录</button>
             </div>
           </div>
         </div>

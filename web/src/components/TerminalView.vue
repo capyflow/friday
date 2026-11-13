@@ -68,12 +68,24 @@ function openTab(initial) {
   seq += 1
   const tab = { id: 'term' + seq, label: '终端 ' + seq, status: 'connecting', note: '' }
   engines.set(tab.id, {})
-  // initial 是要在这条终端里自动敲的命令：等 ready 之后再送（先送会被 shell
-  // 还没起来时的噪声吃掉）。设置页「在终端里登录」走这条路。
-  if (initial) engines.get(tab.id).pending = initial
+  // initial 是要在这条终端里自动敲的内容：等 ready 之后再送（先送会被 shell
+  // 还没起来时的噪声吃掉）。多行时按行依次敲，间隔留给前一个程序就绪——
+  // 「codebuddy」起来后隔几秒再敲 "/login" 就是这个用法。
+  if (initial) engines.get(tab.id).pending = String(initial).split('\n').filter(Boolean)
   tabs.value = [...tabs.value, tab]
   activeId.value = tab.id
   nextTick(() => mountTerm(tab.id))
+}
+
+// flushPending 敲下一行待敲内容；多行时按行间隔几秒依次送（后面的行要等
+// 前面的程序起来才有效，比如 codebuddy 起完交互界面才能收 /login）。
+function flushPending(id) {
+  const eng = engines.get(id)
+  const lines = eng?.pending
+  if (!lines || !lines.length) return
+  const next = lines.shift()
+  send(id, { t: 'input', d: next.endsWith('\n') ? next : next + '\n' })
+  if (lines.length) setTimeout(() => flushPending(id), 3500)
 }
 
 function mountTerm(id) {
@@ -127,12 +139,7 @@ function connect(id) {
     if (msg.t === 'ready') {
       patch(id, { status: 'ready', note: `${msg.shell} · ${msg.cwd}` })
       // 这条终端刚起来：把带来的命令敲进去（设置页「在终端里登录」）。
-      const eng2 = engines.get(id)
-      if (eng2?.pending) {
-        const cmd = eng2.pending
-        eng2.pending = ''
-        send(id, { t: 'input', d: cmd })
-      }
+      flushPending(id)
     } else if (msg.t === 'error') {
       patch(id, { status: 'error', note: msg.message || '终端出错' })
       toast(msg.message || '终端出错', true)

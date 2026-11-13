@@ -93,6 +93,8 @@ type AuthStatus struct {
 	SuggestedVars []string `json:"suggestedVars,omitempty"`
 	// Link 是取凭据的地址（API Key 管理页等），面板里给一个直达链接。
 	Link string `json:"link,omitempty"`
+	// Follow 是登录时启动命令之后还要补敲的行（如 codebuddy 的 /login）。
+	Follow []string `json:"follow,omitempty"`
 }
 
 // AuthResult 是一次认证动作的结果。
@@ -111,6 +113,10 @@ type loginGuide struct {
 	vars []string
 	// link 是取凭据的地址（如 API Key 管理页），面板里给一个直达链接。
 	link string
+	// follow 是启动交互式命令后还要补敲的行（如 codebuddy 的 /login）。
+	// 参数形式 `codebuddy /login` 不认斜杠命令（实测仍报未登录），只有进入
+	// 交互界面后再敲 /login 才有效——所以这里带上 follow，让终端页依次敲。
+	follow []string
 }
 
 // loginGuides 是按 agent 名的登录指引（命令优先用配置名，其次用命令基名兜底）。
@@ -127,8 +133,8 @@ var loginGuides = map[string]loginGuide{
 	// apiKeyHelper，或 CLI 交互登录（凭据进 macOS 钥匙串）。**网页端登录它
 	// 读不到**——网页的登录态不是 CLI 的凭据。所以这里把两种环境变量直接
 	// 推荐出来，让人填进 agent 的环境变量里。
-	"codebuddy":      {hint: "网页端登录不算 CLI 的凭据：终端里跑 `codebuddy` 后用 /login 走浏览器授权（凭据进 macOS 钥匙串），或把 API Key 填在下面", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
-	"codebuddy-code": {hint: "网页端登录不算 CLI 的凭据：终端里跑 `codebuddy` 后用 /login 走浏览器授权（凭据进 macOS 钥匙串），或把 API Key 填在下面", command: "codebuddy", vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
+	"codebuddy":      {hint: "网页版的登录态不与 CLI 共享：CLI 要单独登录一次——在终端里跑 `codebuddy` 后敲 /login，走浏览器授权（凭据进 macOS 钥匙串，之后 Friday 拉起 agent 就能用到）；或把 API Key 填在下面", command: "codebuddy", follow: []string{"/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
+	"codebuddy-code": {hint: "网页版的登录态不与 CLI 共享：CLI 要单独登录一次——在终端里跑 `codebuddy` 后敲 /login，走浏览器授权（凭据进 macOS 钥匙串，之后 Friday 拉起 agent 就能用到）；或把 API Key 填在下面", command: "codebuddy", follow: []string{"/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
 }
 
 // loginGuideFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
@@ -194,6 +200,7 @@ func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, erro
 	st.Command = guide.command
 	st.SuggestedVars = guide.vars
 	st.Link = guide.link
+	st.Follow = guide.follow
 	st.Creds = probeCredFiles(agentCfg)
 
 	err := m.withProbe(agentCfg, func(proc *agentProc) error {

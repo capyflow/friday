@@ -328,6 +328,28 @@ describe('设置 → 智能体 → 认证', () => {
     })
   })
 
+  // codebuddy 的登录要两步：起交互界面，再敲 /login（参数形式不认斜杠命令）。
+  it('「在终端里登录」把命令与后续斜杠命令一起送进终端', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: false, agents: [
+        { name: 'codebuddy-code', command: 'npx' },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url.startsWith('/api/acp/auth?agent=')) return { status: {
+        agent: 'codebuddy-code', state: 'logged_out', message: '未登录：Authentication required',
+        hint: '网页版的登录态不与 CLI 共享', command: 'codebuddy', follow: ['/login'],
+        suggestedVars: ['CODEBUDDY_API_KEY'], methods: [],
+      } }
+      return { message: '已保存' }
+    })
+    await show()
+    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')
+    expect(store.terminalCommand).toBe('codebuddy\n/login')
+    expect(store.view).toBe('terminal')
+  })
+
   it('「在终端里登录」把命令交给终端页去跑', async () => {
     const panel = await openAuthPanel()
     await panel.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')
