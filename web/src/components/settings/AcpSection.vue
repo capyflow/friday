@@ -3,7 +3,7 @@
 // （配置变化的 agent 回收进程，上下文由下次打开对话时 session/load 尝试恢复）。
 // 「测试」做一次握手诊断：拉起进程 → initialize → 立即回收，最常见的"没登录"
 // 由此变成一句话报错（带 stderr 尾部）。
-import { onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { api } from '../../api.js'
 import { store, setMode, toast } from '../../store.js'
 import { copyText } from '../../clipboard.js'
@@ -212,13 +212,31 @@ async function installAgent(entry) {
         envText: envText(r.agent.env) })
       // 装完立刻看一眼登录态：新装的 agent 十有八九还没登录，别等人踩坑才发现。
       const fresh = cfg.agents.find(x => x.name === r.agent.name)
-      if (fresh) probeAuth(fresh)
+      if (fresh) {
+        probeAuth(fresh)
+        focusAgent(r.agent.name)
+      }
     }
-    show(r.message || '安装完成', true)
+    show(r.message ? r.message + '：已在下方清单里，点它的「认证」完成登录' : '安装完成：点下方 agent 的「认证」完成登录', true)
   } catch (e) {
     installOutput.value = e.output || ''
     show('安装失败：' + e.message, false)
   } finally { installing.value = '' }
+}
+
+// focusAgent 把刚装好的那台 agent 滚到眼前并高亮一下：装完人最该做的事
+// 就是给它登录，这一步不做，下一句「装好了怎么用不了」就来了。
+const focusAgentName = ref('')
+function focusAgent(name) {
+  focusAgentName.value = name
+  nextTick(() => {
+    const el = document.querySelector('[data-agent-name="' + name.replace(/"/g, '\\"') + '"]')
+    // scrollIntoView 在个别环境（老 WebView、测试环境）不存在，缺了就跳过。
+    if (el?.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+  setTimeout(() => {
+    if (focusAgentName.value === name) focusAgentName.value = ''
+  }, 4000)
 }
 
 // ---------- 认证面板 ----------
@@ -503,7 +521,9 @@ onMounted(load)
         工作区的「新建会话」里还多一台 <b>friday（内置）</b>：一轮对话直接交给内置大脑，
         模型与权限用本页上方的全局设置。它是代码给的，不写进 config.yaml，所以不在下面这份可编辑清单里。
       </p>
-      <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent">
+      <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent"
+           :class="{ 'acp-agent-focus': focusAgentName === a.name }"
+           :data-agent-name="a.name">
         <div class="acp-agent-head">
           <button class="acp-agent-toggle" type="button" :aria-expanded="a.open ? 'true' : 'false'"
                   :aria-controls="`acp-agent-body-${i}`" @click="a.open = !a.open">
@@ -674,6 +694,8 @@ onMounted(load)
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle);
   font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
   word-break: break-word; color: var(--muted-fg); }
+/* 刚装好的那台 agent：描边高亮一下，提示「该做的是登录」。 */
+.acp-agent-focus { border-color: var(--accent, #2563eb); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
 /* 认证面板：登录态徽章 + 认证方式（密钥输入 / 立即认证 / 去终端登录）。 */
 .acp-auth { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
             border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }

@@ -260,6 +260,32 @@ describe('设置 → 智能体 → 认证', () => {
     expect(wrapper.findAll('.acp-auth-badge')[0].text()).toBe('未登录')
   })
 
+  // 装完 agent 到登录之间不能有空档：面板自动展开、卡片高亮，登录入口就在眼前。
+  it('安装完成后自动展开那台 agent 的认证面板', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: false, agents: [] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [{
+        id: 'codex', name: 'Codex（OpenAI）', installed: false, check: 'codex',
+        template: { name: 'codex', command: 'npx', args: ['-y', '-p', '@agentclientprotocol/codex-acp', 'codex-acp'] },
+      }] }
+      if (method === 'POST' && url === '/api/acp/install') return { message: '安装完成', agent: {
+        name: 'codex', command: 'npx', args: ['-y', '-p', '@agentclientprotocol/codex-acp', 'codex-acp'],
+      } }
+      if (method === 'GET' && url.startsWith('/api/acp/auth?agent=')) return { status: {
+        agent: 'codex', state: 'logged_out', message: '未登录',
+        hint: '在终端运行 codex login', command: 'codex login', methods: [],
+      } }
+      return { message: '已保存' }
+    })
+    await show()
+    await wrapper.findAll('button').find(b => b.text().includes('一键安装')).trigger('click')
+    await flushPromises()
+    const panel = wrapper.get('.acp-auth')
+    expect(panel.text()).toContain('codex login')
+    // 卡片被高亮，指过去就是刚装的那台
+    expect(wrapper.get('.acp-agent').classes()).toContain('acp-agent-focus')
+  })
+
   it('env_var 型：填了密钥点「保存并认证」，变量交给后端落盘', async () => {
     const panel = await openAuthPanel()
     await panel.get('.acp-auth-vars input').setValue('sk-test')
