@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import AcpSection from '../src/components/settings/AcpSection.vue'
 import { api } from '../src/api.js'
+import { store } from '../src/store.js'
 
 vi.mock('../src/api.js', () => ({ api: vi.fn() }))
 
@@ -111,8 +112,8 @@ describe('设置 → 智能体', () => {
     expect(row.get('.acp-agent-toggle').text()).toContain('v2.3.0')
     expect(row.get('.acp-agent-sum').text()).toBe('npx -y @agentclientprotocol/codex-acp')
     expect(row.get('.acp-agent-toggle').attributes('aria-expanded')).toBe('false')
-    // 折叠态仍可测试/删除
-    expect(row.findAll('.pm-acts button').map(b => b.text())).toEqual(['测试', '删除'])
+    // 折叠态仍可认证/测试/删除
+    expect(row.findAll('.pm-acts button').map(b => b.text())).toEqual(['认证', '测试', '删除'])
 
     await row.get('.acp-agent-toggle').trigger('click')
     expect(row.find('.acp-agent-body').exists()).toBe(true)
@@ -210,6 +211,74 @@ describe('升级徽标的版本号', () => {
     expect(badge.text()).toContain('v2.179.3 → v2.180.0')
   })
 })
+// ---------- 认证面板 ----------
+
+// agent 装好之后能不能干活取决于它自己的登录态。这块要做成「可主动查 + 可就地做」，
+// 不能只等「测试」失败时在报错末尾附一句指引。
+describe('设置 → 智能体 → 认证', () => {
+  const AUTH_STATUS = {
+    status: {
+      agent: 'codex', state: 'logged_out', message: '未登录：not logged in',
+      hint: '在终端运行 codex login 完成 ChatGPT 登录', command: 'codex login',
+      creds: [],
+      methods: [{
+        id: 'key', name: 'API Key', type: 'env_var',
+        vars: [{ name: 'OPENAI_API_KEY', secret: true }],
+      }],
+    },
+  }
+
+  beforeEach(() => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') {
+        return { acp: { enabled: false, agents: [
+          { name: 'codex', command: 'npx', args: ['-y', '@agentclientprotocol/codex-acp'] },
+        ] } }
+      }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url.startsWith('/api/acp/auth?agent=')) return AUTH_STATUS
+      if (method === 'POST' && url === '/api/acp/auth') {
+        return { result: { state: 'logged_in', message: '认证成功：API Key' } }
+      }
+      return { message: '已保存' }
+    })
+  })
+
+  async function openAuthPanel() {
+    await show()
+    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    await flushPromises()
+    return wrapper.get('.acp-auth')
+  }
+
+  it('点「认证」展开面板：给出登录态、登录指引与可执行的命令', async () => {
+    const panel = await openAuthPanel()
+    expect(panel.text()).toContain('未登录')
+    expect(panel.text()).toContain('codex login')
+    expect(panel.text()).toContain('在终端运行 codex login')
+    // 卡片头上也有同一份状态的徽章（收起时一眼能看见）
+    expect(wrapper.findAll('.acp-auth-badge')[0].text()).toBe('未登录')
+  })
+
+  it('env_var 型：填了密钥点「保存并认证」，变量交给后端落盘', async () => {
+    const panel = await openAuthPanel()
+    await panel.get('.acp-auth-vars input').setValue('sk-test')
+    await panel.findAll('.acp-auth-acts button').find(b => b.text() === '保存并认证').trigger('click')
+    await flushPromises()
+    const call = api.mock.calls.find(([method, url]) => method === 'POST' && url === '/api/acp/auth')
+    expect(call[2]).toMatchObject({
+      name: 'codex', methodId: 'key', vars: { OPENAI_API_KEY: 'sk-test' },
+    })
+  })
+
+  it('「在终端里登录」把命令交给终端页去跑', async () => {
+    const panel = await openAuthPanel()
+    await panel.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')
+    expect(store.terminalCommand).toBe('codex login')
+    expect(store.view).toBe('terminal')
+  })
+})
+
 // ---------- 工具门面卡片 ----------
 
 const FACADE = {

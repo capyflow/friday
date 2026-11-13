@@ -700,3 +700,66 @@ func TestAcpThreadsBatchDelete(t *testing.T) {
 		}
 	}
 }
+
+// 认证接口：登录态探测 + 认证执行。
+// env_var 型认证的关键是「填了就落盘」——不写进 config.yaml 的密钥，下次
+// 拉起 agent 进程时不在环境里，等于没填。
+func TestAcpAuthEndpoints(t *testing.T) {
+	s, handler, token, _, _ := manageTestServer(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("acp:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.configPath = cfgPath
+	// 清单里有一台"命令不存在"的 agent：探测时拉不起来，登录态判成未登录。
+	s.cfg.Acp = config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "fake", Command: "/nonexistent/fake-bin"},
+	}}
+	m := acp.NewManager(func() config.AcpConfig { return s.cfg.Acp }, nil,
+		filepath.Join(t.TempDir(), "threads.json"))
+	s.acp = m
+	t.Cleanup(m.Close)
+	// 路由是 Handler() 时按 s.acp 是否装配来注册的：装完要重新取一次 handler。
+	handler = s.Handler()
+
+	// 探测：拉不起来也要给出可读的结论，而不是一句 500。
+	code, body := acpCall(t, handler, token, http.MethodGet, "/api/acp/auth?agent=fake", nil)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 %d: %v", code, body)
+	}
+	st, ok := body["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("应回 status: %v", body)
+	}
+	// 拉不起来 ≠ 未登录：命令写错、包没装都会走到这里，只能说"判不出来"。
+	if st["state"] != "unknown" {
+		t.Fatalf("拉不起来应判为状态未知: %v", st)
+	}
+	if msg, _ := st["message"].(string); !strings.Contains(msg, "拉起失败") {
+		t.Fatalf("应说明拉起失败: %v", st)
+	}
+
+	// 清单里没有这台 agent：说清楚，不给空状态。
+	code, body = acpCall(t, handler, token, http.MethodGet, "/api/acp/auth?agent=ghost", nil)
+	if code == http.StatusOK {
+		t.Fatalf("不存在的 agent 应报错: %v", body)
+	}
+	if errText, _ := body["error"].(string); !strings.Contains(errText, "ghost") {
+		t.Fatalf("错误里应点名这台 agent: %v", body)
+	}
+
+	// env_var 型：填了密钥就写进 config.yaml（即便随后的认证因命令不存在而失败）。
+	code, _ = acpCall(t, handler, token, http.MethodPost, "/api/acp/auth", map[string]any{
+		"name": "fake", "methodId": "key", "vars": map[string]string{"OPENAI_API_KEY": "sk-test"},
+	})
+	if code == http.StatusOK {
+		t.Fatalf("命令不存在时认证应失败: %d", code)
+	}
+	saved, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "OPENAI_API_KEY") || !strings.Contains(string(saved), "sk-test") {
+		t.Fatalf("密钥应落进 config.yaml:\n%s", saved)
+	}
+}

@@ -64,10 +64,13 @@ function setPane(id, el) {
   }
 }
 
-function openTab() {
+function openTab(initial) {
   seq += 1
   const tab = { id: 'term' + seq, label: '终端 ' + seq, status: 'connecting', note: '' }
   engines.set(tab.id, {})
+  // initial 是要在这条终端里自动敲的命令：等 ready 之后再送（先送会被 shell
+  // 还没起来时的噪声吃掉）。设置页「在终端里登录」走这条路。
+  if (initial) engines.get(tab.id).pending = initial
   tabs.value = [...tabs.value, tab]
   activeId.value = tab.id
   nextTick(() => mountTerm(tab.id))
@@ -123,6 +126,13 @@ function connect(id) {
     try { msg = JSON.parse(ev.data) } catch { return }
     if (msg.t === 'ready') {
       patch(id, { status: 'ready', note: `${msg.shell} · ${msg.cwd}` })
+      // 这条终端刚起来：把带来的命令敲进去（设置页「在终端里登录」）。
+      const eng2 = engines.get(id)
+      if (eng2?.pending) {
+        const cmd = eng2.pending
+        eng2.pending = ''
+        send(id, { t: 'input', d: cmd })
+      }
     } else if (msg.t === 'error') {
       patch(id, { status: 'error', note: msg.message || '终端出错' })
       toast(msg.message || '终端出错', true)
@@ -215,12 +225,30 @@ watch(() => store.view, v => {
   eng?.term?.focus()
 })
 
+// 设置页「在终端里登录」带来的命令：开一条新终端自动敲进去（人不用复制粘贴）。
+watch(() => store.terminalCommand, cmd => {
+  if (!cmd) return
+  store.terminalCommand = ''
+  if (!info.value?.enabled) {
+    toast(info.value?.reason || '内置终端不可用（本机以外不服务这个功能）', true)
+    return
+  }
+  openTab(cmd.endsWith('\n') ? cmd : cmd + '\n')
+})
+
 onMounted(async () => {
   window.addEventListener('friday:theme', onThemeChange)
   await loadInfo()
   if (disposed) return
   // 一进来就有一个终端可用，比"先要点一下才有"顺手；不可用时页面直接说原因
   if (info.value?.enabled) openTab()
+  // 命令可能在本组件挂载前就到了（设置页先切视图，组件后挂）：这里补跑一次。
+  const cmd = store.terminalCommand
+  if (cmd) {
+    store.terminalCommand = ''
+    if (info.value?.enabled) openTab(cmd.endsWith('\n') ? cmd : cmd + '\n')
+    else toast(info.value?.reason || '内置终端不可用', true)
+  }
 })
 
 onBeforeUnmount(() => {

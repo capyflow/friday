@@ -5,6 +5,8 @@
 // 由此变成一句话报错（带 stderr 尾部）。
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../../api.js'
+import { store, setMode, toast } from '../../store.js'
+import { copyText } from '../../clipboard.js'
 import SelectBox from '../SelectBox.vue'
 
 // 每会话独立进程是三态：auto = 按 agent 判定（CodeBuddy 默认独占）；
@@ -208,12 +210,101 @@ async function installAgent(entry) {
       if (existing) Object.assign(existing, installed)
       else cfg.agents.push({ ...blankAgent(), ...installed, name: r.agent.name,
         envText: envText(r.agent.env) })
+      // 装完立刻看一眼登录态：新装的 agent 十有八九还没登录，别等人踩坑才发现。
+      const fresh = cfg.agents.find(x => x.name === r.agent.name)
+      if (fresh) probeAuth(fresh)
     }
     show(r.message || '安装完成', true)
   } catch (e) {
     installOutput.value = e.output || ''
     show('安装失败：' + e.message, false)
   } finally { installing.value = '' }
+}
+
+// ---------- 认证面板 ----------
+//
+// agent 装好之后能不能干活，取决于它自己的登录态（ChatGPT 账号、Google 账号、
+// API key…）。这块以前只有「测试」失败时在报错末尾附一句指引，属于事后
+// 诸葛亮：人要先踩一次坑才知道这台还没登录。这里做成可主动查 + 可就地做。
+
+const auth = reactive({})   // agent 名 → 面板状态
+function authOf(name) {
+  if (!auth[name]) {
+    auth[name] = { open: false, loading: false, status: null, vars: {}, message: '', err: '', busy: '' }
+  }
+  return auth[name]
+}
+const AUTH_STATE_TEXT = { logged_in: '已登录', logged_out: '未登录', unknown: '状态未知' }
+const AUTH_KIND = { agent: '由 agent 自己认证', env_var: '填写密钥', terminal: '在终端里登录' }
+function authStateText(s) { return AUTH_STATE_TEXT[s] || '未检测' }
+function authStateCls(s) {
+  return s === 'logged_in' ? 'ok' : s === 'logged_out' ? 'warn' : 'no'
+}
+
+// probeAuth 查这台 agent 的登录态与可用认证方式。
+async function probeAuth(a) {
+  const p = authOf(a.name)
+  p.open = true
+  p.loading = true
+  p.err = ''
+  try {
+    const r = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name))
+    p.status = r.status || null
+  } catch (e) {
+    p.err = e.message
+    p.status = null
+  } finally { p.loading = false }
+}
+
+// runAuth 执行一次认证。env_var 型先把用户填的变量交给后端落进 config.yaml
+// （填完不落盘 = 下次拉起进程时凭据不在，等于没填）。
+async function runAuth(a, m) {
+  const p = authOf(a.name)
+  const vars = {}
+  if (m.type === 'env_var') {
+    for (const v of (m.vars || [])) {
+      const val = (p.vars[v.name] || '').trim()
+      if (!val && !v.optional) { p.err = '请先填写 ' + (v.label || v.name); return }
+      if (val) vars[v.name] = val
+    }
+  }
+  p.busy = m.id
+  p.err = ''
+  p.message = ''
+  try {
+    const r = await api('POST', '/api/acp/auth', { name: a.name, methodId: m.id, vars })
+    p.message = (r.result && r.result.message) || '已处理'
+    // 认证完立刻复检一次：徽章要马上反映最新状态。
+    const st = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name))
+    p.status = st.status || null
+  } catch (e) {
+    p.err = e.message
+  } finally { p.busy = '' }
+}
+
+// terminalCmd 拼出这台 agent 的登录命令（agent 自己的启动命令 + 认证参数）。
+function terminalCmd(a, m) {
+  const args = (a.argsText || '').split(',').map(s => s.trim()).filter(Boolean)
+  return [a.command, ...args, ...(m.args || [])].filter(Boolean).join(' ')
+}
+
+// loginInTerminal 把登录命令交给内置终端：新开一条终端自动敲进去。
+// 终端只在本机可用（内核侧有回环硬闸），不可用时那边会自己说明原因。
+function loginInTerminal(cmd) {
+  if (!cmd) return
+  store.terminalCommand = cmd
+  setMode('work')
+  store.view = 'terminal'
+  store.settingsOpen = false
+}
+
+async function copyCmd(cmd) {
+  try {
+    await copyText(cmd)
+    toast('登录命令已复制')
+  } catch {
+    toast('复制失败，请手动选中命令复制', true)
+  }
 }
 
 // 把目录模板追加进 agent 清单；同名已存在则只提示。
@@ -425,10 +516,55 @@ onMounted(load)
             <span v-if="!a.open" class="meta mono acp-agent-sum" :title="launchText(a)">{{ launchText(a) }}</span>
           </button>
           <span class="pm-acts">
+            <span v-if="authOf(a.name).status" class="acp-auth-badge"
+                  :class="authStateCls(authOf(a.name).status.state)">{{ authStateText(authOf(a.name).status.state) }}</span>
+            <button class="btn sm" type="button" :disabled="!a.name" @click="probeAuth(a)">认证</button>
             <button class="btn sm" type="button" :disabled="a.testing || !a.name" @click="test(a)">
               {{ a.testing ? '测试中…' : '测试' }}</button>
             <button class="btn sm danger" type="button" @click="removeAgent(i)">删除</button>
           </span>
+        </div>
+
+        <!-- 认证面板：登录态 + 可选的认证方式（点「认证」展开） -->
+        <div v-if="authOf(a.name).open" class="acp-auth">
+          <div class="acp-auth-head">
+            <span class="acp-auth-badge" :class="authStateCls(authOf(a.name).status?.state)">
+              {{ authOf(a.name).status ? authStateText(authOf(a.name).status.state) : '未检测' }}</span>
+            <span class="meta">{{ authOf(a.name).loading ? '正在检测登录态…'
+              : (authOf(a.name).status?.message || '点「重新检测」查这台 agent 的登录态') }}</span>
+            <button class="btn sm" type="button" :disabled="authOf(a.name).loading" @click="probeAuth(a)">重新检测</button>
+          </div>
+          <p v-if="authOf(a.name).err" class="acp-auth-err">{{ authOf(a.name).err }}</p>
+          <p v-if="authOf(a.name).message" class="acp-auth-msg">{{ authOf(a.name).message }}</p>
+          <p v-if="authOf(a.name).status?.hint" class="meta acp-auth-hint">{{ authOf(a.name).status.hint }}</p>
+          <div v-if="authOf(a.name).status?.command" class="acp-auth-cmd">
+            <code class="mono">{{ authOf(a.name).status.command }}</code>
+            <button class="btn sm" type="button" @click="copyCmd(authOf(a.name).status.command)">复制</button>
+            <button class="btn sm" type="button" @click="loginInTerminal(authOf(a.name).status.command)">在终端里登录</button>
+          </div>
+          <p v-if="authOf(a.name).status?.creds?.length" class="meta">
+            凭据文件：{{ authOf(a.name).status.creds.join('、') }}</p>
+          <div v-for="m in authOf(a.name).status?.methods || []" :key="m.id" class="acp-auth-method">
+            <div class="acp-auth-method-head">
+              <b>{{ m.name }}</b>
+              <span class="acp-auth-kind">{{ AUTH_KIND[m.type] || m.type }}</span>
+              <span v-if="m.description" class="meta">{{ m.description }}</span>
+            </div>
+            <div v-if="m.type === 'env_var'" class="acp-auth-vars">
+              <label v-for="v in m.vars || []" :key="v.name">
+                <span>{{ v.label || v.name }}<em v-if="v.optional">（可选）</em></span>
+                <input v-model="authOf(a.name).vars[v.name]" :type="v.secret ? 'password' : 'text'"
+                       :placeholder="v.name" autocomplete="off">
+              </label>
+              <a v-if="m.link" :href="m.link" target="_blank" rel="noreferrer">获取凭据</a>
+            </div>
+            <div class="acp-auth-acts">
+              <button v-if="m.type !== 'terminal'" class="btn sm primary" type="button"
+                      :disabled="authOf(a.name).busy === m.id" @click="runAuth(a, m)">
+                {{ authOf(a.name).busy === m.id ? '认证中…' : (m.type === 'env_var' ? '保存并认证' : '立即认证') }}</button>
+              <button v-else class="btn sm" type="button" @click="loginInTerminal(terminalCmd(a, m))">在终端里登录</button>
+            </div>
+          </div>
         </div>
         <div v-if="a.open" :id="`acp-agent-body-${i}`" class="acp-agent-body">
           <div class="acp-grid">
@@ -538,4 +674,29 @@ onMounted(load)
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle);
   font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
   word-break: break-word; color: var(--muted-fg); }
+/* 认证面板：登录态徽章 + 认证方式（密钥输入 / 立即认证 / 去终端登录）。 */
+.acp-auth { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+            border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }
+.acp-auth-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acp-auth-badge { flex: none; font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.acp-auth-badge.ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
+.acp-auth-badge.warn { background: rgba(217, 119, 6, .14); color: #D97706; }
+.acp-auth-badge.no { background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
+.acp-auth-err { margin: 0; font-size: 12px; color: #D97706; }
+.acp-auth-msg { margin: 0; font-size: 12px; color: var(--fg); }
+.acp-auth-hint { margin: 0; }
+.acp-auth-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acp-auth-cmd code { font-size: 12px; padding: 3px 8px; border-radius: 6px;
+                     border: 1px solid var(--border); background: var(--bg); }
+.acp-auth-method { display: flex; flex-direction: column; gap: 6px; padding-top: 8px;
+                   border-top: 1px solid var(--border); }
+.acp-auth-method-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.acp-auth-kind { font-size: 11px; color: var(--muted-fg); }
+.acp-auth-vars { display: flex; flex-direction: column; gap: 6px; }
+.acp-auth-vars label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.acp-auth-vars input { font: inherit; font-size: 13px; padding: 6px 8px;
+                       border: 1px solid var(--border-strong); border-radius: 8px;
+                       background: var(--bg); color: var(--fg); }
+.acp-auth-vars em { font-style: normal; color: var(--muted-fg); }
+.acp-auth-acts { display: flex; gap: 8px; }
 </style>

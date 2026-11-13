@@ -40,6 +40,9 @@ type agentProc struct {
 	conn        *acp.ClientSideConnection
 	events      chan acp.SessionNotification // bridge 出口（见 bridge.go 的线程纪律）
 	loadSession bool                         // agent 是否声明 loadSession 能力
+	// authMethods 是 initialize 响应里 agent 声明的认证方式（ACP 规范）。
+	// 设置页的认证面板靠它列出可选的登录方式（见 auth.go）。
+	authMethods []acp.AuthMethod
 	// extraRoots 是 agent 声明支持 `additionalDirectories`（多目录工作区的扩展根）。
 	// 没声明就只传 cwd——多出的目录不发给它，也不假装生效（前端会明说"只用主目录"）。
 	extraRoots bool
@@ -234,6 +237,7 @@ func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Dur
 		}
 	}
 	p.loadSession = initRes.AgentCapabilities.LoadSession
+	p.authMethods = initRes.AuthMethods
 	// sessionCapabilities.additionalDirectories：'{}' 即表示吃这个字段（协议里
 	// 没有取值，声明本身是唯一信息）。多目录工作区靠它决定要不要传扩展根。
 	p.extraRoots = initRes.AgentCapabilities.SessionCapabilities.AdditionalDirectories != nil
@@ -242,24 +246,10 @@ func spawnAgent(cfg config.AcpAgentConfig, cwd string, handshakeTimeout time.Dur
 	return p, nil
 }
 
-// loginHints 是 per-agent 的登录指引（M-1）：按配置名或命令基名匹配。
-// 凭据都在 HOME 下（C13），服务器无 TTY 环境最容易断在这里。
-var loginHints = map[string]string{
-	"codex":    "在服务器终端运行 `codex login` 完成 ChatGPT 登录",
-	"claude":   "在服务器终端运行 `claude` 并执行 /login，或在 env 里配 ANTHROPIC_API_KEY",
-	"gemini":   "在服务器终端运行一次 `gemini` 完成 Google 登录，或在 env 里配 GEMINI_API_KEY",
-	"opencode": "在服务器终端运行 `opencode auth login` 配置模型渠道",
-	"zcode":    "复用 ~/.zcode 登录态；缺失时在服务器终端运行 `zcode` 登录一次",
-}
-
 // loginHintFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
+// 指引表与登录命令在 auth.go（认证面板与报错文案共用一份口径）。
 func loginHintFor(cfg config.AcpAgentConfig) string {
-	for _, key := range []string{strings.ToLower(cfg.Name), strings.ToLower(filepath.Base(cfg.Command))} {
-		if hint, ok := loginHints[key]; ok {
-			return hint
-		}
-	}
-	return "在该 agent 的官方 CLI 完成一次登录（凭据通常落在 HOME 下）"
+	return loginGuideFor(cfg).hint
 }
 
 // authKeywords：stderr/错误文本命中即提示「疑似未登录」。

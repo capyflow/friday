@@ -1042,3 +1042,77 @@ func detectImageMIME(data []byte) string {
 	}
 	return "application/octet-stream"
 }
+
+// handleAcpAuthStatus 返回某个 agent 的登录态与可用认证方式（设置页「认证」面板）。
+// GET /api/acp/auth?agent=codex。探测要拉起一次 agent 进程，因此比普通读接口慢一点。
+func (s *Server) handleAcpAuthStatus(ctx *vhttp.Context) error {
+	name := strings.TrimSpace(ctx.GinContext().Query("agent"))
+	if name == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 agent 参数"})
+	}
+	st, err := s.acp.AuthStatus(ctx.Context(), name)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"status": st})
+}
+
+// handleAcpAuth 执行一次认证（设置页「认证」面板的「认证」按钮）。
+// POST /api/acp/auth {"name":"codex","methodId":"…","vars":{"OPENAI_API_KEY":"…"}}
+//
+// env_var 型认证要先把用户填的变量写进该 agent 的环境变量（落 config.yaml 的
+// acp.agents[].env），否则下次拉起进程时这些凭据不在——这是"填了就生效"的关键。
+// 密钥以明文存在 config.yaml 里，与设置页「额外环境变量」是同一条通道。
+func (s *Server) handleAcpAuth(ctx *vhttp.Context) error {
+	s.acpUpdateMu.Lock()
+	defer s.acpUpdateMu.Unlock()
+	var req struct {
+		Name     string            `json:"name"`
+		MethodID string            `json:"methodId"`
+		Vars     map[string]string `json:"vars"`
+	}
+	if err := ctx.UnmarshalBody(&req); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "请求体须为 JSON 对象"})
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 name 参数"})
+	}
+	if len(req.Vars) > 0 {
+		if s.cfg == nil || s.configPath == "" {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "配置不可用"})
+		}
+		found := false
+		if err := s.cfg.Apply(func(n *config.Config) error {
+			next := n.Acp.Normalized()
+			for i := range next.Agents {
+				if next.Agents[i].Name != name {
+					continue
+				}
+				found = true
+				if next.Agents[i].Env == nil {
+					next.Agents[i].Env = map[string]string{}
+				}
+				for k, v := range req.Vars {
+					next.Agents[i].Env[k] = v
+				}
+			}
+			n.Acp = next
+			return config.UpdateAcp(s.configPath, next)
+		}); err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "保存认证信息失败: " + err.Error()})
+		}
+		if !found {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest,
+				map[string]string{"error": "清单里没有叫 " + name + " 的智能体"})
+		}
+		// 凭据变了：回收该 agent 的存活进程（配置变了就该重起），下次拉起带新环境变量。
+		s.acp.Reload(s.cfg.Snapshot().Acp)
+	}
+	res, err := s.acp.Authenticate(ctx.Context(), name, strings.TrimSpace(req.MethodID), req.Vars)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+	}
+	return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"result": res})
+}

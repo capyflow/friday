@@ -86,6 +86,7 @@ beforeEach(() => {
   termInstances.length = 0
   FakeSocket.instances = []
   store.view = 'terminal'
+  store.terminalCommand = ''
   api.mockReset().mockImplementation((method, url) => {
     if (url === '/api/terminal') return Promise.resolve(terminalInfo())
     return Promise.resolve({})
@@ -154,6 +155,21 @@ describe('内置终端页', () => {
     await flushPromises()
     expect(wrapper.get('.term-hint').text()).toContain('上限 2')
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('上限 2'), true)
+  })
+
+  // 设置页「在终端里登录」把命令带过来：新开一条终端，ready 之后自动敲进去。
+  it('设置页带来的命令：新开一条终端自动执行', async () => {
+    await show()
+    const before = FakeSocket.instances.length
+    store.terminalCommand = 'codex login'
+    await flushPromises()
+    expect(FakeSocket.instances.length).toBe(before + 1)
+    const sock = socket()
+    sock.push({ t: 'ready', shell: '/bin/zsh', cwd: '/x' })
+    await flushPromises()
+    expect(sock.frames).toContainEqual({ t: 'input', d: 'codex login\n' })
+    // 命令消费掉，不留在全局里反复执行
+    expect(store.terminalCommand).toBe('')
   })
 
   it('新建与关闭标签：关闭会发 close 并断开连接', async () => {

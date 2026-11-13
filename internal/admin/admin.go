@@ -72,6 +72,8 @@
 //	POST   /api/acp/threads/:id/checks/:run/stop 停止验证运行（需登录）
 //	GET    /api/runs          运行看板：ACP 轮次/计划/目标/任务/审批/失败（需登录）
 //	POST   /api/acp/test      agent 握手诊断（设置页「测试」按钮，需登录）
+//	GET    /api/acp/auth       agent 登录态与可用认证方式（设置页「认证」面板，需登录）
+//	POST   /api/acp/auth       执行一次认证 {"name","methodId","vars?"}（需登录）
 //	GET    /api/acp/catalog   可安装 agent 目录与本机安装状态（需登录）
 //	POST   /api/acp/install   执行目录 agent 的官方安装命令并注册（需登录）
 //	GET    /api/acp/dirs      列出某目录的子目录（新建对话选目录用，只读，需登录）
@@ -495,6 +497,9 @@ func (s *Server) Handler() http.Handler {
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/git/ops", s.wrap(s.handleAcpThreadGitOpStart))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/threads/:id/git/ops/:op/stop", s.wrap(s.handleAcpThreadGitOpStop))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/test", s.wrap(s.handleAcpTest))
+		// 认证：探测登录态 + 执行认证（设置页「智能体 → 认证」面板）。
+		root.AddRouter([]string{http.MethodGet}, "/api/acp/auth", s.wrap(s.handleAcpAuthStatus))
+		root.AddRouter([]string{http.MethodPost}, "/api/acp/auth", s.wrap(s.handleAcpAuth))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/catalog", s.wrap(s.handleAcpCatalog))
 		root.AddRouter([]string{http.MethodPost}, "/api/acp/install", s.wrap(s.handleAcpInstall))
 		root.AddRouter([]string{http.MethodGet}, "/api/acp/dirs", s.wrap(s.handleAcpDirs))

@@ -94,6 +94,13 @@ type fakeAgent struct {
 	resetOnSession bool
 	extraRoots     bool // initialize 里声明 sessionCapabilities.additionalDirectories
 
+	// authMethods 是 initialize 响应里声明的认证方式（空 = 不声明）。
+	authMethods []map[string]any
+	// authOK 是「哪些 methodId 的 authenticate 会成功」；未列出的默认失败。
+	authOK map[string]bool
+	// authCalls 记录收到的 authenticate methodId。
+	authCalls []string
+
 	configOptions  []map[string]any // session/new、load 响应携带的会话配置项（nil = agent 不回报该能力）
 	models         map[string]any   // 协议原生 models 状态（nil = agent 不回报）
 	modes          map[string]any   // 协议原生 modes 状态（nil = agent 不回报）
@@ -292,11 +299,29 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			if f.extraRoots {
 				caps["sessionCapabilities"] = map[string]any{"additionalDirectories": map[string]any{}}
 			}
+			am := f.authMethods
+			if am == nil {
+				am = []map[string]any{}
+			}
 			fc.w.respond(msg.ID, map[string]any{
 				"protocolVersion":   1,
 				"agentCapabilities": caps,
-				"authMethods":       []any{},
+				"authMethods":       am,
 			})
+		case "authenticate":
+			var ap struct {
+				MethodId string `json:"methodId"`
+			}
+			_ = json.Unmarshal(msg.Params, &ap)
+			f.mu.Lock()
+			f.authCalls = append(f.authCalls, ap.MethodId)
+			ok := f.authOK[ap.MethodId]
+			f.mu.Unlock()
+			if ok {
+				fc.w.respond(msg.ID, map[string]any{})
+			} else {
+				fc.w.respondErr(msg.ID, "not authenticated: run login first")
+			}
 		case "session/new":
 			f.record(&f.newReq, msg.Params)
 			if f.newSessionHang > 0 {
@@ -566,6 +591,7 @@ func spawnFake(f *fakeAgent) func(config.AcpAgentConfig, string, time.Duration, 
 			return nil, err
 		}
 		p.loadSession = initRes.AgentCapabilities.LoadSession
+		p.authMethods = initRes.AuthMethods
 		p.extraRoots = initRes.AgentCapabilities.SessionCapabilities.AdditionalDirectories != nil
 		go func() {
 			<-p.done
