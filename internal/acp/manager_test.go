@@ -98,6 +98,9 @@ type fakeAgent struct {
 	authMethods []map[string]any
 	// authOK 是「哪些 methodId 的 authenticate 会成功」；未列出的默认失败。
 	authOK map[string]bool
+	// authSilent 是「哪些 methodId 的 authenticate 不回应」——模拟 agent 收下请求
+	// 却不吭声（codebuddy 就是这样，它在等人完成登录）。
+	authSilent map[string]bool
 	// authCalls 记录收到的 authenticate methodId。
 	authCalls []string
 
@@ -316,7 +319,11 @@ func (fc *fakeConn) run(r interface{ Read([]byte) (int, error) }) {
 			f.mu.Lock()
 			f.authCalls = append(f.authCalls, ap.MethodId)
 			ok := f.authOK[ap.MethodId]
+			silent := f.authSilent[ap.MethodId]
 			f.mu.Unlock()
+			if silent {
+				break // 不回应：客户端只能等到超时
+			}
 			if ok {
 				fc.w.respond(msg.ID, map[string]any{})
 			} else {

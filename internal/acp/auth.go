@@ -43,12 +43,19 @@ const (
 )
 
 const (
-	// authProbeTimeout 是探测时 authenticate 的等待上限：只是问一句"有登录态吗"。
-	authProbeTimeout = 8 * time.Second
-	// authActionTimeout 是用户主动点「认证」时的等待上限：有些 agent 的
-	// authenticate 会开浏览器 OAuth 并等用户点完，得给足时间。
-	authActionTimeout = 90 * time.Second
+	// maxAuthProbeMethods 是探测时最多试几个认证方式。声明了多个方式的 agent
+	// （codebuddy 有四个）逐个试一遍既慢又多半失败，试前几个够定性了。
+	maxAuthProbeMethods = 3
+	// authActionTimeout 是用户主动点「认证」时的等待上限。ACP 的 authenticate
+	// 通常是同步的（agent 自己开浏览器，URL 放在 _meta 里，客户端去开），
+	// 等更久没有意义——真要等用户操作的，agent 也不会吭声，那种情况留给
+	// 「去终端登录」这条路。
+	authActionTimeout = 15 * time.Second
 )
+
+// authProbeTimeout 是探测时 authenticate 的等待上限：只是问一句"有登录态吗"。
+// 做成变量是为了让测试不用真的等这么久。
+var authProbeTimeout = 5 * time.Second
 
 // AuthVarView 是环境变量型认证要用户填的一个变量。
 type AuthVarView struct {
@@ -101,6 +108,11 @@ var loginGuides = map[string]loginGuide{
 	"gemini":   {"在终端运行一次 `gemini` 完成 Google 登录，或在环境变量里配 GEMINI_API_KEY", "gemini"},
 	"opencode": {"在终端运行 `opencode auth login` 配置模型渠道", "opencode auth login"},
 	"zcode":    {"复用 ~/.zcode 登录态；缺失时在终端运行 `zcode` 登录一次", "zcode"},
+	// codebuddy 声明了四种登录方式（iOA / Google-Github / 微信 / 企业域），
+	// 由 agent 自己的 authenticate 处理；凭据不在文件里（大概在钥匙串），
+	// 所以本地探测不出登录态，只能问它。
+	"codebuddy":      {"用面板里的认证方式登录（iOA / Google-Github / 微信 / 企业域），或在终端运行 `codebuddy` 后按提示登录", "codebuddy"},
+	"codebuddy-code": {"用面板里的认证方式登录（iOA / Google-Github / 微信 / 企业域），或在终端运行 `codebuddy` 后按提示登录", "codebuddy"},
 }
 
 // loginGuideFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
@@ -209,33 +221,15 @@ func (m *Manager) withProbe(agentCfg config.AcpAgentConfig, fn func(*agentProc) 
 	return fn(proc)
 }
 
-// probeLoginState 判定登录态：先信 agent 自己（authenticate 成功 = 已登录），
-// 再看环境变量与凭据文件，都看不出来就说「判不出来」，不硬猜。
+// probeLoginState 判定登录态。
+//
+// 顺序是有讲究的：先用本地的、瞬时的信号（agent 声明要的环境变量填了没、
+// HOME 下有没有凭据文件），再问 agent 自己。为什么不反过来——authenticate
+// 可能阻塞（等浏览器里点确认）甚至当场拉起登录流程，探测阶段不该有副作用；
+// 而且声明了多个方式的 agent（codebuddy 有 iOA / Google / 微信 / 企业域四个）
+// 逐个调一遍既慢又多半失败。最后才用 authenticate 兜底判定。
 func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAgentConfig, creds []string) (string, string) {
 	methods := normalizeAuthMethods(proc.authMethods)
-	var lastErr string
-	for _, am := range methods {
-		if am.view.Type != "agent" {
-			continue
-		}
-		actx, cancel := context.WithTimeout(ctx, authProbeTimeout)
-		_, err := proc.conn.Authenticate(actx, acp.AuthenticateRequest{MethodId: am.view.ID})
-		timedOut := actx.Err() != nil
-		cancel()
-		if err == nil {
-			return AuthStateLoggedIn, "认证通过（" + am.view.Name + "）"
-		}
-		if !timedOut {
-			lastErr = err.Error()
-		} else {
-			// 有些 agent 的 authenticate 会去开浏览器 OAuth 并等用户点完，
-			// 登录链接就印在它的 stderr 上——超时了也要把这句话带给用户。
-			lastErr = "认证超时（agent 可能在等浏览器里的确认）"
-			if tail := proc.stderrTail(6); tail != "" {
-				lastErr += "：" + tail
-			}
-		}
-	}
 	// 环境变量型：配置里已经填了这些变量就算配好了。
 	for _, am := range methods {
 		if am.view.Type != "env_var" || am.raw.EnvVar == nil {
@@ -253,8 +247,38 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 	if names := configuredKeyVars(agentCfg); len(names) > 0 {
 		return AuthStateLoggedIn, "已配置密钥：" + strings.Join(names, "、")
 	}
+	// 前面都没命中，才问 agent 自己：逐个试它声明的方式（最多试几个）。
+	var lastErr string
+	sawTimeout := false
+	tried := 0
+	for _, am := range methods {
+		if am.view.Type != "agent" {
+			continue
+		}
+		if tried >= maxAuthProbeMethods {
+			break
+		}
+		tried++
+		actx, cancel := context.WithTimeout(ctx, authProbeTimeout)
+		_, err := proc.conn.Authenticate(actx, acp.AuthenticateRequest{MethodId: am.view.ID})
+		timedOut := actx.Err() != nil
+		cancel()
+		if err == nil {
+			return AuthStateLoggedIn, "认证通过（" + am.view.Name + "）"
+		}
+		if timedOut {
+			// agent 没回应认证请求：多半是它正等着人完成登录（codebuddy 就是
+			// 这样——authenticate 收下不吭声）。这不是"未登录"的证据，别硬判。
+			sawTimeout = true
+			continue
+		}
+		lastErr = err.Error()
+	}
 	if lastErr != "" {
 		return AuthStateLoggedOut, "未登录：" + lastErr
+	}
+	if sawTimeout {
+		return AuthStateUnknown, "agent 没有回应认证请求（它可能在等你完成登录）——按下方方式登录后重新检测一次"
 	}
 	if len(proc.authMethods) == 0 {
 		return AuthStateUnknown, "该 agent 没有声明认证方式，无法自动判定登录态（可按下方指引在终端里登录一次）"
@@ -302,9 +326,10 @@ func (m *Manager) Authenticate(ctx context.Context, name, methodID string, env m
 			msg := err.Error()
 			switch {
 			case actx.Err() != nil:
-				// agent 在等浏览器里的确认，等不到就超时：把它的输出带上
-				// （登录链接一般就印在那里）。
-				msg = "认证超时（agent 可能在等浏览器里的确认）"
+				// agent 收下请求却不吭声（codebuddy 就是这样：它把登录界面
+				// 甩给人，不走这个 RPC）。这时候干等没意义，把路指到终端。
+				out.State = AuthStateUnknown
+				msg = "agent 没有回应认证请求（它多半是让你在它自己的界面里登录）——请按登录指引在终端里登录一次"
 			case strings.Contains(msg, "Method not implemented"):
 				// 有的 agent 只在 initialize 里声明认证方式，却没实现这个方法
 				// （claude-code-acp 的 claude-login 就是这样）。别让用户以为
@@ -312,6 +337,9 @@ func (m *Manager) Authenticate(ctx context.Context, name, methodID string, env m
 				msg = "这个 agent 声明了认证方式但没实现它（Method not implemented）——按登录指引在终端里登录一次"
 			}
 			out.Message = "认证失败：" + msg
+			if guide := loginGuideFor(agentCfg); guide.command != "" {
+				out.Message += "（命令：" + guide.command + "）"
+			}
 			if tail := proc.stderrTail(6); tail != "" {
 				out.Message += "（agent 输出：" + tail + "）"
 			}
