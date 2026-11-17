@@ -77,6 +77,18 @@ type Status struct {
 	AuthMessage string `json:"authMessage,omitempty"`
 }
 
+// 自动重连的退避参数（var 而非 const：测试要能缩短等待）。
+var (
+	// mcpRestartBaseDelay 是第一次重连前的等待。
+	mcpRestartBaseDelay = 2 * time.Second
+	// mcpRestartMaxDelay 是退避上限（等太久不如让人手动重连）。
+	mcpRestartMaxDelay = 60 * time.Second
+	// mcpRestartMaxTries 是连续失败的重连次数上限：超过就停下等人工改配置。
+	// 没有这个上限，一条写错的 MCP 配置会每 2 秒拉起一批子进程——261113 实测
+	// 把整机 load 打到 500，智能体全部握手失败、拿不到能力清单。
+	mcpRestartMaxTries = 8
+)
+
 // Manager 管理全部 MCP 服务器：Apply 同步配置，RegisterTools 注册工具，
 // Restart 手动重连，进程退出自动重启。
 type Manager struct {
@@ -87,6 +99,14 @@ type Manager struct {
 	oauth    *OAuth // 远程服务器的 OAuth 会话服务（未开启为 nil）
 	onChange func() // 工具清单可能变化后的重建回调（重建注册表与 Agent）
 	closed   bool
+	// failures 记录每台服务器的连续失败次数（退避与放弃的依据）。
+	failures map[string]int
+	// retrying 标记该服务器是否已有重连循环在跑：保证同一台只有一个循环，
+	// 否则每次失败都会再开一个，进程越拉越多（261113 事故的放大器）。
+	retrying map[string]bool
+	// blocked 标记该服务器已放弃自动重连（连续失败到上限）：等人改配置或
+	// 手动重连后再放开，不让它自己无限爬起来。
+	blocked map[string]bool
 }
 
 // NewManager 创建管理器。onChange 在工具清单可能变化后被调用（可为 nil）。
@@ -94,6 +114,9 @@ func NewManager(onChange func()) *Manager {
 	return &Manager{
 		clients:  make(map[string]Conn),
 		status:   make(map[string]*Status),
+		failures: make(map[string]int),
+		retrying: make(map[string]bool),
+		blocked:  make(map[string]bool),
 		onChange: onChange,
 	}
 }
@@ -278,12 +301,21 @@ func (m *Manager) Apply(ctx context.Context, cfgs []ServerConfig) error {
 	for _, name := range names {
 		m.mu.Lock()
 		_, running := m.clients[name]
+		if !running {
+			// 这次配置变更是人（或启动流程）的主动动作：给满重连预算，
+			// 并解除此前的「已放弃自动重连」标记。
+			m.failures[name] = 0
+			m.blocked[name] = false
+		}
 		m.mu.Unlock()
 		if running {
 			continue
 		}
-		if err := m.start(ctx, desired[name]); err != nil && firstErr == nil {
-			firstErr = err
+		if err := m.start(ctx, desired[name]); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			m.scheduleRetry(name) // 连不上就退避重连（连续失败到上限会停）
 		}
 	}
 	m.notifyChange()
@@ -348,6 +380,7 @@ func (m *Manager) start(ctx context.Context, cfg ServerConfig) error {
 		return err
 	}
 	m.clients[name] = conn
+	m.failures[name] = 0
 	st.Running = true
 	st.StartedAt = time.Now()
 	st.LastError = ""
@@ -371,7 +404,7 @@ func (m *Manager) notifyChange() {
 	}
 }
 
-// handleExit 进程意外退出：记状态，后台自动重启（2 秒后重试，直至成功或管理器关闭）。
+// handleExit 进程意外退出：记状态，转入退避重连（连续失败到上限就停下）。
 func (m *Manager) handleExit(name string) {
 	m.mu.Lock()
 	if m.closed {
@@ -381,19 +414,44 @@ func (m *Manager) handleExit(name string) {
 	if st, ok := m.status[name]; ok {
 		st.Running = false
 		st.Restarts++
-		st.LastError = "进程退出，等待自动重启"
+		st.LastError = "进程退出，等待自动重连"
 	}
 	delete(m.clients, name)
+	m.mu.Unlock()
+	m.scheduleRetry(name)
+}
+
+// scheduleRetry 为一台掉线的服务器安排自动重连：按连续失败次数退避
+// （2s → 4s → 8s … 封顶 60s），连续失败到上限就停，等人改配置后手动重连。
+//
+// 单飞：同一台服务器同时只有一个重连循环——每次失败都再开一个循环的话，
+// 坏配置会滚出一大把并行拉起器（261113 事故：整机 load 500，智能体全挂）。
+func (m *Manager) scheduleRetry(name string) {
+	m.mu.Lock()
+	if m.closed || m.retrying[name] || m.blocked[name] {
+		m.mu.Unlock()
+		return // 已有循环在跑 / 已放弃自动重连 / 管理器已关
+	}
 	cfg := m.cfgByName(name)
+	if cfg.Name == "" {
+		m.mu.Unlock()
+		return // 配置中已移除，不重连
+	}
+	m.retrying[name] = true
+	m.failures[name]++
+	fails := m.failures[name]
 	m.mu.Unlock()
 
-	if cfg.Name == "" {
-		return // 配置中已移除，不重启
-	}
-	log.Printf("[mcp] 服务器 %s 进程退出，2 秒后自动重启", name)
+	log.Printf("[mcp] 服务器 %s 掉线，%s 后自动重连（连续失败第 %d 次）",
+		name, restartDelay(fails), fails)
 	go func() {
-		time.Sleep(2 * time.Second)
-		for {
+		defer func() {
+			m.mu.Lock()
+			m.retrying[name] = false
+			m.mu.Unlock()
+		}()
+		for attempt := 0; attempt < mcpRestartMaxTries; attempt++ {
+			time.Sleep(restartDelay(fails + attempt))
 			m.mu.Lock()
 			closed := m.closed
 			_, running := m.clients[name]
@@ -403,19 +461,49 @@ func (m *Manager) handleExit(name string) {
 			}
 			cur := m.cfgByName(name)
 			if cur.Name == "" {
-				return // 配置移除，不再重启
+				return // 配置移除，不再重连
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout*2)
 			err := m.start(ctx, cur)
 			cancel()
 			if err == nil {
-				log.Printf("[mcp] 服务器 %s 已自动重启", name)
+				log.Printf("[mcp] 服务器 %s 已自动重连", name)
 				m.notifyChange()
 				return
 			}
-			time.Sleep(3 * time.Second)
+			m.mu.Lock()
+			m.failures[name]++
+			m.mu.Unlock()
 		}
+		// 连续失败到上限：停下等人改配置（设置页可手动重连），不再无限爬起来。
+		m.mu.Lock()
+		m.blocked[name] = true
+		if st, ok := m.status[name]; ok {
+			st.LastError = fmt.Sprintf("连续 %d 次自动重连仍失败，已停止自动重连（改好启动命令后在设置页点「重连」）",
+				mcpRestartMaxTries)
+		}
+		m.mu.Unlock()
+		log.Printf("[mcp] 服务器 %s 连续 %d 次重连失败，已停止自动重连（改好启动命令后手动重连）",
+			name, mcpRestartMaxTries)
 	}()
+}
+
+// restartDelay 按连续失败次数算退避时长：2s、4s、8s … 封顶 mcpRestartMaxDelay。
+func restartDelay(fails int) time.Duration {
+	if fails < 1 {
+		fails = 1
+	}
+	d := mcpRestartBaseDelay
+	for i := 1; i < fails; i++ {
+		d *= 2
+		if d >= mcpRestartMaxDelay {
+			return mcpRestartMaxDelay
+		}
+	}
+	if d > mcpRestartMaxDelay {
+		return mcpRestartMaxDelay
+	}
+	return d
 }
 
 // RegisterTools 把所有在线服务器的工具注册进注册表（名字加 mcp_<server>_ 前缀）。
@@ -548,6 +636,9 @@ func (m *Manager) Restart(name string) error {
 		delete(m.clients, name)
 	}
 	cfg := m.cfgByName(name)
+	// 手动重连 = 人来修配置了：重置失败计数并解除「已放弃自动重连」。
+	m.failures[name] = 0
+	m.blocked[name] = false
 	m.mu.Unlock()
 	if cfg.Name == "" {
 		return fmt.Errorf("未找到 MCP 服务器 %s", name)

@@ -36,6 +36,17 @@ async function show() {
   await flushPromises()
 }
 
+// 列表行 → 原地展开：三个操作与全部字段都在展开区里，列表只留名称/命令/登录态。
+async function openDetail(name) {
+  const row = wrapper.findAll('.acp-agent').find(r => r.text().includes(name))
+  // 已经展开的（安装/新增后默认展开）不要再点一下，否则会收起来。
+  if (!row.find('.acp-agent-detail').exists()) {
+    await row.get('.acp-agent-row').trigger('click')
+    await flushPromises()
+  }
+  return row
+}
+
 describe('设置 → 智能体', () => {
   it('升级后保存沿用新启动路径、参数和版本，保留自定义环境', async () => {
     api.mockImplementation(async (method, url) => {
@@ -85,16 +96,56 @@ describe('设置 → 智能体', () => {
     const cards = wrapper.findAll('.acp-cat-card')
     const add = name => cards.find(c => c.text().includes(name)).find('button')
     await add('Codex').trigger('click')
+    await flushPromises()
     await add('opencode').trigger('click')
+    await flushPromises()
 
     const rows = wrapper.findAll('.acp-agent')
     expect(rows).toHaveLength(2)
-    // 第二列是「启动命令」；codex 的 args 是适配器参数，不能被替换成 codex 二进制
-    expect(rows[0].findAll('input')[1].element.value).toBe('npx')
-    expect(rows[1].findAll('input')[1].element.value).toBe('/Users/u/.opencode/bin/opencode')
+    // 启动命令在详情页的第二列；codex 的 args 是适配器参数，不能被替换成 codex 二进制
+    let detail = await openDetail('codex')
+    expect(detail.findAll('input')[1].element.value).toBe('npx')
+    await wrapper.get('.acp-agent-row').trigger('click')
+    detail = await openDetail('opencode')
+    expect(detail.findAll('input')[1].element.value).toBe('/Users/u/.opencode/bin/opencode')
   })
 
-  it('agent 卡片默认收起：折叠态看启动摘要，展开后无工作目录字段且原样带回手写的值', async () => {
+  // 门面默认全开（白名单为空 = 全部工具），设置里不再露这块面板。
+  it('工具门面面板默认隐藏', async () => {
+    await show()
+    expect(wrapper.find('.acp-facade').exists()).toBe(false)
+  })
+
+  // 徽章先给本地快查的答案，再由后台逐台问一次 CLI（mode=safe，不调 authenticate）。
+  it('进页面后按顺序用 safe 模式问每台 agent', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { agents: [
+        { name: 'codex', command: 'npx' },
+        { name: 'gemini', command: 'gemini' },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url.includes('mode=safe')) return { status: {
+        agent: 'x', state: 'logged_in', message: '已登录：agent 能正常建立会话', methods: [],
+      } }
+      if (method === 'GET' && url.includes('quick=1')) return { status: {
+        agent: 'x', state: 'unknown', message: '本地没有可判定的凭据或变量', methods: [],
+      } }
+      return { message: '已保存' }
+    })
+    await show()
+    await flushPromises()
+    await flushPromises()
+    const safeCalls = api.mock.calls.filter(([m, u]) => m === 'GET' && u.includes('mode=safe'))
+    // 一台一台问，不并发拉起八个进程
+    expect(safeCalls.map(c => c[1])).toEqual([
+      '/api/acp/auth?agent=codex&mode=safe',
+      '/api/acp/auth?agent=gemini&mode=safe',
+    ])
+    // 问到的结论替换掉快查的「未检测」
+    expect(wrapper.findAll('.acp-auth-badge').map(b => b.text())).toEqual(['已登录', '已登录'])
+  })
+
+  it('列表只露摘要与登录态，点开详情才有字段与三个操作', async () => {
     api.mockImplementation(async (method, url) => {
       if (method === 'GET' && url === '/api/acp/config') return { acp: { agents: [{
         name: 'codex', command: 'npx', args: ['-y', '@agentclientprotocol/codex-acp'],
@@ -105,37 +156,44 @@ describe('设置 → 智能体', () => {
     })
     await show()
     const row = wrapper.get('.acp-agent')
-    // 收起：字段不渲染，标题行给足信息（名称/停用/版本/启动命令）
-    expect(row.find('.acp-agent-body').exists()).toBe(false)
-    expect(row.get('.acp-agent-toggle').text()).toContain('codex')
-    expect(row.get('.acp-agent-toggle').text()).toContain('已停用')
-    expect(row.get('.acp-agent-toggle').text()).toContain('v2.3.0')
+    // 列表行：名称/停用/版本/启动命令摘要 + 登录态徽章，没有输入框也没有操作按钮
+    expect(row.text()).toContain('codex')
+    expect(row.text()).toContain('已停用')
+    expect(row.text()).toContain('v2.3.0')
     expect(row.get('.acp-agent-sum').text()).toBe('npx -y @agentclientprotocol/codex-acp')
-    expect(row.get('.acp-agent-toggle').attributes('aria-expanded')).toBe('false')
-    // 折叠态仍可认证/测试/删除
-    expect(row.findAll('.pm-acts button').map(b => b.text())).toEqual(['认证', '测试', '删除'])
+    expect(row.findAll('input')).toHaveLength(0)
+    expect(row.find('.pm-acts').exists()).toBe(false)
+    // 本地查不出结论时如实说「未检测」，不能显示成「未登录」
+    expect(row.get('.acp-auth-badge').text()).toBe('未检测')
 
-    await row.get('.acp-agent-toggle').trigger('click')
-    expect(row.find('.acp-agent-body').exists()).toBe(true)
-    expect(row.get('.acp-agent-toggle').attributes('aria-expanded')).toBe('true')
-    // 工作目录不在卡片上填（每个对话建 thread 时自己选）
-    expect(row.text()).not.toContain('预填工作目录')
+    const detail = await openDetail('codex')
+    expect(detail.findAll('.acp-agent-acts button').map(b => b.text())).toEqual(['认证', '测试', '删除'])
+    expect(detail.find('.acp-agent-body').exists()).toBe(true)
+    // 工作目录不在详情页上填（每个对话建 thread 时自己选）
+    expect(detail.text()).not.toContain('预填工作目录')
 
+    await wrapper.get('.acp-agent-row').trigger('click')
     await wrapper.findAll('button').find(b => b.text().includes('保存')).trigger('click')
     await flushPromises()
     const saved = api.mock.calls.find(([method, url]) => method === 'POST' && url === '/api/acp/config')[2]
     expect(saved.acp.agents[0]).toMatchObject({ name: 'codex', workspace: '~/projects', enabled: false })
   })
 
-  it('新增与安装/添加模板的卡片直接展开，其余保持收起', async () => {
+  it('新增与「添加到清单」后直接展开那一行', async () => {
     await show()
     await wrapper.findAll('button').find(b => b.text().includes('+ 添加 agent')).trigger('click')
-    expect(wrapper.get('.acp-agent').find('.acp-agent-body').exists()).toBe(true)
-    await wrapper.get('.acp-agent').get('.acp-agent-toggle').trigger('click') // 手动收起
+    await flushPromises()
+    expect(wrapper.findAll('.acp-agent')[0].find('.acp-agent-detail').exists()).toBe(true)
+    await wrapper.get('.acp-agent-row').trigger('click')
+    expect(wrapper.find('.acp-agent-detail').exists()).toBe(false)
+
     const cards = wrapper.findAll('.acp-cat-card')
     await cards.find(c => c.text().includes('Codex')).find('button').trigger('click')
-    expect(wrapper.findAll('.acp-agent')[1].find('.acp-agent-body').exists()).toBe(true)
-    expect(wrapper.findAll('.acp-agent')[0].find('.acp-agent-body').exists()).toBe(false)
+    await flushPromises()
+    expect(wrapper.findAll('.acp-agent')).toHaveLength(2)
+    // 只有新加的那台是展开的
+    expect(wrapper.findAll('.acp-agent')[1].find('.acp-agent-detail').exists()).toBe(true)
+    expect(wrapper.findAll('.acp-agent')[0].find('.acp-agent-detail').exists()).toBe(false)
   })
 })
 
@@ -246,7 +304,10 @@ describe('设置 → 智能体 → 认证', () => {
 
   async function openAuthPanel() {
     await show()
-    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    // 三个操作在详情页里：先点开列表行，再点「认证」做一次完整检测。
+    await wrapper.get('.acp-agent-row').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.acp-agent-acts button').find(b => b.text() === '认证').trigger('click')
     await flushPromises()
     return wrapper.get('.acp-auth')
   }
@@ -256,12 +317,12 @@ describe('设置 → 智能体 → 认证', () => {
     expect(panel.text()).toContain('未登录')
     expect(panel.text()).toContain('codex login')
     expect(panel.text()).toContain('在终端运行 codex login')
-    // 卡片头上也有同一份状态的徽章（收起时一眼能看见）
+    // 列表行上也有同一份状态的徽章（不用点开详情就能看见登录态）
     expect(wrapper.findAll('.acp-auth-badge')[0].text()).toBe('未登录')
   })
 
-  // 装完 agent 到登录之间不能有空档：面板自动展开、卡片高亮，登录入口就在眼前。
-  it('安装完成后自动展开那台 agent 的认证面板', async () => {
+  // 装完 agent 到登录之间不能有空档：直接打开详情页，登录入口就在眼前。
+  it('安装完成后直接打开那台 agent 的详情页', async () => {
     api.mockImplementation(async (method, url) => {
       if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: false, agents: [] } }
       if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [{
@@ -280,9 +341,10 @@ describe('设置 → 智能体 → 认证', () => {
     await show()
     await wrapper.findAll('button').find(b => b.text().includes('一键安装')).trigger('click')
     await flushPromises()
-    const panel = wrapper.get('.acp-auth')
-    expect(panel.text()).toContain('codex login')
-    // 卡片被高亮，指过去就是刚装的那台
+    const detail = wrapper.get('.acp-agent-detail')
+    expect(detail.findAll('input')[1].element.value).toBe('npx')
+    expect(detail.findAll('.acp-agent-acts button').map(b => b.text())).toContain('认证')
+    // 列表行被高亮，指过去就是刚装的那台
     expect(wrapper.get('.acp-agent').classes()).toContain('acp-agent-focus')
   })
 
@@ -315,7 +377,8 @@ describe('设置 → 智能体 → 认证', () => {
       return { message: '已保存' }
     })
     await show()
-    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    const detail = await openDetail('codebuddy-code')
+    await detail.findAll('.acp-agent-acts button').find(b => b.text() === '认证').trigger('click')
     await flushPromises()
     const inputs = wrapper.findAll('.acp-auth-vars input')
     expect(inputs).toHaveLength(2)
@@ -343,7 +406,8 @@ describe('设置 → 智能体 → 认证', () => {
       return { message: '已保存' }
     })
     await show()
-    await wrapper.findAll('.pm-acts button').find(b => b.text() === '认证').trigger('click')
+    const detail = await openDetail('codebuddy-code')
+    await detail.findAll('.acp-agent-acts button').find(b => b.text() === '认证').trigger('click')
     await flushPromises()
     await wrapper.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')
     expect(store.terminalCommand).toBe('codebuddy\n/login')
@@ -355,6 +419,36 @@ describe('设置 → 智能体 → 认证', () => {
     await panel.findAll('.acp-auth-cmd button').find(b => b.text() === '在终端里登录').trigger('click')
     expect(store.terminalCommand).toBe('codex login')
     expect(store.view).toBe('terminal')
+  })
+
+  // 交互式 agent 的「由 agent 自己认证」一组不渲染：CLI 的 authenticate 语义是
+  // 先登出再登录，已登录时点一次就掉线；这类只留终端与凭据两条路。
+  it('交互式 agent 收起「立即认证」，只留终端与凭据入口', async () => {
+    api.mockImplementation(async (method, url) => {
+      if (method === 'GET' && url === '/api/acp/config') return { acp: { enabled: false, agents: [
+        { name: 'codebuddy-code', command: '/opt/homebrew/bin/codebuddy', args: ['--acp'] },
+      ] } }
+      if (method === 'GET' && url === '/api/acp/catalog') return { catalog: [] }
+      if (method === 'GET' && url.startsWith('/api/acp/auth?agent=')) return { status: {
+        agent: 'codebuddy-code', state: 'logged_in', message: '检测到登录凭据：~/x.info',
+        interactive: true, command: 'codebuddy', follow: ['', '/login'],
+        suggestedVars: ['CODEBUDDY_API_KEY'],
+        methods: [
+          { id: 'iOA', name: 'Login with iOA', type: 'agent' },
+          { id: 'internal', name: 'Login with WeChat', type: 'agent' },
+        ],
+      } }
+      return { message: '已保存' }
+    })
+    await show()
+    const detail = await openDetail('codebuddy-code')
+    await detail.findAll('.acp-agent-acts button').find(b => b.text() === '认证').trigger('click')
+    await flushPromises()
+    const panel = wrapper.get('.acp-auth')
+    expect(panel.text()).not.toContain('Login with WeChat')
+    expect(panel.findAll('button').some(b => b.text() === '立即认证')).toBe(false)
+    expect(panel.text()).toContain('在终端里登录')
+    expect(panel.text()).toContain('保存凭据')
   })
 })
 
@@ -377,7 +471,9 @@ const FACADE = {
   ],
 }
 
-describe('设置 → 智能体 → 工具门面', () => {
+// 工具门面面板默认隐藏（白名单为空 = 全部工具），这组用例先挂起；
+// 把 AcpSection.vue 的 facadeVisible 改回 true 时，把 describe.skip 还原成 describe。
+describe.skip('设置 → 智能体 → 工具门面', () => {
   beforeEach(() => {
     api.mockImplementation(async (method, url) => {
       if (method === 'GET' && url === '/api/acp/config') {
@@ -420,10 +516,9 @@ describe('设置 → 智能体 → 工具门面', () => {
   it('取消一个工具 → 展开成全量减一的白名单；agent 卡片勾选落到 allowedFacadeTools', async () => {
     await show()
     await facadeBox('write_file').find('input').setValue(false)
-    // 展开 agent 卡片，勾一个逐 agent 白名单。
-    await wrapper.get('.acp-agent-toggle').trigger('click')
-    const agentCard = wrapper.get('.acp-agent')
-    const agentBox = agentCard.findAll('label').find(l => l.text() === 'read_file')
+    // 逐 agent 白名单在详情页里，先点开那台 agent。
+    const detail = await openDetail('minimax')
+    const agentBox = detail.findAll('label').find(l => l.text() === 'read_file')
     await agentBox.find('input').setValue(true)
 
     const saved = await saveAndCapture()

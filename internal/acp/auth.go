@@ -53,6 +53,10 @@ const (
 	// 等更久没有意义——真要等用户操作的，agent 也不会吭声，那种情况留给
 	// 「去终端登录」这条路。
 	authActionTimeout = 15 * time.Second
+	// interactiveAuthTimeout 是交互式登录（必须人在浏览器里点完）的等待上限。
+	// codebuddy 这类 agent 的 authenticate 要等浏览器授权回来才返回，15 秒
+	// 连扫码都不够；更糟的是提前返回后进程会被回收，等于把登录从中间撕掉。
+	interactiveAuthTimeout = 120 * time.Second
 )
 
 // authProbeTimeout 是探测时 authenticate 的等待上限：只是问一句"有登录态吗"。
@@ -95,6 +99,11 @@ type AuthStatus struct {
 	Link string `json:"link,omitempty"`
 	// Follow 是登录时启动命令之后还要补敲的行（如 codebuddy 的 /login）。
 	Follow []string `json:"follow,omitempty"`
+	// Interactive 表示该 agent 的登录必须由人在浏览器里完成（guide.interactive）。
+	// 面板据此收起「由 agent 自己认证」那组按钮：CLI 的 authenticate 语义是先
+	// 登出再登录，已登录时点一次就会掉线，还会多开登录页。这类只留「在终端里
+	// 登录」与「保存凭据」两条路。
+	Interactive bool `json:"interactive,omitempty"`
 }
 
 // AuthResult 是一次认证动作的结果。
@@ -114,9 +123,18 @@ type loginGuide struct {
 	// link 是取凭据的地址（如 API Key 管理页），面板里给一个直达链接。
 	link string
 	// follow 是启动交互式命令后还要补敲的行（如 codebuddy 的 /login）。
-	// 参数形式 `codebuddy /login` 不认斜杠命令（实测仍报未登录），只有进入
-	// 交互界面后再敲 /login 才有效——所以这里带上 follow，让终端页依次敲。
+	// 空串表示「按一下回车」——codebuddy 起来先问「信任此文件夹吗」，不先确认
+	// 它就不收后面的斜杠命令。参数形式 `codebuddy /login` 不认斜杠命令（实测
+	// 仍报未登录），只有进入交互界面后再敲 /login 才有效。
 	follow []string
+	// interactive 表示「登录必须在人手里完成」（开浏览器扫码/点授权）。
+	// 这类 agent 的 authenticate 有两个要命的性质：
+	//   - 有副作用：codebuddy 的 authenticate 发现已登录会**先登出再重登**
+	//     （logout-origin.json 里 reason=acp_reauthenticate 就是它写的）；
+	//   - 不返回：要等浏览器授权回来才回 RPC，探测阶段调它等于替用户登出，
+	//     而且每调一次就多开一个登录页。
+	// 所以这类 agent 探测时**绝不能**调 authenticate，只认本地凭据与建会话。
+	interactive bool
 }
 
 // loginGuides 是按 agent 名的登录指引（命令优先用配置名，其次用命令基名兜底）。
@@ -130,12 +148,24 @@ var loginGuides = map[string]loginGuide{
 	// codebuddy 声明了四种登录方式（iOA / Google-Github / 微信 / 企业域），
 	// 由 agent 自己的 authenticate 处理；但它只认三种凭据：环境变量里的
 	// CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN、settings.json 里的
-	// apiKeyHelper，或 CLI 交互登录（凭据进 macOS 钥匙串）。**网页端登录它
-	// 读不到**——网页的登录态不是 CLI 的凭据。所以这里把两种环境变量直接
-	// 推荐出来，让人填进 agent 的环境变量里。
-	"codebuddy":      {hint: "网页版的登录态不与 CLI 共享：CLI 要单独登录一次——在终端里跑 `codebuddy` 后敲 /login，走浏览器授权（凭据进 macOS 钥匙串，之后 Friday 拉起 agent 就能用到）；或把 API Key 填在下面", command: "codebuddy", follow: []string{"/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
-	"codebuddy-code": {hint: "网页版的登录态不与 CLI 共享：CLI 要单独登录一次——在终端里跑 `codebuddy` 后敲 /login，走浏览器授权（凭据进 macOS 钥匙串，之后 Friday 拉起 agent 就能用到）；或把 API Key 填在下面", command: "codebuddy", follow: []string{"/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys"},
+	// apiKeyHelper，或 CLI 自己的会话文件——注意**不是** macOS 钥匙串，而是
+	// ~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/
+	// Tencent-Cloud.coding-copilot.info（登出时该文件被删、留 .logged-out
+	// 标记）。**网页端登录它读不到**——网页的登录态不是 CLI 的凭据。
+	//
+	// 四条方式对应的站点各不相同（见 CLI 的映射表：
+	// {"Chinese Site":"internal","International Site":"external",...}）：
+	// internal 是国内站（codebuddy.cn / copilot.tencent.com，微信账号），
+	// external 是国际站（codebuddy.ai，Google/Github 账号）。
+	"codebuddy":      {hint: codebuddyHint, command: "codebuddy", follow: []string{"", "/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys", interactive: true},
+	"codebuddy-code": {hint: codebuddyHint, command: "codebuddy", follow: []string{"", "/login"}, vars: []string{"CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"}, link: "https://tencent.sso.copilot.tencent.com/profile/keys", interactive: true},
 }
+
+// codebuddyHint 是 codebuddy 两步（网页端/CLI 凭据分离 + 站点选择）的说明。
+// 单独提出来是因为两台 codebuddy（codebuddy、codebuddy-code）共用这份文案。
+// 注意不要再引导去点「立即认证」：那组按钮对交互式 agent 已经收起，而且 CLI 的
+// authenticate 会先登出再登录，点一次就把现有登录清掉。
+const codebuddyHint = "网页端登录态不与 CLI 共享：CLI 要单独登录一次。点「在终端里登录」会拉起 codebuddy、自动补一个回车和 /login，登录方式按账号选：国内账号选 Login with WeChat（国内站），国际账号才是 Google/Github（国际站 codebuddy.ai）。登完凭据落在下面那个文件里，之后 Friday 拉起 agent 直接可用；也可以把 API Key 填在下面"
 
 // loginGuideFor 给出该 agent 的登录指引：配置名优先，命令基名兜底。
 func loginGuideFor(cfg config.AcpAgentConfig) loginGuide {
@@ -151,12 +181,32 @@ func loginGuideFor(cfg config.AcpAgentConfig) loginGuide {
 }
 
 // credFiles 是 CLI 类 agent 的登录凭据落点（相对 HOME）。文件存在即认为登录过。
+// 唯一的例外是 codebuddy：它的会话文件在 Application Support 下，登出时被删
+// 并留 .logged-out 标记，所以"文件在 = 已登录"这条判断对它同样成立。
 var credFiles = map[string][]string{
 	"codex":    {".codex/auth.json"},
 	"claude":   {".claude/.credentials.json", ".claude.json"},
 	"gemini":   {".gemini/oauth_creds.json"},
 	"opencode": {".local/share/opencode/auth.json", ".config/opencode/auth.json"},
-	"zcode":    {".zcode/auth.json"},
+	// zcode 1.x 放 ~/.zcode/auth.json；2.x 改成 v2/credentials.json（外加一个
+	// credential-source 标记文件，说明凭据来自哪里）。两个都认，老版本不至于判空。
+	"zcode": {".zcode/auth.json", ".zcode/v2/credentials.json"},
+	// minimax（mcode）按「环境/区域/产品」分目录存凭据：国内站是
+	// auth/prod/cn/mcode-public/auth.json，登出时该文件被删。
+	"minimax":      {".minimax/auth/prod/cn/mcode-public/auth.json"},
+	"minimax-code": {".minimax/auth/prod/cn/mcode-public/auth.json"},
+	// qoder 的登录态在 ~/.qoder/.auth/user（配额与账号信息同在这个文件里）。
+	"qoder": {".qoder/.auth/user"},
+	"codebuddy": {
+		"Library/Application Support/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+		".local/share/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+		"AppData/Local/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+	},
+	"codebuddy-code": {
+		"Library/Application Support/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+		".local/share/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+		"AppData/Local/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+	},
 }
 
 // probeCredFiles 列出本机存在的登录凭据文件（显示成 ~/.codex/auth.json 这样）。
@@ -175,15 +225,37 @@ func probeCredFiles(cfg config.AcpAgentConfig) []string {
 	}
 	out := make([]string, 0, len(rels))
 	for _, rel := range rels {
-		if st, err := os.Stat(filepath.Join(home, rel)); err == nil && !st.IsDir() {
-			out = append(out, "~/"+rel)
+		path := filepath.Join(home, rel)
+		if st, err := os.Stat(path); err != nil || st.IsDir() {
+			continue
 		}
+		// codebuddy 登出时会在同目录留一个 `<凭据>.logged-out` 标记：标记在
+		// 就是明确登出过，残留的凭据文件不算数（实测登出后文件会被删，但别
+		// 把结论押在这份实现细节上）。
+		if _, err := os.Stat(path + ".logged-out"); err == nil {
+			continue
+		}
+		out = append(out, "~/"+rel)
 	}
 	return out
 }
 
 // AuthStatus 取某个 agent 的登录态快照（设置页「认证」面板）。
 func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, error) {
+	return m.authStatus(ctx, name, false)
+}
+
+// AuthStatusSafe 是「只问、不动手」的探测：拉起 agent 与它握手、建一次会话，
+// 但**绝不调 authenticate**。
+//
+// 为什么需要它：设置页列表里每台 agent 都要有个真实状态，而 authenticate 对
+// 有副作用的 agent 是禁区——codebuddy 会先登出再登录，另一些 agent 的实现会
+// 直接开浏览器登录页。列表后台巡检用这条路：全程无副作用，可以放心挨台问。
+func (m *Manager) AuthStatusSafe(ctx context.Context, name string) (AuthStatus, error) {
+	return m.authStatus(ctx, name, true)
+}
+
+func (m *Manager) authStatus(ctx context.Context, name string, safe bool) (AuthStatus, error) {
 	c := m.cfgFn().Normalized()
 	agentCfg, ok := c.Agent(name)
 	if !ok {
@@ -201,11 +273,12 @@ func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, erro
 	st.SuggestedVars = guide.vars
 	st.Link = guide.link
 	st.Follow = guide.follow
+	st.Interactive = guide.interactive
 	st.Creds = probeCredFiles(agentCfg)
 
 	err := m.withProbe(agentCfg, func(proc *agentProc) error {
 		st.Methods = authMethodViews(proc.authMethods)
-		st.State, st.Message = probeLoginState(ctx, proc, agentCfg, st.Creds, guide.vars)
+		st.State, st.Message = probeLoginState(ctx, proc, agentCfg, st.Creds, guide, safe)
 		return nil
 	})
 	if err != nil {
@@ -225,6 +298,53 @@ func (m *Manager) AuthStatus(ctx context.Context, name string) (AuthStatus, erro
 		return st, nil
 	}
 	return st, nil
+}
+
+// AuthQuickStatus 只看本机信号判登录态：**不拉起 agent 进程**。
+//
+// 用途是设置页列表里给每台 agent 露一个状态徽章。八台 agent 各拉一次进程既慢
+// （每次 2–16 秒）又有副作用（非交互式的 authenticate 会开登录页），列表不该
+// 付这个代价；详情页里点「认证」才做完整探测（AuthStatus）。
+//
+// 判不出来就回 unknown，不硬说「未登录」——本地没有凭据文件不等于没登录
+// （比如凭据在系统钥匙串里的 agent）。
+func (m *Manager) AuthQuickStatus(name string) (AuthStatus, error) {
+	c := m.cfgFn().Normalized()
+	agentCfg, ok := c.Agent(name)
+	if !ok {
+		return AuthStatus{}, fmt.Errorf("没有叫 %q 的智能体", name)
+	}
+	st := AuthStatus{Agent: name, State: AuthStateUnknown, Methods: []AuthMethodView{}}
+	if agentCfg.Builtin {
+		st.State = AuthStateLoggedIn
+		st.Message = "内置 Friday 不需要单独登录：模型密钥在「设置 → 模型服务」里配置。"
+		return st, nil
+	}
+	guide := loginGuideFor(agentCfg)
+	st.Hint = guide.hint
+	st.Command = guide.command
+	st.SuggestedVars = guide.vars
+	st.Link = guide.link
+	st.Follow = guide.follow
+	st.Interactive = guide.interactive
+	st.Creds = probeCredFiles(agentCfg)
+	st.State, st.Message = quickLoginState(agentCfg, st.Creds, guide)
+	return st, nil
+}
+
+// quickLoginState 是纯本地的判定顺序（与 probeLoginState 的前半段同口径，
+// 只是少了「拉起 agent 逐个 authenticate / 建会话」那几步）。
+func quickLoginState(agentCfg config.AcpAgentConfig, creds []string, guide loginGuide) (string, string) {
+	if names := filledEnvVars(agentCfg, guide.vars); len(names) > 0 {
+		return AuthStateLoggedIn, "已配置 " + strings.Join(names, "、")
+	}
+	if len(creds) > 0 {
+		return AuthStateLoggedIn, "检测到登录凭据：" + strings.Join(creds, "、")
+	}
+	if names := configuredKeyVars(agentCfg); len(names) > 0 {
+		return AuthStateLoggedIn, "已配置密钥：" + strings.Join(names, "、")
+	}
+	return AuthStateUnknown, "本地没有可判定的凭据或变量——点「认证」拉起 agent 完整检测一次"
 }
 
 // withProbe 起一条短命连接做探测用：拉起 → initialize → 用完即回收。
@@ -253,7 +373,11 @@ func (m *Manager) withProbe(agentCfg config.AcpAgentConfig, fn func(*agentProc) 
 // 可能阻塞（等浏览器里点确认）甚至当场拉起登录流程，探测阶段不该有副作用；
 // 而且声明了多个方式的 agent（codebuddy 有 iOA / Google / 微信 / 企业域四个）
 // 逐个调一遍既慢又多半失败。最后才用 authenticate 兜底判定。
-func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAgentConfig, creds []string, suggested []string) (string, string) {
+//
+// 交互式登录的 agent（guide.interactive）连兜底那一步都不做：它们的
+// authenticate 先登出再登录，探测等于替用户登出，还会每探一次多开一个登录页。
+// 这类只认本地凭据 + 建会话试探。
+func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAgentConfig, creds []string, guide loginGuide, safe bool) (string, string) {
 	methods := normalizeAuthMethods(proc.authMethods)
 	// 环境变量型：配置里已经填了这些变量就算配好了。
 	for _, am := range methods {
@@ -265,7 +389,7 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 		}
 	}
 	// 推荐的环境变量填了就算配好了（codebuddy 这类只认环境变量的 agent）。
-	if names := filledEnvVars(agentCfg, suggested); len(names) > 0 {
+	if names := filledEnvVars(agentCfg, guide.vars); len(names) > 0 {
 		return AuthStateLoggedIn, "已配置 " + strings.Join(names, "、")
 	}
 	// 没声明认证方式的老 CLI：凭据落在 HOME 下（ACP 不管凭据这件事）。
@@ -282,6 +406,12 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 	tried := 0
 	for _, am := range methods {
 		if am.view.Type != "agent" {
+			continue
+		}
+		// 交互式登录的 agent 一律不问：authenticate 会先登出再拉起浏览器，
+		// 探测阶段调它 = 把用户刚登好的会话清掉，且每次都多开一个登录页。
+		// safe 巡检同理：只握手、建会话，不碰 authenticate。
+		if guide.interactive || safe {
 			continue
 		}
 		if tried >= maxAuthProbeMethods {
@@ -304,8 +434,8 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 		lastErr = err.Error()
 	}
 	// authenticate 没给出结论，就用「建一次会话」再问一遍——这是最硬的证据：
-	// 能建出会话说明凭据真的可用。codebuddy 这类把凭据放钥匙串的 agent 读不到
-	// 文件，但建会话时它自己会用（实测未登录时它回 Authentication required）。
+	// 能建出会话说明凭据真的可用。codebuddy 这类凭据不在已知路径上的 agent
+	// 读不到文件，但建会话时它自己会用（实测未登录时它回 Authentication required）。
 	if state, msg, ok := probeSession(ctx, proc); ok {
 		return state, msg
 	}
@@ -314,6 +444,14 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 	}
 	if sawTimeout {
 		return AuthStateUnknown, "agent 没有回应认证请求（它可能在等你完成登录）——按下方方式登录后重新检测一次"
+	}
+	if guide.interactive {
+		return AuthStateUnknown, "该 agent 要人完成登录，无法自动判定——按下方方式在浏览器或终端登录后重新检测一次"
+	}
+	// safe 巡检没调 authenticate，也就没有「认证失败」这条证据：判不出来就如实
+	// 说判不出来，不能拿「没有结论」当「未登录」。
+	if safe {
+		return AuthStateUnknown, "只做了握手与建会话，没得出确定结论——点「认证」完整检测一次"
 	}
 	if len(proc.authMethods) == 0 {
 		return AuthStateUnknown, "该 agent 没有声明认证方式，无法自动判定登录态（可按下方指引在终端里登录一次）"
@@ -324,8 +462,9 @@ func probeLoginState(ctx context.Context, proc *agentProc, agentCfg config.AcpAg
 // probeSession 用「建一次会话」问 agent 自己登录态：能建出会话 = 凭据可用；
 // 报鉴权错 = 没登录；其它错误（建会话本身的问题）不算结论。
 //
-// 这是最可靠的一招：凭据放钥匙串里的 agent（codebuddy）读不到文件，但真要
-// 建会话它必须自己有凭据——所以 agent 的回答就是权威答案。
+// 这是最可靠的一招：凭据不在已知路径上的 agent（codebuddy 的会话文件在
+// Application Support 下）读不到文件，但真要建会话它必须自己有凭据——所以
+// agent 的回答就是权威答案。建会话没有副作用，可以放心当探测手段。
 func probeSession(ctx context.Context, proc *agentProc) (string, string, bool) {
 	sctx, cancel := context.WithTimeout(ctx, sessionProbeTimeout)
 	defer cancel()
@@ -375,12 +514,24 @@ func (m *Manager) Authenticate(ctx context.Context, name, methodID string, env m
 			return fmt.Errorf("这个认证方式需要交互式登录，请在终端里运行：%s",
 				terminalAuthCommand(agentCfg, am.raw))
 		}
-		actx, cancel := context.WithTimeout(ctx, authActionTimeout)
+		// 交互式登录要等人在浏览器里扫码/点授权，15 秒连扫码都不够；提前
+		// 返回后进程还会被回收，等于把登录从中间撕掉。
+		guide := loginGuideFor(agentCfg)
+		timeout := authActionTimeout
+		if guide.interactive {
+			timeout = interactiveAuthTimeout
+		}
+		actx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		if _, err := proc.conn.Authenticate(actx, acp.AuthenticateRequest{MethodId: methodID}); err != nil {
 			out.State = AuthStateLoggedOut
 			msg := err.Error()
 			switch {
+			case actx.Err() != nil && guide.interactive:
+				// 等满时限人还没登完：登录页多半已经开在那儿了，别判失败，
+				// 让用户登完再点「重新检测」。
+				out.State = AuthStateUnknown
+				msg = "已发起登录，但没有等到浏览器授权返回——如果登录页还开着，登完点「重新检测」即可；也可以照面板给的命令在终端里 /login"
 			case actx.Err() != nil:
 				// agent 收下请求却不吭声（codebuddy 就是这样：它把登录界面
 				// 甩给人，不走这个 RPC）。这时候干等没意义，把路指到终端。
@@ -393,7 +544,7 @@ func (m *Manager) Authenticate(ctx context.Context, name, methodID string, env m
 				msg = "这个 agent 声明了认证方式但没实现它（Method not implemented）——按登录指引在终端里登录一次"
 			}
 			out.Message = "认证失败：" + msg
-			if guide := loginGuideFor(agentCfg); guide.command != "" {
+			if guide.command != "" {
 				out.Message += "（命令：" + guide.command + "）"
 			}
 			if tail := proc.stderrTail(6); tail != "" {

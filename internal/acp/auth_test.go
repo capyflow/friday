@@ -358,8 +358,8 @@ func TestAuthStatusProbesAtMostFewMethods(t *testing.T) {
 	}
 }
 
-// codebuddy 的凭据不在文件里（大概在钥匙串），本地探测不出登录态：
-// 它的登录方式由 agent 自己声明，登录指引要说得清有哪几种。
+// codebuddy 的凭据是它自己的会话文件，登录要人扫码，四条登录方式还各对应
+// 不同站点：登录指引要说得清「网页端不等于 CLI」「国内选微信、国际选 Google」。
 func TestLoginGuideForCodebuddy(t *testing.T) {
 	g := loginGuideFor(config.AcpAgentConfig{Name: "codebuddy-code", Command: "npx"})
 	if g.command != "codebuddy" {
@@ -368,19 +368,30 @@ func TestLoginGuideForCodebuddy(t *testing.T) {
 	if !strings.Contains(g.hint, "网页端登录") {
 		t.Fatalf("指引里应点明网页端登录不等于 CLI 凭据，实际 %q", g.hint)
 	}
+	if !g.interactive {
+		t.Fatal("codebuddy 的登录要人扫码，必须标成 interactive——探测时不能调它的 authenticate")
+	}
 	if len(g.vars) == 0 || g.vars[0] != "CODEBUDDY_API_KEY" {
 		t.Fatalf("应推荐 CODEBUDDY_API_KEY 作为凭据入口，实际 %+v", g.vars)
 	}
 	// codebuddy 的 /login 只在交互界面里认（参数形式 `codebuddy /login` 实测
-	// 仍报未登录），所以要带 follow，终端页起完界面再补敲这一行。
-	if len(g.follow) != 1 || g.follow[0] != "/login" {
-		t.Fatalf("应带上 /login 作为后续输入，实际 %+v", g.follow)
+	// 仍报未登录），所以要带 follow，终端页起完界面再补敲这一行。界面起来先问
+	// 「信任此文件夹吗」，不先确认它不收斜杠命令——所以 follow 第一步是回车。
+	want := []string{"", "/login"}
+	if len(g.follow) != len(want) {
+		t.Fatalf("应按「先回车确认信任、再 /login」补敲，实际 %+v", g.follow)
+	}
+	for i, w := range want {
+		if g.follow[i] != w {
+			t.Fatalf("follow 第 %d 步应为 %q，实际 %q（整体 %+v）", i+1, w, g.follow[i], g.follow)
+		}
 	}
 }
 
 // agent 不声明 env_var 认证方式时，推荐的环境变量就是唯一能落地的入口：
 // 填进该 agent 的环境变量就算配好了（codebuddy 只认这个）。
 func TestAuthStatusSuggestedVarsFilledMeansConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
 		{Name: "codebuddy-code", Command: "npx", Env: map[string]string{
 			"CODEBUDDY_API_KEY": "cb-xxxx",
@@ -405,6 +416,9 @@ func TestAuthStatusSuggestedVarsFilledMeansConfigured(t *testing.T) {
 
 // 没填推荐变量时不能凭空说已登录。
 func TestAuthStatusSuggestedVarsEmptyStaysUnknown(t *testing.T) {
+	// codebuddy 的凭据现在能按文件探测了，HOME 指向一个空的临时目录，
+	// 结果才不随开发机是否登录过 codebuddy 变化。
+	t.Setenv("HOME", t.TempDir())
 	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
 		{Name: "codebuddy-code", Command: "npx"},
 	}}
@@ -416,5 +430,243 @@ func TestAuthStatusSuggestedVarsEmptyStaysUnknown(t *testing.T) {
 	}
 	if st.State == AuthStateLoggedIn {
 		t.Fatalf("没填凭据不该判为已登录，实际 %q（%s）", st.State, st.Message)
+	}
+}
+
+// 交互式登录的 agent（codebuddy）探测时一次都不能调 authenticate：
+// 它的 authenticate 会先登出再拉起浏览器（CLI 的 logout-origin.json 里
+// reason=acp_reauthenticate 就是这条路径写的），探测等于替用户登出，
+// 而且每探一个方式就多开一个登录页。
+func TestAuthStatusNeverCallsAuthenticateForInteractiveAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	methods := []map[string]any{
+		{"id": "iOA", "name": "Login with iOA", "type": "agent"},
+		{"id": "external", "name": "Login with Google/Github", "type": "agent"},
+		{"id": "internal", "name": "Login with WeChat", "type": "agent"},
+		{"id": "selfhosted", "name": "Login with Enterprise Domain", "type": "agent"},
+	}
+	f := &fakeAgent{authMethods: methods, authRequired: true}
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codebuddy", Command: "codebuddy"},
+	}}
+	m := newTestManager(t, &cfg, nil, f)
+	st, err := m.AuthStatus(context.Background(), "codebuddy")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	f.mu.Lock()
+	calls := append([]string{}, f.authCalls...)
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("交互式登录的 agent 探测时不应调 authenticate，实际调了 %+v", calls)
+	}
+	if st.State != AuthStateLoggedOut {
+		t.Fatalf("建会话报鉴权错应判未登录，实际 %q（%s）", st.State, st.Message)
+	}
+}
+
+// codebuddy 登录成功后会把会话写到 Application Support 下；那份文件就是
+// 它唯一的本地凭据（不是钥匙串）。认它，面板才能不碰 authenticate 就说已登录。
+func TestAuthStatusDetectsCodebuddySessionFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rel := "Library/Application Support/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info"
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("造会话目录失败: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"auth":{"accessToken":"x"}}`), 0o600); err != nil {
+		t.Fatalf("造会话文件失败: %v", err)
+	}
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codebuddy-code", Command: "codebuddy"},
+	}}
+	f := &fakeAgent{authRequired: true}
+	m := newTestManager(t, &cfg, nil, f)
+	st, err := m.AuthStatus(context.Background(), "codebuddy-code")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	if st.State != AuthStateLoggedIn {
+		t.Fatalf("会话文件在应判已登录，实际 %q（%s）", st.State, st.Message)
+	}
+	if len(st.Creds) != 1 || !strings.Contains(st.Creds[0], "Tencent-Cloud.coding-copilot.info") {
+		t.Fatalf("应回显会话文件路径，实际 %+v", st.Creds)
+	}
+	// 面板要据此收起「由 agent 自己认证」那组按钮：CLI 的 authenticate 会先登出
+	// 再登录，已登录时点一次就掉线，还会多开登录页。
+	if !st.Interactive {
+		t.Fatalf("codebuddy 这类要人完成登录的 agent 应标记 interactive，实际 %+v", st)
+	}
+	f.mu.Lock()
+	calls := append([]string{}, f.authCalls...)
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("有会话文件就不该再调 authenticate，实际 %+v", calls)
+	}
+}
+
+// 登出标记在 = 明确登出过：这时残留的凭据文件不能当已登录。
+func TestAuthStatusLogoutMarkerBeatsLeftoverSessionFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rel := "Library/Application Support/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info"
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("造会话目录失败: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"auth":{"accessToken":"stale"}}`), 0o600); err != nil {
+		t.Fatalf("造会话文件失败: %v", err)
+	}
+	if err := os.WriteFile(path+".logged-out", []byte("marker"), 0o600); err != nil {
+		t.Fatalf("造登出标记失败: %v", err)
+	}
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codebuddy", Command: "codebuddy"},
+	}}
+	f := &fakeAgent{authRequired: true}
+	m := newTestManager(t, &cfg, nil, f)
+	st, err := m.AuthStatus(context.Background(), "codebuddy")
+	if err != nil {
+		t.Fatalf("AuthStatus 失败: %v", err)
+	}
+	if st.State == AuthStateLoggedIn {
+		t.Fatalf("登出标记在时不该判已登录，实际 %q（%s）", st.State, st.Message)
+	}
+	if len(st.Creds) != 0 {
+		t.Fatalf("登出标记在时不该把残留文件当凭据，实际 %+v", st.Creds)
+	}
+}
+
+// 列表里的状态徽章走本地快查：只看环境变量与凭据文件，不拉起 agent 进程。
+// 八台 agent 每台拉一次进程既慢（2–16 秒）又有副作用（非交互式的 authenticate
+// 会开登录页），列表不该付这个代价。
+func TestAuthQuickStatusReadsLocalSignalsOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+		{Name: "codex", Command: "npx"},
+		{Name: "codebuddy-code", Command: "codebuddy"},
+	}}
+	f := &fakeAgent{authRequired: true}
+	m := newTestManager(t, &cfg, nil, f)
+
+	// 本地什么都没有：判不出来，但不能一口咬定「未登录」。
+	st, err := m.AuthQuickStatus("codex")
+	if err != nil {
+		t.Fatalf("AuthQuickStatus 失败: %v", err)
+	}
+	if st.State != AuthStateUnknown {
+		t.Fatalf("本地无凭据时应判 unknown，实际 %q（%s）", st.State, st.Message)
+	}
+
+	// 放一份 codebuddy 凭据文件：快查应当直接认出已登录，并带 interactive 标记。
+	rel := "Library/Application Support/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info"
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("造会话目录失败: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"auth":{"accessToken":"x"}}`), 0o600); err != nil {
+		t.Fatalf("造会话文件失败: %v", err)
+	}
+	cb, err := m.AuthQuickStatus("codebuddy-code")
+	if err != nil {
+		t.Fatalf("AuthQuickStatus 失败: %v", err)
+	}
+	if cb.State != AuthStateLoggedIn || len(cb.Creds) != 1 {
+		t.Fatalf("凭据文件在应判已登录并回显路径，实际 %q / %+v", cb.State, cb.Creds)
+	}
+	if !cb.Interactive {
+		t.Fatalf("codebuddy 应带 interactive 标记，实际 %+v", cb)
+	}
+
+	if got := f.spawnCount(); got != 0 {
+		t.Fatalf("快查不该拉起 agent 进程，实际拉起 %d 次", got)
+	}
+}
+
+// minimax / qoder / zcode 的凭据不在「一眼看得出」的位置，但确实各有落点：
+// 列表徽章走本地快查，路径填错这几台就永远显示「状态未知」，而点「认证」
+// 又立刻变已登录——所以路径要有测试盯着。
+func TestQuickStatusKnowsCredPathsOfCommonAgents(t *testing.T) {
+	cases := []struct {
+		agent string
+		cmd   string
+		rel   string
+	}{
+		{"minimax-code", "npx", ".minimax/auth/prod/cn/mcode-public/auth.json"},
+		{"qoder", "npx", ".qoder/.auth/user"},
+		{"zcode", "zcode-acp-server", ".zcode/v2/credentials.json"},
+	}
+	for _, c := range cases {
+		t.Run(c.agent, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, c.rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("造凭据目录失败: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(`{"token":"x"}`), 0o600); err != nil {
+				t.Fatalf("造凭据文件失败: %v", err)
+			}
+			cfg := config.AcpConfig{Enabled: true, Agents: []config.AcpAgentConfig{
+				{Name: c.agent, Command: c.cmd},
+			}}
+			m := newTestManager(t, &cfg, nil, &fakeAgent{authRequired: true})
+			st, err := m.AuthQuickStatus(c.agent)
+			if err != nil {
+				t.Fatalf("AuthQuickStatus 失败: %v", err)
+			}
+			if st.State != AuthStateLoggedIn {
+				t.Fatalf("凭据文件在应判已登录，实际 %q（%s）", st.State, st.Message)
+			}
+		})
+	}
+}
+
+// safe 巡检：只握手 + 建会话，绝不调 authenticate。
+// 依据是 authenticate 对不少 agent 有副作用（登出、开浏览器登录页），
+// 列表后台把每台都问一遍时不能碰它。
+func TestAuthStatusSafeNeverCallsAuthenticate(t *testing.T) {
+	f := &fakeAgent{
+		authMethods:  []map[string]any{{"id": "login", "name": "登录", "type": "agent"}},
+		authOK:       map[string]bool{"login": true},
+		authRequired: true, // 建会话报鉴权错 = 未登录
+	}
+	m := authTestManager(t, f)
+	st, err := m.AuthStatusSafe(context.Background(), "fake")
+	if err != nil {
+		t.Fatalf("AuthStatusSafe 失败: %v", err)
+	}
+	f.mu.Lock()
+	calls := append([]string{}, f.authCalls...)
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("safe 巡检不该调 authenticate，实际 %+v", calls)
+	}
+	if st.State != AuthStateLoggedOut {
+		t.Fatalf("建会话报鉴权错应判未登录，实际 %q（%s）", st.State, st.Message)
+	}
+}
+
+// 能建出会话 = 凭据可用：safe 巡检不调 authenticate 也能给出「已登录」的结论，
+// 这是它在列表里替代「认证」按钮的底气。
+func TestAuthStatusSafeLogsInOnSessionProbe(t *testing.T) {
+	f := &fakeAgent{
+		authMethods: []map[string]any{{"id": "login", "name": "登录", "type": "agent"}},
+	}
+	m := authTestManager(t, f)
+	st, err := m.AuthStatusSafe(context.Background(), "fake")
+	if err != nil {
+		t.Fatalf("AuthStatusSafe 失败: %v", err)
+	}
+	if st.State != AuthStateLoggedIn {
+		t.Fatalf("能建会话应判已登录，实际 %q（%s）", st.State, st.Message)
+	}
+	f.mu.Lock()
+	calls := append([]string{}, f.authCalls...)
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("safe 巡检不该调 authenticate，实际 %+v", calls)
 	}
 }

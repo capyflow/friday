@@ -1044,11 +1044,29 @@ func detectImageMIME(data []byte) string {
 }
 
 // handleAcpAuthStatus 返回某个 agent 的登录态与可用认证方式（设置页「认证」面板）。
-// GET /api/acp/auth?agent=codex。探测要拉起一次 agent 进程，因此比普通读接口慢一点。
+// GET /api/acp/auth?agent=codex。默认会拉起一次 agent 进程做完整探测，因此比普通
+// 读接口慢；带 quick=1 时只读本机信号（环境变量 / 凭据文件 / 配置里的密钥），
+// 给列表里的状态徽章用——八台 agent 各拉一次进程既慢又有副作用。
 func (s *Server) handleAcpAuthStatus(ctx *vhttp.Context) error {
 	name := strings.TrimSpace(ctx.GinContext().Query("agent"))
 	if name == "" {
 		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "缺少 agent 参数"})
+	}
+	// mode=safe：拉起 agent 握手 + 建会话，但绝不调 authenticate（无副作用），
+	// 给设置页的后台巡检用。
+	if ctx.GinContext().Query("mode") == "safe" {
+		st, err := s.acp.AuthStatusSafe(ctx.Context(), name)
+		if err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"status": st})
+	}
+	if ctx.GinContext().Query("quick") == "1" {
+		st, err := s.acp.AuthQuickStatus(name)
+		if err != nil {
+			return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": err.Error()})
+		}
+		return ctx.JsonResponse(vhttp.Codes.Success, map[string]any{"status": st})
 	}
 	st, err := s.acp.AuthStatus(ctx.Context(), name)
 	if err != nil {

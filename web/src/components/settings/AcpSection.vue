@@ -54,6 +54,8 @@ function show(t, ok) {
 // facadeStatus 是运行态快照（url/计数/活授权/最近调用）；facadeTools 是注册表
 // 全目录，全局清单和逐 agent 白名单的勾选框都靠它渲染。白名单为空 = 全部工具
 // （第一版口径），所以全局那组在空清单时显示为全选。
+// 门面设置面板是否可见：默认隐藏，全开即不配置。
+const facadeVisible = false
 const facadeStatus = ref(null)
 const facadeTools = ref([])
 const facadeLoading = ref(false)
@@ -210,14 +212,16 @@ async function installAgent(entry) {
       if (existing) Object.assign(existing, installed)
       else cfg.agents.push({ ...blankAgent(), ...installed, name: r.agent.name,
         envText: envText(r.agent.env) })
-      // 装完立刻看一眼登录态：新装的 agent 十有八九还没登录，别等人踩坑才发现。
+      // 装完立刻把详情页打开：新装的 agent 十有八九还没登录，登录入口就在眼前。
       const fresh = cfg.agents.find(x => x.name === r.agent.name)
       if (fresh) {
-        probeAuth(fresh)
+        fresh.open = true
+        probeQuick(fresh)
         focusAgent(r.agent.name)
       }
     }
-    show(r.message ? r.message + '：已在下方清单里，点它的「认证」完成登录' : '安装完成：点下方 agent 的「认证」完成登录', true)
+    sweepAuth()
+    show(r.message ? r.message + '：已在清单里，点它那一行展开认证' : '安装完成：点它那一行展开认证', true)
   } catch (e) {
     installOutput.value = e.output || ''
     show('安装失败：' + e.message, false)
@@ -248,18 +252,39 @@ function focusAgent(name) {
 const auth = reactive({})   // agent 名 → 面板状态
 function authOf(name) {
   if (!auth[name]) {
-    auth[name] = { open: false, loading: false, status: null, vars: {}, message: '', err: '', busy: '' }
+    auth[name] = { open: false, loading: false, quick: false, status: null, probedAt: 0,
+                   vars: {}, message: '', err: '', busy: '' }
   }
   return auth[name]
 }
 const AUTH_STATE_TEXT = { logged_in: '已登录', logged_out: '未登录', unknown: '状态未知' }
 const AUTH_KIND = { agent: '由 agent 自己认证', env_var: '填写密钥', terminal: '在终端里登录' }
+// AUTH_SITE 给多站点登录的 agent（codebuddy）补上站点说明：它的四个 method id
+// 是 agent 自报的，光看「Login with Google/Github」看不出那是国际站——
+// 国内账号点了会跳到 codebuddy.ai，登进去也不是同一个账号体系。
+// 映射来自 CLI 自己的对照表：{Chinese Site: internal, International Site: external}。
+const AUTH_SITE = {
+  internal: '国内站 codebuddy.cn（微信账号）',
+  external: '国际站 codebuddy.ai（Google/Github 账号）',
+  iOA: '腾讯内网 SSO',
+  selfhosted: '企业自有域名',
+}
+function authSiteOf(m) { return AUTH_SITE[m.id] || '' }
 function authStateText(s) { return AUTH_STATE_TEXT[s] || '未检测' }
 function authStateCls(s) {
   return s === 'logged_in' ? 'ok' : s === 'logged_out' ? 'warn' : 'no'
 }
 
-// probeAuth 查这台 agent 的登录态与可用认证方式。
+// authMethods 是面板真正要渲染的认证方式。交互式 agent（codebuddy 这类）的
+// 「由 agent 自己认证」一组不渲染：CLI 的 authenticate 语义是「已登录先登出再
+// 登录」，已登录时点一次就掉线，而且每次多开一个登录页。这类只留「在终端里
+// 登录」与「保存凭据」两条——登录同样落在 CLI 自己的凭据上，只是不经过 RPC。
+function authMethods(s) {
+  const list = (s && s.methods) || []
+  return s && s.interactive ? list.filter(m => m.type !== 'agent') : list
+}
+
+// probeAuth 查这台 agent 的登录态与可用认证方式（会拉起一次 agent 进程，2–16 秒）。
 async function probeAuth(a) {
   const p = authOf(a.name)
   p.open = true
@@ -268,10 +293,82 @@ async function probeAuth(a) {
   try {
     const r = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name))
     p.status = r.status || null
+    p.quick = false
+    p.probedAt = Date.now()
   } catch (e) {
     p.err = e.message
     p.status = null
   } finally { p.loading = false }
+}
+
+// probeQuick 只读本机信号（环境变量 / 凭据文件 / 配置里的密钥）判登录态，不拉起
+// 进程——列表徽章用它。八台 agent 各拉一次进程既慢又有副作用（非交互式的
+// authenticate 会开登录页），列表不该付这个代价。
+async function probeQuick(a) {
+  if (!a.name) return
+  const p = authOf(a.name)
+  try {
+    const r = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name) + '&quick=1')
+    // 完整探测（probeAuth）的结果更权威，别被快查覆盖。
+    if (p.quick || !p.status) { p.status = r.status || null; p.quick = true }
+  } catch { /* 徽章查失败不打扰人：详情页点「认证」还会再查 */ }
+}
+async function probeAllQuick() {
+  await Promise.all(cfg.agents.filter(a => a.name).map(a => probeQuick(a)))
+}
+
+// sweepAuth 按队列逐台**问一次 CLI**：拉起 agent、握手、建一次会话（mode=safe，
+// 全程不碰 authenticate，所以不会把人登出、也不会开登录页）。
+//
+// 为什么要排队：一次只问一台。八台并行会同时拉起八个 node 进程（各几十到几百
+// MB），而列表只是「看一眼状态」，不值得为此打满 CPU 与内存。同一台 10 分钟内
+// 不重复问，进页面时先用本地快查的答案，巡检结果回来再逐个替换。
+const SWEEP_TTL = 10 * 60 * 1000
+const sweeping = ref({ done: 0, total: 0 })
+let sweepToken = 0
+
+async function sweepAuth() {
+  const list = cfg.agents.filter(a => a.name)
+  if (!list.length) return
+  const my = ++sweepToken
+  sweeping.value = { done: 0, total: list.length }
+  for (const a of list) {
+    if (my !== sweepToken) return   // 清单变了或又起了一轮：放弃这一轮
+    const p = authOf(a.name)
+    const fresh = p.probedAt && Date.now() - p.probedAt < SWEEP_TTL
+    if (!fresh && !p.loading) {
+      try {
+        const r = await api('GET', '/api/acp/auth?agent=' + encodeURIComponent(a.name) + '&mode=safe')
+        if (r.status && my === sweepToken) {
+          p.status = r.status
+          p.quick = false
+          p.probedAt = Date.now()
+        }
+      } catch { /* 单台问不到不影响别的 */ }
+    }
+    if (my === sweepToken) sweeping.value = { done: sweeping.value.done + 1, total: sweeping.value.total }
+  }
+  if (my === sweepToken) sweeping.value = { done: 0, total: 0 }
+}
+
+// statusOf 给列表行用的状态徽章：没查过时是「检测中」，查不出结论就如实说
+// 「未检测」——不能因为本地没凭据就显示成「未登录」。
+function statusOf(a) {
+  const p = a.name ? authOf(a.name) : null
+  const st = p && p.status
+  if (!st) return { state: '', text: p && p.loading ? '检测中' : '未检测' }
+  return { state: st.state, text: authStateText(st.state) }
+}
+
+// ---------- agent 展开区 ----------
+// 列表行只露「是谁、怎么起、登录态」；点一行原地展开，认证/测试/删除三个操作
+// 与全部字段都在展开区里——不弹窗，展开时其余 agent 仍在一屏里可比对。
+function toggleAgent(a) {
+  a.open = !a.open
+  if (!a.open) return
+  // 首次展开补一次本地快查：新加的 agent 还没有徽章。
+  const p = authOf(a.name)
+  if (a.name && !p.status && !p.loading) probeQuick(a)
 }
 
 // saveVars 只把填好的环境变量交给后端落进 config.yaml（不做认证动作）：
@@ -365,6 +462,8 @@ function appendTemplate(entry) {
     command,
     argsText: (t.args || []).join(', '),
   })
+  // 加进清单就直接摊开：接下来要做的是核对命令、再登录。
+  probeQuick(cfg.agents[cfg.agents.length - 1])
 }
 
 async function load() {
@@ -402,6 +501,10 @@ async function load() {
       version: x.version || '',
       facadeTools: [...(x.allowedFacadeTools || [])],
     }))
+    // 列表里每台 agent 都露一个登录态徽章：先本地快查（毫秒级、不拉进程），
+    // 再后台逐台问一次 CLI（safe 模式，无副作用），结果回来逐个替换。
+    probeAllQuick()
+    sweepAuth()
   } catch (e) { show(e.message, false) }
 }
 
@@ -468,8 +571,10 @@ onMounted(load)
       </label>
     </div>
 
-    <div class="acp-facade">
-      <div class="acp-catalog-head">Friday 工具门面
+    <!-- 工具门面默认全开（后端口径：白名单为空 = 全部工具），这块先不露；
+         需要调节全局/逐 agent 清单时把 facadeVisible 改成 true 即可。 -->
+    <div v-if="facadeVisible" class="acp-facade">
+      <div class="acp-block-head">Friday 工具门面
         <button class="btn sm" type="button" style="margin-left:8px"
                 :disabled="facadeLoading" @click="loadFacade">
           {{ facadeLoading ? '刷新中…' : '刷新状态' }}</button>
@@ -509,39 +614,12 @@ onMounted(load)
       </table>
     </div>
 
-    <div class="acp-catalog">
-      <div class="acp-catalog-head">安装新 agent
-        <button class="btn sm" type="button" style="margin-left:8px"
-                :disabled="refreshing" @click="refreshCatalog">
-          {{ refreshing ? '刷新中…' : '刷新官方目录' }}</button>
-      </div>
-      <div class="acp-catalog-grid">
-        <div v-for="c in catalog" :key="c.id" class="acp-cat-card">
-          <div class="acp-cat-top">
-            <b>{{ c.name }}<span v-if="c.version" class="acp-cat-ver"> v{{ c.version }}</span></b>
-            <span v-if="c.supported === false" class="acp-cat-badge no">本平台无分发包</span>
-            <span v-else-if="c.updateAvailable" class="acp-cat-badge warn">可升级{{ upgradeHint(c) }}</span>
-            <span v-else-if="c.registered" class="acp-cat-badge ok">已添加</span>
-            <span v-else-if="c.installed" class="acp-cat-badge ok">已安装</span>
-            <span v-else class="acp-cat-badge no">未安装</span>
-          </div>
-          <div class="meta">{{ c.description }}</div>
-          <div class="acp-cat-acts">
-            <button v-if="c.supported === false" class="btn sm" type="button" disabled>不可安装</button>
-            <button v-else-if="c.updateAvailable" class="btn sm primary" type="button"
-                    :disabled="installing === c.id" @click="installAgent(c)">
-              {{ installing === c.id ? '升级中…' : '一键升级' }}</button>
-            <button v-else-if="!c.installed" class="btn sm primary" type="button"
-                    :disabled="installing === c.id" @click="installAgent(c)">
-              {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}</button>
-            <button v-else-if="!c.registered" class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
-          </div>
-          <div v-if="c.installed && c.path" class="meta mono acp-cat-path">{{ c.path }}</div>
-        </div>
-      </div>
-    </div>
-
     <div class="acp-agents">
+      <div class="acp-block-head">已安装的 agent
+        <span class="meta" style="font-weight:450">点一行展开设置与认证</span>
+        <span v-if="sweeping.total" class="meta" style="font-weight:450">·
+          后台核对中 {{ sweeping.done }}/{{ sweeping.total }}…</span>
+      </div>
       <p v-if="hasBuiltin" class="meta acp-builtin-hint">
         工作区的「新建会话」里还多一台 <b>friday（内置）</b>：一轮对话直接交给内置大脑，
         模型与权限用本页上方的全局设置。它是代码给的，不写进 config.yaml，所以不在下面这份可编辑清单里。
@@ -549,27 +627,30 @@ onMounted(load)
       <div v-for="(a, i) in cfg.agents" :key="i" class="acp-agent"
            :class="{ 'acp-agent-focus': focusAgentName === a.name }"
            :data-agent-name="a.name">
-        <div class="acp-agent-head">
-          <button class="acp-agent-toggle" type="button" :aria-expanded="a.open ? 'true' : 'false'"
-                  :aria-controls="`acp-agent-body-${i}`" @click="a.open = !a.open">
-            <span class="acp-agent-caret" :class="{ open: a.open }" aria-hidden="true">›</span>
-            <b>{{ a.name || '未命名 agent' }}</b>
-            <span v-if="!a.enabled" class="acp-agent-tag">已停用</span>
-            <span v-if="a.version" class="acp-agent-tag">v{{ a.version }}</span>
-            <span v-if="a.facadeTools?.length" class="acp-agent-tag"
-                  :title="`可调用 Friday 工具：${a.facadeTools.join('、')}`">Friday 工具 ×{{ a.facadeTools.length }}</span>
-            <span v-if="!a.open" class="meta mono acp-agent-sum" :title="launchText(a)">{{ launchText(a) }}</span>
-          </button>
-          <span class="pm-acts">
-            <span v-if="authOf(a.name).status" class="acp-auth-badge"
-                  :class="authStateCls(authOf(a.name).status.state)">{{ authStateText(authOf(a.name).status.state) }}</span>
-            <button class="btn sm" type="button" :disabled="!a.name" @click="probeAuth(a)">认证</button>
+        <button class="acp-agent-row" type="button"
+                :aria-expanded="a.open ? 'true' : 'false'" :aria-controls="`acp-agent-body-${i}`"
+                :aria-label="`展开 ${a.name || '未命名 agent'} 的设置`" @click="toggleAgent(a)">
+          <span class="acp-agent-caret" :class="{ open: a.open }" aria-hidden="true">›</span>
+          <b>{{ a.name || '未命名 agent' }}</b>
+          <span v-if="!a.enabled" class="acp-agent-tag">已停用</span>
+          <span v-if="a.version" class="acp-agent-tag">v{{ a.version }}</span>
+          <span v-if="a.facadeTools?.length" class="acp-agent-tag"
+                :title="`可调用 Friday 工具：${a.facadeTools.join('、')}`">Friday 工具 ×{{ a.facadeTools.length }}</span>
+          <span class="meta mono acp-agent-sum" :title="launchText(a)">{{ launchText(a) }}</span>
+          <span class="acp-auth-badge" :class="authStateCls(statusOf(a).state)"
+                :title="authOf(a.name).status?.message || '点开详情查看登录态'">{{ statusOf(a).text }}</span>
+        </button>
+        <!-- 展开区：认证 / 测试 / 删除三个操作，加上认证面板与全部字段。
+             点标题行原地开合，不再弹窗（弹窗会遮住其它 agent，也比对不了）。 -->
+        <div v-if="a.open" :id="`acp-agent-body-${i}`" class="acp-agent-detail">
+          <div class="acp-agent-acts">
+            <button class="btn sm primary" type="button"
+                    :disabled="!a.name || authOf(a.name).loading" @click="probeAuth(a)">
+              {{ authOf(a.name).loading ? '检测中…' : '认证' }}</button>
             <button class="btn sm" type="button" :disabled="a.testing || !a.name" @click="test(a)">
               {{ a.testing ? '测试中…' : '测试' }}</button>
             <button class="btn sm danger" type="button" @click="removeAgent(i)">删除</button>
-          </span>
-        </div>
-
+          </div>
         <!-- 认证面板：登录态 + 可选的认证方式（点「认证」展开） -->
         <div v-if="authOf(a.name).open" class="acp-auth">
           <div class="acp-auth-head">
@@ -605,10 +686,11 @@ onMounted(load)
                 {{ authOf(a.name).busy === '__vars__' ? '保存中…' : '保存凭据' }}</button>
             </div>
           </div>
-          <div v-for="m in authOf(a.name).status?.methods || []" :key="m.id" class="acp-auth-method">
+          <div v-for="m in authMethods(authOf(a.name).status)" :key="m.id" class="acp-auth-method">
             <div class="acp-auth-method-head">
               <b>{{ m.name }}</b>
               <span class="acp-auth-kind">{{ AUTH_KIND[m.type] || m.type }}</span>
+              <span v-if="authSiteOf(m)" class="meta">{{ authSiteOf(m) }}</span>
               <span v-if="m.description" class="meta">{{ m.description }}</span>
             </div>
             <div v-if="m.type === 'env_var'" class="acp-auth-vars">
@@ -628,7 +710,7 @@ onMounted(load)
             </div>
           </div>
         </div>
-        <div v-if="a.open" :id="`acp-agent-body-${i}`" class="acp-agent-body">
+        <div class="acp-agent-body">
           <div class="acp-grid">
             <label><span>名称</span><input v-model="a.name" placeholder="codex"></label>
             <label><span>启动命令</span><input v-model="a.command" placeholder="npx 或绝对路径"></label>
@@ -649,7 +731,7 @@ onMounted(load)
               <SelectBox v-model="a.oneSessionPerProcess" :options="isoAgentOptions" compact
                          aria-label="每会话独立进程"></SelectBox></label>
           </div>
-          <div class="acp-facade-agent">
+          <div v-if="facadeVisible" class="acp-facade-agent">
             <span class="acp-facade-agent-label">Friday 工具白名单（不勾 = 沿用全局清单）</span>
             <div class="acp-facade-tools">
               <label v-for="t in facadeTools" :key="t.name" class="acp-check">
@@ -660,8 +742,41 @@ onMounted(load)
             </div>
           </div>
         </div>
+        </div>
       </div>
       <button class="btn sm" type="button" @click="addAgent">+ 添加 agent</button>
+    </div>
+
+    <div class="acp-catalog">
+      <div class="acp-block-head">安装新 agent
+        <button class="btn sm" type="button" style="margin-left:8px"
+                :disabled="refreshing" @click="refreshCatalog">
+          {{ refreshing ? '刷新中…' : '刷新官方目录' }}</button>
+      </div>
+      <div class="acp-catalog-grid">
+        <div v-for="c in catalog" :key="c.id" class="acp-cat-card">
+          <div class="acp-cat-top">
+            <b>{{ c.name }}<span v-if="c.version" class="acp-cat-ver"> v{{ c.version }}</span></b>
+            <span v-if="c.supported === false" class="acp-cat-badge no">本平台无分发包</span>
+            <span v-else-if="c.updateAvailable" class="acp-cat-badge warn">可升级{{ upgradeHint(c) }}</span>
+            <span v-else-if="c.registered" class="acp-cat-badge ok">已添加</span>
+            <span v-else-if="c.installed" class="acp-cat-badge ok">已安装</span>
+            <span v-else class="acp-cat-badge no">未安装</span>
+          </div>
+          <div class="meta">{{ c.description }}</div>
+          <div class="acp-cat-acts">
+            <button v-if="c.supported === false" class="btn sm" type="button" disabled>不可安装</button>
+            <button v-else-if="c.updateAvailable" class="btn sm primary" type="button"
+                    :disabled="installing === c.id" @click="installAgent(c)">
+              {{ installing === c.id ? '升级中…' : '一键升级' }}</button>
+            <button v-else-if="!c.installed" class="btn sm primary" type="button"
+                    :disabled="installing === c.id" @click="installAgent(c)">
+              {{ installing === c.id ? '安装中…（最长 5 分钟）' : '一键安装' }}</button>
+            <button v-else-if="!c.registered" class="btn sm" type="button" @click="appendTemplate(c)">添加到清单</button>
+          </div>
+          <div v-if="c.installed && c.path" class="meta mono acp-cat-path">{{ c.path }}</div>
+        </div>
+      </div>
     </div>
 
     <div class="row" style="margin-top:12px">
@@ -673,8 +788,8 @@ onMounted(load)
 </template>
 
 <style scoped>
-.acp-catalog { margin-bottom: 18px; }
-.acp-catalog-head { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+.acp-catalog { margin-top: 20px; }
+.acp-block-head { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
 .acp-catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .acp-cat-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
                 display: flex; flex-direction: column; gap: 6px; }
@@ -700,18 +815,21 @@ onMounted(load)
 .acp-builtin-hint { width: 100%; max-width: 76ch; margin: 0; font-size: 11.5px; line-height: 1.55; }
 .acp-agent { width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
              display: flex; flex-direction: column; gap: 10px; }
-.acp-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.acp-agent-head b { font-size: 13px; }
-/* 折叠开关：整行标题即按钮（名称 + 摘要 + 版本/停用标记），点一下展开全字段。 */
-.acp-agent-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
-  padding: 2px 0; border: 0; background: none; color: inherit; font: inherit;
-  text-align: left; cursor: pointer; }
 .acp-agent-caret { color: var(--muted-fg); font-size: 15px; line-height: 1;
   transition: transform .12s ease; }
 .acp-agent-caret.open { transform: rotate(90deg); }
 .acp-agent-tag { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 999px;
   background: rgba(127, 127, 127, .14); color: var(--muted-fg); }
 .acp-agent-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 列表行：整行可点，右侧常驻登录态徽章——不点开也能看出哪台登录过。 */
+.acp-agent-row { width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 2px 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer; }
+.acp-agent-row:hover b { text-decoration: underline; }
+/* 展开区：三个操作固定在认证面板与字段上方；原地展开，不弹窗。 */
+.acp-agent-detail { display: flex; flex-direction: column; gap: 10px; }
+.acp-agent-acts { display: flex; gap: 8px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 .acp-agent-body { display: flex; flex-direction: column; gap: 10px; }
 .acp-checks { display: flex; gap: 18px; flex-wrap: wrap; }
 /* 工具门面卡片：状态行、勾选网格、调用记录表。 */

@@ -255,3 +255,87 @@ func TestManagerConfigChangeRestarts(t *testing.T) {
 		t.Fatal("Restart 未知服务器应报错")
 	}
 }
+
+// TestManagerRetryBackoffStops 验收 261113 事故防线：启动命令写坏的 MCP 服务器
+// 不能无限自动重启——退避重试到上限就停下（曾经 2 秒一轮把整机 load 打到 500，
+// 智能体全部握手失败、拿不到能力清单）。
+func TestManagerRetryBackoffStops(t *testing.T) {
+	// 缩短退避参数，测试不必等真节奏。
+	oldBase, oldMax, oldTries := mcpRestartBaseDelay, mcpRestartMaxDelay, mcpRestartMaxTries
+	mcpRestartBaseDelay = 10 * time.Millisecond
+	mcpRestartMaxDelay = 20 * time.Millisecond
+	mcpRestartMaxTries = 3
+	defer func() {
+		mcpRestartBaseDelay, mcpRestartMaxDelay, mcpRestartMaxTries = oldBase, oldMax, oldTries
+	}()
+
+	mgr := NewManager(nil)
+	defer mgr.Close()
+
+	// /bin/false 秒退：模拟「命令写错、进程起不来」。
+	bad := ServerConfig{Name: "broken", Command: "/bin/false"}
+	if err := mgr.Apply(context.Background(), []ServerConfig{bad}); err == nil {
+		t.Fatal("坏命令的 Apply 应报错")
+	}
+
+	// 等重连循环跑到放弃。
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.Lock()
+		st := mgr.status["broken"]
+		mgr.mu.Unlock()
+		if st != nil && strings.Contains(st.LastError, "已停止自动重连") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mgr.mu.Lock()
+	st := mgr.status["broken"]
+	fails := mgr.failures["broken"]
+	blocked := mgr.blocked["broken"]
+	mgr.mu.Unlock()
+	if st == nil || !strings.Contains(st.LastError, "已停止自动重连") {
+		t.Fatalf("连续失败到上限应停止自动重连: %+v", st)
+	}
+	if !blocked {
+		t.Fatal("放弃后应标记 blocked，不再自动爬起来")
+	}
+	if fails > mcpRestartMaxTries+3 {
+		t.Fatalf("失败计数应随重试次数受限，不该无限增长: %d", fails)
+	}
+}
+
+// TestManagerRetrySingleFlight 验收单飞：同一台服务器同时只有一个重连循环，
+// 否则每次失败都会再开一个循环，进程越拉越多（261113 事故的放大器）。
+func TestManagerRetrySingleFlight(t *testing.T) {
+	oldBase, oldMax, oldTries := mcpRestartBaseDelay, mcpRestartMaxDelay, mcpRestartMaxTries
+	mcpRestartBaseDelay = 30 * time.Millisecond
+	mcpRestartMaxDelay = 60 * time.Millisecond
+	mcpRestartMaxTries = 4
+	defer func() {
+		mcpRestartBaseDelay, mcpRestartMaxDelay, mcpRestartMaxTries = oldBase, oldMax, oldTries
+	}()
+
+	mgr := NewManager(nil)
+	defer mgr.Close()
+	bad := ServerConfig{Name: "broken", Command: "/bin/false"}
+	_ = mgr.Apply(context.Background(), []ServerConfig{bad})
+
+	// 反复触发「进程退出」，重连循环的数量仍应是 1。
+	for i := 0; i < 10; i++ {
+		mgr.handleExit("broken")
+		mgr.mu.Lock()
+		running := mgr.retrying["broken"]
+		mgr.mu.Unlock()
+		if !running {
+			t.Fatal("重连循环应在跑")
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	mgr.mu.Lock()
+	fails := mgr.failures["broken"]
+	mgr.mu.Unlock()
+	if fails > mcpRestartMaxTries+3 {
+		t.Fatalf("失败计数应受限（不该每个退出都 +1 无限涨）: %d", fails)
+	}
+}
