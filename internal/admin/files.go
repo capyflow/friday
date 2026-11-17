@@ -199,6 +199,45 @@ var openWithDefaultApp = func(path string) error {
 	return nil
 }
 
+// handleFileRaw 原样回传一个本机文件的字节，供 <img> 内联渲染（图文混排里的图片块）。
+// GET /api/files/raw?path=/abs/a.png（支持 ~/ 前缀）。与 download 的区别：不带
+// attachment 头，浏览器能直接当图片显示。鉴权走 wrapMedia——<img> 带不了自定义头，
+// token 走查询参数，与附件回读同一套口径。
+// 只放行嗅探为 image/* 的文件：这个口子是给图片渲染用的，不该变成任意文件的读取口。
+func (s *Server) handleFileRaw(ctx *vhttp.Context) error {
+	abs, errMsg := resolveFilePath(ctx.GinContext().Query("path"))
+	if errMsg != "" {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": errMsg + "，无法读取"})
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "文件不可读"})
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "读取文件失败"})
+	}
+	// 类型按内容嗅探，不按扩展名：.png 里塞别的东西也不给渲染。
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	sniff := http.DetectContentType(head[:n])
+	if !strings.HasPrefix(sniff, "image/") {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "只支持内联渲染图片文件"})
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ctx.JsonResponse(vhttp.Codes.BadRequest, map[string]string{"error": "读取文件失败"})
+	}
+	g := ctx.GinContext()
+	g.Header("Content-Type", sniff)
+	g.Header("X-Content-Type-Options", "nosniff")
+	// 这个 URL 也能被直接打开，所以按「只当图片看」锁死：SVG 之类能带脚本，
+	// sandbox + CSP default-src 'none' 让它既不能执行脚本也不能外联。
+	g.Header("Content-Security-Policy", "default-src 'none'; sandbox")
+	http.ServeContent(g.Writer, g.Request, filepath.Base(abs), info.ModTime(), f)
+	return nil
+}
+
 // handleFileDownload 流式下载一个本机文件（手机端文件面板把文件拉到手机用）：
 // GET /api/files/download?path=/abs/a.md（支持 ~/ 前缀）。鉴权走 wrapMedia——
 // 浏览器 <a download> 带不了自定义头，token 只能放查询参数（同附件回读的取舍）。

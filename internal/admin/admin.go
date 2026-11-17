@@ -84,6 +84,7 @@
 //	GET    /api/files/preview 只读读取本机文件内容供侧边预览（?path=，需登录）
 //	POST   /api/files/open    用系统默认应用打开本机文件 {"path"}（仅本机回环，需登录）
 //	GET    /api/files/download 流式下载本机文件（?path=，token 走查询参数，手机端用）
+//	GET    /api/files/raw     内联回传本机图片字节（?path=，token 走查询参数，图文混排用）
 //	POST   /api/login         登录（公开）
 //	POST   /api/logout        退出登录
 //	GET    /api/status        运行状态（运行时长/模型/待办任务与记忆数量）
@@ -458,6 +459,8 @@ func (s *Server) Handler() http.Handler {
 	root.AddRouter([]string{http.MethodGet}, "/api/files/preview", s.wrap(s.handleFilePreview))
 	root.AddRouter([]string{http.MethodPost}, "/api/files/open", s.wrap(s.handleFileOpen))
 	root.AddRouter([]string{http.MethodGet}, "/api/files/download", s.wrapMedia(s.handleFileDownload))
+	// 内联渲染本机图片（<img src> 带不了请求头，token 走查询参数）
+	root.AddRouter([]string{http.MethodGet}, "/api/files/raw", s.wrapMedia(s.handleFileRaw))
 	// 智能体（ACP）工作区与对话：工作区 CRUD、会话 CRUD、SSE 对话流、停止、
 	// 配置与握手诊断。
 	if s.acp != nil {

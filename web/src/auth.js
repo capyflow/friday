@@ -58,9 +58,12 @@ export function authHeaders(extra) {
   return headers
 }
 
-// <img> 等无法带自定义头的 GET：附件回读允许 ?token=，只在 /api/upload/ 上加。
+// <img> 等无法带自定义头的 GET：附件回读允许 ?token=，只在 /api/upload/ 与
+// /api/files/raw（正文里的图片块内联渲染）上加。
 export function mediaURL(url) {
   const token = getToken()
-  if (!token || typeof url !== 'string' || !url.startsWith('/api/upload/')) return url
+  if (!token || typeof url !== 'string') return url
+  const inlineable = url.startsWith('/api/upload/') || url.startsWith('/api/files/raw')
+  if (!inlineable) return url
   return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token)
 }

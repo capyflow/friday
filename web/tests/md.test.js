@@ -187,3 +187,43 @@ describe('代码块复制按钮', () => {
     expect(html).toContain('<pre><code')
   })
 })
+// <media> 媒体块：agent 输出的媒体标签要渲染成图片块，而不是把标签当原文印出来。
+describe('<media> 媒体块', () => {
+  it('图片媒体块渲染成图 + 说明，标签不再以原文出现', () => {
+    const c = render('截图如下：\n\n<media type="image" src="https://example.com/a.png" name="详情页" caption="图文混排正常" />\n\n后续文字。')
+    const fig = c.querySelector('figure.md-media')
+    expect(fig).not.toBeNull()
+    expect(fig.querySelector('img').getAttribute('src')).toBe('https://example.com/a.png')
+    expect(fig.querySelector('figcaption').textContent).toBe('详情页 · 图文混排正常')
+    expect(c.textContent).not.toContain('<media')
+    // 说明块不该把整段话挤没：前后文字都还在
+    expect(c.textContent).toContain('截图如下：')
+    expect(c.textContent).toContain('后续文字。')
+  })
+
+  it('本机路径走 /api/files/raw 内联渲染，并留下可点的路径', () => {
+    const c = render('<media type="image" src="/tmp/shot.png" name="截图" />')
+    const fig = c.querySelector('figure.md-media')
+    expect(fig.querySelector('img').getAttribute('src')).toContain('/api/files/raw?path=')
+    expect(fig.dataset.path).toBe('/tmp/shot.png')
+    expect(fig.querySelector('figcaption').textContent).toBe('截图')
+  })
+
+  it('认不出来的类型退成路径文字，不塞一个坏掉的 <img>', () => {
+    const c = render('<media type="video" src="/tmp/a.mp4" name="录像" />')
+    expect(c.querySelector('img')).toBeNull()
+    expect(c.querySelector('.md-media-path').textContent).toBe('/tmp/a.mp4')
+  })
+
+  it('代码块里的同名标签是示例文本，不当媒体块', () => {
+    const c = render('```html\n<media type="image" src="/tmp/a.png" />\n```')
+    expect(c.querySelector('figure.md-media')).toBeNull()
+    expect(c.querySelector('code').textContent).toContain('<media')
+  })
+
+  it('没有 src 的标签原样留着，不吞内容', () => {
+    const c = render('<media type="image" />')
+    expect(c.querySelector('figure.md-media')).toBeNull()
+    expect(c.textContent).toContain('<media')
+  })
+});

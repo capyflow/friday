@@ -265,3 +265,64 @@ func TestFilePreviewReportsCanOpen(t *testing.T) {
 		t.Fatalf("远程请求应给出 canOpen=false: %v", envelope.Body)
 	}
 }
+
+// rawBody 发一次 GET /api/files/raw（<img> 带不了请求头，token 走查询参数）。
+func rawBody(t *testing.T, handler http.Handler, token, rawPath string) (int, []byte, http.Header) {
+	t.Helper()
+	q := "path=" + url.QueryEscape(rawPath)
+	if token != "" {
+		q += "&token=" + url.QueryEscape(token)
+	}
+	rec := setupTestRequest(handler, http.MethodGet, "/api/files/raw?"+q, nil, "10.9.8.7:1234", "phone.example", "", "")
+	return rec.Code, rec.Body.Bytes(), rec.Header()
+}
+
+// 内联渲染本机图片：字节原样回传，类型嗅探，不带 attachment 头。
+func TestFileRawServesImagesInline(t *testing.T) {
+	_, handler, token, _, _ := manageTestServer(t)
+
+	dir := t.TempDir()
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 32))
+	file := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(file, png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, body, header := rawBody(t, handler, token, file)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 %d", code)
+	}
+	if !bytes.Equal(body, png) {
+		t.Fatalf("内容不符: %q", body)
+	}
+	if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "image/png") {
+		t.Fatalf("Content-Type 应为 image/png，实际 %q", ct)
+	}
+	// 内联渲染不能带 attachment 头（带了浏览器就不当图片显示了）
+	if disp := header.Get("Content-Disposition"); disp != "" {
+		t.Fatalf("不应带 Content-Disposition: %q", disp)
+	}
+	// 这个 URL 也能被直接打开（在应用 origin 下），得锁死脚本
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox") {
+		t.Fatalf("应有 CSP sandbox: %q", csp)
+	}
+}
+
+// 只放行图片；未登录、非图片、路径不对都拒。
+func TestFileRawRejectsNonImageAndUnauthenticated(t *testing.T) {
+	_, handler, token, _, _ := manageTestServer(t)
+
+	dir := t.TempDir()
+	text := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(text, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := rawBody(t, handler, token, text); code != http.StatusBadRequest {
+		t.Fatalf("非图片应 400，实际 %d", code)
+	}
+	if code, _, _ := rawBody(t, handler, token, filepath.Join(dir, "没有.png")); code != http.StatusBadRequest {
+		t.Fatalf("不存在的文件应 400，实际 %d", code)
+	}
+	if code, _, _ := rawBody(t, handler, "", text); code != http.StatusForbidden {
+		t.Fatalf("未登录应 403，实际 %d", code)
+	}
+}

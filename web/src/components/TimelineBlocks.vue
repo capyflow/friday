@@ -51,6 +51,9 @@ function onTextClick(e) {
   }
   const chip = e.target.closest?.('.file-chip')
   if (chip?.dataset.path) { emit('preview', chip.dataset.path); return }
+  // 媒体块里的本机图片：点开进文件预览抽屉，和文件 chip 同一去处
+  const media = e.target.closest?.('.md-media')
+  if (media?.dataset.path) { emit('preview', media.dataset.path); return }
   const a = e.target.closest?.('a[href]')
   if (!a) return
   const href = localFileHref(a.getAttribute('href'))

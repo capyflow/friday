@@ -3,6 +3,7 @@
 // 流式中间态若 ``` 未闭合则临时补齐，避免半截代码块把整条消息渲染成代码。
 import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { mediaURL } from './auth.js'
 
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -126,6 +127,112 @@ function linkifyFileChips(html) {
   return changed ? tpl.innerHTML : html
 }
 
+// ---------- <media> 媒体块 ----------
+// agent 会在正文里给出 <media type="image" src="…" name="…" caption="…"/> 这类标签，
+// 指的是本机刚生成的图片（截图、渲染结果）。marked 只会把原始 HTML 转义成文本，
+// 所以先把标签摘出来换成占位符，等 HTML 消毒完再把媒体块补回去——补的时候用
+// DOM 构造（textContent / 属性赋值），不拼字符串，没有注入面。
+// 围栏代码块里的同名标签是示例文本，不当媒体块：先按围栏切段，只处理代码块外的部分。
+const MEDIA_RE = /<media\b([^>]*?)\/?>(?:\s*<\/media>)?/gi
+const MEDIA_MARK = '\uE000frmedia'
+const MEDIA_END = '\uE001'
+
+function parseMediaAttrs(raw) {
+  const out = {}
+  const re = /([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g
+  let m
+  while ((m = re.exec(raw))) out[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? ''
+  return out
+}
+
+// extractMedia 把正文里的媒体标签摘出来，返回替身文本与媒体属性表。
+export function extractMedia(src) {
+  const blocks = []
+  const segs = String(src ?? '').split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g)
+  const text = segs.map((seg, i) => {
+    if (i % 2 === 1) return seg // 围栏段原样留着
+    return seg.replace(MEDIA_RE, (all, attrs) => {
+      const a = parseMediaAttrs(attrs)
+      if (!a.src) return all // 没有 src 的不是媒体块，当普通文本
+      blocks.push(a)
+      return '\n\n' + MEDIA_MARK + (blocks.length - 1) + MEDIA_END + '\n\n'
+    })
+  }).join('')
+  return { text, blocks }
+}
+
+// mediaElement 造一个媒体块元素：图片内联渲染 + 一行说明。本机路径做成可点
+// （点开进文件预览抽屉，与文件 chip 同一去处）。
+function mediaElement(a) {
+  const fig = document.createElement('figure')
+  fig.className = 'md-media'
+  const type = (a.type || 'image').toLowerCase()
+  const src = (a.src || '').trim()
+  const name = (a.name || '').trim()
+  const caption = (a.caption || '').trim()
+  const local = looksLikeFilePath(src)
+  const remote = local ? null : safeURL(src, true)
+  if (type === 'image' && (local || remote)) {
+    const img = document.createElement('img')
+    img.src = local ? mediaURL('/api/files/raw?path=' + encodeURIComponent(src)) : remote
+    img.alt = name || caption || '图片'
+    img.loading = 'lazy'
+    if (local) { img.title = src; fig.dataset.path = src }
+    fig.appendChild(img)
+  } else {
+    // 认不出来的类型（音视频、文件等）：别塞一个坏掉的 <img>，退成一行路径文字。
+    fig.classList.add('md-media-text')
+    const line = document.createElement('div')
+    line.className = 'md-media-path'
+    line.textContent = src || name || '媒体'
+    fig.appendChild(line)
+    if (local) fig.dataset.path = src
+  }
+  if (name || caption) {
+    const cap = document.createElement('figcaption')
+    cap.textContent = name && caption ? name + ' · ' + caption : (name || caption)
+    fig.appendChild(cap)
+  }
+  return fig
+}
+
+// injectMedia 把占位符换回媒体块。占位符独占一段时整段替换（不留空 <p>），
+// 夹在文字中间就原位插入。
+function injectMedia(html, blocks) {
+  const tpl = document.createElement('template')
+  tpl.innerHTML = html
+  const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  let n
+  while ((n = walker.nextNode())) if (n.nodeValue && n.nodeValue.includes(MEDIA_MARK)) nodes.push(n)
+  for (const node of nodes) {
+    const parts = node.nodeValue.split(new RegExp(MEDIA_MARK + '(\\d+)' + MEDIA_END))
+    const frag = document.createDocumentFragment()
+    let only = null
+    let count = 0
+    let hasText = false
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        const b = blocks[Number(parts[i])]
+        const el = b ? mediaElement(b) : null
+        if (el) { frag.appendChild(el); only = el; count++ }
+      } else if (parts[i]) {
+        frag.appendChild(document.createTextNode(parts[i]))
+        hasText = true
+      }
+    }
+    const parent = node.parentNode
+    if (!parent) continue
+    parent.replaceChild(frag, node)
+    // 整段只有一个媒体块时把包着它的 <p> 去掉：figure 是块级，多一层 p 只多一份间距
+    if (count === 1 && !hasText && only && parent.tagName === 'P' &&
+        parent.childNodes.length === 1 && parent.firstChild === only) {
+      parent.parentNode.replaceChild(only, parent)
+    }
+  }
+  return tpl.innerHTML
+}
+
 // 对话正文开启 codeCopy：给每个块级代码块包一层，右上角放复制按钮。按钮不带
 // 代码文本（大段代码不重复进 DOM），点击时从相邻 pre 取 textContent——复制
 // 逻辑在 TimelineBlocks 的点击委托里，md.js 只管把结构摆出来。放在 sanitize
@@ -139,11 +246,15 @@ function wrapCodeCopy(html) {
 export function renderMD(src, { fileChips = false, codeCopy = false } = {}) {
   let s = String(src ?? '')
   if ((s.match(/```/g) || []).length % 2 === 1) s += '\n```'
+  // 媒体标签要在消毒前摘出来（marked 只认 markdown，不认原始 HTML 标签）
+  const media = extractMedia(s)
+  s = media.text
   let html
   try {
     html = markdown.parse(s, { async: false })
   } catch { html = '<p>' + escapeHTML(s).replace(/\n/g, '<br>') + '</p>' }
   html = DOMPurify.sanitize(html, SANITIZE_OPTIONS)
   if (codeCopy) html = wrapCodeCopy(html)
+  if (media.blocks.length) html = injectMedia(html, media.blocks)
   return fileChips ? linkifyFileChips(html) : html
 }
