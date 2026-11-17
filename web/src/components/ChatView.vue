@@ -16,6 +16,7 @@ import { authHeaders, mediaURL } from '../auth.js'
 import { fmtTokens } from '../format.js'
 import { turnTotalText, answerText, pushText, histBlocks } from '../blocks.js'
 import { feedRate } from '../speed.js'
+import { createFootScrollKeep } from '../scrollkeep.js'
 import { subscribe, clientId, deviceLabel } from '../events.js'
 import { applyEvent } from '../turnevents.js'
 import { store, toast } from '../store.js'
@@ -44,6 +45,9 @@ const menuOpen = ref(false)
 const popOpen = ref(false)
 const mode = ref(null)             // null | 'plan' | 'goal'
 const scroller = ref(null)
+const footEl = ref(null)
+// 底栏（输入框）变高时把滚动位置跟着挪：对话跟着输入框一起平移，不抖。
+let stopKeep = null
 const composerEl = ref(null)
 const fileInput = ref(null)
 const moreWrap = ref(null)
@@ -784,6 +788,7 @@ function bootstrap() {
   return Promise.resolve()
 }
 onMounted(() => {
+  stopKeep = createFootScrollKeep(() => scroller.value, () => footEl.value)
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onKeydown)
   window.addEventListener('friday:perm', onPermSync)
@@ -795,6 +800,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   disposed = true
+  if (stopKeep) { stopKeep(); stopKeep = null }
   stopEvents()
   request?.abort()
   imageURLs.forEach(url => URL.revokeObjectURL(url))
@@ -940,7 +946,7 @@ async function clearContext() {
       </div>
     </div>
 
-    <div id="chatFoot">
+    <div id="chatFoot" ref="footEl">
       <ChatComposer ref="composerEl" v-model="input" :placeholder="placeholder" aria-label="聊天输入"
                     :busy="phase === 'streaming'" :disabled="clearing"
                     :send-label="sendLabel" :send-disabled="sendDisabled"

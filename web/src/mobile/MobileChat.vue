@@ -6,12 +6,13 @@
 // 事件驱动（2026-11-11 起）：不再自己那条 SSE 连接消费帧，而是订阅
 // /api/events/stream 统一收事件——与桌面端走同一条渲染路径，所以移动端问完
 // 桌面端那边也能实时看见，桌面端问完这里也一样。
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, authFailed } from '../api.js'
 import { authHeaders, mediaURL } from '../auth.js'
 import { toast } from '../store.js'
 import { turnTotalText } from '../blocks.js'
 import { feedRate } from '../speed.js'
+import { createFootScrollKeep } from '../scrollkeep.js'
 import { subscribe, clientId, deviceLabel } from '../events.js'
 import { applyEvent } from '../turnevents.js'
 import TimelineBlocks from '../components/TimelineBlocks.vue'
@@ -30,6 +31,9 @@ const typing = ref('')
 const attachments = ref([]) // 已上传图片的 id（/api/upload 返回的文件名）
 const paused = ref(null) // 主会话暂停现场 { question, partial }
 const scroller = ref(null)
+const footEl = ref(null)
+// 底栏（输入框）变高时把滚动位置跟着挪：对话跟着输入框一起平移，不抖。
+let stopKeep = null
 const fileInput = ref(null)
 
 let controller = null
@@ -87,6 +91,10 @@ async function load() {
 onMounted(() => {
   load()
   startEvents()
+  stopKeep = createFootScrollKeep(() => scroller.value, () => footEl.value)
+})
+onBeforeUnmount(() => {
+  if (stopKeep) { stopKeep(); stopKeep = null }
 })
 watch(() => props.kind === 'thread' && props.thread && props.thread.id, () => {
   load()
@@ -364,7 +372,7 @@ defineExpose({ load })
       <div class="m-chat-pad"></div>
     </div>
 
-    <div class="m-composer">
+    <div class="m-composer" ref="footEl">
       <div v-if="paused" class="m-composer-hint">上一条回答已暂停，部分内容已保留</div>
       <!-- 会话配置：模型 / 思考强度 / 审批档位。主会话没有会话级配置，整行不出现。 -->
       <div v-if="kind === 'thread' && (capsLoading || (caps && caps.length))" class="m-cap-row">

@@ -21,6 +21,7 @@ import { authHeaders, mediaURL } from '../auth.js'
 import { popIn } from '../anim.js'
 import { turnTotalText, answerText, histBlocks } from '../blocks.js'
 import { feedRate, fmtRate } from '../speed.js'
+import { createFootScrollKeep } from '../scrollkeep.js'
 import { subscribe, clientId, deviceLabel } from '../events.js'
 import { applyEvent } from '../turnevents.js'
 import { ago, fmtTokens } from '../format.js'
@@ -100,6 +101,9 @@ function isUnread(t) {
 const showAllWs = reactive(new Set()) // 展开了全部会话的工作区（再点一次「收起会话」移出）
 const SESSION_PREVIEW = 3             // 每组默认先露出最近 3 条会话
 const scroller = ref(null)
+const footEl = ref(null)
+// 底栏（输入框）变高时把滚动位置跟着挪：对话跟着输入框一起平移，不抖。
+let stopKeep = null
 const creatingWs = ref(false)  // 新建工作区表单展开
 const wsForm = reactive({ name: '', dirs: [] })
 const sessionFor = ref('')     // 正在新建会话的工作区 id（'' = 没在建）
@@ -463,10 +467,13 @@ const STATE_HINT = {
 
 onMounted(() => {
   load()
+  // 底栏（输入框）变高时把滚动位置跟着挪：对话跟着输入框一起平移，不抖。
+  stopKeep = createFootScrollKeep(() => scroller.value, () => footEl.value)
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onKey)
 })
 onBeforeUnmount(() => {
+  if (stopKeep) { stopKeep(); stopKeep = null }
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onKey)
 })
@@ -1741,7 +1748,7 @@ function previewImages(urls, at = 0) {
             </template>
           </div>
         </div>
-        <div class="ag-foot">
+        <div class="ag-foot" ref="footEl">
           <ChatComposer v-model="input" :placeholder="busy ? '正在回答，这条会排队…' : '给 ' + current.agent + ' 派活…'"
                         aria-label="智能体输入" :busy="busy" :queue-on="busy"
                         :send-label="busy ? '加入队列' : '发送'" :send-disabled="!canSend"
