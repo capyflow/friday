@@ -71,7 +71,7 @@ function openTab(initial) {
   // initial 是要在这条终端里自动敲的内容：等 ready 之后再送（先送会被 shell
   // 还没起来时的噪声吃掉）。多行时按行依次敲，间隔留给前一个程序就绪——
   // 「codebuddy」起来后隔几秒再敲 "/login" 就是这个用法。
-  if (initial) engines.get(tab.id).pending = String(initial).split('\n').filter(Boolean)
+  if (initial) engines.get(tab.id).pending = String(initial).split('\n')
   tabs.value = [...tabs.value, tab]
   activeId.value = tab.id
   nextTick(() => mountTerm(tab.id))
@@ -84,7 +84,8 @@ function flushPending(id) {
   const lines = eng?.pending
   if (!lines || !lines.length) return
   const next = lines.shift()
-  send(id, { t: 'input', d: next.endsWith('\n') ? next : next + '\n' })
+  // 空行 = 按一下回车（确认默认选项，如 codebuddy 的「信任此文件夹」）。
+  send(id, { t: 'input', d: next === '' ? '\r' : (next.endsWith('\n') ? next : next + '\n') })
   if (lines.length) setTimeout(() => flushPending(id), 3500)
 }
 
