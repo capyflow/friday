@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
 import TimelineBlocks from '../src/components/TimelineBlocks.vue'
 
 // 时间线的工具行按来源分两种口径：ChatView（Friday 自己的 agent）传 own-tools 走展示目录，
@@ -165,5 +166,19 @@ describe('代码块复制按钮', () => {
     expect(w.get('.md-copy').text()).toBe('复制失败')
     w.unmount()
     delete navigator.clipboard
+  })
+})
+
+// 样式层守卫：过程行流式期间，摘要标题显示的就是思考预览（一行可达上百字符）。
+// 标签若写成 flex:none 就不肯收缩，这一行会直接顶出对话列宽、把箭头挤出窗口。
+describe('过程行的实时预览不撑破对话列宽', () => {
+  it('.step-name 允许收缩并省略', () => {
+    const css = readFileSync('src/style.css', 'utf8')
+    // 只认独立成条的那条规则（选择器列表里也出现过 .step-name）
+    const rule = css.match(/(?:^|\n)\.step-name \{[^}]*\}/)
+    expect(rule).not.toBeNull()
+    expect(rule[0]).toContain('min-width: 0')
+    expect(rule[0]).toContain('text-overflow: ellipsis')
+    expect(rule[0]).not.toMatch(/flex:\s*none/)
   })
 })

@@ -12,7 +12,7 @@ export default [
         'Event', 'MouseEvent', 'history', 'URLSearchParams',
         'URL', 'File', 'FormData', 'Blob', 'HTMLCanvasElement', 'createImageBitmap',
         'CustomEvent', 'TextDecoder', 'TextEncoder', 'AbortController', 'Response',
-        'EventSource',
+        'EventSource', 'NodeFilter', 'ResizeObserver',
         'ReadableStream', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
         'requestAnimationFrame', 'cancelAnimationFrame', 'console', 'performance', 'confirm',
       ].map(name => [name, 'readonly'])),

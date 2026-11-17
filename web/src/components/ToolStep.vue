@@ -39,12 +39,13 @@ function toolTitle(b) {
         <svg v-else-if="b.status === 'fail'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
         <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path v-for="(d, di) in shown.icon" :key="di" :d="d"/></svg>
       </span>
-      <span class="step-name">{{ shown.label }}</span>
+      <span class="step-name" :title="shown.label">{{ shown.label }}</span>
       <svg v-if="toolHasBody(b)" class="think-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </button>
     <div v-show="b.open" class="tool-body">
       <div class="tool-call">
-        <span class="step-name">{{ b.name }}</span>
+        <!-- 工具名可能被省略号截断，title 里留全名，悬停能看全 -->
+        <span class="step-name" :title="b.name">{{ b.name }}</span>
         <span class="step-detail">{{ b.text }}</span>
       </div>
       <div v-if="b.out" class="tool-out">{{ b.out }}</div>

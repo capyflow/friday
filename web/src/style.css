@@ -484,6 +484,17 @@ html[data-theme="dark"] .copy-btn:hover { background: rgba(255,255,255,.08); col
 .chat-md pre { background: #18181B; color: #E6E6EA; padding: 11px 13px;
   border-radius: var(--radius-sm); overflow-x: auto; margin: 6px 0; }
 .chat-md pre code { background: none; padding: 0; color: inherit; }
+/* 正文里的媒体块（<media type="image" …>）：图片内联渲染 + 一行说明。
+   md.js 把标签摘出来用 DOM 造出 figure，所以这里只管版式。 */
+.md-media { margin: 8px 0; max-width: 100%; }
+.md-media img { display: block; max-width: 100%; max-height: 420px; margin: 0 auto;
+                border-radius: 10px; border: 1px solid var(--border); background: var(--bg-muted); }
+.md-media figcaption { margin-top: 6px; font-size: 12px; line-height: 1.5;
+                       color: var(--muted-fg); text-align: center; }
+.md-media-text .md-media-path { font-size: 12.5px; color: var(--fg-2);
+                                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                                word-break: break-all; }
+
 /* 代码块右上角复制按钮（md.js codeCopy 包的 .md-code，点击委托在 TimelineBlocks）：
    常显但淡化，悬停提亮；触屏没有 hover 也点得到。 */
 .chat-md .md-code { position: relative; }
@@ -797,7 +808,11 @@ html[data-theme="dark"] .tool-out { background: rgba(255,255,255,.04); }
         border: 1.5px solid var(--border-strong); border-top-color: var(--primary);
         animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.step-name { flex: none; font-weight: 500; color: var(--fg-2); }
+/* 标签要能收缩：过程行流式期间显示的就是思考预览（一行可达上百字符），
+   外部 agent 的工具名也可能很长。写成 flex:none 时这行不肯缩，直接顶出
+   对话列宽、把开合箭头挤到窗口外面去。短标签仍是内容宽，箭头照旧贴着文字。 */
+.step-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; font-weight: 500; color: var(--fg-2); }
 .step-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
                opacity: .75; }
