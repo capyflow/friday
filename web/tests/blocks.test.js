@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { answerText, closeRunningTools, pushToolStep } from '../src/blocks.js'
+import { answerText, closeRunningTools, histBlocks, pushText, pushThinking, pushToolStep } from '../src/blocks.js'
 
 describe('answerText', () => {
   it('只拼正文块，思考与工具调用不进入复制内容', () => {
@@ -77,3 +77,61 @@ describe('closeRunningTools', () => {
     expect(() => closeRunningTools({})).not.toThrow()
   })
 })
+// 回放（刷新/重启后按投影还原）与直播必须同口径：同一串事件，两边都要以正文结尾。
+describe('回放与直播的时间线同口径', () => {
+  const seq = [
+    ['think', '思考A'], ['text', '开场白'], ['think', '思考B'],
+    ['tool', '工具1'], ['think', '思考C'], ['tool', '工具2'],
+    ['text', '最终回答'], ['think', '答完还在想'],
+  ]
+
+  function liveBlocks() {
+    const m = { text: '', round: 0, blocks: [] }
+    let n = 0
+    for (const [kind, val] of seq) {
+      if (kind === 'think') pushThinking(m, val)
+      else if (kind === 'text') pushText(m, val)
+      else {
+        const id = 't' + (++n)
+        pushToolStep(m, { id, name: val, status: 'run' })
+        pushToolStep(m, { id, name: val, status: 'ok' })
+      }
+    }
+    return m.blocks
+  }
+
+  function replayBlocks() {
+    return histBlocks({ blocks: seq.map(([kind, val]) => kind === 'think'
+      ? { kind: 'think', text: val }
+      : kind === 'text' ? { kind: 'text', text: val } : { kind: 'tool', name: val, status: 'ok' }) })
+  }
+
+  it('答完之后的思考不吊在答案下面：两边都以正文结尾', () => {
+    for (const blocks of [liveBlocks(), replayBlocks()]) {
+      expect(blocks[blocks.length - 1].kind).toBe('text')
+      expect(blocks[blocks.length - 1].text).toBe('最终回答')
+      // 尾随的思考回到正文前面，不再单独挂在答案后面
+      expect(blocks.filter(b => b.kind === 'text')).toHaveLength(2)
+    }
+  })
+
+  it('回放把尾随思考挪到最后一个正文之前', () => {
+    const blocks = replayBlocks()
+    const kinds = blocks.map(b => b.kind)
+    expect(kinds[kinds.length - 2]).toBe('think')
+    expect(blocks[blocks.length - 2].text).toContain('答完还在想')
+  })
+
+  it('这一轮没有正文时，思考块留在原位', () => {
+    const blocks = histBlocks({ blocks: [{ kind: 'think', text: '只有思考' }] })
+    expect(blocks.map(b => b.kind)).toEqual(['think'])
+  })
+
+  it('尾块不是思考时不动原顺序', () => {
+    const blocks = histBlocks({ blocks: [
+      { kind: 'think', text: '先想' },
+      { kind: 'text', text: '回答' },
+    ] })
+    expect(blocks.map(b => b.kind)).toEqual(['think', 'text'])
+  })
+});

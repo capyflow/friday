@@ -41,12 +41,31 @@ export function thinkPreview(text) {
 // internal/acp/blocks.go 的 Block）。
 export function histBlocks(m) {
   const src = (m.blocks && m.blocks.length) ? m.blocks : [{ kind: 'text', text: m.text }]
-  return src.map(b => b.kind === 'think'
+  const out = src.map(b => b.kind === 'think'
     ? { kind: 'think', text: b.text || '', meta: '', open: false, round: 0 }
     : b.kind === 'tool'
       ? { kind: 'tool', name: b.name || '', text: b.text || '', out: b.out || '',
           status: b.status || 'ok', open: false, round: 0 }
       : { kind: 'text', text: b.text || '', round: 0 })
+  return trailingThinkBeforeText(out)
+}
+
+// trailingThinkBeforeText：agent 答完还在想时，那段思考在投影里排在正文后面
+// （留档按到达顺序）。直播时它被摆在正文前面——pushThinking 的原意就是
+// 「先思考后回答」，思考插到正文前（正文后跟的思考会插到正文前那行）。
+// 回放却不摆，于是刷新/重启后一行孤零零的「思考」吊在答案下面。
+// 这里按同一口径把它挪到最后一个正文块之前，回答保持在最后。
+function trailingThinkBeforeText(blocks) {
+  if (!blocks.length) return blocks
+  if (blocks[blocks.length - 1].kind !== 'think') return blocks
+  let xi = -1
+  for (let i = blocks.length - 2; i >= 0; i--) {
+    if (blocks[i].kind === 'text') { xi = i; break }
+  }
+  if (xi < 0) return blocks // 这一轮没有正文，思考本来就是最后一块
+  const tail = blocks.pop()
+  blocks.splice(xi, 0, tail)
+  return blocks
 }
 
 // 思考增量并入本轮的思考块；本轮还没有就新起一块，并插在正文块前面
